@@ -1,0 +1,26 @@
+[package]
+name = "kacrab"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "A production-oriented Kafka client for Rust, built from the protocol up."
+readme = "README.md"
+categories = []
+keywords = []
+
+[features]
+default = []
+# macros = ["dep:kacrab-macros"]
+
+[dependencies]
+# kacrab-macros = { workspace = true, optional = true }
+
+[dev-dependencies]
+# kacrab-test = { workspace = true }
+
+[lints]
+workspace = true

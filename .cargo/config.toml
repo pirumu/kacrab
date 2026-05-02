@@ -1,0 +1,34 @@
+[build]
+# Use all logical cores for codegen
+jobs = -1
+
+[net]
+git-fetch-with-cli = true
+
+[future-incompat-report]
+frequency = "always"
+
+[alias]
+b = "build"
+br = "build --release"
+c = "check --workspace --all-targets"
+ca = "check --workspace --all-targets --all-features"
+r = "run"
+rr = "run --release"
+t = "test --workspace"
+ta = "test --workspace --all-features"
+ld = "clippy --workspace --all-targets --all-features"
+ll = "clippy --workspace --all-targets --all-features -- -D warnings"
+docs = "doc --workspace --no-deps --open"
+xtree = "tree --workspace --duplicates"
+
+# Nightly rustfmt (rustfmt.toml uses unstable features).
+# Cargo aliases cannot inject `+toolchain`, so call rustup directly:
+#   cargo +nightly fmt --all
+#   cargo +nightly fmt --all -- --check
+
+# macOS native: keep default linker (no override needed).
+# For faster linking on Linux cross-compiles, uncomment below after installing lld:
+# [target.x86_64-unknown-linux-gnu]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]

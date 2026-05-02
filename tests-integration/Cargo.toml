@@ -1,0 +1,18 @@
+[package]
+name = "kacrab-tests-integration"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# kacrab = { workspace = true }
+
+[dev-dependencies]
+# kacrab-test = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "kacrab-benches"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# kacrab = { workspace = true }
+# criterion = "0.5"
+
+# Add benches here as work lands:
+# [[bench]]
+# name = "throughput"
+# harness = false
+
+[lints]
+workspace = true

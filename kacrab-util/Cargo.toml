@@ -1,0 +1,20 @@
+[package]
+name = "kacrab-util"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Additional utilities for kacrab users."
+readme = "README.md"
+
+[features]
+default = []
+
+[dependencies]
+# kacrab = { workspace = true }
+
+[lints]
+workspace = true
