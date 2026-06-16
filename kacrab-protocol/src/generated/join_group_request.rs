@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -49,6 +50,38 @@ impl Default for JoinGroupRequestData {
     }
 }
 impl JoinGroupRequestData {
+    pub fn with_group_id(mut self, value: KafkaString) -> Self {
+        self.group_id = value;
+        self
+    }
+    pub fn with_session_timeout_ms(mut self, value: i32) -> Self {
+        self.session_timeout_ms = value;
+        self
+    }
+    pub fn with_rebalance_timeout_ms(mut self, value: i32) -> Self {
+        self.rebalance_timeout_ms = value;
+        self
+    }
+    pub fn with_member_id(mut self, value: KafkaString) -> Self {
+        self.member_id = value;
+        self
+    }
+    pub fn with_group_instance_id(mut self, value: Option<KafkaString>) -> Self {
+        self.group_instance_id = value;
+        self
+    }
+    pub fn with_protocol_type(mut self, value: KafkaString) -> Self {
+        self.protocol_type = value;
+        self
+    }
+    pub fn with_protocols(mut self, value: Vec<JoinGroupRequestProtocol>) -> Self {
+        self.protocols = value;
+        self
+    }
+    pub fn with_reason(mut self, value: Option<KafkaString>) -> Self {
+        self.reason = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 9 {
             return Err(UnsupportedVersion::new(11, version).into());
@@ -144,6 +177,8 @@ impl JoinGroupRequestData {
         write_i32(buf, self.session_timeout_ms);
         if version >= 1 {
             write_i32(buf, self.rebalance_timeout_ms);
+        } else if self.rebalance_timeout_ms != -1i32 {
+            return Err(UnsupportedFieldVersion::new(11, "rebalance_timeout_ms", version).into());
         }
         if version >= 6 {
             write_compact_string(buf, &self.member_id)?;
@@ -156,6 +191,8 @@ impl JoinGroupRequestData {
             } else {
                 write_nullable_string(buf, self.group_instance_id.as_ref())?;
             }
+        } else if self.group_instance_id != None {
+            return Err(UnsupportedFieldVersion::new(11, "group_instance_id", version).into());
         }
         if version >= 6 {
             write_compact_string(buf, &self.protocol_type)?;
@@ -175,6 +212,8 @@ impl JoinGroupRequestData {
         }
         if version >= 8 {
             write_compact_nullable_string(buf, self.reason.as_ref())?;
+        } else if self.reason != None {
+            return Err(UnsupportedFieldVersion::new(11, "reason", version).into());
         }
         if version >= 6 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -182,6 +221,64 @@ impl JoinGroupRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 9 {
+            return Err(UnsupportedVersion::new(11, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 6 {
+            len += compact_string_len(&self.group_id)?;
+        } else {
+            len += string_len(&self.group_id)?;
+        }
+        len += 4;
+        if version >= 1 {
+            len += 4;
+        } else if self.rebalance_timeout_ms != -1i32 {
+            return Err(UnsupportedFieldVersion::new(11, "rebalance_timeout_ms", version).into());
+        }
+        if version >= 6 {
+            len += compact_string_len(&self.member_id)?;
+        } else {
+            len += string_len(&self.member_id)?;
+        }
+        if version >= 5 {
+            if version >= 6 {
+                len += compact_nullable_string_len(self.group_instance_id.as_ref())?;
+            } else {
+                len += nullable_string_len(self.group_instance_id.as_ref())?;
+            }
+        } else if self.group_instance_id != None {
+            return Err(UnsupportedFieldVersion::new(11, "group_instance_id", version).into());
+        }
+        if version >= 6 {
+            len += compact_string_len(&self.protocol_type)?;
+        } else {
+            len += string_len(&self.protocol_type)?;
+        }
+        if version >= 6 {
+            len += compact_array_length_len(self.protocols.len() as i32);
+            for el in &self.protocols {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.protocols {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 8 {
+            len += compact_nullable_string_len(self.reason.as_ref())?;
+        } else if self.reason != None {
+            return Err(UnsupportedFieldVersion::new(11, "reason", version).into());
+        }
+        if version >= 6 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -202,6 +299,14 @@ impl Default for JoinGroupRequestProtocol {
     }
 }
 impl JoinGroupRequestProtocol {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_metadata(mut self, value: Bytes) -> Self {
+        self.metadata = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let metadata;
@@ -249,5 +354,24 @@ impl JoinGroupRequestProtocol {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 6 {
+            len += compact_string_len(&self.name)?;
+        } else {
+            len += string_len(&self.name)?;
+        }
+        if version >= 6 {
+            len += compact_bytes_len(&self.metadata)?;
+        } else {
+            len += bytes_len(&self.metadata)?;
+        }
+        if version >= 6 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

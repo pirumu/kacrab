@@ -7,7 +7,7 @@
 
 pub mod error;
 
-pub use self::error::UnsupportedVersion;
+pub use self::error::{UnsupportedFieldVersion, UnsupportedVersion};
 pub use crate::generated::{ApiInfo, ApiKey, client_api_info};
 
 /// Result alias for version operations.

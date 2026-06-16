@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -29,6 +30,14 @@ impl Default for ApiVersionsRequestData {
     }
 }
 impl ApiVersionsRequestData {
+    pub fn with_client_software_name(mut self, value: KafkaString) -> Self {
+        self.client_software_name = value;
+        self
+    }
+    pub fn with_client_software_version(mut self, value: KafkaString) -> Self {
+        self.client_software_version = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 4 {
             return Err(UnsupportedVersion::new(18, version).into());
@@ -64,9 +73,15 @@ impl ApiVersionsRequestData {
         }
         if version >= 3 {
             write_compact_string(buf, &self.client_software_name)?;
+        } else if self.client_software_name != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(18, "client_software_name", version).into());
         }
         if version >= 3 {
             write_compact_string(buf, &self.client_software_version)?;
+        } else if self.client_software_version != KafkaString::default() {
+            return Err(
+                UnsupportedFieldVersion::new(18, "client_software_version", version).into(),
+            );
         }
         if version >= 3 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -74,5 +89,29 @@ impl ApiVersionsRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 4 {
+            return Err(UnsupportedVersion::new(18, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 3 {
+            len += compact_string_len(&self.client_software_name)?;
+        } else if self.client_software_name != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(18, "client_software_name", version).into());
+        }
+        if version >= 3 {
+            len += compact_string_len(&self.client_software_version)?;
+        } else if self.client_software_version != KafkaString::default() {
+            return Err(
+                UnsupportedFieldVersion::new(18, "client_software_version", version).into(),
+            );
+        }
+        if version >= 3 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

@@ -7,6 +7,7 @@ mod error;
 mod ident;
 mod io;
 mod read_expr;
+mod size_expr;
 mod struct_def;
 mod test_instance;
 mod test_utils;
@@ -37,12 +38,14 @@ pub fn generate_file(
     let mut structs: Vec<StructDef<'_>> = Vec::new();
 
     let top_name = format!("{}Data", spec.name);
+    let api_key = spec.api_key;
     let top_level_info = spec.api_key.map(|k| (k, spec.valid_versions.clone()));
     structs.push(StructDef {
         name: top_name,
         about: String::new(),
         fields: &spec.fields,
         top_level: top_level_info,
+        api_key,
         is_data_struct: true,
         flexible_versions: spec.flexible_versions.clone(),
         effective_versions: spec.valid_versions.clone(),
@@ -52,6 +55,7 @@ pub fn generate_file(
         &spec.fields,
         &spec.flexible_versions,
         &spec.valid_versions,
+        api_key,
         &mut structs,
     );
 
@@ -61,6 +65,7 @@ pub fn generate_file(
             about: String::new(),
             fields: &cs.fields,
             top_level: None,
+            api_key,
             is_data_struct: false,
             flexible_versions: spec.flexible_versions.clone(),
             effective_versions: spec.valid_versions.clone(),
@@ -69,6 +74,7 @@ pub fn generate_file(
             &cs.fields,
             &spec.flexible_versions,
             &spec.valid_versions,
+            api_key,
             &mut structs,
         );
     }
@@ -92,6 +98,7 @@ pub fn generate_file(
             clippy::all,
             clippy::pedantic,
             clippy::nursery,
+            clippy::arithmetic_side_effects,
             reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade hand-written lint style for reproducible wire-code output."
         )]
 
@@ -131,6 +138,7 @@ pub fn generate_mod_rs(
             clippy::all,
             clippy::pedantic,
             clippy::nursery,
+            clippy::arithmetic_side_effects,
             reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade hand-written lint style for reproducible wire-code output."
         )]
 

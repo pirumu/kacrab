@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -37,6 +38,22 @@ impl Default for ProduceRequestData {
     }
 }
 impl ProduceRequestData {
+    pub fn with_transactional_id(mut self, value: Option<KafkaString>) -> Self {
+        self.transactional_id = value;
+        self
+    }
+    pub fn with_acks(mut self, value: i16) -> Self {
+        self.acks = value;
+        self
+    }
+    pub fn with_timeout_ms(mut self, value: i32) -> Self {
+        self.timeout_ms = value;
+        self
+    }
+    pub fn with_topic_data(mut self, value: Vec<TopicProduceData>) -> Self {
+        self.topic_data = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 3 || version > 13 {
             return Err(UnsupportedVersion::new(0, version).into());
@@ -119,6 +136,36 @@ impl ProduceRequestData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 3 || version > 13 {
+            return Err(UnsupportedVersion::new(0, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 9 {
+            len += compact_nullable_string_len(self.transactional_id.as_ref())?;
+        } else {
+            len += nullable_string_len(self.transactional_id.as_ref())?;
+        }
+        len += 2;
+        len += 4;
+        if version >= 9 {
+            len += compact_array_length_len(self.topic_data.len() as i32);
+            for el in &self.topic_data {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.topic_data {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 9 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicProduceData {
@@ -141,6 +188,18 @@ impl Default for TopicProduceData {
     }
 }
 impl TopicProduceData {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_topic_id(mut self, value: KafkaUuid) -> Self {
+        self.topic_id = value;
+        self
+    }
+    pub fn with_partition_data(mut self, value: Vec<PartitionProduceData>) -> Self {
+        self.partition_data = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let mut name = KafkaString::default();
         let mut topic_id = KafkaUuid::ZERO;
@@ -199,9 +258,13 @@ impl TopicProduceData {
             } else {
                 write_string(buf, &self.name)?;
             }
+        } else if self.name != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(0, "name", version).into());
         }
         if version >= 13 {
             write_uuid(buf, &self.topic_id);
+        } else if self.topic_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(0, "topic_id", version).into());
         }
         if version >= 9 {
             write_compact_array_length(buf, self.partition_data.len() as i32);
@@ -220,6 +283,40 @@ impl TopicProduceData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version <= 12 {
+            if version >= 9 {
+                len += compact_string_len(&self.name)?;
+            } else {
+                len += string_len(&self.name)?;
+            }
+        } else if self.name != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(0, "name", version).into());
+        }
+        if version >= 13 {
+            len += 16;
+        } else if self.topic_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(0, "topic_id", version).into());
+        }
+        if version >= 9 {
+            len += compact_array_length_len(self.partition_data.len() as i32);
+            for el in &self.partition_data {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.partition_data {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 9 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -240,6 +337,14 @@ impl Default for PartitionProduceData {
     }
 }
 impl PartitionProduceData {
+    pub fn with_index(mut self, value: i32) -> Self {
+        self.index = value;
+        self
+    }
+    pub fn with_records(mut self, value: Option<Bytes>) -> Self {
+        self.records = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let index;
         let records;
@@ -279,5 +384,20 @@ impl PartitionProduceData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 9 {
+            len += compact_nullable_bytes_len(self.records.as_ref().map(|b| b.as_ref()))?;
+        } else {
+            len += nullable_bytes_len(self.records.as_ref().map(|b| b.as_ref()))?;
+        }
+        if version >= 9 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

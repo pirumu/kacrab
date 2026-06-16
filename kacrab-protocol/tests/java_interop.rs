@@ -58,6 +58,7 @@ pub(crate) struct MatrixCase {
     pub(crate) version: i16,
     pub(crate) fixture: &'static str,
     pub(crate) rust_encode: fn(i16) -> MatrixResult<String>,
+    pub(crate) rust_encoded_len: fn(i16) -> MatrixResult<usize>,
     pub(crate) rust_reencode: fn(i16, &str) -> MatrixResult<String>,
 }
 
@@ -89,6 +90,41 @@ fn generated_protocol_matrix_has_release_grade_fixtures_for_every_schema_version
     }
 
     assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn generated_encoded_len_matches_rust_encoded_bytes_for_all_fixtures() {
+    let cases = generated_test_utils::protocol_cases();
+    assert!(
+        !cases.is_empty(),
+        "generated Java oracle matrix should contain protocol cases"
+    );
+
+    for case in &cases {
+        match (
+            (case.rust_encode)(case.version),
+            (case.rust_encoded_len)(case.version),
+        ) {
+            (Ok(rust_hex), Ok(encoded_len)) => {
+                assert_eq!(
+                    rust_hex.len(),
+                    encoded_len.saturating_mul(2),
+                    "{} v{} {} encoded_len should match Rust-encoded bytes",
+                    case.schema_name,
+                    case.version,
+                    case.fixture
+                );
+            },
+            (Err(_encode_error), Err(_len_error)) => {},
+            (encode_result, len_result) => {
+                panic!(
+                    "{} v{} {} write and encoded_len should agree on success/failure: \
+                     write={encode_result:?}, encoded_len={len_result:?}",
+                    case.schema_name, case.version, case.fixture
+                );
+            },
+        }
+    }
 }
 
 #[test]

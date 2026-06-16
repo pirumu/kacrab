@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -26,6 +27,10 @@ impl Default for ResponseHeaderData {
     }
 }
 impl ResponseHeaderData {
+    pub fn with_correlation_id(mut self, value: i32) -> Self {
+        self.correlation_id = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let correlation_id;
         let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
@@ -53,5 +58,15 @@ impl ResponseHeaderData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

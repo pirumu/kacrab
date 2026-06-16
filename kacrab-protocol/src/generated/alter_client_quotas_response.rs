@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -30,6 +31,14 @@ impl Default for AlterClientQuotasResponseData {
     }
 }
 impl AlterClientQuotasResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_entries(mut self, value: Vec<EntryData>) -> Self {
+        self.entries = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 1 {
             return Err(UnsupportedVersion::new(49, version).into());
@@ -96,6 +105,30 @@ impl AlterClientQuotasResponseData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(49, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 1 {
+            len += compact_array_length_len(self.entries.len() as i32);
+            for el in &self.entries {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.entries {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryData {
@@ -118,6 +151,18 @@ impl Default for EntryData {
     }
 }
 impl EntryData {
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_error_message(mut self, value: Option<KafkaString>) -> Self {
+        self.error_message = value;
+        self
+    }
+    pub fn with_entity(mut self, value: Vec<EntityData>) -> Self {
+        self.entity = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let error_code;
         let error_message;
@@ -190,6 +235,32 @@ impl EntryData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 2;
+        if version >= 1 {
+            len += compact_nullable_string_len(self.error_message.as_ref())?;
+        } else {
+            len += nullable_string_len(self.error_message.as_ref())?;
+        }
+        if version >= 1 {
+            len += compact_array_length_len(self.entity.len() as i32);
+            for el in &self.entity {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.entity {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntityData {
@@ -209,6 +280,14 @@ impl Default for EntityData {
     }
 }
 impl EntityData {
+    pub fn with_entity_type(mut self, value: KafkaString) -> Self {
+        self.entity_type = value;
+        self
+    }
+    pub fn with_entity_name(mut self, value: Option<KafkaString>) -> Self {
+        self.entity_name = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let entity_type;
         let entity_name;
@@ -256,5 +335,24 @@ impl EntityData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += compact_string_len(&self.entity_type)?;
+        } else {
+            len += string_len(&self.entity_type)?;
+        }
+        if version >= 1 {
+            len += compact_nullable_string_len(self.entity_name.as_ref())?;
+        } else {
+            len += nullable_string_len(self.entity_name.as_ref())?;
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

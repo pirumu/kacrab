@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -32,6 +33,18 @@ impl Default for VoteResponseData {
     }
 }
 impl VoteResponseData {
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<TopicData>) -> Self {
+        self.topics = value;
+        self
+    }
+    pub fn with_node_endpoints(mut self, value: Vec<NodeEndpoint>) -> Self {
+        self.node_endpoints = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 2 {
             return Err(UnsupportedVersion::new(52, version).into());
@@ -104,6 +117,34 @@ impl VoteResponseData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 2 {
+            return Err(UnsupportedVersion::new(52, version).into());
+        }
+        let mut len: usize = 0;
+        len += 2;
+        len += compact_array_length_len(self.topics.len() as i32);
+        for el in &self.topics {
+            len += el.encoded_len(version)?;
+        }
+        let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
+        if version >= 1 && !self.node_endpoints.is_empty() {
+            let mut tag_buf = BytesMut::new();
+            write_compact_array_length(&mut tag_buf, self.node_endpoints.len() as i32);
+            for el in &self.node_endpoints {
+                el.write(&mut tag_buf, version)?;
+            }
+            known_tagged_fields.push(RawTaggedField {
+                tag: 0,
+                data: tag_buf.freeze(),
+            });
+        }
+        let mut all_tags = known_tagged_fields;
+        all_tags.extend(self._unknown_tagged_fields.iter().cloned());
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicData {
@@ -123,6 +164,14 @@ impl Default for TopicData {
     }
 }
 impl TopicData {
+    pub fn with_topic_name(mut self, value: KafkaString) -> Self {
+        self.topic_name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<PartitionData>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let topic_name;
         let partitions;
@@ -161,6 +210,18 @@ impl TopicData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.topic_name)?;
+        len += compact_array_length_len(self.partitions.len() as i32);
+        for el in &self.partitions {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartitionData {
@@ -189,6 +250,26 @@ impl Default for PartitionData {
     }
 }
 impl PartitionData {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_leader_id(mut self, value: i32) -> Self {
+        self.leader_id = value;
+        self
+    }
+    pub fn with_leader_epoch(mut self, value: i32) -> Self {
+        self.leader_epoch = value;
+        self
+    }
+    pub fn with_vote_granted(mut self, value: bool) -> Self {
+        self.vote_granted = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let partition_index;
         let error_code;
@@ -229,6 +310,18 @@ impl PartitionData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 2;
+        len += 4;
+        len += 4;
+        len += 1;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeEndpoint {
@@ -251,6 +344,18 @@ impl Default for NodeEndpoint {
     }
 }
 impl NodeEndpoint {
+    pub fn with_node_id(mut self, value: i32) -> Self {
+        self.node_id = value;
+        self
+    }
+    pub fn with_host(mut self, value: KafkaString) -> Self {
+        self.host = value;
+        self
+    }
+    pub fn with_port(mut self, value: u16) -> Self {
+        self.port = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let node_id;
         let host;
@@ -282,5 +387,15 @@ impl NodeEndpoint {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += compact_string_len(&self.host)?;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

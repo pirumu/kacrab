@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -26,6 +27,10 @@ impl Default for ReadShareGroupStateSummaryResponseData {
     }
 }
 impl ReadShareGroupStateSummaryResponseData {
+    pub fn with_results(mut self, value: Vec<ReadStateSummaryResult>) -> Self {
+        self.results = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 1 {
             return Err(UnsupportedVersion::new(87, version).into());
@@ -66,6 +71,20 @@ impl ReadShareGroupStateSummaryResponseData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(87, version).into());
+        }
+        let mut len: usize = 0;
+        len += compact_array_length_len(self.results.len() as i32);
+        for el in &self.results {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReadStateSummaryResult {
@@ -85,6 +104,14 @@ impl Default for ReadStateSummaryResult {
     }
 }
 impl ReadStateSummaryResult {
+    pub fn with_topic_id(mut self, value: KafkaUuid) -> Self {
+        self.topic_id = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<PartitionResult>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let topic_id;
         let partitions;
@@ -123,6 +150,18 @@ impl ReadStateSummaryResult {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 16;
+        len += compact_array_length_len(self.partitions.len() as i32);
+        for el in &self.partitions {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartitionResult {
@@ -158,6 +197,34 @@ impl Default for PartitionResult {
     }
 }
 impl PartitionResult {
+    pub fn with_partition(mut self, value: i32) -> Self {
+        self.partition = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_error_message(mut self, value: Option<KafkaString>) -> Self {
+        self.error_message = value;
+        self
+    }
+    pub fn with_state_epoch(mut self, value: i32) -> Self {
+        self.state_epoch = value;
+        self
+    }
+    pub fn with_leader_epoch(mut self, value: i32) -> Self {
+        self.leader_epoch = value;
+        self
+    }
+    pub fn with_start_offset(mut self, value: i64) -> Self {
+        self.start_offset = value;
+        self
+    }
+    pub fn with_delivery_complete_count(mut self, value: i32) -> Self {
+        self.delivery_complete_count = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let partition;
         let error_code;
@@ -204,10 +271,34 @@ impl PartitionResult {
         write_i64(buf, self.start_offset);
         if version >= 1 {
             write_i32(buf, self.delivery_complete_count);
+        } else if self.delivery_complete_count != -1i32 {
+            return Err(
+                UnsupportedFieldVersion::new(87, "delivery_complete_count", version).into(),
+            );
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 2;
+        len += compact_nullable_string_len(self.error_message.as_ref())?;
+        len += 4;
+        len += 4;
+        len += 8;
+        if version >= 1 {
+            len += 4;
+        } else if self.delivery_complete_count != -1i32 {
+            return Err(
+                UnsupportedFieldVersion::new(87, "delivery_complete_count", version).into(),
+            );
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -26,6 +27,10 @@ impl Default for AlterReplicaLogDirsRequestData {
     }
 }
 impl AlterReplicaLogDirsRequestData {
+    pub fn with_dirs(mut self, value: Vec<AlterReplicaLogDir>) -> Self {
+        self.dirs = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 2 {
             return Err(UnsupportedVersion::new(34, version).into());
@@ -88,6 +93,29 @@ impl AlterReplicaLogDirsRequestData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 2 {
+            return Err(UnsupportedVersion::new(34, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 2 {
+            len += compact_array_length_len(self.dirs.len() as i32);
+            for el in &self.dirs {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.dirs {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct AlterReplicaLogDir {
@@ -107,6 +135,14 @@ impl Default for AlterReplicaLogDir {
     }
 }
 impl AlterReplicaLogDir {
+    pub fn with_path(mut self, value: KafkaString) -> Self {
+        self.path = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<AlterReplicaLogDirTopic>) -> Self {
+        self.topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let path;
         let topics;
@@ -175,6 +211,31 @@ impl AlterReplicaLogDir {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 2 {
+            len += compact_string_len(&self.path)?;
+        } else {
+            len += string_len(&self.path)?;
+        }
+        if version >= 2 {
+            len += compact_array_length_len(self.topics.len() as i32);
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct AlterReplicaLogDirTopic {
@@ -194,6 +255,14 @@ impl Default for AlterReplicaLogDirTopic {
     }
 }
 impl AlterReplicaLogDirTopic {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<i32>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let partitions;
@@ -261,5 +330,26 @@ impl AlterReplicaLogDirTopic {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 2 {
+            len += compact_string_len(&self.name)?;
+        } else {
+            len += string_len(&self.name)?;
+        }
+        if version >= 2 {
+            len += compact_array_length_len(self.partitions.len() as i32);
+            len += self.partitions.len() * 4usize;
+        } else {
+            len += array_length_len();
+            len += self.partitions.len() * 4usize;
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

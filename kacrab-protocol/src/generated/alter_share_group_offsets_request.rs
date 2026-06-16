@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -29,6 +30,14 @@ impl Default for AlterShareGroupOffsetsRequestData {
     }
 }
 impl AlterShareGroupOffsetsRequestData {
+    pub fn with_group_id(mut self, value: KafkaString) -> Self {
+        self.group_id = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<AlterShareGroupOffsetsRequestTopic>) -> Self {
+        self.topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 0 {
             return Err(UnsupportedVersion::new(91, version).into());
@@ -73,6 +82,21 @@ impl AlterShareGroupOffsetsRequestData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 0 {
+            return Err(UnsupportedVersion::new(91, version).into());
+        }
+        let mut len: usize = 0;
+        len += compact_string_len(&self.group_id)?;
+        len += compact_array_length_len(self.topics.len() as i32);
+        for el in &self.topics {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct AlterShareGroupOffsetsRequestTopic {
@@ -92,6 +116,14 @@ impl Default for AlterShareGroupOffsetsRequestTopic {
     }
 }
 impl AlterShareGroupOffsetsRequestTopic {
+    pub fn with_topic_name(mut self, value: KafkaString) -> Self {
+        self.topic_name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<AlterShareGroupOffsetsRequestPartition>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let topic_name;
         let partitions;
@@ -130,6 +162,18 @@ impl AlterShareGroupOffsetsRequestTopic {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.topic_name)?;
+        len += compact_array_length_len(self.partitions.len() as i32);
+        for el in &self.partitions {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct AlterShareGroupOffsetsRequestPartition {
@@ -149,6 +193,14 @@ impl Default for AlterShareGroupOffsetsRequestPartition {
     }
 }
 impl AlterShareGroupOffsetsRequestPartition {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
+    pub fn with_start_offset(mut self, value: i64) -> Self {
+        self.start_offset = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let partition_index;
         let start_offset;
@@ -176,5 +228,14 @@ impl AlterShareGroupOffsetsRequestPartition {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 8;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

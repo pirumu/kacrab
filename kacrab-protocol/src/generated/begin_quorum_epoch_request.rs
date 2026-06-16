@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -35,6 +36,22 @@ impl Default for BeginQuorumEpochRequestData {
     }
 }
 impl BeginQuorumEpochRequestData {
+    pub fn with_cluster_id(mut self, value: Option<KafkaString>) -> Self {
+        self.cluster_id = value;
+        self
+    }
+    pub fn with_voter_id(mut self, value: i32) -> Self {
+        self.voter_id = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<TopicData>) -> Self {
+        self.topics = value;
+        self
+    }
+    pub fn with_leader_endpoints(mut self, value: Vec<LeaderEndpoint>) -> Self {
+        self.leader_endpoints = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 1 {
             return Err(UnsupportedVersion::new(53, version).into());
@@ -110,6 +127,8 @@ impl BeginQuorumEpochRequestData {
         }
         if version >= 1 {
             write_i32(buf, self.voter_id);
+        } else if self.voter_id != -1i32 {
+            return Err(UnsupportedFieldVersion::new(53, "voter_id", version).into());
         }
         if version >= 1 {
             write_compact_array_length(buf, self.topics.len() as i32);
@@ -127,6 +146,8 @@ impl BeginQuorumEpochRequestData {
             for el in &self.leader_endpoints {
                 el.write(buf, version)?;
             }
+        } else if self.leader_endpoints != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(53, "leader_endpoints", version).into());
         }
         if version >= 1 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -134,6 +155,47 @@ impl BeginQuorumEpochRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(53, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += compact_nullable_string_len(self.cluster_id.as_ref())?;
+        } else {
+            len += nullable_string_len(self.cluster_id.as_ref())?;
+        }
+        if version >= 1 {
+            len += 4;
+        } else if self.voter_id != -1i32 {
+            return Err(UnsupportedFieldVersion::new(53, "voter_id", version).into());
+        }
+        if version >= 1 {
+            len += compact_array_length_len(self.topics.len() as i32);
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 1 {
+            len += compact_array_length_len(self.leader_endpoints.len() as i32);
+            for el in &self.leader_endpoints {
+                len += el.encoded_len(version)?;
+            }
+        } else if self.leader_endpoints != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(53, "leader_endpoints", version).into());
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -154,6 +216,14 @@ impl Default for TopicData {
     }
 }
 impl TopicData {
+    pub fn with_topic_name(mut self, value: KafkaString) -> Self {
+        self.topic_name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<PartitionData>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let topic_name;
         let partitions;
@@ -222,6 +292,31 @@ impl TopicData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += compact_string_len(&self.topic_name)?;
+        } else {
+            len += string_len(&self.topic_name)?;
+        }
+        if version >= 1 {
+            len += compact_array_length_len(self.partitions.len() as i32);
+            for el in &self.partitions {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.partitions {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartitionData {
@@ -247,6 +342,22 @@ impl Default for PartitionData {
     }
 }
 impl PartitionData {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
+    pub fn with_voter_directory_id(mut self, value: KafkaUuid) -> Self {
+        self.voter_directory_id = value;
+        self
+    }
+    pub fn with_leader_id(mut self, value: i32) -> Self {
+        self.leader_id = value;
+        self
+    }
+    pub fn with_leader_epoch(mut self, value: i32) -> Self {
+        self.leader_epoch = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let partition_index;
         let mut voter_directory_id = KafkaUuid::ZERO;
@@ -281,6 +392,8 @@ impl PartitionData {
         write_i32(buf, self.partition_index);
         if version >= 1 {
             write_uuid(buf, &self.voter_directory_id);
+        } else if self.voter_directory_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(53, "voter_directory_id", version).into());
         }
         write_i32(buf, self.leader_id);
         write_i32(buf, self.leader_epoch);
@@ -290,6 +403,23 @@ impl PartitionData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 1 {
+            len += 16;
+        } else if self.voter_directory_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(53, "voter_directory_id", version).into());
+        }
+        len += 4;
+        len += 4;
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -313,6 +443,18 @@ impl Default for LeaderEndpoint {
     }
 }
 impl LeaderEndpoint {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_host(mut self, value: KafkaString) -> Self {
+        self.host = value;
+        self
+    }
+    pub fn with_port(mut self, value: u16) -> Self {
+        self.port = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let host;
@@ -344,5 +486,15 @@ impl LeaderEndpoint {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += compact_string_len(&self.host)?;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

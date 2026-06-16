@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -86,6 +87,74 @@ impl Default for StreamsGroupHeartbeatRequestData {
     }
 }
 impl StreamsGroupHeartbeatRequestData {
+    pub fn with_group_id(mut self, value: KafkaString) -> Self {
+        self.group_id = value;
+        self
+    }
+    pub fn with_member_id(mut self, value: KafkaString) -> Self {
+        self.member_id = value;
+        self
+    }
+    pub fn with_member_epoch(mut self, value: i32) -> Self {
+        self.member_epoch = value;
+        self
+    }
+    pub fn with_endpoint_information_epoch(mut self, value: i32) -> Self {
+        self.endpoint_information_epoch = value;
+        self
+    }
+    pub fn with_instance_id(mut self, value: Option<KafkaString>) -> Self {
+        self.instance_id = value;
+        self
+    }
+    pub fn with_rack_id(mut self, value: Option<KafkaString>) -> Self {
+        self.rack_id = value;
+        self
+    }
+    pub fn with_rebalance_timeout_ms(mut self, value: i32) -> Self {
+        self.rebalance_timeout_ms = value;
+        self
+    }
+    pub fn with_topology(mut self, value: Option<Box<Topology>>) -> Self {
+        self.topology = value;
+        self
+    }
+    pub fn with_active_tasks(mut self, value: Option<Vec<TaskIds>>) -> Self {
+        self.active_tasks = value;
+        self
+    }
+    pub fn with_standby_tasks(mut self, value: Option<Vec<TaskIds>>) -> Self {
+        self.standby_tasks = value;
+        self
+    }
+    pub fn with_warmup_tasks(mut self, value: Option<Vec<TaskIds>>) -> Self {
+        self.warmup_tasks = value;
+        self
+    }
+    pub fn with_process_id(mut self, value: Option<KafkaString>) -> Self {
+        self.process_id = value;
+        self
+    }
+    pub fn with_user_endpoint(mut self, value: Option<Box<Endpoint>>) -> Self {
+        self.user_endpoint = value;
+        self
+    }
+    pub fn with_client_tags(mut self, value: Option<Vec<KeyValue>>) -> Self {
+        self.client_tags = value;
+        self
+    }
+    pub fn with_task_offsets(mut self, value: Option<Vec<TaskOffset>>) -> Self {
+        self.task_offsets = value;
+        self
+    }
+    pub fn with_task_end_offsets(mut self, value: Option<Vec<TaskOffset>>) -> Self {
+        self.task_end_offsets = value;
+        self
+    }
+    pub fn with_shutdown_application(mut self, value: bool) -> Self {
+        self.shutdown_application = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 0 {
             return Err(UnsupportedVersion::new(88, version).into());
@@ -336,6 +405,109 @@ impl StreamsGroupHeartbeatRequestData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 0 {
+            return Err(UnsupportedVersion::new(88, version).into());
+        }
+        let mut len: usize = 0;
+        len += compact_string_len(&self.group_id)?;
+        len += compact_string_len(&self.member_id)?;
+        len += 4;
+        len += 4;
+        len += compact_nullable_string_len(self.instance_id.as_ref())?;
+        len += compact_nullable_string_len(self.rack_id.as_ref())?;
+        len += 4;
+        match &self.topology {
+            None => {
+                len += 1;
+            },
+            Some(v) => {
+                len += 1;
+                len += v.encoded_len(version)?;
+            },
+        }
+        match &self.active_tasks {
+            None => {
+                len += compact_array_length_len(-1);
+            },
+            Some(arr) => {
+                len += compact_array_length_len(arr.len() as i32);
+                for el in arr {
+                    len += el.encoded_len(version)?;
+                }
+            },
+        }
+        match &self.standby_tasks {
+            None => {
+                len += compact_array_length_len(-1);
+            },
+            Some(arr) => {
+                len += compact_array_length_len(arr.len() as i32);
+                for el in arr {
+                    len += el.encoded_len(version)?;
+                }
+            },
+        }
+        match &self.warmup_tasks {
+            None => {
+                len += compact_array_length_len(-1);
+            },
+            Some(arr) => {
+                len += compact_array_length_len(arr.len() as i32);
+                for el in arr {
+                    len += el.encoded_len(version)?;
+                }
+            },
+        }
+        len += compact_nullable_string_len(self.process_id.as_ref())?;
+        match &self.user_endpoint {
+            None => {
+                len += 1;
+            },
+            Some(v) => {
+                len += 1;
+                len += v.encoded_len(version)?;
+            },
+        }
+        match &self.client_tags {
+            None => {
+                len += compact_array_length_len(-1);
+            },
+            Some(arr) => {
+                len += compact_array_length_len(arr.len() as i32);
+                for el in arr {
+                    len += el.encoded_len(version)?;
+                }
+            },
+        }
+        match &self.task_offsets {
+            None => {
+                len += compact_array_length_len(-1);
+            },
+            Some(arr) => {
+                len += compact_array_length_len(arr.len() as i32);
+                for el in arr {
+                    len += el.encoded_len(version)?;
+                }
+            },
+        }
+        match &self.task_end_offsets {
+            None => {
+                len += compact_array_length_len(-1);
+            },
+            Some(arr) => {
+                len += compact_array_length_len(arr.len() as i32);
+                for el in arr {
+                    len += el.encoded_len(version)?;
+                }
+            },
+        }
+        len += 1;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Topology {
@@ -356,6 +528,14 @@ impl Default for Topology {
     }
 }
 impl Topology {
+    pub fn with_epoch(mut self, value: i32) -> Self {
+        self.epoch = value;
+        self
+    }
+    pub fn with_subtopologies(mut self, value: Vec<Subtopology>) -> Self {
+        self.subtopologies = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let epoch;
         let subtopologies;
@@ -394,6 +574,18 @@ impl Topology {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += compact_array_length_len(self.subtopologies.len() as i32);
+        for el in &self.subtopologies {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Subtopology {
@@ -429,6 +621,34 @@ impl Default for Subtopology {
     }
 }
 impl Subtopology {
+    pub fn with_subtopology_id(mut self, value: KafkaString) -> Self {
+        self.subtopology_id = value;
+        self
+    }
+    pub fn with_source_topics(mut self, value: Vec<KafkaString>) -> Self {
+        self.source_topics = value;
+        self
+    }
+    pub fn with_source_topic_regex(mut self, value: Vec<KafkaString>) -> Self {
+        self.source_topic_regex = value;
+        self
+    }
+    pub fn with_state_changelog_topics(mut self, value: Vec<TopicInfo>) -> Self {
+        self.state_changelog_topics = value;
+        self
+    }
+    pub fn with_repartition_sink_topics(mut self, value: Vec<KafkaString>) -> Self {
+        self.repartition_sink_topics = value;
+        self
+    }
+    pub fn with_repartition_source_topics(mut self, value: Vec<TopicInfo>) -> Self {
+        self.repartition_source_topics = value;
+        self
+    }
+    pub fn with_copartition_groups(mut self, value: Vec<CopartitionGroup>) -> Self {
+        self.copartition_groups = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let subtopology_id;
         let source_topics;
@@ -537,6 +757,38 @@ impl Subtopology {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.subtopology_id)?;
+        len += compact_array_length_len(self.source_topics.len() as i32);
+        for el in &self.source_topics {
+            len += compact_string_len(el)?;
+        }
+        len += compact_array_length_len(self.source_topic_regex.len() as i32);
+        for el in &self.source_topic_regex {
+            len += compact_string_len(el)?;
+        }
+        len += compact_array_length_len(self.state_changelog_topics.len() as i32);
+        for el in &self.state_changelog_topics {
+            len += el.encoded_len(version)?;
+        }
+        len += compact_array_length_len(self.repartition_sink_topics.len() as i32);
+        for el in &self.repartition_sink_topics {
+            len += compact_string_len(el)?;
+        }
+        len += compact_array_length_len(self.repartition_source_topics.len() as i32);
+        for el in &self.repartition_source_topics {
+            len += el.encoded_len(version)?;
+        }
+        len += compact_array_length_len(self.copartition_groups.len() as i32);
+        for el in &self.copartition_groups {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct CopartitionGroup {
@@ -561,6 +813,18 @@ impl Default for CopartitionGroup {
     }
 }
 impl CopartitionGroup {
+    pub fn with_source_topics(mut self, value: Vec<i16>) -> Self {
+        self.source_topics = value;
+        self
+    }
+    pub fn with_source_topic_regex(mut self, value: Vec<i16>) -> Self {
+        self.source_topic_regex = value;
+        self
+    }
+    pub fn with_repartition_source_topics(mut self, value: Vec<i16>) -> Self {
+        self.repartition_source_topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let source_topics;
         let source_topic_regex;
@@ -623,6 +887,19 @@ impl CopartitionGroup {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_array_length_len(self.source_topics.len() as i32);
+        len += self.source_topics.len() * 2usize;
+        len += compact_array_length_len(self.source_topic_regex.len() as i32);
+        len += self.source_topic_regex.len() * 2usize;
+        len += compact_array_length_len(self.repartition_source_topics.len() as i32);
+        len += self.repartition_source_topics.len() * 2usize;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyValue {
@@ -642,6 +919,14 @@ impl Default for KeyValue {
     }
 }
 impl KeyValue {
+    pub fn with_key(mut self, value: KafkaString) -> Self {
+        self.key = value;
+        self
+    }
+    pub fn with_value(mut self, value: KafkaString) -> Self {
+        self.value = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let key;
         let value;
@@ -670,6 +955,15 @@ impl KeyValue {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.key)?;
+        len += compact_string_len(&self.value)?;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicInfo {
@@ -697,6 +991,22 @@ impl Default for TopicInfo {
     }
 }
 impl TopicInfo {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: i32) -> Self {
+        self.partitions = value;
+        self
+    }
+    pub fn with_replication_factor(mut self, value: i16) -> Self {
+        self.replication_factor = value;
+        self
+    }
+    pub fn with_topic_configs(mut self, value: Vec<KeyValue>) -> Self {
+        self.topic_configs = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let partitions;
@@ -743,6 +1053,20 @@ impl TopicInfo {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += 4;
+        len += 2;
+        len += compact_array_length_len(self.topic_configs.len() as i32);
+        for el in &self.topic_configs {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Endpoint {
@@ -762,6 +1086,14 @@ impl Default for Endpoint {
     }
 }
 impl Endpoint {
+    pub fn with_host(mut self, value: KafkaString) -> Self {
+        self.host = value;
+        self
+    }
+    pub fn with_port(mut self, value: u16) -> Self {
+        self.port = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let host;
         let port;
@@ -790,6 +1122,15 @@ impl Endpoint {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.host)?;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskOffset {
@@ -812,6 +1153,18 @@ impl Default for TaskOffset {
     }
 }
 impl TaskOffset {
+    pub fn with_subtopology_id(mut self, value: KafkaString) -> Self {
+        self.subtopology_id = value;
+        self
+    }
+    pub fn with_partition(mut self, value: i32) -> Self {
+        self.partition = value;
+        self
+    }
+    pub fn with_offset(mut self, value: i64) -> Self {
+        self.offset = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let subtopology_id;
         let partition;
@@ -844,6 +1197,16 @@ impl TaskOffset {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.subtopology_id)?;
+        len += 4;
+        len += 8;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskIds {
@@ -863,6 +1226,14 @@ impl Default for TaskIds {
     }
 }
 impl TaskIds {
+    pub fn with_subtopology_id(mut self, value: KafkaString) -> Self {
+        self.subtopology_id = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<i32>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let subtopology_id;
         let partitions;
@@ -900,5 +1271,15 @@ impl TaskIds {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.subtopology_id)?;
+        len += compact_array_length_len(self.partitions.len() as i32);
+        len += self.partitions.len() * 4usize;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -40,6 +41,22 @@ impl Default for ListTransactionsRequestData {
     }
 }
 impl ListTransactionsRequestData {
+    pub fn with_state_filters(mut self, value: Vec<KafkaString>) -> Self {
+        self.state_filters = value;
+        self
+    }
+    pub fn with_producer_id_filters(mut self, value: Vec<i64>) -> Self {
+        self.producer_id_filters = value;
+        self
+    }
+    pub fn with_duration_filter(mut self, value: i64) -> Self {
+        self.duration_filter = value;
+        self
+    }
+    pub fn with_transactional_id_pattern(mut self, value: Option<KafkaString>) -> Self {
+        self.transactional_id_pattern = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 2 {
             return Err(UnsupportedVersion::new(66, version).into());
@@ -101,13 +118,47 @@ impl ListTransactionsRequestData {
         }
         if version >= 1 {
             write_i64(buf, self.duration_filter);
+        } else if self.duration_filter != -1i64 {
+            return Err(UnsupportedFieldVersion::new(66, "duration_filter", version).into());
         }
         if version >= 2 {
             write_compact_nullable_string(buf, self.transactional_id_pattern.as_ref())?;
+        } else if self.transactional_id_pattern != None {
+            return Err(
+                UnsupportedFieldVersion::new(66, "transactional_id_pattern", version).into(),
+            );
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 2 {
+            return Err(UnsupportedVersion::new(66, version).into());
+        }
+        let mut len: usize = 0;
+        len += compact_array_length_len(self.state_filters.len() as i32);
+        for el in &self.state_filters {
+            len += compact_string_len(el)?;
+        }
+        len += compact_array_length_len(self.producer_id_filters.len() as i32);
+        len += self.producer_id_filters.len() * 8usize;
+        if version >= 1 {
+            len += 8;
+        } else if self.duration_filter != -1i64 {
+            return Err(UnsupportedFieldVersion::new(66, "duration_filter", version).into());
+        }
+        if version >= 2 {
+            len += compact_nullable_string_len(self.transactional_id_pattern.as_ref())?;
+        } else if self.transactional_id_pattern != None {
+            return Err(
+                UnsupportedFieldVersion::new(66, "transactional_id_pattern", version).into(),
+            );
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

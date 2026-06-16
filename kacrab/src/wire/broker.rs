@@ -9,7 +9,7 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{
-    KafkaString, frame,
+    KafkaString, Result as ProtocolResult, frame,
     frame::RequestFrameSpec,
     generated::{
         ApiKey, ApiVersionsRequestData, ApiVersionsResponseData, ErrorCode,
@@ -56,9 +56,6 @@ const SASL_AUTHENTICATE_CORRELATION_ID: i32 = 2;
 const SASL_HANDSHAKE_VERSION: i16 = 1;
 /// Use the latest generated `SaslAuthenticate` version so session lifetime is available.
 const SASL_AUTHENTICATE_VERSION: i16 = 2;
-/// Capacity hint for request headers plus tiny handshake bodies; avoids a
-/// resize while staying small for every new connection.
-const SMALL_REQUEST_FRAME_CAPACITY_HINT: usize = 128;
 /// Timeout scanning should be frequent enough to clean expired requests quickly
 /// but bounded so broker tasks do not spin on sub-millisecond intervals.
 const MIN_TIMEOUT_TICK: Duration = Duration::from_millis(1);
@@ -129,7 +126,8 @@ struct RequestCommand {
 }
 
 trait EncodableRequest: Send {
-    fn encode(&self, version: i16) -> Result<Bytes>;
+    fn encoded_len(&self, version: i16) -> ProtocolResult<usize>;
+    fn write_body(&self, buf: &mut BytesMut, version: i16) -> ProtocolResult<()>;
 }
 
 struct OwnedRequest<Req> {
@@ -140,10 +138,13 @@ impl<Req> EncodableRequest for OwnedRequest<Req>
 where
     Req: RequestMessage + Send + Sync,
 {
-    fn encode(&self, version: i16) -> Result<Bytes> {
-        let mut body = BytesMut::new();
-        self.request.write_request(&mut body, version)?;
-        Ok(body.freeze())
+    fn encoded_len(&self, version: i16) -> ProtocolResult<usize> {
+        self.request.encoded_len(version)
+    }
+
+    fn write_body(&self, buf: &mut BytesMut, version: i16) -> ProtocolResult<()> {
+        self.request.write_request(buf, version)?;
+        Ok(())
     }
 }
 
@@ -364,29 +365,39 @@ impl BrokerTask {
         command: RequestCommand,
         capabilities: &BrokerCapabilities,
     ) -> Result<bool> {
-        let api_key = command.api_key;
-        let Some(api_version) = capabilities.version_for_limit(api_key, command.max_api_version)
-        else {
-            let _ignored = command
-                .tx
-                .send(Err(WireError::UnsupportedApiVersion(api_key)));
+        let RequestCommand {
+            api_key,
+            max_api_version,
+            request,
+            tx,
+            ..
+        } = command;
+        let Some(api_version) = capabilities.version_for_limit(api_key, max_api_version) else {
+            let _ignored = tx.send(Err(WireError::UnsupportedApiVersion(api_key)));
             return Ok(false);
         };
-        let body = match command.request.encode(api_version) {
-            Ok(body) => body,
+        let body_len = match request.encoded_len(api_version) {
+            Ok(body_len) => body_len,
             Err(error) => {
-                let _ignored = command.tx.send(Err(error));
+                let _ignored = tx.send(Err(error.into()));
                 return Ok(false);
             },
         };
-        let correlation_id = match pipeline.reserve(api_key, api_version, command.tx) {
+        let correlation_id = match pipeline.reserve(api_key, api_version, tx) {
             Ok(correlation_id) => correlation_id,
             Err(tx) => {
                 let _ignored = tx.send(Err(WireError::Backpressure));
                 return Ok(false);
             },
         };
-        let frame = match self.encode_frame(api_key, api_version, correlation_id, &body) {
+        let spec = RequestFrameSpec {
+            api_key,
+            api_version,
+            correlation_id,
+            client_id: &self.client_id,
+            capacity_hint: 0,
+        };
+        let frame = match self.encode_request_frame(spec, body_len, &*request) {
             Ok(frame) => frame,
             Err(error) => {
                 pipeline.fail_correlation(correlation_id, error);
@@ -436,13 +447,20 @@ impl BrokerTask {
             _unknown_tagged_fields: Vec::new(),
         };
         let api_version = API_VERSIONS_HANDSHAKE_VERSION;
+        let body_len = request.encoded_len(api_version)?;
+        let capacity_hint = self.request_frame_capacity_hint(
+            ApiKey::ApiVersions,
+            api_version,
+            HANDSHAKE_CORRELATION_ID,
+            body_len,
+        )?;
         let frame = frame::encode_request_frame(
             RequestFrameSpec {
                 api_key: ApiKey::ApiVersions,
                 api_version,
                 correlation_id: HANDSHAKE_CORRELATION_ID,
                 client_id: &self.client_id,
-                capacity_hint: SMALL_REQUEST_FRAME_CAPACITY_HINT,
+                capacity_hint,
             },
             |buf| {
                 request.write(buf, api_version)?;
@@ -567,13 +585,20 @@ impl BrokerTask {
             auth_bytes,
             _unknown_tagged_fields: Vec::new(),
         };
+        let body_len = request.encoded_len(SASL_AUTHENTICATE_VERSION)?;
+        let capacity_hint = self.request_frame_capacity_hint(
+            ApiKey::SaslAuthenticate,
+            SASL_AUTHENTICATE_VERSION,
+            SASL_AUTHENTICATE_CORRELATION_ID,
+            body_len,
+        )?;
         let frame = frame::encode_request_frame(
             RequestFrameSpec {
                 api_key: ApiKey::SaslAuthenticate,
                 api_version: SASL_AUTHENTICATE_VERSION,
                 correlation_id: SASL_AUTHENTICATE_CORRELATION_ID,
                 client_id: &self.client_id,
-                capacity_hint: SMALL_REQUEST_FRAME_CAPACITY_HINT,
+                capacity_hint,
             },
             |buf| {
                 request.write(buf, SASL_AUTHENTICATE_VERSION)?;
@@ -617,13 +642,20 @@ impl BrokerTask {
             mechanism: KafkaString::from(mechanism.as_str().to_owned()),
             _unknown_tagged_fields: Vec::new(),
         };
+        let body_len = request.encoded_len(SASL_HANDSHAKE_VERSION)?;
+        let capacity_hint = self.request_frame_capacity_hint(
+            ApiKey::SaslHandshake,
+            SASL_HANDSHAKE_VERSION,
+            SASL_HANDSHAKE_CORRELATION_ID,
+            body_len,
+        )?;
         let frame = frame::encode_request_frame(
             RequestFrameSpec {
                 api_key: ApiKey::SaslHandshake,
                 api_version: SASL_HANDSHAKE_VERSION,
                 correlation_id: SASL_HANDSHAKE_CORRELATION_ID,
                 client_id: &self.client_id,
-                capacity_hint: SMALL_REQUEST_FRAME_CAPACITY_HINT,
+                capacity_hint,
             },
             |buf| {
                 request.write(buf, SASL_HANDSHAKE_VERSION)?;
@@ -663,27 +695,42 @@ impl BrokerTask {
         Ok(())
     }
 
-    fn encode_frame(
+    fn encode_request_frame(
+        &self,
+        spec: RequestFrameSpec<'_>,
+        body_len: usize,
+        request: &dyn EncodableRequest,
+    ) -> Result<BytesMut> {
+        let capacity_hint = frame::request_frame_capacity_hint(spec, body_len)?;
+        let mut frame = self.buffers.acquire_write(capacity_hint);
+        frame::encode_request_frame_with_buffer(
+            &mut frame,
+            RequestFrameSpec {
+                capacity_hint,
+                ..spec
+            },
+            |buf| request.write_body(buf, spec.api_version),
+        )?;
+        Ok(frame)
+    }
+
+    fn request_frame_capacity_hint(
         &self,
         api_key: ApiKey,
         api_version: i16,
         correlation_id: i32,
-        body: &Bytes,
-    ) -> Result<BytesMut> {
-        let capacity_hint = body.len().saturating_add(SMALL_REQUEST_FRAME_CAPACITY_HINT);
-        let mut frame = self.buffers.acquire_write(capacity_hint);
-        frame::encode_request_frame_body_with_buffer(
-            &mut frame,
+        body_len: usize,
+    ) -> Result<usize> {
+        Ok(frame::request_frame_capacity_hint(
             RequestFrameSpec {
                 api_key,
                 api_version,
                 correlation_id,
                 client_id: &self.client_id,
-                capacity_hint,
+                capacity_hint: 0,
             },
-            body.as_ref(),
-        )?;
-        Ok(frame)
+            body_len,
+        )?)
     }
 }
 
@@ -800,7 +847,10 @@ fn decode_response<Resp>(mut envelope: ResponseEnvelope) -> Result<Resp>
 where
     Resp: ResponseMessage,
 {
-    Resp::read_response(&mut envelope.body, envelope.api_version)
+    Ok(Resp::read_response(
+        &mut envelope.body,
+        envelope.api_version,
+    )?)
 }
 
 fn timeout_tick_duration(config: &ConnectionConfig) -> Duration {
@@ -827,6 +877,7 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use kacrab_protocol::{
         KafkaString, frame,
+        frame::RequestFrameSpec,
         generated::{
             ApiKey, ApiVersion, ApiVersionsRequestData, ApiVersionsResponseData, ErrorCode,
             RequestHeaderData, SaslAuthenticateRequestData, SaslAuthenticateResponseData,
@@ -844,9 +895,9 @@ mod tests {
     use super::KerberosLoginManager;
     use super::{
         BrokerCapabilities, BrokerEndpoint, BrokerHandle, BrokerStream, BrokerTask, BufferPools,
-        OAuthTokenCache, OwnedRequest, RequestCommand, RequestPipeline, ResponseEnvelope,
-        ServeOutcome, expire_pending_commands, next_reconnect_backoff, read_frame,
-        read_response_frames, reconnect_backoff_initial, reconnect_backoff_max,
+        EncodableRequest, OAuthTokenCache, OwnedRequest, RequestCommand, RequestPipeline,
+        ResponseEnvelope, ServeOutcome, expire_pending_commands, next_reconnect_backoff,
+        read_frame, read_response_frames, reconnect_backoff_initial, reconnect_backoff_max,
         timeout_tick_duration,
     };
     use crate::wire::{
@@ -1126,11 +1177,28 @@ mod tests {
             kerberos_login,
         };
 
+        let request = OwnedRequest {
+            request: api_versions_request(),
+        };
+        let body_len = request.encoded_len(3).expect("body length");
+        let expected_len = task
+            .request_frame_capacity_hint(ApiKey::ApiVersions, 3, 9, body_len)
+            .expect("frame capacity hint");
         let frame = task
-            .encode_frame(ApiKey::ApiVersions, 3, 9, &Bytes::from_static(b"body"))
+            .encode_request_frame(
+                RequestFrameSpec {
+                    api_key: ApiKey::ApiVersions,
+                    api_version: 3,
+                    correlation_id: 9,
+                    client_id: &task.client_id,
+                    capacity_hint: 0,
+                },
+                body_len,
+                &request,
+            )
             .expect("encoded frame");
 
-        assert!(frame.len() > b"body".len());
+        assert_eq!(frame.len(), expected_len);
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -49,6 +50,38 @@ impl Default for DescribeClusterResponseData {
     }
 }
 impl DescribeClusterResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_error_message(mut self, value: Option<KafkaString>) -> Self {
+        self.error_message = value;
+        self
+    }
+    pub fn with_endpoint_type(mut self, value: i8) -> Self {
+        self.endpoint_type = value;
+        self
+    }
+    pub fn with_cluster_id(mut self, value: KafkaString) -> Self {
+        self.cluster_id = value;
+        self
+    }
+    pub fn with_controller_id(mut self, value: i32) -> Self {
+        self.controller_id = value;
+        self
+    }
+    pub fn with_brokers(mut self, value: Vec<DescribeClusterBroker>) -> Self {
+        self.brokers = value;
+        self
+    }
+    pub fn with_cluster_authorized_operations(mut self, value: i32) -> Self {
+        self.cluster_authorized_operations = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 2 {
             return Err(UnsupportedVersion::new(60, version).into());
@@ -108,6 +141,8 @@ impl DescribeClusterResponseData {
         write_compact_nullable_string(buf, self.error_message.as_ref())?;
         if version >= 1 {
             write_i8(buf, self.endpoint_type);
+        } else if self.endpoint_type != 1i8 {
+            return Err(UnsupportedFieldVersion::new(60, "endpoint_type", version).into());
         }
         write_compact_string(buf, &self.cluster_id)?;
         write_i32(buf, self.controller_id);
@@ -120,6 +155,31 @@ impl DescribeClusterResponseData {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 2 {
+            return Err(UnsupportedVersion::new(60, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        len += 2;
+        len += compact_nullable_string_len(self.error_message.as_ref())?;
+        if version >= 1 {
+            len += 1;
+        } else if self.endpoint_type != 1i8 {
+            return Err(UnsupportedFieldVersion::new(60, "endpoint_type", version).into());
+        }
+        len += compact_string_len(&self.cluster_id)?;
+        len += 4;
+        len += compact_array_length_len(self.brokers.len() as i32);
+        for el in &self.brokers {
+            len += el.encoded_len(version)?;
+        }
+        len += 4;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -149,6 +209,26 @@ impl Default for DescribeClusterBroker {
     }
 }
 impl DescribeClusterBroker {
+    pub fn with_broker_id(mut self, value: i32) -> Self {
+        self.broker_id = value;
+        self
+    }
+    pub fn with_host(mut self, value: KafkaString) -> Self {
+        self.host = value;
+        self
+    }
+    pub fn with_port(mut self, value: i32) -> Self {
+        self.port = value;
+        self
+    }
+    pub fn with_rack(mut self, value: Option<KafkaString>) -> Self {
+        self.rack = value;
+        self
+    }
+    pub fn with_is_fenced(mut self, value: bool) -> Self {
+        self.is_fenced = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let broker_id;
         let host;
@@ -187,10 +267,28 @@ impl DescribeClusterBroker {
         write_compact_nullable_string(buf, self.rack.as_ref())?;
         if version >= 2 {
             write_bool(buf, self.is_fenced);
+        } else if self.is_fenced != false {
+            return Err(UnsupportedFieldVersion::new(60, "is_fenced", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += compact_string_len(&self.host)?;
+        len += 4;
+        len += compact_nullable_string_len(self.rack.as_ref())?;
+        if version >= 2 {
+            len += 1;
+        } else if self.is_fenced != false {
+            return Err(UnsupportedFieldVersion::new(60, "is_fenced", version).into());
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

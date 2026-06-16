@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -33,6 +34,18 @@ impl Default for DescribeLogDirsResponseData {
     }
 }
 impl DescribeLogDirsResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_results(mut self, value: Vec<DescribeLogDirsResult>) -> Self {
+        self.results = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 5 {
             return Err(UnsupportedVersion::new(35, version).into());
@@ -88,6 +101,8 @@ impl DescribeLogDirsResponseData {
         write_i32(buf, self.throttle_time_ms);
         if version >= 3 {
             write_i16(buf, self.error_code);
+        } else if self.error_code != 0_i16 {
+            return Err(UnsupportedFieldVersion::new(35, "error_code", version).into());
         }
         if version >= 2 {
             write_compact_array_length(buf, self.results.len() as i32);
@@ -106,6 +121,35 @@ impl DescribeLogDirsResponseData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 5 {
+            return Err(UnsupportedVersion::new(35, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 3 {
+            len += 2;
+        } else if self.error_code != 0_i16 {
+            return Err(UnsupportedFieldVersion::new(35, "error_code", version).into());
+        }
+        if version >= 2 {
+            len += compact_array_length_len(self.results.len() as i32);
+            for el in &self.results {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.results {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -140,6 +184,30 @@ impl Default for DescribeLogDirsResult {
     }
 }
 impl DescribeLogDirsResult {
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_log_dir(mut self, value: KafkaString) -> Self {
+        self.log_dir = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<DescribeLogDirsTopic>) -> Self {
+        self.topics = value;
+        self
+    }
+    pub fn with_total_bytes(mut self, value: i64) -> Self {
+        self.total_bytes = value;
+        self
+    }
+    pub fn with_usable_bytes(mut self, value: i64) -> Self {
+        self.usable_bytes = value;
+        self
+    }
+    pub fn with_is_cordoned(mut self, value: bool) -> Self {
+        self.is_cordoned = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let error_code;
         let log_dir;
@@ -222,12 +290,18 @@ impl DescribeLogDirsResult {
         }
         if version >= 4 {
             write_i64(buf, self.total_bytes);
+        } else if self.total_bytes != -1i64 {
+            return Err(UnsupportedFieldVersion::new(35, "total_bytes", version).into());
         }
         if version >= 4 {
             write_i64(buf, self.usable_bytes);
+        } else if self.usable_bytes != -1i64 {
+            return Err(UnsupportedFieldVersion::new(35, "usable_bytes", version).into());
         }
         if version >= 5 {
             write_bool(buf, self.is_cordoned);
+        } else if self.is_cordoned != false {
+            return Err(UnsupportedFieldVersion::new(35, "is_cordoned", version).into());
         }
         if version >= 2 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -235,6 +309,47 @@ impl DescribeLogDirsResult {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 2;
+        if version >= 2 {
+            len += compact_string_len(&self.log_dir)?;
+        } else {
+            len += string_len(&self.log_dir)?;
+        }
+        if version >= 2 {
+            len += compact_array_length_len(self.topics.len() as i32);
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 4 {
+            len += 8;
+        } else if self.total_bytes != -1i64 {
+            return Err(UnsupportedFieldVersion::new(35, "total_bytes", version).into());
+        }
+        if version >= 4 {
+            len += 8;
+        } else if self.usable_bytes != -1i64 {
+            return Err(UnsupportedFieldVersion::new(35, "usable_bytes", version).into());
+        }
+        if version >= 5 {
+            len += 1;
+        } else if self.is_cordoned != false {
+            return Err(UnsupportedFieldVersion::new(35, "is_cordoned", version).into());
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -255,6 +370,14 @@ impl Default for DescribeLogDirsTopic {
     }
 }
 impl DescribeLogDirsTopic {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<DescribeLogDirsPartition>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let partitions;
@@ -323,6 +446,31 @@ impl DescribeLogDirsTopic {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 2 {
+            len += compact_string_len(&self.name)?;
+        } else {
+            len += string_len(&self.name)?;
+        }
+        if version >= 2 {
+            len += compact_array_length_len(self.partitions.len() as i32);
+            for el in &self.partitions {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.partitions {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeLogDirsPartition {
@@ -350,6 +498,22 @@ impl Default for DescribeLogDirsPartition {
     }
 }
 impl DescribeLogDirsPartition {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
+    pub fn with_partition_size(mut self, value: i64) -> Self {
+        self.partition_size = value;
+        self
+    }
+    pub fn with_offset_lag(mut self, value: i64) -> Self {
+        self.offset_lag = value;
+        self
+    }
+    pub fn with_is_future_key(mut self, value: bool) -> Self {
+        self.is_future_key = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let partition_index;
         let partition_size;
@@ -389,5 +553,18 @@ impl DescribeLogDirsPartition {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 8;
+        len += 8;
+        len += 1;
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

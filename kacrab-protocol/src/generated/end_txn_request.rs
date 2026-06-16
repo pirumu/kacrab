@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -35,6 +36,22 @@ impl Default for EndTxnRequestData {
     }
 }
 impl EndTxnRequestData {
+    pub fn with_transactional_id(mut self, value: KafkaString) -> Self {
+        self.transactional_id = value;
+        self
+    }
+    pub fn with_producer_id(mut self, value: i64) -> Self {
+        self.producer_id = value;
+        self
+    }
+    pub fn with_producer_epoch(mut self, value: i16) -> Self {
+        self.producer_epoch = value;
+        self
+    }
+    pub fn with_committed(mut self, value: bool) -> Self {
+        self.committed = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 5 {
             return Err(UnsupportedVersion::new(26, version).into());
@@ -88,5 +105,25 @@ impl EndTxnRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 5 {
+            return Err(UnsupportedVersion::new(26, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 3 {
+            len += compact_string_len(&self.transactional_id)?;
+        } else {
+            len += string_len(&self.transactional_id)?;
+        }
+        len += 8;
+        len += 2;
+        len += 1;
+        if version >= 3 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -36,6 +37,22 @@ impl Default for MetadataRequestData {
     }
 }
 impl MetadataRequestData {
+    pub fn with_topics(mut self, value: Option<Vec<MetadataRequestTopic>>) -> Self {
+        self.topics = value;
+        self
+    }
+    pub fn with_allow_auto_topic_creation(mut self, value: bool) -> Self {
+        self.allow_auto_topic_creation = value;
+        self
+    }
+    pub fn with_include_cluster_authorized_operations(mut self, value: bool) -> Self {
+        self.include_cluster_authorized_operations = value;
+        self
+    }
+    pub fn with_include_topic_authorized_operations(mut self, value: bool) -> Self {
+        self.include_topic_authorized_operations = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 13 {
             return Err(UnsupportedVersion::new(3, version).into());
@@ -155,12 +172,30 @@ impl MetadataRequestData {
         }
         if version >= 4 {
             write_bool(buf, self.allow_auto_topic_creation);
+        } else if self.allow_auto_topic_creation != true {
+            return Err(
+                UnsupportedFieldVersion::new(3, "allow_auto_topic_creation", version).into(),
+            );
         }
         if version >= 8 && version <= 10 {
             write_bool(buf, self.include_cluster_authorized_operations);
+        } else if self.include_cluster_authorized_operations != false {
+            return Err(UnsupportedFieldVersion::new(
+                3,
+                "include_cluster_authorized_operations",
+                version,
+            )
+            .into());
         }
         if version >= 8 {
             write_bool(buf, self.include_topic_authorized_operations);
+        } else if self.include_topic_authorized_operations != false {
+            return Err(UnsupportedFieldVersion::new(
+                3,
+                "include_topic_authorized_operations",
+                version,
+            )
+            .into());
         }
         if version >= 9 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -168,6 +203,84 @@ impl MetadataRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 13 {
+            return Err(UnsupportedVersion::new(3, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 1 {
+            if version >= 9 {
+                match &self.topics {
+                    None => {
+                        len += compact_array_length_len(-1);
+                    },
+                    Some(arr) => {
+                        len += compact_array_length_len(arr.len() as i32);
+                        for el in arr {
+                            len += el.encoded_len(version)?;
+                        }
+                    },
+                }
+            } else {
+                match &self.topics {
+                    None => {
+                        len += array_length_len();
+                    },
+                    Some(arr) => {
+                        len += array_length_len();
+                        for el in arr {
+                            len += el.encoded_len(version)?;
+                        }
+                    },
+                }
+            }
+        } else {
+            match &self.topics {
+                Some(arr) => {
+                    len += array_length_len();
+                    for el in arr {
+                        len += el.encoded_len(version)?;
+                    }
+                },
+                None => {
+                    len += array_length_len();
+                },
+            }
+        }
+        if version >= 4 {
+            len += 1;
+        } else if self.allow_auto_topic_creation != true {
+            return Err(
+                UnsupportedFieldVersion::new(3, "allow_auto_topic_creation", version).into(),
+            );
+        }
+        if version >= 8 && version <= 10 {
+            len += 1;
+        } else if self.include_cluster_authorized_operations != false {
+            return Err(UnsupportedFieldVersion::new(
+                3,
+                "include_cluster_authorized_operations",
+                version,
+            )
+            .into());
+        }
+        if version >= 8 {
+            len += 1;
+        } else if self.include_topic_authorized_operations != false {
+            return Err(UnsupportedFieldVersion::new(
+                3,
+                "include_topic_authorized_operations",
+                version,
+            )
+            .into());
+        }
+        if version >= 9 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -188,6 +301,14 @@ impl Default for MetadataRequestTopic {
     }
 }
 impl MetadataRequestTopic {
+    pub fn with_topic_id(mut self, value: KafkaUuid) -> Self {
+        self.topic_id = value;
+        self
+    }
+    pub fn with_name(mut self, value: Option<KafkaString>) -> Self {
+        self.name = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let mut topic_id = KafkaUuid::ZERO;
         let name;
@@ -223,6 +344,8 @@ impl MetadataRequestTopic {
     pub fn write(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
         if version >= 10 {
             write_uuid(buf, &self.topic_id);
+        } else if self.topic_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(3, "topic_id", version).into());
         }
         if version >= 10 {
             write_compact_nullable_string(buf, self.name.as_ref())?;
@@ -243,5 +366,30 @@ impl MetadataRequestTopic {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 10 {
+            len += 16;
+        } else if self.topic_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(3, "topic_id", version).into());
+        }
+        if version >= 10 {
+            len += compact_nullable_string_len(self.name.as_ref())?;
+        } else {
+            let _nn_default = KafkaString::default();
+            let _nn_val = self.name.as_ref().unwrap_or(&_nn_default);
+            if version >= 9 {
+                len += compact_string_len(_nn_val)?;
+            } else {
+                len += string_len(_nn_val)?;
+            }
+        }
+        if version >= 9 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

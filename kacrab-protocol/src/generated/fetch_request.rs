@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -65,6 +66,54 @@ impl Default for FetchRequestData {
     }
 }
 impl FetchRequestData {
+    pub fn with_cluster_id(mut self, value: Option<KafkaString>) -> Self {
+        self.cluster_id = value;
+        self
+    }
+    pub fn with_replica_id(mut self, value: i32) -> Self {
+        self.replica_id = value;
+        self
+    }
+    pub fn with_replica_state(mut self, value: ReplicaState) -> Self {
+        self.replica_state = value;
+        self
+    }
+    pub fn with_max_wait_ms(mut self, value: i32) -> Self {
+        self.max_wait_ms = value;
+        self
+    }
+    pub fn with_min_bytes(mut self, value: i32) -> Self {
+        self.min_bytes = value;
+        self
+    }
+    pub fn with_max_bytes(mut self, value: i32) -> Self {
+        self.max_bytes = value;
+        self
+    }
+    pub fn with_isolation_level(mut self, value: i8) -> Self {
+        self.isolation_level = value;
+        self
+    }
+    pub fn with_session_id(mut self, value: i32) -> Self {
+        self.session_id = value;
+        self
+    }
+    pub fn with_session_epoch(mut self, value: i32) -> Self {
+        self.session_epoch = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<FetchTopic>) -> Self {
+        self.topics = value;
+        self
+    }
+    pub fn with_forgotten_topics_data(mut self, value: Vec<ForgottenTopic>) -> Self {
+        self.forgotten_topics_data = value;
+        self
+    }
+    pub fn with_rack_id(mut self, value: KafkaString) -> Self {
+        self.rack_id = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 4 || version > 18 {
             return Err(UnsupportedVersion::new(1, version).into());
@@ -184,6 +233,8 @@ impl FetchRequestData {
         }
         if version <= 14 {
             write_i32(buf, self.replica_id);
+        } else if self.replica_id != -1i32 {
+            return Err(UnsupportedFieldVersion::new(1, "replica_id", version).into());
         }
         write_i32(buf, self.max_wait_ms);
         write_i32(buf, self.min_bytes);
@@ -191,9 +242,13 @@ impl FetchRequestData {
         write_i8(buf, self.isolation_level);
         if version >= 7 {
             write_i32(buf, self.session_id);
+        } else if self.session_id != 0i32 {
+            return Err(UnsupportedFieldVersion::new(1, "session_id", version).into());
         }
         if version >= 7 {
             write_i32(buf, self.session_epoch);
+        } else if self.session_epoch != -1i32 {
+            return Err(UnsupportedFieldVersion::new(1, "session_epoch", version).into());
         }
         if version >= 12 {
             write_compact_array_length(buf, self.topics.len() as i32);
@@ -218,6 +273,8 @@ impl FetchRequestData {
                     el.write(buf, version)?;
                 }
             }
+        } else if self.forgotten_topics_data != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(1, "forgotten_topics_data", version).into());
         }
         if version >= 11 {
             if version >= 12 {
@@ -225,6 +282,8 @@ impl FetchRequestData {
             } else {
                 write_string(buf, &self.rack_id)?;
             }
+        } else if self.rack_id != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(1, "rack_id", version).into());
         }
         if version >= 12 {
             let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
@@ -251,6 +310,90 @@ impl FetchRequestData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 4 || version > 18 {
+            return Err(UnsupportedVersion::new(1, version).into());
+        }
+        let mut len: usize = 0;
+        if version <= 14 {
+            len += 4;
+        } else if self.replica_id != -1i32 {
+            return Err(UnsupportedFieldVersion::new(1, "replica_id", version).into());
+        }
+        len += 4;
+        len += 4;
+        len += 4;
+        len += 1;
+        if version >= 7 {
+            len += 4;
+        } else if self.session_id != 0i32 {
+            return Err(UnsupportedFieldVersion::new(1, "session_id", version).into());
+        }
+        if version >= 7 {
+            len += 4;
+        } else if self.session_epoch != -1i32 {
+            return Err(UnsupportedFieldVersion::new(1, "session_epoch", version).into());
+        }
+        if version >= 12 {
+            len += compact_array_length_len(self.topics.len() as i32);
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 7 {
+            if version >= 12 {
+                len += compact_array_length_len(self.forgotten_topics_data.len() as i32);
+                for el in &self.forgotten_topics_data {
+                    len += el.encoded_len(version)?;
+                }
+            } else {
+                len += array_length_len();
+                for el in &self.forgotten_topics_data {
+                    len += el.encoded_len(version)?;
+                }
+            }
+        } else if self.forgotten_topics_data != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(1, "forgotten_topics_data", version).into());
+        }
+        if version >= 11 {
+            if version >= 12 {
+                len += compact_string_len(&self.rack_id)?;
+            } else {
+                len += string_len(&self.rack_id)?;
+            }
+        } else if self.rack_id != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(1, "rack_id", version).into());
+        }
+        if version >= 12 {
+            let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
+            if self.cluster_id.is_some() {
+                let mut tag_buf = BytesMut::new();
+                write_compact_nullable_string(&mut tag_buf, self.cluster_id.as_ref())?;
+                known_tagged_fields.push(RawTaggedField {
+                    tag: 0,
+                    data: tag_buf.freeze(),
+                });
+            }
+            if version >= 15 && self.replica_state != ReplicaState::default() {
+                let mut tag_buf = BytesMut::new();
+                self.replica_state.write(&mut tag_buf, version)?;
+                known_tagged_fields.push(RawTaggedField {
+                    tag: 1,
+                    data: tag_buf.freeze(),
+                });
+            }
+            let mut all_tags = known_tagged_fields;
+            all_tags.extend(self._unknown_tagged_fields.iter().cloned());
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplicaState {
@@ -270,6 +413,14 @@ impl Default for ReplicaState {
     }
 }
 impl ReplicaState {
+    pub fn with_replica_id(mut self, value: i32) -> Self {
+        self.replica_id = value;
+        self
+    }
+    pub fn with_replica_epoch(mut self, value: i64) -> Self {
+        self.replica_epoch = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let replica_id;
         let replica_epoch;
@@ -298,6 +449,15 @@ impl ReplicaState {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 8;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct FetchTopic {
@@ -320,6 +480,18 @@ impl Default for FetchTopic {
     }
 }
 impl FetchTopic {
+    pub fn with_topic(mut self, value: KafkaString) -> Self {
+        self.topic = value;
+        self
+    }
+    pub fn with_topic_id(mut self, value: KafkaUuid) -> Self {
+        self.topic_id = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<FetchPartition>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let mut topic = KafkaString::default();
         let mut topic_id = KafkaUuid::ZERO;
@@ -378,9 +550,13 @@ impl FetchTopic {
             } else {
                 write_string(buf, &self.topic)?;
             }
+        } else if self.topic != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(1, "topic", version).into());
         }
         if version >= 13 {
             write_uuid(buf, &self.topic_id);
+        } else if self.topic_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(1, "topic_id", version).into());
         }
         if version >= 12 {
             write_compact_array_length(buf, self.partitions.len() as i32);
@@ -399,6 +575,40 @@ impl FetchTopic {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version <= 12 {
+            if version >= 12 {
+                len += compact_string_len(&self.topic)?;
+            } else {
+                len += string_len(&self.topic)?;
+            }
+        } else if self.topic != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(1, "topic", version).into());
+        }
+        if version >= 13 {
+            len += 16;
+        } else if self.topic_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(1, "topic_id", version).into());
+        }
+        if version >= 12 {
+            len += compact_array_length_len(self.partitions.len() as i32);
+            for el in &self.partitions {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.partitions {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 12 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -440,6 +650,38 @@ impl Default for FetchPartition {
     }
 }
 impl FetchPartition {
+    pub fn with_partition(mut self, value: i32) -> Self {
+        self.partition = value;
+        self
+    }
+    pub fn with_current_leader_epoch(mut self, value: i32) -> Self {
+        self.current_leader_epoch = value;
+        self
+    }
+    pub fn with_fetch_offset(mut self, value: i64) -> Self {
+        self.fetch_offset = value;
+        self
+    }
+    pub fn with_last_fetched_epoch(mut self, value: i32) -> Self {
+        self.last_fetched_epoch = value;
+        self
+    }
+    pub fn with_log_start_offset(mut self, value: i64) -> Self {
+        self.log_start_offset = value;
+        self
+    }
+    pub fn with_partition_max_bytes(mut self, value: i32) -> Self {
+        self.partition_max_bytes = value;
+        self
+    }
+    pub fn with_replica_directory_id(mut self, value: KafkaUuid) -> Self {
+        self.replica_directory_id = value;
+        self
+    }
+    pub fn with_high_watermark(mut self, value: i64) -> Self {
+        self.high_watermark = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let partition;
         let mut current_leader_epoch = -1i32;
@@ -500,13 +742,19 @@ impl FetchPartition {
         write_i32(buf, self.partition);
         if version >= 9 {
             write_i32(buf, self.current_leader_epoch);
+        } else if self.current_leader_epoch != -1i32 {
+            return Err(UnsupportedFieldVersion::new(1, "current_leader_epoch", version).into());
         }
         write_i64(buf, self.fetch_offset);
         if version >= 12 {
             write_i32(buf, self.last_fetched_epoch);
+        } else if self.last_fetched_epoch != -1i32 {
+            return Err(UnsupportedFieldVersion::new(1, "last_fetched_epoch", version).into());
         }
         if version >= 5 {
             write_i64(buf, self.log_start_offset);
+        } else if self.log_start_offset != -1i64 {
+            return Err(UnsupportedFieldVersion::new(1, "log_start_offset", version).into());
         }
         write_i32(buf, self.partition_max_bytes);
         if version >= 12 {
@@ -534,6 +782,51 @@ impl FetchPartition {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 9 {
+            len += 4;
+        } else if self.current_leader_epoch != -1i32 {
+            return Err(UnsupportedFieldVersion::new(1, "current_leader_epoch", version).into());
+        }
+        len += 8;
+        if version >= 12 {
+            len += 4;
+        } else if self.last_fetched_epoch != -1i32 {
+            return Err(UnsupportedFieldVersion::new(1, "last_fetched_epoch", version).into());
+        }
+        if version >= 5 {
+            len += 8;
+        } else if self.log_start_offset != -1i64 {
+            return Err(UnsupportedFieldVersion::new(1, "log_start_offset", version).into());
+        }
+        len += 4;
+        if version >= 12 {
+            let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
+            if version >= 17 && !self.replica_directory_id.is_nil() {
+                let mut tag_buf = BytesMut::new();
+                write_uuid(&mut tag_buf, &self.replica_directory_id);
+                known_tagged_fields.push(RawTaggedField {
+                    tag: 0,
+                    data: tag_buf.freeze(),
+                });
+            }
+            if version >= 18 && self.high_watermark != 9223372036854775807_i64 {
+                let mut tag_buf = BytesMut::new();
+                write_i64(&mut tag_buf, self.high_watermark);
+                known_tagged_fields.push(RawTaggedField {
+                    tag: 1,
+                    data: tag_buf.freeze(),
+                });
+            }
+            let mut all_tags = known_tagged_fields;
+            all_tags.extend(self._unknown_tagged_fields.iter().cloned());
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct ForgottenTopic {
@@ -556,6 +849,18 @@ impl Default for ForgottenTopic {
     }
 }
 impl ForgottenTopic {
+    pub fn with_topic(mut self, value: KafkaString) -> Self {
+        self.topic = value;
+        self
+    }
+    pub fn with_topic_id(mut self, value: KafkaUuid) -> Self {
+        self.topic_id = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<i32>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let mut topic = KafkaString::default();
         let mut topic_id = KafkaUuid::ZERO;
@@ -614,9 +919,13 @@ impl ForgottenTopic {
             } else {
                 write_string(buf, &self.topic)?;
             }
+        } else if self.topic != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(1, "topic", version).into());
         }
         if version >= 13 {
             write_uuid(buf, &self.topic_id);
+        } else if self.topic_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(1, "topic_id", version).into());
         }
         if version >= 12 {
             write_compact_array_length(buf, self.partitions.len() as i32);
@@ -635,5 +944,35 @@ impl ForgottenTopic {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version <= 12 {
+            if version >= 12 {
+                len += compact_string_len(&self.topic)?;
+            } else {
+                len += string_len(&self.topic)?;
+            }
+        } else if self.topic != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(1, "topic", version).into());
+        }
+        if version >= 13 {
+            len += 16;
+        } else if self.topic_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(1, "topic_id", version).into());
+        }
+        if version >= 12 {
+            len += compact_array_length_len(self.partitions.len() as i32);
+            len += self.partitions.len() * 4usize;
+        } else {
+            len += array_length_len();
+            len += self.partitions.len() * 4usize;
+        }
+        if version >= 12 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

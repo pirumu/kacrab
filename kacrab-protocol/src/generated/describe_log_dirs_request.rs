@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -26,6 +27,10 @@ impl Default for DescribeLogDirsRequestData {
     }
 }
 impl DescribeLogDirsRequestData {
+    pub fn with_topics(mut self, value: Option<Vec<DescribableLogDirTopic>>) -> Self {
+        self.topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 5 {
             return Err(UnsupportedVersion::new(35, version).into());
@@ -110,6 +115,43 @@ impl DescribeLogDirsRequestData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 5 {
+            return Err(UnsupportedVersion::new(35, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 2 {
+            match &self.topics {
+                None => {
+                    len += compact_array_length_len(-1);
+                },
+                Some(arr) => {
+                    len += compact_array_length_len(arr.len() as i32);
+                    for el in arr {
+                        len += el.encoded_len(version)?;
+                    }
+                },
+            }
+        } else {
+            match &self.topics {
+                None => {
+                    len += array_length_len();
+                },
+                Some(arr) => {
+                    len += array_length_len();
+                    for el in arr {
+                        len += el.encoded_len(version)?;
+                    }
+                },
+            }
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribableLogDirTopic {
@@ -129,6 +171,14 @@ impl Default for DescribableLogDirTopic {
     }
 }
 impl DescribableLogDirTopic {
+    pub fn with_topic(mut self, value: KafkaString) -> Self {
+        self.topic = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<i32>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let topic;
         let partitions;
@@ -196,5 +246,26 @@ impl DescribableLogDirTopic {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 2 {
+            len += compact_string_len(&self.topic)?;
+        } else {
+            len += string_len(&self.topic)?;
+        }
+        if version >= 2 {
+            len += compact_array_length_len(self.partitions.len() as i32);
+            len += self.partitions.len() * 4usize;
+        } else {
+            len += array_length_len();
+            len += self.partitions.len() * 4usize;
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

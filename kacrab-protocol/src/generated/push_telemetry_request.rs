@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -38,6 +39,26 @@ impl Default for PushTelemetryRequestData {
     }
 }
 impl PushTelemetryRequestData {
+    pub fn with_client_instance_id(mut self, value: KafkaUuid) -> Self {
+        self.client_instance_id = value;
+        self
+    }
+    pub fn with_subscription_id(mut self, value: i32) -> Self {
+        self.subscription_id = value;
+        self
+    }
+    pub fn with_terminating(mut self, value: bool) -> Self {
+        self.terminating = value;
+        self
+    }
+    pub fn with_compression_type(mut self, value: i8) -> Self {
+        self.compression_type = value;
+        self
+    }
+    pub fn with_metrics(mut self, value: Bytes) -> Self {
+        self.metrics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 0 {
             return Err(UnsupportedVersion::new(72, version).into());
@@ -83,5 +104,20 @@ impl PushTelemetryRequestData {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 0 {
+            return Err(UnsupportedVersion::new(72, version).into());
+        }
+        let mut len: usize = 0;
+        len += 16;
+        len += 4;
+        len += 1;
+        len += 1;
+        len += compact_bytes_len(&self.metrics)?;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

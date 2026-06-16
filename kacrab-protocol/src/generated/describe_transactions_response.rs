@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -30,6 +31,14 @@ impl Default for DescribeTransactionsResponseData {
     }
 }
 impl DescribeTransactionsResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_transaction_states(mut self, value: Vec<TransactionState>) -> Self {
+        self.transaction_states = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 0 {
             return Err(UnsupportedVersion::new(65, version).into());
@@ -74,6 +83,21 @@ impl DescribeTransactionsResponseData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 0 {
+            return Err(UnsupportedVersion::new(65, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        len += compact_array_length_len(self.transaction_states.len() as i32);
+        for el in &self.transaction_states {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransactionState {
@@ -113,6 +137,38 @@ impl Default for TransactionState {
     }
 }
 impl TransactionState {
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_transactional_id(mut self, value: KafkaString) -> Self {
+        self.transactional_id = value;
+        self
+    }
+    pub fn with_transaction_state(mut self, value: KafkaString) -> Self {
+        self.transaction_state = value;
+        self
+    }
+    pub fn with_transaction_timeout_ms(mut self, value: i32) -> Self {
+        self.transaction_timeout_ms = value;
+        self
+    }
+    pub fn with_transaction_start_time_ms(mut self, value: i64) -> Self {
+        self.transaction_start_time_ms = value;
+        self
+    }
+    pub fn with_producer_id(mut self, value: i64) -> Self {
+        self.producer_id = value;
+        self
+    }
+    pub fn with_producer_epoch(mut self, value: i16) -> Self {
+        self.producer_epoch = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<TopicData>) -> Self {
+        self.topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let error_code;
         let transactional_id;
@@ -175,6 +231,24 @@ impl TransactionState {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 2;
+        len += compact_string_len(&self.transactional_id)?;
+        len += compact_string_len(&self.transaction_state)?;
+        len += 4;
+        len += 8;
+        len += 8;
+        len += 2;
+        len += compact_array_length_len(self.topics.len() as i32);
+        for el in &self.topics {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicData {
@@ -194,6 +268,14 @@ impl Default for TopicData {
     }
 }
 impl TopicData {
+    pub fn with_topic(mut self, value: KafkaString) -> Self {
+        self.topic = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<i32>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let topic;
         let partitions;
@@ -231,5 +313,15 @@ impl TopicData {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.topic)?;
+        len += compact_array_length_len(self.partitions.len() as i32);
+        len += self.partitions.len() * 4usize;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

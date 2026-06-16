@@ -50,22 +50,26 @@ pub mod version;
 // ---------------------------------------------------------------------------
 #[doc(hidden)]
 pub use crate::bytes_io::{
-    read_bytes, read_compact_bytes, read_compact_nullable_bytes, read_nullable_bytes, write_bytes,
+    bytes_len, compact_bytes_len, compact_nullable_bytes_len, nullable_bytes_len, read_bytes,
+    read_compact_bytes, read_compact_nullable_bytes, read_nullable_bytes, write_bytes,
     write_compact_bytes, write_compact_nullable_bytes, write_nullable_bytes,
 };
 #[doc(hidden)]
 pub use crate::primitives::{
-    read_array_length, read_bool, read_compact_array_length, read_f64, read_i8, read_i16, read_i32,
-    read_i64, read_u16, read_u32, write_array_length, write_bool, write_compact_array_length,
-    write_f64, write_i8, write_i16, write_i32, write_i64, write_u16, write_u32,
+    array_length_len, compact_array_length_len, read_array_length, read_bool,
+    read_compact_array_length, read_f64, read_i8, read_i16, read_i32, read_i64, read_u16, read_u32,
+    unsigned_varint_len, write_array_length, write_bool, write_compact_array_length, write_f64,
+    write_i8, write_i16, write_i32, write_i64, write_u16, write_u32,
 };
 #[doc(hidden)]
 pub use crate::string::{
+    compact_nullable_string_len, compact_string_len, nullable_string_len,
     read_compact_nullable_string, read_compact_string, read_nullable_string, read_string,
-    write_compact_nullable_string, write_compact_string, write_nullable_string, write_string,
+    string_len, write_compact_nullable_string, write_compact_string, write_nullable_string,
+    write_string,
 };
 #[doc(hidden)]
-pub use crate::tagged::{read_tagged_fields, write_tagged_fields};
+pub use crate::tagged::{read_tagged_fields, tagged_fields_len, write_tagged_fields};
 #[doc(hidden)]
 pub use crate::uuid::{read_uuid, write_uuid};
 pub use crate::{
@@ -73,5 +77,5 @@ pub use crate::{
     string::KafkaString,
     tagged::RawTaggedField,
     uuid::KafkaUuid,
-    version::UnsupportedVersion,
+    version::{UnsupportedFieldVersion, UnsupportedVersion},
 };

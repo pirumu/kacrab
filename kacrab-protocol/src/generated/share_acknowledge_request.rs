@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -39,6 +40,26 @@ impl Default for ShareAcknowledgeRequestData {
     }
 }
 impl ShareAcknowledgeRequestData {
+    pub fn with_group_id(mut self, value: Option<KafkaString>) -> Self {
+        self.group_id = value;
+        self
+    }
+    pub fn with_member_id(mut self, value: Option<KafkaString>) -> Self {
+        self.member_id = value;
+        self
+    }
+    pub fn with_share_session_epoch(mut self, value: i32) -> Self {
+        self.share_session_epoch = value;
+        self
+    }
+    pub fn with_is_renew_ack(mut self, value: bool) -> Self {
+        self.is_renew_ack = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<AcknowledgeTopic>) -> Self {
+        self.topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 2 {
             return Err(UnsupportedVersion::new(79, version).into());
@@ -89,6 +110,8 @@ impl ShareAcknowledgeRequestData {
         write_i32(buf, self.share_session_epoch);
         if version >= 2 {
             write_bool(buf, self.is_renew_ack);
+        } else if self.is_renew_ack != false {
+            return Err(UnsupportedFieldVersion::new(79, "is_renew_ack", version).into());
         }
         write_compact_array_length(buf, self.topics.len() as i32);
         for el in &self.topics {
@@ -98,6 +121,28 @@ impl ShareAcknowledgeRequestData {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 2 {
+            return Err(UnsupportedVersion::new(79, version).into());
+        }
+        let mut len: usize = 0;
+        len += compact_nullable_string_len(self.group_id.as_ref())?;
+        len += compact_nullable_string_len(self.member_id.as_ref())?;
+        len += 4;
+        if version >= 2 {
+            len += 1;
+        } else if self.is_renew_ack != false {
+            return Err(UnsupportedFieldVersion::new(79, "is_renew_ack", version).into());
+        }
+        len += compact_array_length_len(self.topics.len() as i32);
+        for el in &self.topics {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -118,6 +163,14 @@ impl Default for AcknowledgeTopic {
     }
 }
 impl AcknowledgeTopic {
+    pub fn with_topic_id(mut self, value: KafkaUuid) -> Self {
+        self.topic_id = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<AcknowledgePartition>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let topic_id;
         let partitions;
@@ -156,6 +209,18 @@ impl AcknowledgeTopic {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 16;
+        len += compact_array_length_len(self.partitions.len() as i32);
+        for el in &self.partitions {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcknowledgePartition {
@@ -175,6 +240,14 @@ impl Default for AcknowledgePartition {
     }
 }
 impl AcknowledgePartition {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
+    pub fn with_acknowledgement_batches(mut self, value: Vec<AcknowledgementBatch>) -> Self {
+        self.acknowledgement_batches = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let partition_index;
         let acknowledgement_batches;
@@ -213,6 +286,18 @@ impl AcknowledgePartition {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += compact_array_length_len(self.acknowledgement_batches.len() as i32);
+        for el in &self.acknowledgement_batches {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcknowledgementBatch {
@@ -235,6 +320,18 @@ impl Default for AcknowledgementBatch {
     }
 }
 impl AcknowledgementBatch {
+    pub fn with_first_offset(mut self, value: i64) -> Self {
+        self.first_offset = value;
+        self
+    }
+    pub fn with_last_offset(mut self, value: i64) -> Self {
+        self.last_offset = value;
+        self
+    }
+    pub fn with_acknowledge_types(mut self, value: Vec<i8>) -> Self {
+        self.acknowledge_types = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let first_offset;
         let last_offset;
@@ -276,5 +373,16 @@ impl AcknowledgementBatch {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 8;
+        len += 8;
+        len += compact_array_length_len(self.acknowledge_types.len() as i32);
+        len += self.acknowledge_types.len() * 1usize;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

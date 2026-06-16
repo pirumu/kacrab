@@ -82,6 +82,27 @@ pub fn encode_request_frame_body_with_buffer(
     })
 }
 
+/// Return the exact buffer capacity needed for a request frame.
+///
+/// The returned value includes the 4-byte frame length prefix, the generated
+/// request header, and the caller-supplied body length.
+pub fn request_frame_capacity_hint(spec: RequestFrameSpec<'_>, body_len: usize) -> Result<usize> {
+    let header_len = request_header_len(spec)?;
+    let payload_len = header_len.checked_add(body_len).ok_or_else(|| {
+        crate::ProtocolError::Frame(FrameError::from(FrameErrorKind::TooLarge {
+            length: i32::MAX,
+            max: MAX_FRAME_LENGTH,
+        }))
+    })?;
+    validate_payload_len(payload_len)?;
+    payload_len.checked_add(4).ok_or_else(|| {
+        crate::ProtocolError::Frame(FrameError::from(FrameErrorKind::TooLarge {
+            length: i32::MAX,
+            max: MAX_FRAME_LENGTH,
+        }))
+    })
+}
+
 /// Parse a Kafka response header once and return the remaining body bytes.
 pub fn decode_response_envelope(
     api_key: ApiKey,
@@ -97,7 +118,19 @@ pub fn decode_response_envelope(
 }
 
 fn write_request_header(buf: &mut BytesMut, spec: RequestFrameSpec<'_>) -> Result<()> {
+    request_header(spec).write(
+        buf,
+        request_header_version(spec.api_key as i16, spec.api_version),
+    )?;
+    Ok(())
+}
+
+fn request_header_len(spec: RequestFrameSpec<'_>) -> Result<usize> {
     let header_version = request_header_version(spec.api_key as i16, spec.api_version);
+    request_header(spec).encoded_len(header_version)
+}
+
+fn request_header(spec: RequestFrameSpec<'_>) -> RequestHeaderData {
     RequestHeaderData {
         request_api_key: spec.api_key as i16,
         request_api_version: spec.api_version,
@@ -105,8 +138,6 @@ fn write_request_header(buf: &mut BytesMut, spec: RequestFrameSpec<'_>) -> Resul
         client_id: Some(KafkaString::from(spec.client_id.to_owned())),
         _unknown_tagged_fields: Vec::new(),
     }
-    .write(buf, header_version)?;
-    Ok(())
 }
 
 fn finish_request_frame(request_frame: &mut BytesMut) -> Result<()> {
@@ -116,15 +147,7 @@ fn finish_request_frame(request_frame: &mut BytesMut) -> Result<()> {
             available: request_frame.len(),
         }))
     })?;
-    let max_frame_length = usize::try_from(MAX_FRAME_LENGTH).unwrap_or(usize::MAX);
-    if payload_len > max_frame_length {
-        return Err(crate::ProtocolError::Frame(FrameError::from(
-            FrameErrorKind::TooLarge {
-                length: i32::try_from(payload_len).unwrap_or(i32::MAX),
-                max: MAX_FRAME_LENGTH,
-            },
-        )));
-    }
+    validate_payload_len(payload_len)?;
     let payload_len = i32::try_from(payload_len).map_err(|_error| {
         crate::ProtocolError::Frame(FrameError::from(FrameErrorKind::TooLarge {
             length: i32::MAX,
@@ -138,11 +161,27 @@ fn finish_request_frame(request_frame: &mut BytesMut) -> Result<()> {
     Ok(())
 }
 
+fn validate_payload_len(payload_len: usize) -> Result<()> {
+    let max_frame_length = usize::try_from(MAX_FRAME_LENGTH).unwrap_or(usize::MAX);
+    if payload_len > max_frame_length {
+        return Err(crate::ProtocolError::Frame(FrameError::from(
+            FrameErrorKind::TooLarge {
+                length: i32::try_from(payload_len).unwrap_or(i32::MAX),
+                max: MAX_FRAME_LENGTH,
+            },
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::{Buf, BytesMut};
 
-    use super::{RequestFrameSpec, decode_response_envelope, encode_request_frame};
+    use super::{
+        RequestFrameSpec, decode_response_envelope, encode_request_frame,
+        request_frame_capacity_hint,
+    };
     use crate::{
         KafkaString,
         generated::{
@@ -190,6 +229,37 @@ mod tests {
         assert_eq!(decoded.client_software_name.as_str(), "kacrab");
         assert_eq!(decoded.client_software_version.as_str(), "0.0.1");
         assert_eq!(payload.remaining(), 0);
+    }
+
+    #[test]
+    fn request_frame_capacity_hint_matches_encoded_frame_len() {
+        let request = ApiVersionsRequestData {
+            client_software_name: KafkaString::from("kacrab".to_owned()),
+            client_software_version: KafkaString::from("0.0.1".to_owned()),
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let body_len = request.encoded_len(3).expect("body length");
+        let spec = RequestFrameSpec {
+            api_key: ApiKey::ApiVersions,
+            api_version: 3,
+            correlation_id: 42,
+            client_id: "client-a",
+            capacity_hint: 0,
+        };
+        let capacity_hint =
+            request_frame_capacity_hint(spec, body_len).expect("request capacity hint");
+
+        let frame = encode_request_frame(
+            RequestFrameSpec {
+                capacity_hint,
+                ..spec
+            },
+            |buf| request.write(buf, 3),
+        )
+        .expect("request frame");
+
+        assert_eq!(capacity_hint, frame.len());
+        assert_eq!(capacity_hint, frame.capacity());
     }
 
     #[test]

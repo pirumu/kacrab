@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -32,6 +33,18 @@ impl Default for CreatePartitionsRequestData {
     }
 }
 impl CreatePartitionsRequestData {
+    pub fn with_topics(mut self, value: Vec<CreatePartitionsTopic>) -> Self {
+        self.topics = value;
+        self
+    }
+    pub fn with_timeout_ms(mut self, value: i32) -> Self {
+        self.timeout_ms = value;
+        self
+    }
+    pub fn with_validate_only(mut self, value: bool) -> Self {
+        self.validate_only = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 3 {
             return Err(UnsupportedVersion::new(37, version).into());
@@ -102,6 +115,31 @@ impl CreatePartitionsRequestData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 3 {
+            return Err(UnsupportedVersion::new(37, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 2 {
+            len += compact_array_length_len(self.topics.len() as i32);
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        }
+        len += 4;
+        len += 1;
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreatePartitionsTopic {
@@ -124,6 +162,18 @@ impl Default for CreatePartitionsTopic {
     }
 }
 impl CreatePartitionsTopic {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_count(mut self, value: i32) -> Self {
+        self.count = value;
+        self
+    }
+    pub fn with_assignments(mut self, value: Option<Vec<CreatePartitionsAssignment>>) -> Self {
+        self.assignments = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let count;
@@ -218,6 +268,46 @@ impl CreatePartitionsTopic {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 2 {
+            len += compact_string_len(&self.name)?;
+        } else {
+            len += string_len(&self.name)?;
+        }
+        len += 4;
+        if version >= 2 {
+            match &self.assignments {
+                None => {
+                    len += compact_array_length_len(-1);
+                },
+                Some(arr) => {
+                    len += compact_array_length_len(arr.len() as i32);
+                    for el in arr {
+                        len += el.encoded_len(version)?;
+                    }
+                },
+            }
+        } else {
+            match &self.assignments {
+                None => {
+                    len += array_length_len();
+                },
+                Some(arr) => {
+                    len += array_length_len();
+                    for el in arr {
+                        len += el.encoded_len(version)?;
+                    }
+                },
+            }
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreatePartitionsAssignment {
@@ -234,6 +324,10 @@ impl Default for CreatePartitionsAssignment {
     }
 }
 impl CreatePartitionsAssignment {
+    pub fn with_broker_ids(mut self, value: Vec<i32>) -> Self {
+        self.broker_ids = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let broker_ids;
         let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
@@ -289,5 +383,21 @@ impl CreatePartitionsAssignment {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 2 {
+            len += compact_array_length_len(self.broker_ids.len() as i32);
+            len += self.broker_ids.len() * 4usize;
+        } else {
+            len += array_length_len();
+            len += self.broker_ids.len() * 4usize;
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

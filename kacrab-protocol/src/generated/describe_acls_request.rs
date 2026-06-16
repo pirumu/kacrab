@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -44,6 +45,34 @@ impl Default for DescribeAclsRequestData {
     }
 }
 impl DescribeAclsRequestData {
+    pub fn with_resource_type_filter(mut self, value: i8) -> Self {
+        self.resource_type_filter = value;
+        self
+    }
+    pub fn with_resource_name_filter(mut self, value: Option<KafkaString>) -> Self {
+        self.resource_name_filter = value;
+        self
+    }
+    pub fn with_pattern_type_filter(mut self, value: i8) -> Self {
+        self.pattern_type_filter = value;
+        self
+    }
+    pub fn with_principal_filter(mut self, value: Option<KafkaString>) -> Self {
+        self.principal_filter = value;
+        self
+    }
+    pub fn with_host_filter(mut self, value: Option<KafkaString>) -> Self {
+        self.host_filter = value;
+        self
+    }
+    pub fn with_operation(mut self, value: i8) -> Self {
+        self.operation = value;
+        self
+    }
+    pub fn with_permission_type(mut self, value: i8) -> Self {
+        self.permission_type = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 3 {
             return Err(UnsupportedVersion::new(29, version).into());
@@ -125,5 +154,36 @@ impl DescribeAclsRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 3 {
+            return Err(UnsupportedVersion::new(29, version).into());
+        }
+        let mut len: usize = 0;
+        len += 1;
+        if version >= 2 {
+            len += compact_nullable_string_len(self.resource_name_filter.as_ref())?;
+        } else {
+            len += nullable_string_len(self.resource_name_filter.as_ref())?;
+        }
+        len += 1;
+        if version >= 2 {
+            len += compact_nullable_string_len(self.principal_filter.as_ref())?;
+        } else {
+            len += nullable_string_len(self.principal_filter.as_ref())?;
+        }
+        if version >= 2 {
+            len += compact_nullable_string_len(self.host_filter.as_ref())?;
+        } else {
+            len += nullable_string_len(self.host_filter.as_ref())?;
+        }
+        len += 1;
+        len += 1;
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

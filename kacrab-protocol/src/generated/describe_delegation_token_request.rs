@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -26,6 +27,10 @@ impl Default for DescribeDelegationTokenRequestData {
     }
 }
 impl DescribeDelegationTokenRequestData {
+    pub fn with_owners(mut self, value: Option<Vec<DescribeDelegationTokenOwner>>) -> Self {
+        self.owners = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 3 {
             return Err(UnsupportedVersion::new(41, version).into());
@@ -110,6 +115,43 @@ impl DescribeDelegationTokenRequestData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 3 {
+            return Err(UnsupportedVersion::new(41, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 2 {
+            match &self.owners {
+                None => {
+                    len += compact_array_length_len(-1);
+                },
+                Some(arr) => {
+                    len += compact_array_length_len(arr.len() as i32);
+                    for el in arr {
+                        len += el.encoded_len(version)?;
+                    }
+                },
+            }
+        } else {
+            match &self.owners {
+                None => {
+                    len += array_length_len();
+                },
+                Some(arr) => {
+                    len += array_length_len();
+                    for el in arr {
+                        len += el.encoded_len(version)?;
+                    }
+                },
+            }
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeDelegationTokenOwner {
@@ -129,6 +171,14 @@ impl Default for DescribeDelegationTokenOwner {
     }
 }
 impl DescribeDelegationTokenOwner {
+    pub fn with_principal_type(mut self, value: KafkaString) -> Self {
+        self.principal_type = value;
+        self
+    }
+    pub fn with_principal_name(mut self, value: KafkaString) -> Self {
+        self.principal_name = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let principal_type;
         let principal_name;
@@ -176,5 +226,24 @@ impl DescribeDelegationTokenOwner {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 2 {
+            len += compact_string_len(&self.principal_type)?;
+        } else {
+            len += string_len(&self.principal_type)?;
+        }
+        if version >= 2 {
+            len += compact_string_len(&self.principal_name)?;
+        } else {
+            len += string_len(&self.principal_name)?;
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

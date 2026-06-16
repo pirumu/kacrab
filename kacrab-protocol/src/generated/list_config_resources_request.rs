@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -27,6 +28,10 @@ impl Default for ListConfigResourcesRequestData {
     }
 }
 impl ListConfigResourcesRequestData {
+    pub fn with_resource_types(mut self, value: Vec<i8>) -> Self {
+        self.resource_types = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 1 {
             return Err(UnsupportedVersion::new(74, version).into());
@@ -65,10 +70,28 @@ impl ListConfigResourcesRequestData {
             for el in &self.resource_types {
                 write_i8(buf, *el);
             }
+        } else if self.resource_types != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(74, "resource_types", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(74, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += compact_array_length_len(self.resource_types.len() as i32);
+            len += self.resource_types.len() * 1usize;
+        } else if self.resource_types != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(74, "resource_types", version).into());
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

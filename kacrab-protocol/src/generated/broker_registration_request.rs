@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -51,6 +52,42 @@ impl Default for BrokerRegistrationRequestData {
     }
 }
 impl BrokerRegistrationRequestData {
+    pub fn with_broker_id(mut self, value: i32) -> Self {
+        self.broker_id = value;
+        self
+    }
+    pub fn with_cluster_id(mut self, value: KafkaString) -> Self {
+        self.cluster_id = value;
+        self
+    }
+    pub fn with_incarnation_id(mut self, value: KafkaUuid) -> Self {
+        self.incarnation_id = value;
+        self
+    }
+    pub fn with_listeners(mut self, value: Vec<Listener>) -> Self {
+        self.listeners = value;
+        self
+    }
+    pub fn with_features(mut self, value: Vec<Feature>) -> Self {
+        self.features = value;
+        self
+    }
+    pub fn with_rack(mut self, value: Option<KafkaString>) -> Self {
+        self.rack = value;
+        self
+    }
+    pub fn with_is_migrating_zk_broker(mut self, value: bool) -> Self {
+        self.is_migrating_zk_broker = value;
+        self
+    }
+    pub fn with_log_dirs(mut self, value: Vec<KafkaUuid>) -> Self {
+        self.log_dirs = value;
+        self
+    }
+    pub fn with_previous_broker_epoch(mut self, value: i64) -> Self {
+        self.previous_broker_epoch = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 4 {
             return Err(UnsupportedVersion::new(62, version).into());
@@ -140,20 +177,64 @@ impl BrokerRegistrationRequestData {
         write_compact_nullable_string(buf, self.rack.as_ref())?;
         if version >= 1 {
             write_bool(buf, self.is_migrating_zk_broker);
+        } else if self.is_migrating_zk_broker != false {
+            return Err(UnsupportedFieldVersion::new(62, "is_migrating_zk_broker", version).into());
         }
         if version >= 2 {
             write_compact_array_length(buf, self.log_dirs.len() as i32);
             for el in &self.log_dirs {
                 write_uuid(buf, el);
             }
+        } else if self.log_dirs != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(62, "log_dirs", version).into());
         }
         if version >= 3 {
             write_i64(buf, self.previous_broker_epoch);
+        } else if self.previous_broker_epoch != -1i64 {
+            return Err(UnsupportedFieldVersion::new(62, "previous_broker_epoch", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 4 {
+            return Err(UnsupportedVersion::new(62, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        len += compact_string_len(&self.cluster_id)?;
+        len += 16;
+        len += compact_array_length_len(self.listeners.len() as i32);
+        for el in &self.listeners {
+            len += el.encoded_len(version)?;
+        }
+        len += compact_array_length_len(self.features.len() as i32);
+        for el in &self.features {
+            len += el.encoded_len(version)?;
+        }
+        len += compact_nullable_string_len(self.rack.as_ref())?;
+        if version >= 1 {
+            len += 1;
+        } else if self.is_migrating_zk_broker != false {
+            return Err(UnsupportedFieldVersion::new(62, "is_migrating_zk_broker", version).into());
+        }
+        if version >= 2 {
+            len += compact_array_length_len(self.log_dirs.len() as i32);
+            len += self.log_dirs.len() * 16usize;
+        } else if self.log_dirs != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(62, "log_dirs", version).into());
+        }
+        if version >= 3 {
+            len += 8;
+        } else if self.previous_broker_epoch != -1i64 {
+            return Err(UnsupportedFieldVersion::new(62, "previous_broker_epoch", version).into());
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -180,6 +261,22 @@ impl Default for Listener {
     }
 }
 impl Listener {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_host(mut self, value: KafkaString) -> Self {
+        self.host = value;
+        self
+    }
+    pub fn with_port(mut self, value: u16) -> Self {
+        self.port = value;
+        self
+    }
+    pub fn with_security_protocol(mut self, value: i16) -> Self {
+        self.security_protocol = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let host;
@@ -216,6 +313,17 @@ impl Listener {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += compact_string_len(&self.host)?;
+        len += 2;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Feature {
@@ -238,6 +346,18 @@ impl Default for Feature {
     }
 }
 impl Feature {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_min_supported_version(mut self, value: i16) -> Self {
+        self.min_supported_version = value;
+        self
+    }
+    pub fn with_max_supported_version(mut self, value: i16) -> Self {
+        self.max_supported_version = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let min_supported_version;
@@ -269,5 +389,15 @@ impl Feature {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += 2;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

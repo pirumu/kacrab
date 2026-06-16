@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -29,6 +30,14 @@ impl Default for AlterClientQuotasRequestData {
     }
 }
 impl AlterClientQuotasRequestData {
+    pub fn with_entries(mut self, value: Vec<EntryData>) -> Self {
+        self.entries = value;
+        self
+    }
+    pub fn with_validate_only(mut self, value: bool) -> Self {
+        self.validate_only = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 1 {
             return Err(UnsupportedVersion::new(49, version).into());
@@ -95,6 +104,30 @@ impl AlterClientQuotasRequestData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(49, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += compact_array_length_len(self.entries.len() as i32);
+            for el in &self.entries {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.entries {
+                len += el.encoded_len(version)?;
+            }
+        }
+        len += 1;
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryData {
@@ -114,6 +147,14 @@ impl Default for EntryData {
     }
 }
 impl EntryData {
+    pub fn with_entity(mut self, value: Vec<EntityData>) -> Self {
+        self.entity = value;
+        self
+    }
+    pub fn with_ops(mut self, value: Vec<OpData>) -> Self {
+        self.ops = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let entity;
         let ops;
@@ -202,6 +243,37 @@ impl EntryData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += compact_array_length_len(self.entity.len() as i32);
+            for el in &self.entity {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.entity {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 1 {
+            len += compact_array_length_len(self.ops.len() as i32);
+            for el in &self.ops {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.ops {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntityData {
@@ -221,6 +293,14 @@ impl Default for EntityData {
     }
 }
 impl EntityData {
+    pub fn with_entity_type(mut self, value: KafkaString) -> Self {
+        self.entity_type = value;
+        self
+    }
+    pub fn with_entity_name(mut self, value: Option<KafkaString>) -> Self {
+        self.entity_name = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let entity_type;
         let entity_name;
@@ -269,6 +349,25 @@ impl EntityData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += compact_string_len(&self.entity_type)?;
+        } else {
+            len += string_len(&self.entity_type)?;
+        }
+        if version >= 1 {
+            len += compact_nullable_string_len(self.entity_name.as_ref())?;
+        } else {
+            len += nullable_string_len(self.entity_name.as_ref())?;
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpData {
@@ -291,6 +390,18 @@ impl Default for OpData {
     }
 }
 impl OpData {
+    pub fn with_key(mut self, value: KafkaString) -> Self {
+        self.key = value;
+        self
+    }
+    pub fn with_value(mut self, value: f64) -> Self {
+        self.value = value;
+        self
+    }
+    pub fn with_remove(mut self, value: bool) -> Self {
+        self.remove = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let key;
         let value;
@@ -334,5 +445,21 @@ impl OpData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += compact_string_len(&self.key)?;
+        } else {
+            len += string_len(&self.key)?;
+        }
+        len += 8;
+        len += 1;
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

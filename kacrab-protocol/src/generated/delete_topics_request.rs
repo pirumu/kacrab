@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -32,6 +33,18 @@ impl Default for DeleteTopicsRequestData {
     }
 }
 impl DeleteTopicsRequestData {
+    pub fn with_topics(mut self, value: Vec<DeleteTopicState>) -> Self {
+        self.topics = value;
+        self
+    }
+    pub fn with_topic_names(mut self, value: Vec<KafkaString>) -> Self {
+        self.topic_names = value;
+        self
+    }
+    pub fn with_timeout_ms(mut self, value: i32) -> Self {
+        self.timeout_ms = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 6 {
             return Err(UnsupportedVersion::new(20, version).into());
@@ -98,6 +111,8 @@ impl DeleteTopicsRequestData {
             for el in &self.topics {
                 el.write(buf, version)?;
             }
+        } else if self.topics != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(20, "topics", version).into());
         }
         if version <= 5 {
             if version >= 4 {
@@ -111,6 +126,8 @@ impl DeleteTopicsRequestData {
                     write_string(buf, el)?;
                 }
             }
+        } else if self.topic_names != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(20, "topic_names", version).into());
         }
         write_i32(buf, self.timeout_ms);
         if version >= 4 {
@@ -119,6 +136,42 @@ impl DeleteTopicsRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 6 {
+            return Err(UnsupportedVersion::new(20, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 6 {
+            len += compact_array_length_len(self.topics.len() as i32);
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        } else if self.topics != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(20, "topics", version).into());
+        }
+        if version <= 5 {
+            if version >= 4 {
+                len += compact_array_length_len(self.topic_names.len() as i32);
+                for el in &self.topic_names {
+                    len += compact_string_len(el)?;
+                }
+            } else {
+                len += array_length_len();
+                for el in &self.topic_names {
+                    len += string_len(el)?;
+                }
+            }
+        } else if self.topic_names != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(20, "topic_names", version).into());
+        }
+        len += 4;
+        if version >= 4 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -139,6 +192,14 @@ impl Default for DeleteTopicState {
     }
 }
 impl DeleteTopicState {
+    pub fn with_name(mut self, value: Option<KafkaString>) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_topic_id(mut self, value: KafkaUuid) -> Self {
+        self.topic_id = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let topic_id;
@@ -166,5 +227,14 @@ impl DeleteTopicState {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_nullable_string_len(self.name.as_ref())?;
+        len += 16;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

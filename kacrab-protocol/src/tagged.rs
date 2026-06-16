@@ -9,7 +9,7 @@ pub mod error;
 use bytes::{Buf, Bytes, BytesMut};
 
 pub use self::error::TaggedFieldError;
-use crate::primitives::{read_unsigned_varint, write_unsigned_varint};
+use crate::primitives::{read_unsigned_varint, unsigned_varint_len, write_unsigned_varint};
 
 /// Result alias for tagged-field operations.
 pub type Result<T> = core::result::Result<T, TaggedFieldError>;
@@ -105,4 +105,44 @@ pub fn write_tagged_fields(buf: &mut BytesMut, fields: &[RawTaggedField]) -> Res
         buf.extend_from_slice(&field.data);
     }
     Ok(())
+}
+
+/// Encoded length of a tagged-fields section.
+pub fn tagged_fields_len(fields: &[RawTaggedField]) -> Result<usize> {
+    let mut prev_tag: Option<u32> = None;
+    for field in fields {
+        if let Some(prev) = prev_tag
+            && field.tag <= prev
+        {
+            return Err(TaggedFieldError::OutOfOrder {
+                tag: field.tag,
+                prev_tag: prev,
+            });
+        }
+        prev_tag = Some(field.tag);
+    }
+
+    let field_count = u32::try_from(fields.len()).map_err(|_| TaggedFieldError::CountOverflow {
+        count: u32::MAX,
+        max: usize::try_from(u32::MAX).unwrap_or(usize::MAX),
+    })?;
+    let mut len = unsigned_varint_len(field_count);
+    for field in fields {
+        let field_len =
+            u32::try_from(field.data.len()).map_err(|_| TaggedFieldError::FieldTooLarge {
+                tag: field.tag,
+                size: field.data.len(),
+                max: usize::try_from(u32::MAX).unwrap_or(usize::MAX),
+            })?;
+        len = len
+            .checked_add(unsigned_varint_len(field.tag))
+            .and_then(|len| len.checked_add(unsigned_varint_len(field_len)))
+            .and_then(|len| len.checked_add(field.data.len()))
+            .ok_or_else(|| TaggedFieldError::FieldTooLarge {
+                tag: field.tag,
+                size: field.data.len(),
+                max: usize::try_from(u32::MAX).unwrap_or(usize::MAX),
+            })?;
+    }
+    Ok(len)
 }

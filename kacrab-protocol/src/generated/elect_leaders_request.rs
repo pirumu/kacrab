@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -33,6 +34,18 @@ impl Default for ElectLeadersRequestData {
     }
 }
 impl ElectLeadersRequestData {
+    pub fn with_election_type(mut self, value: i8) -> Self {
+        self.election_type = value;
+        self
+    }
+    pub fn with_topic_partitions(mut self, value: Option<Vec<TopicPartitions>>) -> Self {
+        self.topic_partitions = value;
+        self
+    }
+    pub fn with_timeout_ms(mut self, value: i32) -> Self {
+        self.timeout_ms = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 2 {
             return Err(UnsupportedVersion::new(43, version).into());
@@ -95,6 +108,8 @@ impl ElectLeadersRequestData {
         }
         if version >= 1 {
             write_i8(buf, self.election_type);
+        } else if self.election_type != 0_i8 {
+            return Err(UnsupportedFieldVersion::new(43, "election_type", version).into());
         }
         if version >= 2 {
             match &self.topic_partitions {
@@ -129,6 +144,49 @@ impl ElectLeadersRequestData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 2 {
+            return Err(UnsupportedVersion::new(43, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += 1;
+        } else if self.election_type != 0_i8 {
+            return Err(UnsupportedFieldVersion::new(43, "election_type", version).into());
+        }
+        if version >= 2 {
+            match &self.topic_partitions {
+                None => {
+                    len += compact_array_length_len(-1);
+                },
+                Some(arr) => {
+                    len += compact_array_length_len(arr.len() as i32);
+                    for el in arr {
+                        len += el.encoded_len(version)?;
+                    }
+                },
+            }
+        } else {
+            match &self.topic_partitions {
+                None => {
+                    len += array_length_len();
+                },
+                Some(arr) => {
+                    len += array_length_len();
+                    for el in arr {
+                        len += el.encoded_len(version)?;
+                    }
+                },
+            }
+        }
+        len += 4;
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicPartitions {
@@ -148,6 +206,14 @@ impl Default for TopicPartitions {
     }
 }
 impl TopicPartitions {
+    pub fn with_topic(mut self, value: KafkaString) -> Self {
+        self.topic = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<i32>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let topic;
         let partitions;
@@ -215,5 +281,26 @@ impl TopicPartitions {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 2 {
+            len += compact_string_len(&self.topic)?;
+        } else {
+            len += string_len(&self.topic)?;
+        }
+        if version >= 2 {
+            len += compact_array_length_len(self.partitions.len() as i32);
+            len += self.partitions.len() * 4usize;
+        } else {
+            len += array_length_len();
+            len += self.partitions.len() * 4usize;
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

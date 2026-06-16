@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -29,6 +30,14 @@ impl Default for OffsetDeleteRequestData {
     }
 }
 impl OffsetDeleteRequestData {
+    pub fn with_group_id(mut self, value: KafkaString) -> Self {
+        self.group_id = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<OffsetDeleteRequestTopic>) -> Self {
+        self.topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 0 {
             return Err(UnsupportedVersion::new(47, version).into());
@@ -62,6 +71,18 @@ impl OffsetDeleteRequestData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 0 {
+            return Err(UnsupportedVersion::new(47, version).into());
+        }
+        let mut len: usize = 0;
+        len += string_len(&self.group_id)?;
+        len += array_length_len();
+        for el in &self.topics {
+            len += el.encoded_len(version)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct OffsetDeleteRequestTopic {
@@ -81,6 +102,14 @@ impl Default for OffsetDeleteRequestTopic {
     }
 }
 impl OffsetDeleteRequestTopic {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<OffsetDeleteRequestPartition>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let partitions;
@@ -108,6 +137,15 @@ impl OffsetDeleteRequestTopic {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += string_len(&self.name)?;
+        len += array_length_len();
+        for el in &self.partitions {
+            len += el.encoded_len(version)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct OffsetDeleteRequestPartition {
@@ -124,6 +162,10 @@ impl Default for OffsetDeleteRequestPartition {
     }
 }
 impl OffsetDeleteRequestPartition {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let partition_index;
         let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
@@ -136,5 +178,10 @@ impl OffsetDeleteRequestPartition {
     pub fn write(&self, buf: &mut BytesMut, _version: i16) -> Result<()> {
         write_i32(buf, self.partition_index);
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        Ok(len)
     }
 }

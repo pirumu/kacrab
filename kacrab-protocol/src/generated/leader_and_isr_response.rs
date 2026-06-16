@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -37,5 +38,12 @@ impl LeaderAndIsrResponseData {
             return Err(UnsupportedVersion::new(4, version).into());
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > -1 {
+            return Err(UnsupportedVersion::new(4, version).into());
+        }
+        let len: usize = 0;
+        Ok(len)
     }
 }

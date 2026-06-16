@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -37,6 +38,22 @@ impl Default for CreateDelegationTokenRequestData {
     }
 }
 impl CreateDelegationTokenRequestData {
+    pub fn with_owner_principal_type(mut self, value: Option<KafkaString>) -> Self {
+        self.owner_principal_type = value;
+        self
+    }
+    pub fn with_owner_principal_name(mut self, value: Option<KafkaString>) -> Self {
+        self.owner_principal_name = value;
+        self
+    }
+    pub fn with_renewers(mut self, value: Vec<CreatableRenewers>) -> Self {
+        self.renewers = value;
+        self
+    }
+    pub fn with_max_lifetime_ms(mut self, value: i64) -> Self {
+        self.max_lifetime_ms = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 3 {
             return Err(UnsupportedVersion::new(38, version).into());
@@ -96,9 +113,13 @@ impl CreateDelegationTokenRequestData {
         }
         if version >= 3 {
             write_compact_nullable_string(buf, self.owner_principal_type.as_ref())?;
+        } else if self.owner_principal_type != None {
+            return Err(UnsupportedFieldVersion::new(38, "owner_principal_type", version).into());
         }
         if version >= 3 {
             write_compact_nullable_string(buf, self.owner_principal_name.as_ref())?;
+        } else if self.owner_principal_name != None {
+            return Err(UnsupportedFieldVersion::new(38, "owner_principal_name", version).into());
         }
         if version >= 2 {
             write_compact_array_length(buf, self.renewers.len() as i32);
@@ -119,6 +140,40 @@ impl CreateDelegationTokenRequestData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 3 {
+            return Err(UnsupportedVersion::new(38, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 3 {
+            len += compact_nullable_string_len(self.owner_principal_type.as_ref())?;
+        } else if self.owner_principal_type != None {
+            return Err(UnsupportedFieldVersion::new(38, "owner_principal_type", version).into());
+        }
+        if version >= 3 {
+            len += compact_nullable_string_len(self.owner_principal_name.as_ref())?;
+        } else if self.owner_principal_name != None {
+            return Err(UnsupportedFieldVersion::new(38, "owner_principal_name", version).into());
+        }
+        if version >= 2 {
+            len += compact_array_length_len(self.renewers.len() as i32);
+            for el in &self.renewers {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.renewers {
+                len += el.encoded_len(version)?;
+            }
+        }
+        len += 8;
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreatableRenewers {
@@ -138,6 +193,14 @@ impl Default for CreatableRenewers {
     }
 }
 impl CreatableRenewers {
+    pub fn with_principal_type(mut self, value: KafkaString) -> Self {
+        self.principal_type = value;
+        self
+    }
+    pub fn with_principal_name(mut self, value: KafkaString) -> Self {
+        self.principal_name = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let principal_type;
         let principal_name;
@@ -185,5 +248,24 @@ impl CreatableRenewers {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 2 {
+            len += compact_string_len(&self.principal_type)?;
+        } else {
+            len += string_len(&self.principal_type)?;
+        }
+        if version >= 2 {
+            len += compact_string_len(&self.principal_name)?;
+        } else {
+            len += string_len(&self.principal_name)?;
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

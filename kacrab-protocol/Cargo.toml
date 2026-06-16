@@ -49,6 +49,7 @@ zstd = { version = "0.13", default-features = false, optional = true }
 
 [features]
 default = []
+message-enums = []
 gzip = ["dep:flate2"]
 snappy = ["dep:snap"]
 # Pure-Rust LZ4 (fast mode only). See module doc on the LZ4 backend in

@@ -236,7 +236,7 @@ fn generate_file_and_mod_rs_cover_flexible_tagged_nested_and_api_key_paths() {
     let response_path = write_file(
         &dir,
         "ShapeResponse.json",
-        &protocol_schema("ShapeResponse", 78, "response"),
+        &protocol_schema("ShapeResponse", 77, "response"),
     );
     let request = parser::parse_spec(&request_path).unwrap();
     let response = parser::parse_spec(&response_path).unwrap();
@@ -250,6 +250,11 @@ fn generate_file_and_mod_rs_cover_flexible_tagged_nested_and_api_key_paths() {
     assert!(generated.contains("write_tagged_fields (buf , & all_tags) ?"));
     assert!(generated.contains("read_compact_nullable_bytes"));
     assert!(generated.contains("write_compact_array_length"));
+    assert!(generated.contains("pub fn encoded_len (& self , version : i16) -> Result < usize >"));
+    assert!(generated.contains("let mut len : usize = 0 ;"));
+    assert!(generated.contains("pub fn with_enabled (mut self , value : bool) -> Self"));
+    assert!(generated.contains("pub fn with_items (mut self , value : Vec < Item >) -> Self"));
+    assert!(generated.contains("UnsupportedFieldVersion :: new (77 , \"topic_id\" , version)"));
     assert!(generated.contains("KafkaUuid :: ZERO"));
     assert!(generated.contains("Option < KafkaString >"));
     assert!(generated.contains("UnsupportedVersion :: new (77 , version)"));
@@ -258,6 +263,11 @@ fn generate_file_and_mod_rs_cover_flexible_tagged_nested_and_api_key_paths() {
     let mod_rs =
         codegen::generate_mod_rs(&[&response, &request], &all_specs, "test-ref").to_string();
     assert!(mod_rs.contains("pub const KAFKA_PROTOCOL_SOURCE_REF : & str = \"test-ref\""));
+    assert!(mod_rs.contains("pub enum RequestKind"));
+    assert!(mod_rs.contains("Shape (ShapeRequestData)"));
+    assert!(mod_rs.contains("pub enum ResponseKind"));
+    assert!(mod_rs.contains("Shape (ShapeResponseData)"));
+    assert!(mod_rs.contains("pub fn write (& self , buf : & mut BytesMut , version : i16)"));
     assert!(mod_rs.contains("pub mod shape_request"));
     assert!(mod_rs.contains("pub mod shape_response"));
     assert!(mod_rs.contains("Shape = 77"));

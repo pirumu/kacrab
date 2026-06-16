@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -42,6 +43,30 @@ impl Default for AddRaftVoterRequestData {
     }
 }
 impl AddRaftVoterRequestData {
+    pub fn with_cluster_id(mut self, value: Option<KafkaString>) -> Self {
+        self.cluster_id = value;
+        self
+    }
+    pub fn with_timeout_ms(mut self, value: i32) -> Self {
+        self.timeout_ms = value;
+        self
+    }
+    pub fn with_voter_id(mut self, value: i32) -> Self {
+        self.voter_id = value;
+        self
+    }
+    pub fn with_voter_directory_id(mut self, value: KafkaUuid) -> Self {
+        self.voter_directory_id = value;
+        self
+    }
+    pub fn with_listeners(mut self, value: Vec<Listener>) -> Self {
+        self.listeners = value;
+        self
+    }
+    pub fn with_ack_when_committed(mut self, value: bool) -> Self {
+        self.ack_when_committed = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 1 {
             return Err(UnsupportedVersion::new(80, version).into());
@@ -100,11 +125,36 @@ impl AddRaftVoterRequestData {
         }
         if version >= 1 {
             write_bool(buf, self.ack_when_committed);
+        } else if self.ack_when_committed != true {
+            return Err(UnsupportedFieldVersion::new(80, "ack_when_committed", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(80, version).into());
+        }
+        let mut len: usize = 0;
+        len += compact_nullable_string_len(self.cluster_id.as_ref())?;
+        len += 4;
+        len += 4;
+        len += 16;
+        len += compact_array_length_len(self.listeners.len() as i32);
+        for el in &self.listeners {
+            len += el.encoded_len(version)?;
+        }
+        if version >= 1 {
+            len += 1;
+        } else if self.ack_when_committed != true {
+            return Err(UnsupportedFieldVersion::new(80, "ack_when_committed", version).into());
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -128,6 +178,18 @@ impl Default for Listener {
     }
 }
 impl Listener {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_host(mut self, value: KafkaString) -> Self {
+        self.host = value;
+        self
+    }
+    pub fn with_port(mut self, value: u16) -> Self {
+        self.port = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let host;
@@ -159,5 +221,15 @@ impl Listener {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += compact_string_len(&self.host)?;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -29,6 +30,14 @@ impl Default for AlterUserScramCredentialsRequestData {
     }
 }
 impl AlterUserScramCredentialsRequestData {
+    pub fn with_deletions(mut self, value: Vec<ScramCredentialDeletion>) -> Self {
+        self.deletions = value;
+        self
+    }
+    pub fn with_upsertions(mut self, value: Vec<ScramCredentialUpsertion>) -> Self {
+        self.upsertions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 0 {
             return Err(UnsupportedVersion::new(51, version).into());
@@ -83,6 +92,24 @@ impl AlterUserScramCredentialsRequestData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 0 {
+            return Err(UnsupportedVersion::new(51, version).into());
+        }
+        let mut len: usize = 0;
+        len += compact_array_length_len(self.deletions.len() as i32);
+        for el in &self.deletions {
+            len += el.encoded_len(version)?;
+        }
+        len += compact_array_length_len(self.upsertions.len() as i32);
+        for el in &self.upsertions {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScramCredentialDeletion {
@@ -102,6 +129,14 @@ impl Default for ScramCredentialDeletion {
     }
 }
 impl ScramCredentialDeletion {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_mechanism(mut self, value: i8) -> Self {
+        self.mechanism = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let mechanism;
@@ -129,6 +164,15 @@ impl ScramCredentialDeletion {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += 1;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -158,6 +202,26 @@ impl Default for ScramCredentialUpsertion {
     }
 }
 impl ScramCredentialUpsertion {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_mechanism(mut self, value: i8) -> Self {
+        self.mechanism = value;
+        self
+    }
+    pub fn with_iterations(mut self, value: i32) -> Self {
+        self.iterations = value;
+        self
+    }
+    pub fn with_salt(mut self, value: Bytes) -> Self {
+        self.salt = value;
+        self
+    }
+    pub fn with_salted_password(mut self, value: Bytes) -> Self {
+        self.salted_password = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let mechanism;
@@ -197,5 +261,17 @@ impl ScramCredentialUpsertion {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += 1;
+        len += 4;
+        len += compact_bytes_len(&self.salt)?;
+        len += compact_bytes_len(&self.salted_password)?;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

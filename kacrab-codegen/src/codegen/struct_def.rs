@@ -20,6 +20,8 @@ pub(crate) struct StructDef<'a> {
     pub(crate) fields: &'a [FieldSpec],
     /// `(api_key, valid_versions)` for top-level message structs.
     pub(crate) top_level: Option<(i16, VersionRange)>,
+    /// Kafka API key for field-level diagnostics inside nested structs.
+    pub(crate) api_key: Option<i16>,
     /// True for the primary `{Name}Data` struct of a message file.
     pub(crate) is_data_struct: bool,
     /// Flexible-version range inherited from the enclosing message.
@@ -39,6 +41,7 @@ pub(crate) fn collect_nested_structs<'a>(
     fields: &'a [FieldSpec],
     flexible_versions: &VersionRange,
     effective_versions: &VersionRange,
+    api_key: Option<i16>,
     out: &mut Vec<StructDef<'a>>,
 ) {
     for field in fields {
@@ -51,11 +54,12 @@ pub(crate) fn collect_nested_structs<'a>(
                 about: String::new(),
                 fields: &field.fields,
                 top_level: None,
+                api_key,
                 is_data_struct: false,
                 flexible_versions: flexible_versions.clone(),
                 effective_versions: narrowed.clone(),
             });
-            collect_nested_structs(&field.fields, flexible_versions, &narrowed, out);
+            collect_nested_structs(&field.fields, flexible_versions, &narrowed, api_key, out);
         }
     }
 }

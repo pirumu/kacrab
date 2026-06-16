@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -36,6 +37,22 @@ impl Default for FetchSnapshotResponseData {
     }
 }
 impl FetchSnapshotResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<TopicSnapshot>) -> Self {
+        self.topics = value;
+        self
+    }
+    pub fn with_node_endpoints(mut self, value: Vec<NodeEndpoint>) -> Self {
+        self.node_endpoints = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 1 {
             return Err(UnsupportedVersion::new(59, version).into());
@@ -112,6 +129,35 @@ impl FetchSnapshotResponseData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(59, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        len += 2;
+        len += compact_array_length_len(self.topics.len() as i32);
+        for el in &self.topics {
+            len += el.encoded_len(version)?;
+        }
+        let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
+        if version >= 1 && !self.node_endpoints.is_empty() {
+            let mut tag_buf = BytesMut::new();
+            write_compact_array_length(&mut tag_buf, self.node_endpoints.len() as i32);
+            for el in &self.node_endpoints {
+                el.write(&mut tag_buf, version)?;
+            }
+            known_tagged_fields.push(RawTaggedField {
+                tag: 0,
+                data: tag_buf.freeze(),
+            });
+        }
+        let mut all_tags = known_tagged_fields;
+        all_tags.extend(self._unknown_tagged_fields.iter().cloned());
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicSnapshot {
@@ -131,6 +177,14 @@ impl Default for TopicSnapshot {
     }
 }
 impl TopicSnapshot {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<PartitionSnapshot>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let partitions;
@@ -169,6 +223,18 @@ impl TopicSnapshot {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += compact_array_length_len(self.partitions.len() as i32);
+        for el in &self.partitions {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartitionSnapshot {
@@ -203,6 +269,34 @@ impl Default for PartitionSnapshot {
     }
 }
 impl PartitionSnapshot {
+    pub fn with_index(mut self, value: i32) -> Self {
+        self.index = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_snapshot_id(mut self, value: SnapshotId) -> Self {
+        self.snapshot_id = value;
+        self
+    }
+    pub fn with_current_leader(mut self, value: LeaderIdAndEpoch) -> Self {
+        self.current_leader = value;
+        self
+    }
+    pub fn with_size(mut self, value: i64) -> Self {
+        self.size = value;
+        self
+    }
+    pub fn with_position(mut self, value: i64) -> Self {
+        self.position = value;
+        self
+    }
+    pub fn with_unaligned_records(mut self, value: Option<Bytes>) -> Self {
+        self.unaligned_records = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let index;
         let error_code;
@@ -263,6 +357,29 @@ impl PartitionSnapshot {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 2;
+        len += self.snapshot_id.encoded_len(version)?;
+        len += 8;
+        len += 8;
+        len += compact_nullable_bytes_len(self.unaligned_records.as_ref().map(|b| b.as_ref()))?;
+        let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
+        if self.current_leader != LeaderIdAndEpoch::default() {
+            let mut tag_buf = BytesMut::new();
+            self.current_leader.write(&mut tag_buf, version)?;
+            known_tagged_fields.push(RawTaggedField {
+                tag: 0,
+                data: tag_buf.freeze(),
+            });
+        }
+        let mut all_tags = known_tagged_fields;
+        all_tags.extend(self._unknown_tagged_fields.iter().cloned());
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct SnapshotId {
@@ -282,6 +399,14 @@ impl Default for SnapshotId {
     }
 }
 impl SnapshotId {
+    pub fn with_end_offset(mut self, value: i64) -> Self {
+        self.end_offset = value;
+        self
+    }
+    pub fn with_epoch(mut self, value: i32) -> Self {
+        self.epoch = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let end_offset;
         let epoch;
@@ -310,6 +435,15 @@ impl SnapshotId {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 8;
+        len += 4;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct LeaderIdAndEpoch {
@@ -329,6 +463,14 @@ impl Default for LeaderIdAndEpoch {
     }
 }
 impl LeaderIdAndEpoch {
+    pub fn with_leader_id(mut self, value: i32) -> Self {
+        self.leader_id = value;
+        self
+    }
+    pub fn with_leader_epoch(mut self, value: i32) -> Self {
+        self.leader_epoch = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let leader_id;
         let leader_epoch;
@@ -357,6 +499,15 @@ impl LeaderIdAndEpoch {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 4;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeEndpoint {
@@ -379,6 +530,18 @@ impl Default for NodeEndpoint {
     }
 }
 impl NodeEndpoint {
+    pub fn with_node_id(mut self, value: i32) -> Self {
+        self.node_id = value;
+        self
+    }
+    pub fn with_host(mut self, value: KafkaString) -> Self {
+        self.host = value;
+        self
+    }
+    pub fn with_port(mut self, value: u16) -> Self {
+        self.port = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let node_id;
         let host;
@@ -410,5 +573,15 @@ impl NodeEndpoint {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += compact_string_len(&self.host)?;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

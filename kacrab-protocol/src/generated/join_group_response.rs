@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -51,6 +52,42 @@ impl Default for JoinGroupResponseData {
     }
 }
 impl JoinGroupResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_generation_id(mut self, value: i32) -> Self {
+        self.generation_id = value;
+        self
+    }
+    pub fn with_protocol_type(mut self, value: Option<KafkaString>) -> Self {
+        self.protocol_type = value;
+        self
+    }
+    pub fn with_protocol_name(mut self, value: Option<KafkaString>) -> Self {
+        self.protocol_name = value;
+        self
+    }
+    pub fn with_leader(mut self, value: KafkaString) -> Self {
+        self.leader = value;
+        self
+    }
+    pub fn with_skip_assignment(mut self, value: bool) -> Self {
+        self.skip_assignment = value;
+        self
+    }
+    pub fn with_member_id(mut self, value: KafkaString) -> Self {
+        self.member_id = value;
+        self
+    }
+    pub fn with_members(mut self, value: Vec<JoinGroupResponseMember>) -> Self {
+        self.members = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 9 {
             return Err(UnsupportedVersion::new(11, version).into());
@@ -143,11 +180,15 @@ impl JoinGroupResponseData {
         }
         if version >= 2 {
             write_i32(buf, self.throttle_time_ms);
+        } else if self.throttle_time_ms != 0_i32 {
+            return Err(UnsupportedFieldVersion::new(11, "throttle_time_ms", version).into());
         }
         write_i16(buf, self.error_code);
         write_i32(buf, self.generation_id);
         if version >= 7 {
             write_compact_nullable_string(buf, self.protocol_type.as_ref())?;
+        } else if self.protocol_type != None {
+            return Err(UnsupportedFieldVersion::new(11, "protocol_type", version).into());
         }
         if version >= 7 {
             write_compact_nullable_string(buf, self.protocol_name.as_ref())?;
@@ -169,6 +210,8 @@ impl JoinGroupResponseData {
         }
         if version >= 9 {
             write_bool(buf, self.skip_assignment);
+        } else if self.skip_assignment != false {
+            return Err(UnsupportedFieldVersion::new(11, "skip_assignment", version).into());
         }
         if version >= 6 {
             write_compact_string(buf, &self.member_id)?;
@@ -193,6 +236,67 @@ impl JoinGroupResponseData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 9 {
+            return Err(UnsupportedVersion::new(11, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 2 {
+            len += 4;
+        } else if self.throttle_time_ms != 0_i32 {
+            return Err(UnsupportedFieldVersion::new(11, "throttle_time_ms", version).into());
+        }
+        len += 2;
+        len += 4;
+        if version >= 7 {
+            len += compact_nullable_string_len(self.protocol_type.as_ref())?;
+        } else if self.protocol_type != None {
+            return Err(UnsupportedFieldVersion::new(11, "protocol_type", version).into());
+        }
+        if version >= 7 {
+            len += compact_nullable_string_len(self.protocol_name.as_ref())?;
+        } else {
+            let _nn_default = KafkaString::default();
+            let _nn_val = self.protocol_name.as_ref().unwrap_or(&_nn_default);
+            if version >= 6 {
+                len += compact_string_len(_nn_val)?;
+            } else {
+                len += string_len(_nn_val)?;
+            }
+        }
+        if version >= 6 {
+            len += compact_string_len(&self.leader)?;
+        } else {
+            len += string_len(&self.leader)?;
+        }
+        if version >= 9 {
+            len += 1;
+        } else if self.skip_assignment != false {
+            return Err(UnsupportedFieldVersion::new(11, "skip_assignment", version).into());
+        }
+        if version >= 6 {
+            len += compact_string_len(&self.member_id)?;
+        } else {
+            len += string_len(&self.member_id)?;
+        }
+        if version >= 6 {
+            len += compact_array_length_len(self.members.len() as i32);
+            for el in &self.members {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.members {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 6 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct JoinGroupResponseMember {
@@ -215,6 +319,18 @@ impl Default for JoinGroupResponseMember {
     }
 }
 impl JoinGroupResponseMember {
+    pub fn with_member_id(mut self, value: KafkaString) -> Self {
+        self.member_id = value;
+        self
+    }
+    pub fn with_group_instance_id(mut self, value: Option<KafkaString>) -> Self {
+        self.group_instance_id = value;
+        self
+    }
+    pub fn with_metadata(mut self, value: Bytes) -> Self {
+        self.metadata = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let member_id;
         let mut group_instance_id = None;
@@ -266,6 +382,8 @@ impl JoinGroupResponseMember {
             } else {
                 write_nullable_string(buf, self.group_instance_id.as_ref())?;
             }
+        } else if self.group_instance_id != None {
+            return Err(UnsupportedFieldVersion::new(11, "group_instance_id", version).into());
         }
         if version >= 6 {
             write_compact_bytes(buf, &self.metadata)?;
@@ -278,5 +396,33 @@ impl JoinGroupResponseMember {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 6 {
+            len += compact_string_len(&self.member_id)?;
+        } else {
+            len += string_len(&self.member_id)?;
+        }
+        if version >= 5 {
+            if version >= 6 {
+                len += compact_nullable_string_len(self.group_instance_id.as_ref())?;
+            } else {
+                len += nullable_string_len(self.group_instance_id.as_ref())?;
+            }
+        } else if self.group_instance_id != None {
+            return Err(UnsupportedFieldVersion::new(11, "group_instance_id", version).into());
+        }
+        if version >= 6 {
+            len += compact_bytes_len(&self.metadata)?;
+        } else {
+            len += bytes_len(&self.metadata)?;
+        }
+        if version >= 6 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

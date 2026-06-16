@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -29,6 +30,14 @@ impl Default for IncrementalAlterConfigsRequestData {
     }
 }
 impl IncrementalAlterConfigsRequestData {
+    pub fn with_resources(mut self, value: Vec<AlterConfigsResource>) -> Self {
+        self.resources = value;
+        self
+    }
+    pub fn with_validate_only(mut self, value: bool) -> Self {
+        self.validate_only = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 1 {
             return Err(UnsupportedVersion::new(44, version).into());
@@ -95,6 +104,30 @@ impl IncrementalAlterConfigsRequestData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(44, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += compact_array_length_len(self.resources.len() as i32);
+            for el in &self.resources {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.resources {
+                len += el.encoded_len(version)?;
+            }
+        }
+        len += 1;
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct AlterConfigsResource {
@@ -117,6 +150,18 @@ impl Default for AlterConfigsResource {
     }
 }
 impl AlterConfigsResource {
+    pub fn with_resource_type(mut self, value: i8) -> Self {
+        self.resource_type = value;
+        self
+    }
+    pub fn with_resource_name(mut self, value: KafkaString) -> Self {
+        self.resource_name = value;
+        self
+    }
+    pub fn with_configs(mut self, value: Vec<AlterableConfig>) -> Self {
+        self.configs = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let resource_type;
         let resource_name;
@@ -189,6 +234,32 @@ impl AlterConfigsResource {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 1;
+        if version >= 1 {
+            len += compact_string_len(&self.resource_name)?;
+        } else {
+            len += string_len(&self.resource_name)?;
+        }
+        if version >= 1 {
+            len += compact_array_length_len(self.configs.len() as i32);
+            for el in &self.configs {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.configs {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct AlterableConfig {
@@ -211,6 +282,18 @@ impl Default for AlterableConfig {
     }
 }
 impl AlterableConfig {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_config_operation(mut self, value: i8) -> Self {
+        self.config_operation = value;
+        self
+    }
+    pub fn with_value(mut self, value: Option<KafkaString>) -> Self {
+        self.value = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let config_operation;
@@ -262,5 +345,25 @@ impl AlterableConfig {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += compact_string_len(&self.name)?;
+        } else {
+            len += string_len(&self.name)?;
+        }
+        len += 1;
+        if version >= 1 {
+            len += compact_nullable_string_len(self.value.as_ref())?;
+        } else {
+            len += nullable_string_len(self.value.as_ref())?;
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

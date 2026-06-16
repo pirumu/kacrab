@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -32,6 +33,18 @@ impl Default for DefaultPrincipalDataData {
     }
 }
 impl DefaultPrincipalDataData {
+    pub fn with_type(mut self, value: KafkaString) -> Self {
+        self.r#type = value;
+        self
+    }
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_token_authenticated(mut self, value: bool) -> Self {
+        self.token_authenticated = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let r#type;
         let name;
@@ -63,5 +76,15 @@ impl DefaultPrincipalDataData {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.r#type)?;
+        len += compact_string_len(&self.name)?;
+        len += 1;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

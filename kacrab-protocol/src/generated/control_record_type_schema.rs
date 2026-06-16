@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -26,6 +27,10 @@ impl Default for ControlRecordTypeSchemaData {
     }
 }
 impl ControlRecordTypeSchemaData {
+    pub fn with_type(mut self, value: i16) -> Self {
+        self.r#type = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let r#type;
         let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
@@ -38,5 +43,10 @@ impl ControlRecordTypeSchemaData {
     pub fn write(&self, buf: &mut BytesMut, _version: i16) -> Result<()> {
         write_i16(buf, self.r#type);
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 2;
+        Ok(len)
     }
 }

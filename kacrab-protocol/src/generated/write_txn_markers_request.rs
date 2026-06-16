@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -26,6 +27,10 @@ impl Default for WriteTxnMarkersRequestData {
     }
 }
 impl WriteTxnMarkersRequestData {
+    pub fn with_markers(mut self, value: Vec<WritableTxnMarker>) -> Self {
+        self.markers = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 2 {
             return Err(UnsupportedVersion::new(27, version).into());
@@ -66,6 +71,20 @@ impl WriteTxnMarkersRequestData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 2 {
+            return Err(UnsupportedVersion::new(27, version).into());
+        }
+        let mut len: usize = 0;
+        len += compact_array_length_len(self.markers.len() as i32);
+        for el in &self.markers {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct WritableTxnMarker {
@@ -98,6 +117,30 @@ impl Default for WritableTxnMarker {
     }
 }
 impl WritableTxnMarker {
+    pub fn with_producer_id(mut self, value: i64) -> Self {
+        self.producer_id = value;
+        self
+    }
+    pub fn with_producer_epoch(mut self, value: i16) -> Self {
+        self.producer_epoch = value;
+        self
+    }
+    pub fn with_transaction_result(mut self, value: bool) -> Self {
+        self.transaction_result = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<WritableTxnMarkerTopic>) -> Self {
+        self.topics = value;
+        self
+    }
+    pub fn with_coordinator_epoch(mut self, value: i32) -> Self {
+        self.coordinator_epoch = value;
+        self
+    }
+    pub fn with_transaction_version(mut self, value: i8) -> Self {
+        self.transaction_version = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let producer_id;
         let producer_epoch;
@@ -150,11 +193,33 @@ impl WritableTxnMarker {
         write_i32(buf, self.coordinator_epoch);
         if version >= 2 {
             write_i8(buf, self.transaction_version);
+        } else if self.transaction_version != 0i8 {
+            return Err(UnsupportedFieldVersion::new(27, "transaction_version", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 8;
+        len += 2;
+        len += 1;
+        len += compact_array_length_len(self.topics.len() as i32);
+        for el in &self.topics {
+            len += el.encoded_len(version)?;
+        }
+        len += 4;
+        if version >= 2 {
+            len += 1;
+        } else if self.transaction_version != 0i8 {
+            return Err(UnsupportedFieldVersion::new(27, "transaction_version", version).into());
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -175,6 +240,14 @@ impl Default for WritableTxnMarkerTopic {
     }
 }
 impl WritableTxnMarkerTopic {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_partition_indexes(mut self, value: Vec<i32>) -> Self {
+        self.partition_indexes = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let partition_indexes;
@@ -212,5 +285,15 @@ impl WritableTxnMarkerTopic {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += compact_array_length_len(self.partition_indexes.len() as i32);
+        len += self.partition_indexes.len() * 4usize;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

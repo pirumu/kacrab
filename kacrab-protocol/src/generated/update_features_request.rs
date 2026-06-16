@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -32,6 +33,18 @@ impl Default for UpdateFeaturesRequestData {
     }
 }
 impl UpdateFeaturesRequestData {
+    pub fn with_timeout_ms(mut self, value: i32) -> Self {
+        self.timeout_ms = value;
+        self
+    }
+    pub fn with_feature_updates(mut self, value: Vec<FeatureUpdateKey>) -> Self {
+        self.feature_updates = value;
+        self
+    }
+    pub fn with_validate_only(mut self, value: bool) -> Self {
+        self.validate_only = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 2 {
             return Err(UnsupportedVersion::new(57, version).into());
@@ -78,11 +91,33 @@ impl UpdateFeaturesRequestData {
         }
         if version >= 1 {
             write_bool(buf, self.validate_only);
+        } else if self.validate_only != false {
+            return Err(UnsupportedFieldVersion::new(57, "validate_only", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 2 {
+            return Err(UnsupportedVersion::new(57, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        len += compact_array_length_len(self.feature_updates.len() as i32);
+        for el in &self.feature_updates {
+            len += el.encoded_len(version)?;
+        }
+        if version >= 1 {
+            len += 1;
+        } else if self.validate_only != false {
+            return Err(UnsupportedFieldVersion::new(57, "validate_only", version).into());
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -114,6 +149,22 @@ impl Default for FeatureUpdateKey {
     }
 }
 impl FeatureUpdateKey {
+    pub fn with_feature(mut self, value: KafkaString) -> Self {
+        self.feature = value;
+        self
+    }
+    pub fn with_max_version_level(mut self, value: i16) -> Self {
+        self.max_version_level = value;
+        self
+    }
+    pub fn with_allow_downgrade(mut self, value: bool) -> Self {
+        self.allow_downgrade = value;
+        self
+    }
+    pub fn with_upgrade_type(mut self, value: i8) -> Self {
+        self.upgrade_type = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let feature;
         let max_version_level;
@@ -149,13 +200,36 @@ impl FeatureUpdateKey {
         write_i16(buf, self.max_version_level);
         if version == 0 {
             write_bool(buf, self.allow_downgrade);
+        } else if self.allow_downgrade != false {
+            return Err(UnsupportedFieldVersion::new(57, "allow_downgrade", version).into());
         }
         if version >= 1 {
             write_i8(buf, self.upgrade_type);
+        } else if self.upgrade_type != 1i8 {
+            return Err(UnsupportedFieldVersion::new(57, "upgrade_type", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.feature)?;
+        len += 2;
+        if version == 0 {
+            len += 1;
+        } else if self.allow_downgrade != false {
+            return Err(UnsupportedFieldVersion::new(57, "allow_downgrade", version).into());
+        }
+        if version >= 1 {
+            len += 1;
+        } else if self.upgrade_type != 1i8 {
+            return Err(UnsupportedFieldVersion::new(57, "upgrade_type", version).into());
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

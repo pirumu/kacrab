@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -38,6 +39,26 @@ impl Default for AddPartitionsToTxnRequestData {
     }
 }
 impl AddPartitionsToTxnRequestData {
+    pub fn with_transactions(mut self, value: Vec<AddPartitionsToTxnTransaction>) -> Self {
+        self.transactions = value;
+        self
+    }
+    pub fn with_v3_and_below_transactional_id(mut self, value: KafkaString) -> Self {
+        self.v3_and_below_transactional_id = value;
+        self
+    }
+    pub fn with_v3_and_below_producer_id(mut self, value: i64) -> Self {
+        self.v3_and_below_producer_id = value;
+        self
+    }
+    pub fn with_v3_and_below_producer_epoch(mut self, value: i16) -> Self {
+        self.v3_and_below_producer_epoch = value;
+        self
+    }
+    pub fn with_v3_and_below_topics(mut self, value: Vec<AddPartitionsToTxnTopic>) -> Self {
+        self.v3_and_below_topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 5 {
             return Err(UnsupportedVersion::new(24, version).into());
@@ -120,6 +141,8 @@ impl AddPartitionsToTxnRequestData {
             for el in &self.transactions {
                 el.write(buf, version)?;
             }
+        } else if self.transactions != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(24, "transactions", version).into());
         }
         if version <= 3 {
             if version >= 3 {
@@ -127,12 +150,24 @@ impl AddPartitionsToTxnRequestData {
             } else {
                 write_string(buf, &self.v3_and_below_transactional_id)?;
             }
+        } else if self.v3_and_below_transactional_id != KafkaString::default() {
+            return Err(
+                UnsupportedFieldVersion::new(24, "v3_and_below_transactional_id", version).into(),
+            );
         }
         if version <= 3 {
             write_i64(buf, self.v3_and_below_producer_id);
+        } else if self.v3_and_below_producer_id != 0_i64 {
+            return Err(
+                UnsupportedFieldVersion::new(24, "v3_and_below_producer_id", version).into(),
+            );
         }
         if version <= 3 {
             write_i16(buf, self.v3_and_below_producer_epoch);
+        } else if self.v3_and_below_producer_epoch != 0_i16 {
+            return Err(
+                UnsupportedFieldVersion::new(24, "v3_and_below_producer_epoch", version).into(),
+            );
         }
         if version <= 3 {
             if version >= 3 {
@@ -146,6 +181,8 @@ impl AddPartitionsToTxnRequestData {
                     el.write(buf, version)?;
                 }
             }
+        } else if self.v3_and_below_topics != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(24, "v3_and_below_topics", version).into());
         }
         if version >= 3 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -153,6 +190,66 @@ impl AddPartitionsToTxnRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 5 {
+            return Err(UnsupportedVersion::new(24, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 4 {
+            len += compact_array_length_len(self.transactions.len() as i32);
+            for el in &self.transactions {
+                len += el.encoded_len(version)?;
+            }
+        } else if self.transactions != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(24, "transactions", version).into());
+        }
+        if version <= 3 {
+            if version >= 3 {
+                len += compact_string_len(&self.v3_and_below_transactional_id)?;
+            } else {
+                len += string_len(&self.v3_and_below_transactional_id)?;
+            }
+        } else if self.v3_and_below_transactional_id != KafkaString::default() {
+            return Err(
+                UnsupportedFieldVersion::new(24, "v3_and_below_transactional_id", version).into(),
+            );
+        }
+        if version <= 3 {
+            len += 8;
+        } else if self.v3_and_below_producer_id != 0_i64 {
+            return Err(
+                UnsupportedFieldVersion::new(24, "v3_and_below_producer_id", version).into(),
+            );
+        }
+        if version <= 3 {
+            len += 2;
+        } else if self.v3_and_below_producer_epoch != 0_i16 {
+            return Err(
+                UnsupportedFieldVersion::new(24, "v3_and_below_producer_epoch", version).into(),
+            );
+        }
+        if version <= 3 {
+            if version >= 3 {
+                len += compact_array_length_len(self.v3_and_below_topics.len() as i32);
+                for el in &self.v3_and_below_topics {
+                    len += el.encoded_len(version)?;
+                }
+            } else {
+                len += array_length_len();
+                for el in &self.v3_and_below_topics {
+                    len += el.encoded_len(version)?;
+                }
+            }
+        } else if self.v3_and_below_topics != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(24, "v3_and_below_topics", version).into());
+        }
+        if version >= 3 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -183,6 +280,26 @@ impl Default for AddPartitionsToTxnTransaction {
     }
 }
 impl AddPartitionsToTxnTransaction {
+    pub fn with_transactional_id(mut self, value: KafkaString) -> Self {
+        self.transactional_id = value;
+        self
+    }
+    pub fn with_producer_id(mut self, value: i64) -> Self {
+        self.producer_id = value;
+        self
+    }
+    pub fn with_producer_epoch(mut self, value: i16) -> Self {
+        self.producer_epoch = value;
+        self
+    }
+    pub fn with_verify_only(mut self, value: bool) -> Self {
+        self.verify_only = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<AddPartitionsToTxnTopic>) -> Self {
+        self.topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let transactional_id;
         let producer_id;
@@ -233,6 +350,21 @@ impl AddPartitionsToTxnTransaction {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.transactional_id)?;
+        len += 8;
+        len += 2;
+        len += 1;
+        len += compact_array_length_len(self.topics.len() as i32);
+        for el in &self.topics {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct AddPartitionsToTxnTopic {
@@ -252,6 +384,14 @@ impl Default for AddPartitionsToTxnTopic {
     }
 }
 impl AddPartitionsToTxnTopic {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<i32>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let partitions;
@@ -319,5 +459,26 @@ impl AddPartitionsToTxnTopic {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 3 {
+            len += compact_string_len(&self.name)?;
+        } else {
+            len += string_len(&self.name)?;
+        }
+        if version >= 3 {
+            len += compact_array_length_len(self.partitions.len() as i32);
+            len += self.partitions.len() * 4usize;
+        } else {
+            len += array_length_len();
+            len += self.partitions.len() * 4usize;
+        }
+        if version >= 3 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

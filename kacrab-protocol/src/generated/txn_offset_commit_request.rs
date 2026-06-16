@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -47,6 +48,38 @@ impl Default for TxnOffsetCommitRequestData {
     }
 }
 impl TxnOffsetCommitRequestData {
+    pub fn with_transactional_id(mut self, value: KafkaString) -> Self {
+        self.transactional_id = value;
+        self
+    }
+    pub fn with_group_id(mut self, value: KafkaString) -> Self {
+        self.group_id = value;
+        self
+    }
+    pub fn with_producer_id(mut self, value: i64) -> Self {
+        self.producer_id = value;
+        self
+    }
+    pub fn with_producer_epoch(mut self, value: i16) -> Self {
+        self.producer_epoch = value;
+        self
+    }
+    pub fn with_generation_id(mut self, value: i32) -> Self {
+        self.generation_id = value;
+        self
+    }
+    pub fn with_member_id(mut self, value: KafkaString) -> Self {
+        self.member_id = value;
+        self
+    }
+    pub fn with_group_instance_id(mut self, value: Option<KafkaString>) -> Self {
+        self.group_instance_id = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<TxnOffsetCommitRequestTopic>) -> Self {
+        self.topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 5 {
             return Err(UnsupportedVersion::new(28, version).into());
@@ -140,12 +173,18 @@ impl TxnOffsetCommitRequestData {
         write_i16(buf, self.producer_epoch);
         if version >= 3 {
             write_i32(buf, self.generation_id);
+        } else if self.generation_id != -1i32 {
+            return Err(UnsupportedFieldVersion::new(28, "generation_id", version).into());
         }
         if version >= 3 {
             write_compact_string(buf, &self.member_id)?;
+        } else if self.member_id != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(28, "member_id", version).into());
         }
         if version >= 3 {
             write_compact_nullable_string(buf, self.group_instance_id.as_ref())?;
+        } else if self.group_instance_id != None {
+            return Err(UnsupportedFieldVersion::new(28, "group_instance_id", version).into());
         }
         if version >= 3 {
             write_compact_array_length(buf, self.topics.len() as i32);
@@ -164,6 +203,56 @@ impl TxnOffsetCommitRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 5 {
+            return Err(UnsupportedVersion::new(28, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 3 {
+            len += compact_string_len(&self.transactional_id)?;
+        } else {
+            len += string_len(&self.transactional_id)?;
+        }
+        if version >= 3 {
+            len += compact_string_len(&self.group_id)?;
+        } else {
+            len += string_len(&self.group_id)?;
+        }
+        len += 8;
+        len += 2;
+        if version >= 3 {
+            len += 4;
+        } else if self.generation_id != -1i32 {
+            return Err(UnsupportedFieldVersion::new(28, "generation_id", version).into());
+        }
+        if version >= 3 {
+            len += compact_string_len(&self.member_id)?;
+        } else if self.member_id != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(28, "member_id", version).into());
+        }
+        if version >= 3 {
+            len += compact_nullable_string_len(self.group_instance_id.as_ref())?;
+        } else if self.group_instance_id != None {
+            return Err(UnsupportedFieldVersion::new(28, "group_instance_id", version).into());
+        }
+        if version >= 3 {
+            len += compact_array_length_len(self.topics.len() as i32);
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 3 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -184,6 +273,14 @@ impl Default for TxnOffsetCommitRequestTopic {
     }
 }
 impl TxnOffsetCommitRequestTopic {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<TxnOffsetCommitRequestPartition>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let partitions;
@@ -252,6 +349,31 @@ impl TxnOffsetCommitRequestTopic {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 3 {
+            len += compact_string_len(&self.name)?;
+        } else {
+            len += string_len(&self.name)?;
+        }
+        if version >= 3 {
+            len += compact_array_length_len(self.partitions.len() as i32);
+            for el in &self.partitions {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.partitions {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 3 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct TxnOffsetCommitRequestPartition {
@@ -277,6 +399,22 @@ impl Default for TxnOffsetCommitRequestPartition {
     }
 }
 impl TxnOffsetCommitRequestPartition {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
+    pub fn with_committed_offset(mut self, value: i64) -> Self {
+        self.committed_offset = value;
+        self
+    }
+    pub fn with_committed_leader_epoch(mut self, value: i32) -> Self {
+        self.committed_leader_epoch = value;
+        self
+    }
+    pub fn with_committed_metadata(mut self, value: Option<KafkaString>) -> Self {
+        self.committed_metadata = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let partition_index;
         let committed_offset;
@@ -316,6 +454,8 @@ impl TxnOffsetCommitRequestPartition {
         write_i64(buf, self.committed_offset);
         if version >= 2 {
             write_i32(buf, self.committed_leader_epoch);
+        } else if self.committed_leader_epoch != -1i32 {
+            return Err(UnsupportedFieldVersion::new(28, "committed_leader_epoch", version).into());
         }
         if version >= 3 {
             write_compact_nullable_string(buf, self.committed_metadata.as_ref())?;
@@ -328,5 +468,26 @@ impl TxnOffsetCommitRequestPartition {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 8;
+        if version >= 2 {
+            len += 4;
+        } else if self.committed_leader_epoch != -1i32 {
+            return Err(UnsupportedFieldVersion::new(28, "committed_leader_epoch", version).into());
+        }
+        if version >= 3 {
+            len += compact_nullable_string_len(self.committed_metadata.as_ref())?;
+        } else {
+            len += nullable_string_len(self.committed_metadata.as_ref())?;
+        }
+        if version >= 3 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

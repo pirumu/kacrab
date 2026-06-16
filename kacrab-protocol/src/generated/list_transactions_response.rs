@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -37,6 +38,22 @@ impl Default for ListTransactionsResponseData {
     }
 }
 impl ListTransactionsResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_unknown_state_filters(mut self, value: Vec<KafkaString>) -> Self {
+        self.unknown_state_filters = value;
+        self
+    }
+    pub fn with_transaction_states(mut self, value: Vec<TransactionState>) -> Self {
+        self.transaction_states = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 2 {
             return Err(UnsupportedVersion::new(66, version).into());
@@ -99,6 +116,26 @@ impl ListTransactionsResponseData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 2 {
+            return Err(UnsupportedVersion::new(66, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        len += 2;
+        len += compact_array_length_len(self.unknown_state_filters.len() as i32);
+        for el in &self.unknown_state_filters {
+            len += compact_string_len(el)?;
+        }
+        len += compact_array_length_len(self.transaction_states.len() as i32);
+        for el in &self.transaction_states {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransactionState {
@@ -121,6 +158,18 @@ impl Default for TransactionState {
     }
 }
 impl TransactionState {
+    pub fn with_transactional_id(mut self, value: KafkaString) -> Self {
+        self.transactional_id = value;
+        self
+    }
+    pub fn with_producer_id(mut self, value: i64) -> Self {
+        self.producer_id = value;
+        self
+    }
+    pub fn with_transaction_state(mut self, value: KafkaString) -> Self {
+        self.transaction_state = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let transactional_id;
         let producer_id;
@@ -152,5 +201,15 @@ impl TransactionState {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.transactional_id)?;
+        len += 8;
+        len += compact_string_len(&self.transaction_state)?;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

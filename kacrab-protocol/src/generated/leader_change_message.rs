@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -35,6 +36,22 @@ impl Default for LeaderChangeMessageData {
     }
 }
 impl LeaderChangeMessageData {
+    pub fn with_version(mut self, value: i16) -> Self {
+        self.version = value;
+        self
+    }
+    pub fn with_leader_id(mut self, value: i32) -> Self {
+        self.leader_id = value;
+        self
+    }
+    pub fn with_voters(mut self, value: Vec<Voter>) -> Self {
+        self.voters = value;
+        self
+    }
+    pub fn with_granting_voters(mut self, value: Vec<Voter>) -> Self {
+        self.granting_voters = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let version_;
         let leader_id;
@@ -91,6 +108,23 @@ impl LeaderChangeMessageData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 2;
+        len += 4;
+        len += compact_array_length_len(self.voters.len() as i32);
+        for el in &self.voters {
+            len += el.encoded_len(version)?;
+        }
+        len += compact_array_length_len(self.granting_voters.len() as i32);
+        for el in &self.granting_voters {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Voter {
@@ -110,6 +144,14 @@ impl Default for Voter {
     }
 }
 impl Voter {
+    pub fn with_voter_id(mut self, value: i32) -> Self {
+        self.voter_id = value;
+        self
+    }
+    pub fn with_voter_directory_id(mut self, value: KafkaUuid) -> Self {
+        self.voter_directory_id = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let voter_id;
         let mut voter_directory_id = KafkaUuid::ZERO;
@@ -141,5 +183,16 @@ impl Voter {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 1 {
+            len += 16;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

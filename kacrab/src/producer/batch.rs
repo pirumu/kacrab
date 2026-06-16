@@ -1,5 +1,7 @@
 //! Record-batch construction for minimal produce requests.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::record::{Record, RecordBatch};
 
@@ -15,8 +17,8 @@ const RECORD_BATCH_MAGIC_V2: i8 = 2;
 const NO_PRODUCER_ID: i64 = -1;
 /// Kafka sentinel for non-idempotent producer epoch/base sequence.
 const NO_PRODUCER_EPOCH_OR_SEQUENCE: i16 = -1;
-/// Kacrab currently emits create-time style batches with zero timestamp deltas;
-/// timestamp policy should become config-driven when producer timestamps land.
+/// Kacrab currently emits create-time style records with zero deltas from the
+/// batch timestamp; timestamp policy should become config-driven later.
 const DEFAULT_RECORD_TIMESTAMP_DELTA_MS: i64 = 0;
 /// Kacrab does not set per-record attributes yet; batch-level compression owns
 /// the current attribute bits.
@@ -88,14 +90,15 @@ fn encode_records(
             )
         },
     );
+    let batch_timestamp_ms = current_time_ms();
     let batch = RecordBatch {
         base_offset: REQUEST_RECORD_BATCH_BASE_OFFSET,
         partition_leader_epoch: UNKNOWN_PARTITION_LEADER_EPOCH,
         magic: RECORD_BATCH_MAGIC_V2,
         attributes: compression.codec as i16,
         last_offset_delta: i32::try_from(records.len().saturating_sub(1)).unwrap_or(i32::MAX),
-        first_timestamp: DEFAULT_RECORD_TIMESTAMP_DELTA_MS,
-        max_timestamp: DEFAULT_RECORD_TIMESTAMP_DELTA_MS,
+        first_timestamp: batch_timestamp_ms,
+        max_timestamp: batch_timestamp_ms,
         producer_id,
         producer_epoch,
         base_sequence,
@@ -104,6 +107,14 @@ fn encode_records(
     let mut bytes = BytesMut::new();
     batch.encode_with_compression_level(&mut bytes, compression.level)?;
     Ok(bytes.freeze())
+}
+
+fn current_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 #[cfg(test)]
@@ -143,6 +154,28 @@ mod tests {
         assert_eq!(decoded.producer_id, 42);
         assert_eq!(decoded.producer_epoch, 3);
         assert_eq!(decoded.base_sequence, 7);
+    }
+
+    #[test]
+    fn record_batch_sets_create_time_timestamp_from_clock() {
+        let before = super::current_time_ms();
+        let encoded = encode_record_batch_with_producer_state(
+            &[ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value"))],
+            ProducerCompression::default(),
+            None,
+        )
+        .expect("batch should encode");
+        let after = super::current_time_ms();
+        let mut encoded = encoded;
+        let decoded = RecordBatch::decode(&mut encoded).expect("record batch");
+
+        assert!(decoded.first_timestamp >= before);
+        assert!(decoded.first_timestamp <= after);
+        assert_eq!(decoded.max_timestamp, decoded.first_timestamp);
+        assert_eq!(
+            decoded.records.first().expect("one record").timestamp_delta,
+            0
+        );
     }
 
     #[cfg(feature = "lz4")]

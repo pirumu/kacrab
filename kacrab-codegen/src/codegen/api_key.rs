@@ -53,6 +53,7 @@ pub(crate) fn generate_api_key(specs: &[MessageSpec]) -> TokenStream {
             }
         })
         .collect();
+    let message_enums = generate_message_enums(specs);
 
     quote! {
         /// Kafka API keys for request dispatch.
@@ -90,6 +91,81 @@ pub(crate) fn generate_api_key(specs: &[MessageSpec]) -> TokenStream {
                 #(#api_info_arms,)*
             }
         }
+
+        #message_enums
+    }
+}
+
+fn generate_message_enums(specs: &[MessageSpec]) -> TokenStream {
+    let pairs = collect_message_pairs(specs);
+    let request_variants = message_kind_variants(&pairs, MessageKind::Request);
+    let response_variants = message_kind_variants(&pairs, MessageKind::Response);
+    let request_write_arms = message_kind_write_arms(&pairs, MessageKind::Request);
+    let response_write_arms = message_kind_write_arms(&pairs, MessageKind::Response);
+    let request_len_arms = message_kind_len_arms(&pairs, MessageKind::Request);
+    let response_len_arms = message_kind_len_arms(&pairs, MessageKind::Response);
+    let request_key_arms = message_kind_key_arms(&pairs, MessageKind::Request);
+    let response_key_arms = message_kind_key_arms(&pairs, MessageKind::Response);
+
+    quote! {
+        #[cfg(feature = "message-enums")]
+        use bytes::BytesMut;
+
+        /// Type-erased generated Kafka requests.
+        #[cfg(feature = "message-enums")]
+        #[derive(Debug, Clone, PartialEq)]
+        pub enum RequestKind {
+            #(#request_variants,)*
+        }
+
+        #[cfg(feature = "message-enums")]
+        impl RequestKind {
+            pub fn api_key(&self) -> ApiKey {
+                match self {
+                    #(#request_key_arms,)*
+                }
+            }
+
+            pub fn write(&self, buf: &mut BytesMut, version: i16) -> crate::Result<()> {
+                match self {
+                    #(#request_write_arms,)*
+                }
+            }
+
+            pub fn encoded_len(&self, version: i16) -> crate::Result<usize> {
+                match self {
+                    #(#request_len_arms,)*
+                }
+            }
+        }
+
+        /// Type-erased generated Kafka responses.
+        #[cfg(feature = "message-enums")]
+        #[derive(Debug, Clone, PartialEq)]
+        pub enum ResponseKind {
+            #(#response_variants,)*
+        }
+
+        #[cfg(feature = "message-enums")]
+        impl ResponseKind {
+            pub fn api_key(&self) -> ApiKey {
+                match self {
+                    #(#response_key_arms,)*
+                }
+            }
+
+            pub fn write(&self, buf: &mut BytesMut, version: i16) -> crate::Result<()> {
+                match self {
+                    #(#response_write_arms,)*
+                }
+            }
+
+            pub fn encoded_len(&self, version: i16) -> crate::Result<usize> {
+                match self {
+                    #(#response_len_arms,)*
+                }
+            }
+        }
     }
 }
 
@@ -99,6 +175,18 @@ struct ApiKeyEntry {
     min_version: i16,
     max_version: i16,
     flexible_versions_start: i16,
+}
+
+struct MessagePair {
+    variant: String,
+    request_type: String,
+    response_type: String,
+}
+
+#[derive(Clone, Copy)]
+enum MessageKind {
+    Request,
+    Response,
 }
 
 fn collect_api_key_entries(specs: &[MessageSpec]) -> Vec<ApiKeyEntry> {
@@ -132,4 +220,96 @@ fn collect_api_key_entries(specs: &[MessageSpec]) -> Vec<ApiKeyEntry> {
         .collect();
     entries.sort_by_key(|e| e.api_key);
     entries
+}
+
+fn collect_message_pairs(specs: &[MessageSpec]) -> Vec<MessagePair> {
+    let mut requests = std::collections::BTreeMap::new();
+    let mut responses = std::collections::BTreeMap::new();
+    for spec in specs {
+        let Some(api_key) = spec.api_key else {
+            continue;
+        };
+        match spec.message_type {
+            MessageType::Request => {
+                let _previous = requests.insert(api_key, spec.name.clone());
+            },
+            MessageType::Response => {
+                let _previous = responses.insert(api_key, spec.name.clone());
+            },
+            MessageType::Data => {},
+        }
+    }
+
+    requests
+        .into_iter()
+        .filter_map(|(api_key, request)| {
+            let response = responses.remove(&api_key)?;
+            let variant = request
+                .strip_suffix("Request")
+                .unwrap_or(&request)
+                .to_upper_camel_case();
+            Some(MessagePair {
+                variant,
+                request_type: format!("{request}Data"),
+                response_type: format!("{response}Data"),
+            })
+        })
+        .collect()
+}
+
+fn message_kind_variants(pairs: &[MessagePair], kind: MessageKind) -> Vec<TokenStream> {
+    pairs
+        .iter()
+        .map(|pair| {
+            let variant = Ident::new(&pair.variant, Span::call_site());
+            let ty = match kind {
+                MessageKind::Request => Ident::new(&pair.request_type, Span::call_site()),
+                MessageKind::Response => Ident::new(&pair.response_type, Span::call_site()),
+            };
+            quote! { #variant(#ty) }
+        })
+        .collect()
+}
+
+fn message_kind_write_arms(pairs: &[MessagePair], kind: MessageKind) -> Vec<TokenStream> {
+    pairs
+        .iter()
+        .map(|pair| {
+            let variant = Ident::new(&pair.variant, Span::call_site());
+            let enum_name = match kind {
+                MessageKind::Request => quote! { RequestKind },
+                MessageKind::Response => quote! { ResponseKind },
+            };
+            quote! { #enum_name::#variant(message) => message.write(buf, version) }
+        })
+        .collect()
+}
+
+fn message_kind_len_arms(pairs: &[MessagePair], kind: MessageKind) -> Vec<TokenStream> {
+    pairs
+        .iter()
+        .map(|pair| {
+            let variant = Ident::new(&pair.variant, Span::call_site());
+            let enum_name = match kind {
+                MessageKind::Request => quote! { RequestKind },
+                MessageKind::Response => quote! { ResponseKind },
+            };
+            quote! { #enum_name::#variant(message) => message.encoded_len(version) }
+        })
+        .collect()
+}
+
+fn message_kind_key_arms(pairs: &[MessagePair], kind: MessageKind) -> Vec<TokenStream> {
+    pairs
+        .iter()
+        .map(|pair| {
+            let variant = Ident::new(&pair.variant, Span::call_site());
+            let api_variant = Ident::new(&pair.variant, Span::call_site());
+            let enum_name = match kind {
+                MessageKind::Request => quote! { RequestKind },
+                MessageKind::Response => quote! { ResponseKind },
+            };
+            quote! { #enum_name::#variant(_) => ApiKey::#api_variant }
+        })
+        .collect()
 }

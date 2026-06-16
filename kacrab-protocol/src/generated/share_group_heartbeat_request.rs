@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -40,6 +41,26 @@ impl Default for ShareGroupHeartbeatRequestData {
     }
 }
 impl ShareGroupHeartbeatRequestData {
+    pub fn with_group_id(mut self, value: KafkaString) -> Self {
+        self.group_id = value;
+        self
+    }
+    pub fn with_member_id(mut self, value: KafkaString) -> Self {
+        self.member_id = value;
+        self
+    }
+    pub fn with_member_epoch(mut self, value: i32) -> Self {
+        self.member_epoch = value;
+        self
+    }
+    pub fn with_rack_id(mut self, value: Option<KafkaString>) -> Self {
+        self.rack_id = value;
+        self
+    }
+    pub fn with_subscribed_topic_names(mut self, value: Option<Vec<KafkaString>>) -> Self {
+        self.subscribed_topic_names = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 1 {
             return Err(UnsupportedVersion::new(76, version).into());
@@ -106,5 +127,30 @@ impl ShareGroupHeartbeatRequestData {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 1 {
+            return Err(UnsupportedVersion::new(76, version).into());
+        }
+        let mut len: usize = 0;
+        len += compact_string_len(&self.group_id)?;
+        len += compact_string_len(&self.member_id)?;
+        len += 4;
+        len += compact_nullable_string_len(self.rack_id.as_ref())?;
+        match &self.subscribed_topic_names {
+            None => {
+                len += compact_array_length_len(-1);
+            },
+            Some(arr) => {
+                len += compact_array_length_len(arr.len() as i32);
+                for el in arr {
+                    len += compact_string_len(el)?;
+                }
+            },
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

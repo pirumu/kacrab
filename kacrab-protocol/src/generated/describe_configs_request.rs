@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -32,6 +33,18 @@ impl Default for DescribeConfigsRequestData {
     }
 }
 impl DescribeConfigsRequestData {
+    pub fn with_resources(mut self, value: Vec<DescribeConfigsResource>) -> Self {
+        self.resources = value;
+        self
+    }
+    pub fn with_include_synonyms(mut self, value: bool) -> Self {
+        self.include_synonyms = value;
+        self
+    }
+    pub fn with_include_documentation(mut self, value: bool) -> Self {
+        self.include_documentation = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 4 {
             return Err(UnsupportedVersion::new(32, version).into());
@@ -98,6 +111,8 @@ impl DescribeConfigsRequestData {
         write_bool(buf, self.include_synonyms);
         if version >= 3 {
             write_bool(buf, self.include_documentation);
+        } else if self.include_documentation != false {
+            return Err(UnsupportedFieldVersion::new(32, "include_documentation", version).into());
         }
         if version >= 4 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -105,6 +120,35 @@ impl DescribeConfigsRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 4 {
+            return Err(UnsupportedVersion::new(32, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 4 {
+            len += compact_array_length_len(self.resources.len() as i32);
+            for el in &self.resources {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.resources {
+                len += el.encoded_len(version)?;
+            }
+        }
+        len += 1;
+        if version >= 3 {
+            len += 1;
+        } else if self.include_documentation != false {
+            return Err(UnsupportedFieldVersion::new(32, "include_documentation", version).into());
+        }
+        if version >= 4 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -128,6 +172,18 @@ impl Default for DescribeConfigsResource {
     }
 }
 impl DescribeConfigsResource {
+    pub fn with_resource_type(mut self, value: i8) -> Self {
+        self.resource_type = value;
+        self
+    }
+    pub fn with_resource_name(mut self, value: KafkaString) -> Self {
+        self.resource_name = value;
+        self
+    }
+    pub fn with_configuration_keys(mut self, value: Option<Vec<KafkaString>>) -> Self {
+        self.configuration_keys = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let resource_type;
         let resource_name;
@@ -221,5 +277,45 @@ impl DescribeConfigsResource {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 1;
+        if version >= 4 {
+            len += compact_string_len(&self.resource_name)?;
+        } else {
+            len += string_len(&self.resource_name)?;
+        }
+        if version >= 4 {
+            match &self.configuration_keys {
+                None => {
+                    len += compact_array_length_len(-1);
+                },
+                Some(arr) => {
+                    len += compact_array_length_len(arr.len() as i32);
+                    for el in arr {
+                        len += compact_string_len(el)?;
+                    }
+                },
+            }
+        } else {
+            match &self.configuration_keys {
+                None => {
+                    len += array_length_len();
+                },
+                Some(arr) => {
+                    len += array_length_len();
+                    for el in arr {
+                        len += string_len(el)?;
+                    }
+                },
+            }
+        }
+        if version >= 4 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

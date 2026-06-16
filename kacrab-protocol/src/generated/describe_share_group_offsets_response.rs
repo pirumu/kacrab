@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -30,6 +31,14 @@ impl Default for DescribeShareGroupOffsetsResponseData {
     }
 }
 impl DescribeShareGroupOffsetsResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_groups(mut self, value: Vec<DescribeShareGroupOffsetsResponseGroup>) -> Self {
+        self.groups = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 1 {
             return Err(UnsupportedVersion::new(90, version).into());
@@ -74,6 +83,21 @@ impl DescribeShareGroupOffsetsResponseData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(90, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        len += compact_array_length_len(self.groups.len() as i32);
+        for el in &self.groups {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeShareGroupOffsetsResponseGroup {
@@ -99,6 +123,22 @@ impl Default for DescribeShareGroupOffsetsResponseGroup {
     }
 }
 impl DescribeShareGroupOffsetsResponseGroup {
+    pub fn with_group_id(mut self, value: KafkaString) -> Self {
+        self.group_id = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<DescribeShareGroupOffsetsResponseTopic>) -> Self {
+        self.topics = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_error_message(mut self, value: Option<KafkaString>) -> Self {
+        self.error_message = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let group_id;
         let topics;
@@ -145,6 +185,20 @@ impl DescribeShareGroupOffsetsResponseGroup {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.group_id)?;
+        len += compact_array_length_len(self.topics.len() as i32);
+        for el in &self.topics {
+            len += el.encoded_len(version)?;
+        }
+        len += 2;
+        len += compact_nullable_string_len(self.error_message.as_ref())?;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeShareGroupOffsetsResponseTopic {
@@ -166,6 +220,21 @@ impl Default for DescribeShareGroupOffsetsResponseTopic {
     }
 }
 impl DescribeShareGroupOffsetsResponseTopic {
+    pub fn with_topic_name(mut self, value: KafkaString) -> Self {
+        self.topic_name = value;
+        self
+    }
+    pub fn with_topic_id(mut self, value: KafkaUuid) -> Self {
+        self.topic_id = value;
+        self
+    }
+    pub fn with_partitions(
+        mut self,
+        value: Vec<DescribeShareGroupOffsetsResponsePartition>,
+    ) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let topic_name;
         let topic_id;
@@ -210,6 +279,19 @@ impl DescribeShareGroupOffsetsResponseTopic {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.topic_name)?;
+        len += 16;
+        len += compact_array_length_len(self.partitions.len() as i32);
+        for el in &self.partitions {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeShareGroupOffsetsResponsePartition {
@@ -241,6 +323,30 @@ impl Default for DescribeShareGroupOffsetsResponsePartition {
     }
 }
 impl DescribeShareGroupOffsetsResponsePartition {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
+    pub fn with_start_offset(mut self, value: i64) -> Self {
+        self.start_offset = value;
+        self
+    }
+    pub fn with_leader_epoch(mut self, value: i32) -> Self {
+        self.leader_epoch = value;
+        self
+    }
+    pub fn with_lag(mut self, value: i64) -> Self {
+        self.lag = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_error_message(mut self, value: Option<KafkaString>) -> Self {
+        self.error_message = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let partition_index;
         let start_offset;
@@ -281,6 +387,8 @@ impl DescribeShareGroupOffsetsResponsePartition {
         write_i32(buf, self.leader_epoch);
         if version >= 1 {
             write_i64(buf, self.lag);
+        } else if self.lag != -1i64 {
+            return Err(UnsupportedFieldVersion::new(90, "lag", version).into());
         }
         write_i16(buf, self.error_code);
         write_compact_nullable_string(buf, self.error_message.as_ref())?;
@@ -288,5 +396,22 @@ impl DescribeShareGroupOffsetsResponsePartition {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 8;
+        len += 4;
+        if version >= 1 {
+            len += 8;
+        } else if self.lag != -1i64 {
+            return Err(UnsupportedFieldVersion::new(90, "lag", version).into());
+        }
+        len += 2;
+        len += compact_nullable_string_len(self.error_message.as_ref())?;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

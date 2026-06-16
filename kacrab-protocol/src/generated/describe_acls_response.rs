@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -36,6 +37,22 @@ impl Default for DescribeAclsResponseData {
     }
 }
 impl DescribeAclsResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_error_message(mut self, value: Option<KafkaString>) -> Self {
+        self.error_message = value;
+        self
+    }
+    pub fn with_resources(mut self, value: Vec<DescribeAclsResource>) -> Self {
+        self.resources = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 3 {
             return Err(UnsupportedVersion::new(29, version).into());
@@ -118,6 +135,36 @@ impl DescribeAclsResponseData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 3 {
+            return Err(UnsupportedVersion::new(29, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        len += 2;
+        if version >= 2 {
+            len += compact_nullable_string_len(self.error_message.as_ref())?;
+        } else {
+            len += nullable_string_len(self.error_message.as_ref())?;
+        }
+        if version >= 2 {
+            len += compact_array_length_len(self.resources.len() as i32);
+            for el in &self.resources {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.resources {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeAclsResource {
@@ -143,6 +190,22 @@ impl Default for DescribeAclsResource {
     }
 }
 impl DescribeAclsResource {
+    pub fn with_resource_type(mut self, value: i8) -> Self {
+        self.resource_type = value;
+        self
+    }
+    pub fn with_resource_name(mut self, value: KafkaString) -> Self {
+        self.resource_name = value;
+        self
+    }
+    pub fn with_pattern_type(mut self, value: i8) -> Self {
+        self.pattern_type = value;
+        self
+    }
+    pub fn with_acls(mut self, value: Vec<AclDescription>) -> Self {
+        self.acls = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let resource_type;
         let resource_name;
@@ -219,6 +282,33 @@ impl DescribeAclsResource {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 1;
+        if version >= 2 {
+            len += compact_string_len(&self.resource_name)?;
+        } else {
+            len += string_len(&self.resource_name)?;
+        }
+        len += 1;
+        if version >= 2 {
+            len += compact_array_length_len(self.acls.len() as i32);
+            for el in &self.acls {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.acls {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct AclDescription {
@@ -244,6 +334,22 @@ impl Default for AclDescription {
     }
 }
 impl AclDescription {
+    pub fn with_principal(mut self, value: KafkaString) -> Self {
+        self.principal = value;
+        self
+    }
+    pub fn with_host(mut self, value: KafkaString) -> Self {
+        self.host = value;
+        self
+    }
+    pub fn with_operation(mut self, value: i8) -> Self {
+        self.operation = value;
+        self
+    }
+    pub fn with_permission_type(mut self, value: i8) -> Self {
+        self.permission_type = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let principal;
         let host;
@@ -299,5 +405,26 @@ impl AclDescription {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 2 {
+            len += compact_string_len(&self.principal)?;
+        } else {
+            len += string_len(&self.principal)?;
+        }
+        if version >= 2 {
+            len += compact_string_len(&self.host)?;
+        } else {
+            len += string_len(&self.host)?;
+        }
+        len += 1;
+        len += 1;
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

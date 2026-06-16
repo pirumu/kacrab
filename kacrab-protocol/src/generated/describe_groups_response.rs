@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -30,6 +31,14 @@ impl Default for DescribeGroupsResponseData {
     }
 }
 impl DescribeGroupsResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_groups(mut self, value: Vec<DescribedGroup>) -> Self {
+        self.groups = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 6 {
             return Err(UnsupportedVersion::new(15, version).into());
@@ -81,6 +90,8 @@ impl DescribeGroupsResponseData {
         }
         if version >= 1 {
             write_i32(buf, self.throttle_time_ms);
+        } else if self.throttle_time_ms != 0_i32 {
+            return Err(UnsupportedFieldVersion::new(15, "throttle_time_ms", version).into());
         }
         if version >= 5 {
             write_compact_array_length(buf, self.groups.len() as i32);
@@ -99,6 +110,34 @@ impl DescribeGroupsResponseData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 6 {
+            return Err(UnsupportedVersion::new(15, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += 4;
+        } else if self.throttle_time_ms != 0_i32 {
+            return Err(UnsupportedFieldVersion::new(15, "throttle_time_ms", version).into());
+        }
+        if version >= 5 {
+            len += compact_array_length_len(self.groups.len() as i32);
+            for el in &self.groups {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.groups {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 5 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -137,6 +176,38 @@ impl Default for DescribedGroup {
     }
 }
 impl DescribedGroup {
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_error_message(mut self, value: Option<KafkaString>) -> Self {
+        self.error_message = value;
+        self
+    }
+    pub fn with_group_id(mut self, value: KafkaString) -> Self {
+        self.group_id = value;
+        self
+    }
+    pub fn with_group_state(mut self, value: KafkaString) -> Self {
+        self.group_state = value;
+        self
+    }
+    pub fn with_protocol_type(mut self, value: KafkaString) -> Self {
+        self.protocol_type = value;
+        self
+    }
+    pub fn with_protocol_data(mut self, value: KafkaString) -> Self {
+        self.protocol_data = value;
+        self
+    }
+    pub fn with_members(mut self, value: Vec<DescribedGroupMember>) -> Self {
+        self.members = value;
+        self
+    }
+    pub fn with_authorized_operations(mut self, value: i32) -> Self {
+        self.authorized_operations = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let error_code;
         let mut error_message = None;
@@ -219,6 +290,8 @@ impl DescribedGroup {
         write_i16(buf, self.error_code);
         if version >= 6 {
             write_compact_nullable_string(buf, self.error_message.as_ref())?;
+        } else if self.error_message != None {
+            return Err(UnsupportedFieldVersion::new(15, "error_message", version).into());
         }
         if version >= 5 {
             write_compact_string(buf, &self.group_id)?;
@@ -253,6 +326,8 @@ impl DescribedGroup {
         }
         if version >= 3 {
             write_i32(buf, self.authorized_operations);
+        } else if self.authorized_operations != i32::MIN {
+            return Err(UnsupportedFieldVersion::new(15, "authorized_operations", version).into());
         }
         if version >= 5 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -260,6 +335,57 @@ impl DescribedGroup {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 2;
+        if version >= 6 {
+            len += compact_nullable_string_len(self.error_message.as_ref())?;
+        } else if self.error_message != None {
+            return Err(UnsupportedFieldVersion::new(15, "error_message", version).into());
+        }
+        if version >= 5 {
+            len += compact_string_len(&self.group_id)?;
+        } else {
+            len += string_len(&self.group_id)?;
+        }
+        if version >= 5 {
+            len += compact_string_len(&self.group_state)?;
+        } else {
+            len += string_len(&self.group_state)?;
+        }
+        if version >= 5 {
+            len += compact_string_len(&self.protocol_type)?;
+        } else {
+            len += string_len(&self.protocol_type)?;
+        }
+        if version >= 5 {
+            len += compact_string_len(&self.protocol_data)?;
+        } else {
+            len += string_len(&self.protocol_data)?;
+        }
+        if version >= 5 {
+            len += compact_array_length_len(self.members.len() as i32);
+            for el in &self.members {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.members {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 3 {
+            len += 4;
+        } else if self.authorized_operations != i32::MIN {
+            return Err(UnsupportedFieldVersion::new(15, "authorized_operations", version).into());
+        }
+        if version >= 5 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -292,6 +418,30 @@ impl Default for DescribedGroupMember {
     }
 }
 impl DescribedGroupMember {
+    pub fn with_member_id(mut self, value: KafkaString) -> Self {
+        self.member_id = value;
+        self
+    }
+    pub fn with_group_instance_id(mut self, value: Option<KafkaString>) -> Self {
+        self.group_instance_id = value;
+        self
+    }
+    pub fn with_client_id(mut self, value: KafkaString) -> Self {
+        self.client_id = value;
+        self
+    }
+    pub fn with_client_host(mut self, value: KafkaString) -> Self {
+        self.client_host = value;
+        self
+    }
+    pub fn with_member_metadata(mut self, value: Bytes) -> Self {
+        self.member_metadata = value;
+        self
+    }
+    pub fn with_member_assignment(mut self, value: Bytes) -> Self {
+        self.member_assignment = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let member_id;
         let mut group_instance_id = None;
@@ -364,6 +514,8 @@ impl DescribedGroupMember {
             } else {
                 write_nullable_string(buf, self.group_instance_id.as_ref())?;
             }
+        } else if self.group_instance_id != None {
+            return Err(UnsupportedFieldVersion::new(15, "group_instance_id", version).into());
         }
         if version >= 5 {
             write_compact_string(buf, &self.client_id)?;
@@ -391,5 +543,48 @@ impl DescribedGroupMember {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 5 {
+            len += compact_string_len(&self.member_id)?;
+        } else {
+            len += string_len(&self.member_id)?;
+        }
+        if version >= 4 {
+            if version >= 5 {
+                len += compact_nullable_string_len(self.group_instance_id.as_ref())?;
+            } else {
+                len += nullable_string_len(self.group_instance_id.as_ref())?;
+            }
+        } else if self.group_instance_id != None {
+            return Err(UnsupportedFieldVersion::new(15, "group_instance_id", version).into());
+        }
+        if version >= 5 {
+            len += compact_string_len(&self.client_id)?;
+        } else {
+            len += string_len(&self.client_id)?;
+        }
+        if version >= 5 {
+            len += compact_string_len(&self.client_host)?;
+        } else {
+            len += string_len(&self.client_host)?;
+        }
+        if version >= 5 {
+            len += compact_bytes_len(&self.member_metadata)?;
+        } else {
+            len += bytes_len(&self.member_metadata)?;
+        }
+        if version >= 5 {
+            len += compact_bytes_len(&self.member_assignment)?;
+        } else {
+            len += bytes_len(&self.member_assignment)?;
+        }
+        if version >= 5 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -32,6 +33,18 @@ impl Default for CreateTopicsRequestData {
     }
 }
 impl CreateTopicsRequestData {
+    pub fn with_topics(mut self, value: Vec<CreatableTopic>) -> Self {
+        self.topics = value;
+        self
+    }
+    pub fn with_timeout_ms(mut self, value: i32) -> Self {
+        self.timeout_ms = value;
+        self
+    }
+    pub fn with_validate_only(mut self, value: bool) -> Self {
+        self.validate_only = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 2 || version > 7 {
             return Err(UnsupportedVersion::new(19, version).into());
@@ -102,6 +115,31 @@ impl CreateTopicsRequestData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 2 || version > 7 {
+            return Err(UnsupportedVersion::new(19, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 5 {
+            len += compact_array_length_len(self.topics.len() as i32);
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        }
+        len += 4;
+        len += 1;
+        if version >= 5 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreatableTopic {
@@ -132,6 +170,26 @@ impl Default for CreatableTopic {
     }
 }
 impl CreatableTopic {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_num_partitions(mut self, value: i32) -> Self {
+        self.num_partitions = value;
+        self
+    }
+    pub fn with_replication_factor(mut self, value: i16) -> Self {
+        self.replication_factor = value;
+        self
+    }
+    pub fn with_assignments(mut self, value: Vec<CreatableReplicaAssignment>) -> Self {
+        self.assignments = value;
+        self
+    }
+    pub fn with_configs(mut self, value: Vec<CreatableTopicConfig>) -> Self {
+        self.configs = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let num_partitions;
@@ -240,6 +298,44 @@ impl CreatableTopic {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 5 {
+            len += compact_string_len(&self.name)?;
+        } else {
+            len += string_len(&self.name)?;
+        }
+        len += 4;
+        len += 2;
+        if version >= 5 {
+            len += compact_array_length_len(self.assignments.len() as i32);
+            for el in &self.assignments {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.assignments {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 5 {
+            len += compact_array_length_len(self.configs.len() as i32);
+            for el in &self.configs {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.configs {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 5 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreatableReplicaAssignment {
@@ -259,6 +355,14 @@ impl Default for CreatableReplicaAssignment {
     }
 }
 impl CreatableReplicaAssignment {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
+    pub fn with_broker_ids(mut self, value: Vec<i32>) -> Self {
+        self.broker_ids = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let partition_index;
         let broker_ids;
@@ -319,6 +423,23 @@ impl CreatableReplicaAssignment {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 5 {
+            len += compact_array_length_len(self.broker_ids.len() as i32);
+            len += self.broker_ids.len() * 4usize;
+        } else {
+            len += array_length_len();
+            len += self.broker_ids.len() * 4usize;
+        }
+        if version >= 5 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreatableTopicConfig {
@@ -338,6 +459,14 @@ impl Default for CreatableTopicConfig {
     }
 }
 impl CreatableTopicConfig {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_value(mut self, value: Option<KafkaString>) -> Self {
+        self.value = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let value;
@@ -385,5 +514,24 @@ impl CreatableTopicConfig {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 5 {
+            len += compact_string_len(&self.name)?;
+        } else {
+            len += string_len(&self.name)?;
+        }
+        if version >= 5 {
+            len += compact_nullable_string_len(self.value.as_ref())?;
+        } else {
+            len += nullable_string_len(self.value.as_ref())?;
+        }
+        if version >= 5 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

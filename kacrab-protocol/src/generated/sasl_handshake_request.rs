@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -26,6 +27,10 @@ impl Default for SaslHandshakeRequestData {
     }
 }
 impl SaslHandshakeRequestData {
+    pub fn with_mechanism(mut self, value: KafkaString) -> Self {
+        self.mechanism = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 1 {
             return Err(UnsupportedVersion::new(17, version).into());
@@ -44,5 +49,13 @@ impl SaslHandshakeRequestData {
         }
         write_string(buf, &self.mechanism)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(17, version).into());
+        }
+        let mut len: usize = 0;
+        len += string_len(&self.mechanism)?;
+        Ok(len)
     }
 }

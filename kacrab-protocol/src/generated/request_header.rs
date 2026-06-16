@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -35,6 +36,22 @@ impl Default for RequestHeaderData {
     }
 }
 impl RequestHeaderData {
+    pub fn with_request_api_key(mut self, value: i16) -> Self {
+        self.request_api_key = value;
+        self
+    }
+    pub fn with_request_api_version(mut self, value: i16) -> Self {
+        self.request_api_version = value;
+        self
+    }
+    pub fn with_correlation_id(mut self, value: i32) -> Self {
+        self.correlation_id = value;
+        self
+    }
+    pub fn with_client_id(mut self, value: Option<KafkaString>) -> Self {
+        self.client_id = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let request_api_key;
         let request_api_version;
@@ -74,5 +91,18 @@ impl RequestHeaderData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 2;
+        len += 2;
+        len += 4;
+        len += nullable_string_len(self.client_id.as_ref())?;
+        if version >= 2 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

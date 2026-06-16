@@ -9,9 +9,16 @@
 //! [`ProtocolError`] for the crate boundary (lib facade, generated code).
 
 use crate::{
-    bytes_io::BytesError, compression::CompressionError, crc::CrcMismatch, frame::FrameError,
-    primitives::PrimitiveError, record::RecordError, string::StringError, tagged::TaggedFieldError,
-    uuid::UuidError, version::UnsupportedVersion,
+    bytes_io::BytesError,
+    compression::CompressionError,
+    crc::CrcMismatch,
+    frame::FrameError,
+    primitives::PrimitiveError,
+    record::RecordError,
+    string::StringError,
+    tagged::TaggedFieldError,
+    uuid::UuidError,
+    version::{UnsupportedFieldVersion, UnsupportedVersion},
 };
 
 /// Convenience alias for `Result<T, ProtocolError>`.
@@ -67,4 +74,8 @@ pub enum ProtocolError {
     /// API key / version negotiation failed.
     #[error(transparent)]
     Version(#[from] UnsupportedVersion),
+
+    /// A generated message field was set for a version where it is absent.
+    #[error(transparent)]
+    FieldVersion(#[from] UnsupportedFieldVersion),
 }

@@ -13,7 +13,7 @@ pub use self::{
     codec::{
         RequestFrameSpec, ResponseEnvelope, decode_response_envelope, encode_request_frame,
         encode_request_frame_body, encode_request_frame_body_with_buffer,
-        encode_request_frame_with_buffer,
+        encode_request_frame_with_buffer, request_frame_capacity_hint,
     },
     error::{FrameError, FrameErrorKind},
 };

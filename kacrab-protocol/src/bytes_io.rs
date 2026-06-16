@@ -8,7 +8,9 @@ pub mod error;
 use bytes::{BufMut, Bytes, BytesMut};
 
 pub use self::error::{BytesError, BytesErrorKind};
-use crate::primitives::{check_remaining, read_i32, read_unsigned_varint, write_unsigned_varint};
+use crate::primitives::{
+    check_remaining, read_i32, read_unsigned_varint, unsigned_varint_len, write_unsigned_varint,
+};
 
 /// Result alias for raw bytes read operations.
 pub type Result<T> = core::result::Result<T, BytesError>;
@@ -111,6 +113,22 @@ pub fn write_bytes(buf: &mut BytesMut, value: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Encoded length of non-flexible bytes (`i32` length prefix).
+pub fn bytes_len(value: &[u8]) -> Result<usize> {
+    let _len = i32::try_from(value.len()).map_err(|_| {
+        BytesError::new(BytesErrorKind::TooLong {
+            length: value.len(),
+            max: i32_max_len(),
+        })
+    })?;
+    value.len().checked_add(4).ok_or_else(|| {
+        BytesError::new(BytesErrorKind::TooLong {
+            length: value.len(),
+            max: i32_max_len(),
+        })
+    })
+}
+
 /// Read compact bytes (unsigned varint of `len + 1`).
 pub fn read_compact_bytes(buf: &mut Bytes) -> Result<Bytes> {
     let len = read_compact_len(buf)?;
@@ -123,6 +141,20 @@ pub fn write_compact_bytes(buf: &mut BytesMut, value: &[u8]) -> Result<()> {
     write_unsigned_varint(buf, len_plus_one);
     buf.extend_from_slice(value);
     Ok(())
+}
+
+/// Encoded length of compact bytes (unsigned varint of `len + 1`).
+pub fn compact_bytes_len(value: &[u8]) -> Result<usize> {
+    let len_plus_one = compact_len_plus_one(value.len())?;
+    value
+        .len()
+        .checked_add(unsigned_varint_len(len_plus_one))
+        .ok_or_else(|| {
+            BytesError::new(BytesErrorKind::TooLong {
+                length: value.len(),
+                max: compact_max_len(),
+            })
+        })
 }
 
 /// Read nullable non-flexible bytes (`i32`, `-1` = null).
@@ -144,6 +176,11 @@ pub fn write_nullable_bytes(buf: &mut BytesMut, value: Option<&[u8]>) -> Result<
     }
 }
 
+/// Encoded length of nullable non-flexible bytes.
+pub fn nullable_bytes_len(value: Option<&[u8]>) -> Result<usize> {
+    value.map_or(Ok(4), bytes_len)
+}
+
 /// Read nullable compact bytes (unsigned varint, `0` = null).
 pub fn read_compact_nullable_bytes(buf: &mut Bytes) -> Result<Option<Bytes>> {
     let Some(len) = read_nullable_compact_len(buf)? else {
@@ -161,4 +198,9 @@ pub fn write_compact_nullable_bytes(buf: &mut BytesMut, value: Option<&[u8]>) ->
         },
         Some(bytes) => write_compact_bytes(buf, bytes),
     }
+}
+
+/// Encoded length of nullable compact bytes.
+pub fn compact_nullable_bytes_len(value: Option<&[u8]>) -> Result<usize> {
+    value.map_or(Ok(1), compact_bytes_len)
 }

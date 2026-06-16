@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -26,6 +27,10 @@ impl Default for EndTxnMarkerData {
     }
 }
 impl EndTxnMarkerData {
+    pub fn with_coordinator_epoch(mut self, value: i32) -> Self {
+        self.coordinator_epoch = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let coordinator_epoch;
         let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
@@ -38,5 +43,10 @@ impl EndTxnMarkerData {
     pub fn write(&self, buf: &mut BytesMut, _version: i16) -> Result<()> {
         write_i32(buf, self.coordinator_epoch);
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        Ok(len)
     }
 }

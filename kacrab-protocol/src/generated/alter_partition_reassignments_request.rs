@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -33,6 +34,18 @@ impl Default for AlterPartitionReassignmentsRequestData {
     }
 }
 impl AlterPartitionReassignmentsRequestData {
+    pub fn with_timeout_ms(mut self, value: i32) -> Self {
+        self.timeout_ms = value;
+        self
+    }
+    pub fn with_allow_replication_factor_change(mut self, value: bool) -> Self {
+        self.allow_replication_factor_change = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<ReassignableTopic>) -> Self {
+        self.topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 1 {
             return Err(UnsupportedVersion::new(45, version).into());
@@ -75,6 +88,13 @@ impl AlterPartitionReassignmentsRequestData {
         write_i32(buf, self.timeout_ms);
         if version >= 1 {
             write_bool(buf, self.allow_replication_factor_change);
+        } else if self.allow_replication_factor_change != true {
+            return Err(UnsupportedFieldVersion::new(
+                45,
+                "allow_replication_factor_change",
+                version,
+            )
+            .into());
         }
         write_compact_array_length(buf, self.topics.len() as i32);
         for el in &self.topics {
@@ -84,6 +104,31 @@ impl AlterPartitionReassignmentsRequestData {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(45, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 1 {
+            len += 1;
+        } else if self.allow_replication_factor_change != true {
+            return Err(UnsupportedFieldVersion::new(
+                45,
+                "allow_replication_factor_change",
+                version,
+            )
+            .into());
+        }
+        len += compact_array_length_len(self.topics.len() as i32);
+        for el in &self.topics {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -104,6 +149,14 @@ impl Default for ReassignableTopic {
     }
 }
 impl ReassignableTopic {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<ReassignablePartition>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let partitions;
@@ -142,6 +195,18 @@ impl ReassignableTopic {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += compact_array_length_len(self.partitions.len() as i32);
+        for el in &self.partitions {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReassignablePartition {
@@ -162,6 +227,14 @@ impl Default for ReassignablePartition {
     }
 }
 impl ReassignablePartition {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
+    pub fn with_replicas(mut self, value: Option<Vec<i32>>) -> Self {
+        self.replicas = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let partition_index;
         let replicas;
@@ -210,5 +283,22 @@ impl ReassignablePartition {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        match &self.replicas {
+            None => {
+                len += compact_array_length_len(-1);
+            },
+            Some(arr) => {
+                len += compact_array_length_len(arr.len() as i32);
+                len += arr.len() * 4usize;
+            },
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

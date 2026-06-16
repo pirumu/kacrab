@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -41,6 +42,22 @@ impl Default for ListOffsetsRequestData {
     }
 }
 impl ListOffsetsRequestData {
+    pub fn with_replica_id(mut self, value: i32) -> Self {
+        self.replica_id = value;
+        self
+    }
+    pub fn with_isolation_level(mut self, value: i8) -> Self {
+        self.isolation_level = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<ListOffsetsTopic>) -> Self {
+        self.topics = value;
+        self
+    }
+    pub fn with_timeout_ms(mut self, value: i32) -> Self {
+        self.timeout_ms = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 11 {
             return Err(UnsupportedVersion::new(2, version).into());
@@ -101,6 +118,8 @@ impl ListOffsetsRequestData {
         write_i32(buf, self.replica_id);
         if version >= 2 {
             write_i8(buf, self.isolation_level);
+        } else if self.isolation_level != 0_i8 {
+            return Err(UnsupportedFieldVersion::new(2, "isolation_level", version).into());
         }
         if version >= 6 {
             write_compact_array_length(buf, self.topics.len() as i32);
@@ -115,6 +134,8 @@ impl ListOffsetsRequestData {
         }
         if version >= 10 {
             write_i32(buf, self.timeout_ms);
+        } else if self.timeout_ms != 0_i32 {
+            return Err(UnsupportedFieldVersion::new(2, "timeout_ms", version).into());
         }
         if version >= 6 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -122,6 +143,40 @@ impl ListOffsetsRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 11 {
+            return Err(UnsupportedVersion::new(2, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 2 {
+            len += 1;
+        } else if self.isolation_level != 0_i8 {
+            return Err(UnsupportedFieldVersion::new(2, "isolation_level", version).into());
+        }
+        if version >= 6 {
+            len += compact_array_length_len(self.topics.len() as i32);
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 10 {
+            len += 4;
+        } else if self.timeout_ms != 0_i32 {
+            return Err(UnsupportedFieldVersion::new(2, "timeout_ms", version).into());
+        }
+        if version >= 6 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -142,6 +197,14 @@ impl Default for ListOffsetsTopic {
     }
 }
 impl ListOffsetsTopic {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<ListOffsetsPartition>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let partitions;
@@ -210,6 +273,31 @@ impl ListOffsetsTopic {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 6 {
+            len += compact_string_len(&self.name)?;
+        } else {
+            len += string_len(&self.name)?;
+        }
+        if version >= 6 {
+            len += compact_array_length_len(self.partitions.len() as i32);
+            for el in &self.partitions {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.partitions {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 6 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListOffsetsPartition {
@@ -232,6 +320,18 @@ impl Default for ListOffsetsPartition {
     }
 }
 impl ListOffsetsPartition {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
+    pub fn with_current_leader_epoch(mut self, value: i32) -> Self {
+        self.current_leader_epoch = value;
+        self
+    }
+    pub fn with_timestamp(mut self, value: i64) -> Self {
+        self.timestamp = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let partition_index;
         let mut current_leader_epoch = -1i32;
@@ -263,6 +363,8 @@ impl ListOffsetsPartition {
         write_i32(buf, self.partition_index);
         if version >= 4 {
             write_i32(buf, self.current_leader_epoch);
+        } else if self.current_leader_epoch != -1i32 {
+            return Err(UnsupportedFieldVersion::new(2, "current_leader_epoch", version).into());
         }
         write_i64(buf, self.timestamp);
         if version >= 6 {
@@ -271,5 +373,21 @@ impl ListOffsetsPartition {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 4 {
+            len += 4;
+        } else if self.current_leader_epoch != -1i32 {
+            return Err(UnsupportedFieldVersion::new(2, "current_leader_epoch", version).into());
+        }
+        len += 8;
+        if version >= 6 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

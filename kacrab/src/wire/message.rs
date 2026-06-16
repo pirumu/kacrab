@@ -1,19 +1,23 @@
 //! Generated request/response adapter traits for broker sessions.
 
 use bytes::{Bytes, BytesMut};
-use kacrab_protocol::generated::{
-    AddPartitionsToTxnRequestData, AddPartitionsToTxnResponseData, ApiVersionsRequestData,
-    ApiVersionsResponseData, EndTxnRequestData, EndTxnResponseData, FindCoordinatorRequestData,
-    FindCoordinatorResponseData, InitProducerIdRequestData, InitProducerIdResponseData,
-    MetadataRequestData, MetadataResponseData, ProduceRequestData, ProduceResponseData,
+use kacrab_protocol::{
+    KafkaString, KafkaUuid, Result,
+    generated::{
+        AddPartitionsToTxnRequestData, AddPartitionsToTxnResponseData, ApiVersionsRequestData,
+        ApiVersionsResponseData, EndTxnRequestData, EndTxnResponseData, FindCoordinatorRequestData,
+        FindCoordinatorResponseData, InitProducerIdRequestData, InitProducerIdResponseData,
+        MetadataRequestData, MetadataResponseData, ProduceRequestData, ProduceResponseData,
+    },
 };
-
-use super::error::Result;
 
 /// A generated Kafka request body that can be encoded by the wire client.
 pub trait RequestMessage {
     /// Encode this request body for `version`.
     fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()>;
+
+    /// Return the exact encoded body length for `version`.
+    fn encoded_len(&self, version: i16) -> Result<usize>;
 }
 
 /// A generated Kafka response body that can be decoded by the wire client.
@@ -27,11 +31,15 @@ impl RequestMessage for ApiVersionsRequestData {
         self.write(buf, version)?;
         Ok(())
     }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        self.encoded_len(version)
+    }
 }
 
 impl ResponseMessage for ApiVersionsResponseData {
     fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Ok(Self::read(buf, version)?)
+        Self::read(buf, version)
     }
 }
 
@@ -40,24 +48,32 @@ impl RequestMessage for MetadataRequestData {
         self.write(buf, version)?;
         Ok(())
     }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        self.encoded_len(version)
+    }
 }
 
 impl ResponseMessage for MetadataResponseData {
     fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Ok(Self::read(buf, version)?)
+        Self::read(buf, version)
     }
 }
 
 impl RequestMessage for ProduceRequestData {
     fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        self.write(buf, version)?;
+        normalize_produce_request(self, version).write(buf, version)?;
         Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_produce_request(self, version).encoded_len(version)
     }
 }
 
 impl ResponseMessage for ProduceResponseData {
     fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Ok(Self::read(buf, version)?)
+        Self::read(buf, version)
     }
 }
 
@@ -66,11 +82,15 @@ impl RequestMessage for InitProducerIdRequestData {
         self.write(buf, version)?;
         Ok(())
     }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        self.encoded_len(version)
+    }
 }
 
 impl ResponseMessage for InitProducerIdResponseData {
     fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Ok(Self::read(buf, version)?)
+        Self::read(buf, version)
     }
 }
 
@@ -79,11 +99,15 @@ impl RequestMessage for FindCoordinatorRequestData {
         self.write(buf, version)?;
         Ok(())
     }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        self.encoded_len(version)
+    }
 }
 
 impl ResponseMessage for FindCoordinatorResponseData {
     fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Ok(Self::read(buf, version)?)
+        Self::read(buf, version)
     }
 }
 
@@ -92,11 +116,15 @@ impl RequestMessage for AddPartitionsToTxnRequestData {
         self.write(buf, version)?;
         Ok(())
     }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        self.encoded_len(version)
+    }
 }
 
 impl ResponseMessage for AddPartitionsToTxnResponseData {
     fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Ok(Self::read(buf, version)?)
+        Self::read(buf, version)
     }
 }
 
@@ -105,10 +133,26 @@ impl RequestMessage for EndTxnRequestData {
         self.write(buf, version)?;
         Ok(())
     }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        self.encoded_len(version)
+    }
 }
 
 impl ResponseMessage for EndTxnResponseData {
     fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Ok(Self::read(buf, version)?)
+        Self::read(buf, version)
     }
+}
+
+fn normalize_produce_request(request: &ProduceRequestData, version: i16) -> ProduceRequestData {
+    let mut normalized = request.clone();
+    for topic in &mut normalized.topic_data {
+        if version >= 13 {
+            topic.name = KafkaString::default();
+        } else {
+            topic.topic_id = KafkaUuid::ZERO;
+        }
+    }
+    normalized
 }

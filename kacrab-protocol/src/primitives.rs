@@ -150,6 +150,18 @@ pub fn write_unsigned_varint(buf: &mut BytesMut, mut value: u32) {
     }
 }
 
+/// Encoded length of an unsigned varint (1–5 bytes, `u32` payload).
+#[must_use]
+pub const fn unsigned_varint_len(value: u32) -> usize {
+    match value {
+        0x0..=0x7f => 1,
+        0x80..=0x3fff => 2,
+        0x4000..=0x1f_ffff => 3,
+        0x20_0000..=0xfff_ffff => 4,
+        0x1000_0000..=u32::MAX => 5,
+    }
+}
+
 /// Read an unsigned varlong (1–10 bytes, `u64` payload).
 pub fn read_unsigned_varlong(buf: &mut Bytes) -> Result<u64> {
     let mut value: u64 = 0;
@@ -222,6 +234,12 @@ pub fn write_array_length(buf: &mut BytesMut, len: i32) {
     write_i32(buf, len);
 }
 
+/// Encoded length of a non-flexible array length prefix.
+#[must_use]
+pub const fn array_length_len() -> usize {
+    4
+}
+
 /// Read a compact array length (varint of `len + 1`, `0 → -1` (null)).
 pub fn read_compact_array_length(buf: &mut Bytes) -> Result<i32> {
     let raw = read_unsigned_varint(buf)?;
@@ -249,5 +267,15 @@ pub fn write_compact_array_length(buf: &mut BytesMut, len: i32) {
     } else {
         let encoded = len.cast_unsigned().saturating_add(1);
         write_unsigned_varint(buf, encoded);
+    }
+}
+
+/// Encoded length of a compact array length prefix.
+#[must_use]
+pub const fn compact_array_length_len(len: i32) -> usize {
+    if len < 0 {
+        unsigned_varint_len(0)
+    } else {
+        unsigned_varint_len(len.cast_unsigned().saturating_add(1))
     }
 }

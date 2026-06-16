@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -29,6 +30,14 @@ impl Default for VotersRecordData {
     }
 }
 impl VotersRecordData {
+    pub fn with_version(mut self, value: i16) -> Self {
+        self.version = value;
+        self
+    }
+    pub fn with_voters(mut self, value: Vec<Voter>) -> Self {
+        self.voters = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let version_;
         let voters;
@@ -67,6 +76,18 @@ impl VotersRecordData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 2;
+        len += compact_array_length_len(self.voters.len() as i32);
+        for el in &self.voters {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Voter {
@@ -92,6 +113,22 @@ impl Default for Voter {
     }
 }
 impl Voter {
+    pub fn with_voter_id(mut self, value: i32) -> Self {
+        self.voter_id = value;
+        self
+    }
+    pub fn with_voter_directory_id(mut self, value: KafkaUuid) -> Self {
+        self.voter_directory_id = value;
+        self
+    }
+    pub fn with_endpoints(mut self, value: Vec<Endpoint>) -> Self {
+        self.endpoints = value;
+        self
+    }
+    pub fn with_k_raft_version_feature(mut self, value: KRaftVersionFeature) -> Self {
+        self.k_raft_version_feature = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let voter_id;
         let voter_directory_id;
@@ -138,6 +175,20 @@ impl Voter {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 16;
+        len += compact_array_length_len(self.endpoints.len() as i32);
+        for el in &self.endpoints {
+            len += el.encoded_len(version)?;
+        }
+        len += self.k_raft_version_feature.encoded_len(version)?;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Endpoint {
@@ -160,6 +211,18 @@ impl Default for Endpoint {
     }
 }
 impl Endpoint {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_host(mut self, value: KafkaString) -> Self {
+        self.host = value;
+        self
+    }
+    pub fn with_port(mut self, value: u16) -> Self {
+        self.port = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let host;
@@ -192,6 +255,16 @@ impl Endpoint {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += compact_string_len(&self.host)?;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct KRaftVersionFeature {
@@ -211,6 +284,14 @@ impl Default for KRaftVersionFeature {
     }
 }
 impl KRaftVersionFeature {
+    pub fn with_min_supported_version(mut self, value: i16) -> Self {
+        self.min_supported_version = value;
+        self
+    }
+    pub fn with_max_supported_version(mut self, value: i16) -> Self {
+        self.max_supported_version = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let min_supported_version;
         let max_supported_version;
@@ -238,5 +319,14 @@ impl KRaftVersionFeature {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 2;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

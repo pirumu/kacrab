@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -48,6 +49,34 @@ impl Default for ApiVersionsResponseData {
     }
 }
 impl ApiVersionsResponseData {
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_api_keys(mut self, value: Vec<ApiVersion>) -> Self {
+        self.api_keys = value;
+        self
+    }
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_supported_features(mut self, value: Vec<SupportedFeatureKey>) -> Self {
+        self.supported_features = value;
+        self
+    }
+    pub fn with_finalized_features_epoch(mut self, value: i64) -> Self {
+        self.finalized_features_epoch = value;
+        self
+    }
+    pub fn with_finalized_features(mut self, value: Vec<FinalizedFeatureKey>) -> Self {
+        self.finalized_features = value;
+        self
+    }
+    pub fn with_zk_migration_ready(mut self, value: bool) -> Self {
+        self.zk_migration_ready = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 4 {
             return Err(UnsupportedVersion::new(18, version).into());
@@ -152,6 +181,8 @@ impl ApiVersionsResponseData {
         }
         if version >= 1 {
             write_i32(buf, self.throttle_time_ms);
+        } else if self.throttle_time_ms != 0_i32 {
+            return Err(UnsupportedFieldVersion::new(18, "throttle_time_ms", version).into());
         }
         if version >= 3 {
             let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
@@ -200,6 +231,75 @@ impl ApiVersionsResponseData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 4 {
+            return Err(UnsupportedVersion::new(18, version).into());
+        }
+        let mut len: usize = 0;
+        len += 2;
+        if version >= 3 {
+            len += compact_array_length_len(self.api_keys.len() as i32);
+            for el in &self.api_keys {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.api_keys {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 1 {
+            len += 4;
+        } else if self.throttle_time_ms != 0_i32 {
+            return Err(UnsupportedFieldVersion::new(18, "throttle_time_ms", version).into());
+        }
+        if version >= 3 {
+            let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
+            if !self.supported_features.is_empty() {
+                let mut tag_buf = BytesMut::new();
+                write_compact_array_length(&mut tag_buf, self.supported_features.len() as i32);
+                for el in &self.supported_features {
+                    el.write(&mut tag_buf, version)?;
+                }
+                known_tagged_fields.push(RawTaggedField {
+                    tag: 0,
+                    data: tag_buf.freeze(),
+                });
+            }
+            if self.finalized_features_epoch != -1_i64 {
+                let mut tag_buf = BytesMut::new();
+                write_i64(&mut tag_buf, self.finalized_features_epoch);
+                known_tagged_fields.push(RawTaggedField {
+                    tag: 1,
+                    data: tag_buf.freeze(),
+                });
+            }
+            if !self.finalized_features.is_empty() {
+                let mut tag_buf = BytesMut::new();
+                write_compact_array_length(&mut tag_buf, self.finalized_features.len() as i32);
+                for el in &self.finalized_features {
+                    el.write(&mut tag_buf, version)?;
+                }
+                known_tagged_fields.push(RawTaggedField {
+                    tag: 2,
+                    data: tag_buf.freeze(),
+                });
+            }
+            if self.zk_migration_ready {
+                let mut tag_buf = BytesMut::new();
+                write_bool(&mut tag_buf, self.zk_migration_ready);
+                known_tagged_fields.push(RawTaggedField {
+                    tag: 3,
+                    data: tag_buf.freeze(),
+                });
+            }
+            let mut all_tags = known_tagged_fields;
+            all_tags.extend(self._unknown_tagged_fields.iter().cloned());
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApiVersion {
@@ -222,6 +322,18 @@ impl Default for ApiVersion {
     }
 }
 impl ApiVersion {
+    pub fn with_api_key(mut self, value: i16) -> Self {
+        self.api_key = value;
+        self
+    }
+    pub fn with_min_version(mut self, value: i16) -> Self {
+        self.min_version = value;
+        self
+    }
+    pub fn with_max_version(mut self, value: i16) -> Self {
+        self.max_version = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let api_key;
         let min_version;
@@ -258,6 +370,18 @@ impl ApiVersion {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 2;
+        len += 2;
+        len += 2;
+        if version >= 3 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct SupportedFeatureKey {
@@ -280,6 +404,18 @@ impl Default for SupportedFeatureKey {
     }
 }
 impl SupportedFeatureKey {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_min_version(mut self, value: i16) -> Self {
+        self.min_version = value;
+        self
+    }
+    pub fn with_max_version(mut self, value: i16) -> Self {
+        self.max_version = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let min_version;
@@ -312,6 +448,16 @@ impl SupportedFeatureKey {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += 2;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct FinalizedFeatureKey {
@@ -334,6 +480,18 @@ impl Default for FinalizedFeatureKey {
     }
 }
 impl FinalizedFeatureKey {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_max_version_level(mut self, value: i16) -> Self {
+        self.max_version_level = value;
+        self
+    }
+    pub fn with_min_version_level(mut self, value: i16) -> Self {
+        self.min_version_level = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let max_version_level;
@@ -365,5 +523,15 @@ impl FinalizedFeatureKey {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += 2;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

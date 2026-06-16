@@ -309,6 +309,7 @@ mod tests {
             about: String::new(),
             fields,
             top_level: top_level.then_some((99, effective.clone())),
+            api_key: Some(99),
             is_data_struct: true,
             flexible_versions: flex,
             effective_versions: effective,

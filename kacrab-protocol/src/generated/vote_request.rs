@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -32,6 +33,18 @@ impl Default for VoteRequestData {
     }
 }
 impl VoteRequestData {
+    pub fn with_cluster_id(mut self, value: Option<KafkaString>) -> Self {
+        self.cluster_id = value;
+        self
+    }
+    pub fn with_voter_id(mut self, value: i32) -> Self {
+        self.voter_id = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<TopicData>) -> Self {
+        self.topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 2 {
             return Err(UnsupportedVersion::new(52, version).into());
@@ -74,6 +87,8 @@ impl VoteRequestData {
         write_compact_nullable_string(buf, self.cluster_id.as_ref())?;
         if version >= 1 {
             write_i32(buf, self.voter_id);
+        } else if self.voter_id != -1i32 {
+            return Err(UnsupportedFieldVersion::new(52, "voter_id", version).into());
         }
         write_compact_array_length(buf, self.topics.len() as i32);
         for el in &self.topics {
@@ -83,6 +98,26 @@ impl VoteRequestData {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 2 {
+            return Err(UnsupportedVersion::new(52, version).into());
+        }
+        let mut len: usize = 0;
+        len += compact_nullable_string_len(self.cluster_id.as_ref())?;
+        if version >= 1 {
+            len += 4;
+        } else if self.voter_id != -1i32 {
+            return Err(UnsupportedFieldVersion::new(52, "voter_id", version).into());
+        }
+        len += compact_array_length_len(self.topics.len() as i32);
+        for el in &self.topics {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +138,14 @@ impl Default for TopicData {
     }
 }
 impl TopicData {
+    pub fn with_topic_name(mut self, value: KafkaString) -> Self {
+        self.topic_name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<PartitionData>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let topic_name;
         let partitions;
@@ -141,6 +184,18 @@ impl TopicData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.topic_name)?;
+        len += compact_array_length_len(self.partitions.len() as i32);
+        for el in &self.partitions {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartitionData {
@@ -178,6 +233,38 @@ impl Default for PartitionData {
     }
 }
 impl PartitionData {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
+    pub fn with_replica_epoch(mut self, value: i32) -> Self {
+        self.replica_epoch = value;
+        self
+    }
+    pub fn with_replica_id(mut self, value: i32) -> Self {
+        self.replica_id = value;
+        self
+    }
+    pub fn with_replica_directory_id(mut self, value: KafkaUuid) -> Self {
+        self.replica_directory_id = value;
+        self
+    }
+    pub fn with_voter_directory_id(mut self, value: KafkaUuid) -> Self {
+        self.voter_directory_id = value;
+        self
+    }
+    pub fn with_last_offset_epoch(mut self, value: i32) -> Self {
+        self.last_offset_epoch = value;
+        self
+    }
+    pub fn with_last_offset(mut self, value: i64) -> Self {
+        self.last_offset = value;
+        self
+    }
+    pub fn with_pre_vote(mut self, value: bool) -> Self {
+        self.pre_vote = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let partition_index;
         let replica_epoch;
@@ -228,18 +315,51 @@ impl PartitionData {
         write_i32(buf, self.replica_id);
         if version >= 1 {
             write_uuid(buf, &self.replica_directory_id);
+        } else if self.replica_directory_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(52, "replica_directory_id", version).into());
         }
         if version >= 1 {
             write_uuid(buf, &self.voter_directory_id);
+        } else if self.voter_directory_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(52, "voter_directory_id", version).into());
         }
         write_i32(buf, self.last_offset_epoch);
         write_i64(buf, self.last_offset);
         if version >= 2 {
             write_bool(buf, self.pre_vote);
+        } else if self.pre_vote != false {
+            return Err(UnsupportedFieldVersion::new(52, "pre_vote", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 4;
+        len += 4;
+        if version >= 1 {
+            len += 16;
+        } else if self.replica_directory_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(52, "replica_directory_id", version).into());
+        }
+        if version >= 1 {
+            len += 16;
+        } else if self.voter_directory_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(52, "voter_directory_id", version).into());
+        }
+        len += 4;
+        len += 8;
+        if version >= 2 {
+            len += 1;
+        } else if self.pre_vote != false {
+            return Err(UnsupportedFieldVersion::new(52, "pre_vote", version).into());
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

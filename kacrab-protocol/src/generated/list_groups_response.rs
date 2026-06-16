@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -33,6 +34,18 @@ impl Default for ListGroupsResponseData {
     }
 }
 impl ListGroupsResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_groups(mut self, value: Vec<ListedGroup>) -> Self {
+        self.groups = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 5 {
             return Err(UnsupportedVersion::new(16, version).into());
@@ -87,6 +100,8 @@ impl ListGroupsResponseData {
         }
         if version >= 1 {
             write_i32(buf, self.throttle_time_ms);
+        } else if self.throttle_time_ms != 0_i32 {
+            return Err(UnsupportedFieldVersion::new(16, "throttle_time_ms", version).into());
         }
         write_i16(buf, self.error_code);
         if version >= 3 {
@@ -106,6 +121,35 @@ impl ListGroupsResponseData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 5 {
+            return Err(UnsupportedVersion::new(16, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += 4;
+        } else if self.throttle_time_ms != 0_i32 {
+            return Err(UnsupportedFieldVersion::new(16, "throttle_time_ms", version).into());
+        }
+        len += 2;
+        if version >= 3 {
+            len += compact_array_length_len(self.groups.len() as i32);
+            for el in &self.groups {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.groups {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 3 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +176,22 @@ impl Default for ListedGroup {
     }
 }
 impl ListedGroup {
+    pub fn with_group_id(mut self, value: KafkaString) -> Self {
+        self.group_id = value;
+        self
+    }
+    pub fn with_protocol_type(mut self, value: KafkaString) -> Self {
+        self.protocol_type = value;
+        self
+    }
+    pub fn with_group_state(mut self, value: KafkaString) -> Self {
+        self.group_state = value;
+        self
+    }
+    pub fn with_group_type(mut self, value: KafkaString) -> Self {
+        self.group_type = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let group_id;
         let protocol_type;
@@ -185,9 +245,13 @@ impl ListedGroup {
         }
         if version >= 4 {
             write_compact_string(buf, &self.group_state)?;
+        } else if self.group_state != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(16, "group_state", version).into());
         }
         if version >= 5 {
             write_compact_string(buf, &self.group_type)?;
+        } else if self.group_type != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(16, "group_type", version).into());
         }
         if version >= 3 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -195,5 +259,34 @@ impl ListedGroup {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 3 {
+            len += compact_string_len(&self.group_id)?;
+        } else {
+            len += string_len(&self.group_id)?;
+        }
+        if version >= 3 {
+            len += compact_string_len(&self.protocol_type)?;
+        } else {
+            len += string_len(&self.protocol_type)?;
+        }
+        if version >= 4 {
+            len += compact_string_len(&self.group_state)?;
+        } else if self.group_state != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(16, "group_state", version).into());
+        }
+        if version >= 5 {
+            len += compact_string_len(&self.group_type)?;
+        } else if self.group_type != KafkaString::default() {
+            return Err(UnsupportedFieldVersion::new(16, "group_type", version).into());
+        }
+        if version >= 3 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

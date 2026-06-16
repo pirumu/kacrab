@@ -42,3 +42,10 @@ pub(crate) fn local_var_ident(name: &str) -> Ident {
         Ident::new(&snake, Span::call_site())
     }
 }
+
+/// Builder setter name for a field. Field identifiers may be raw (`r#type`),
+/// but method names should stay ordinary Rust identifiers (`with_type`).
+pub(crate) fn builder_method_ident(name: &str) -> Ident {
+    let snake = name.to_snake_case();
+    Ident::new(&format!("with_{snake}"), Span::call_site())
+}

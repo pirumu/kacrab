@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -39,6 +40,26 @@ impl Default for BrokerHeartbeatResponseData {
     }
 }
 impl BrokerHeartbeatResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_is_caught_up(mut self, value: bool) -> Self {
+        self.is_caught_up = value;
+        self
+    }
+    pub fn with_is_fenced(mut self, value: bool) -> Self {
+        self.is_fenced = value;
+        self
+    }
+    pub fn with_should_shut_down(mut self, value: bool) -> Self {
+        self.should_shut_down = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 2 {
             return Err(UnsupportedVersion::new(63, version).into());
@@ -84,5 +105,20 @@ impl BrokerHeartbeatResponseData {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 2 {
+            return Err(UnsupportedVersion::new(63, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        len += 2;
+        len += 1;
+        len += 1;
+        len += 1;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

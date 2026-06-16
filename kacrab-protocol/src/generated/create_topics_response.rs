@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -30,6 +31,14 @@ impl Default for CreateTopicsResponseData {
     }
 }
 impl CreateTopicsResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<CreatableTopicResult>) -> Self {
+        self.topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 2 || version > 7 {
             return Err(UnsupportedVersion::new(19, version).into());
@@ -96,6 +105,30 @@ impl CreateTopicsResponseData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 2 || version > 7 {
+            return Err(UnsupportedVersion::new(19, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 5 {
+            len += compact_array_length_len(self.topics.len() as i32);
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 5 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreatableTopicResult {
@@ -133,6 +166,38 @@ impl Default for CreatableTopicResult {
     }
 }
 impl CreatableTopicResult {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_topic_id(mut self, value: KafkaUuid) -> Self {
+        self.topic_id = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_error_message(mut self, value: Option<KafkaString>) -> Self {
+        self.error_message = value;
+        self
+    }
+    pub fn with_topic_config_error_code(mut self, value: i16) -> Self {
+        self.topic_config_error_code = value;
+        self
+    }
+    pub fn with_num_partitions(mut self, value: i32) -> Self {
+        self.num_partitions = value;
+        self
+    }
+    pub fn with_replication_factor(mut self, value: i16) -> Self {
+        self.replication_factor = value;
+        self
+    }
+    pub fn with_configs(mut self, value: Option<Vec<CreatableTopicConfigs>>) -> Self {
+        self.configs = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let mut topic_id = KafkaUuid::ZERO;
@@ -211,6 +276,8 @@ impl CreatableTopicResult {
         }
         if version >= 7 {
             write_uuid(buf, &self.topic_id);
+        } else if self.topic_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(19, "topic_id", version).into());
         }
         write_i16(buf, self.error_code);
         if version >= 5 {
@@ -220,9 +287,13 @@ impl CreatableTopicResult {
         }
         if version >= 5 {
             write_i32(buf, self.num_partitions);
+        } else if self.num_partitions != -1i32 {
+            return Err(UnsupportedFieldVersion::new(19, "num_partitions", version).into());
         }
         if version >= 5 {
             write_i16(buf, self.replication_factor);
+        } else if self.replication_factor != -1i16 {
+            return Err(UnsupportedFieldVersion::new(19, "replication_factor", version).into());
         }
         if version >= 5 {
             match &self.configs {
@@ -236,6 +307,8 @@ impl CreatableTopicResult {
                     }
                 },
             }
+        } else if self.configs != None {
+            return Err(UnsupportedFieldVersion::new(19, "configs", version).into());
         }
         if version >= 5 {
             let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
@@ -253,6 +326,66 @@ impl CreatableTopicResult {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 5 {
+            len += compact_string_len(&self.name)?;
+        } else {
+            len += string_len(&self.name)?;
+        }
+        if version >= 7 {
+            len += 16;
+        } else if self.topic_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(19, "topic_id", version).into());
+        }
+        len += 2;
+        if version >= 5 {
+            len += compact_nullable_string_len(self.error_message.as_ref())?;
+        } else {
+            len += nullable_string_len(self.error_message.as_ref())?;
+        }
+        if version >= 5 {
+            len += 4;
+        } else if self.num_partitions != -1i32 {
+            return Err(UnsupportedFieldVersion::new(19, "num_partitions", version).into());
+        }
+        if version >= 5 {
+            len += 2;
+        } else if self.replication_factor != -1i16 {
+            return Err(UnsupportedFieldVersion::new(19, "replication_factor", version).into());
+        }
+        if version >= 5 {
+            match &self.configs {
+                None => {
+                    len += compact_array_length_len(-1);
+                },
+                Some(arr) => {
+                    len += compact_array_length_len(arr.len() as i32);
+                    for el in arr {
+                        len += el.encoded_len(version)?;
+                    }
+                },
+            }
+        } else if self.configs != None {
+            return Err(UnsupportedFieldVersion::new(19, "configs", version).into());
+        }
+        if version >= 5 {
+            let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
+            if self.topic_config_error_code != 0_i16 {
+                let mut tag_buf = BytesMut::new();
+                write_i16(&mut tag_buf, self.topic_config_error_code);
+                known_tagged_fields.push(RawTaggedField {
+                    tag: 0,
+                    data: tag_buf.freeze(),
+                });
+            }
+            let mut all_tags = known_tagged_fields;
+            all_tags.extend(self._unknown_tagged_fields.iter().cloned());
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -282,6 +415,26 @@ impl Default for CreatableTopicConfigs {
     }
 }
 impl CreatableTopicConfigs {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_value(mut self, value: Option<KafkaString>) -> Self {
+        self.value = value;
+        self
+    }
+    pub fn with_read_only(mut self, value: bool) -> Self {
+        self.read_only = value;
+        self
+    }
+    pub fn with_config_source(mut self, value: i8) -> Self {
+        self.config_source = value;
+        self
+    }
+    pub fn with_is_sensitive(mut self, value: bool) -> Self {
+        self.is_sensitive = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let value;
@@ -321,5 +474,17 @@ impl CreatableTopicConfigs {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += compact_nullable_string_len(self.value.as_ref())?;
+        len += 1;
+        len += 1;
+        len += 1;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

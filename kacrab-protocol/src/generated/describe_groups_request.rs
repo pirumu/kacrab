@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -29,6 +30,14 @@ impl Default for DescribeGroupsRequestData {
     }
 }
 impl DescribeGroupsRequestData {
+    pub fn with_groups(mut self, value: Vec<KafkaString>) -> Self {
+        self.groups = value;
+        self
+    }
+    pub fn with_include_authorized_operations(mut self, value: bool) -> Self {
+        self.include_authorized_operations = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 6 {
             return Err(UnsupportedVersion::new(15, version).into());
@@ -91,6 +100,10 @@ impl DescribeGroupsRequestData {
         }
         if version >= 3 {
             write_bool(buf, self.include_authorized_operations);
+        } else if self.include_authorized_operations != false {
+            return Err(
+                UnsupportedFieldVersion::new(15, "include_authorized_operations", version).into(),
+            );
         }
         if version >= 5 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -98,5 +111,35 @@ impl DescribeGroupsRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 6 {
+            return Err(UnsupportedVersion::new(15, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 5 {
+            len += compact_array_length_len(self.groups.len() as i32);
+            for el in &self.groups {
+                len += compact_string_len(el)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.groups {
+                len += string_len(el)?;
+            }
+        }
+        if version >= 3 {
+            len += 1;
+        } else if self.include_authorized_operations != false {
+            return Err(
+                UnsupportedFieldVersion::new(15, "include_authorized_operations", version).into(),
+            );
+        }
+        if version >= 5 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

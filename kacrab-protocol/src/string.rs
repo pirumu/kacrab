@@ -19,7 +19,9 @@ use std::fmt;
 use bytes::{BufMut, Bytes, BytesMut};
 
 pub use self::error::{StringError, StringErrorKind};
-use crate::primitives::{check_remaining, read_i16, read_unsigned_varint, write_unsigned_varint};
+use crate::primitives::{
+    check_remaining, read_i16, read_unsigned_varint, unsigned_varint_len, write_unsigned_varint,
+};
 
 /// Result alias for string read operations.
 pub type Result<T> = core::result::Result<T, StringError>;
@@ -202,6 +204,22 @@ pub fn write_string(buf: &mut BytesMut, value: &KafkaString) -> Result<()> {
     Ok(())
 }
 
+/// Encoded length of a non-flexible Kafka string (`i16` length prefix).
+pub fn string_len(value: &KafkaString) -> Result<usize> {
+    let _len = i16::try_from(value.len()).map_err(|_| {
+        StringError::new(StringErrorKind::TooLong {
+            length: value.len(),
+            max: i16_max_len(),
+        })
+    })?;
+    value.len().checked_add(2).ok_or_else(|| {
+        StringError::new(StringErrorKind::TooLong {
+            length: value.len(),
+            max: i16_max_len(),
+        })
+    })
+}
+
 /// Read a compact Kafka string (unsigned varint of `len + 1`).
 pub fn read_compact_string(buf: &mut Bytes) -> Result<KafkaString> {
     let len = read_compact_len(buf)?;
@@ -213,6 +231,20 @@ pub fn write_compact_string(buf: &mut BytesMut, value: &KafkaString) -> Result<(
     write_unsigned_varint(buf, compact_len_plus_one(value.len())?);
     buf.extend_from_slice(value.as_bytes());
     Ok(())
+}
+
+/// Encoded length of a compact Kafka string.
+pub fn compact_string_len(value: &KafkaString) -> Result<usize> {
+    let len_plus_one = compact_len_plus_one(value.len())?;
+    value
+        .len()
+        .checked_add(unsigned_varint_len(len_plus_one))
+        .ok_or_else(|| {
+            StringError::new(StringErrorKind::TooLong {
+                length: value.len(),
+                max: compact_max_len(),
+            })
+        })
 }
 
 /// Read a nullable non-flexible Kafka string (`i16`, `-1` = null).
@@ -232,6 +264,11 @@ pub fn write_nullable_string(buf: &mut BytesMut, value: Option<&KafkaString>) ->
         },
         Some(s) => write_string(buf, s),
     }
+}
+
+/// Encoded length of a nullable non-flexible Kafka string.
+pub fn nullable_string_len(value: Option<&KafkaString>) -> Result<usize> {
+    value.map_or(Ok(2), string_len)
 }
 
 /// Read a nullable compact Kafka string (unsigned varint, `0` = null).
@@ -254,4 +291,9 @@ pub fn write_compact_nullable_string(
         },
         Some(s) => write_compact_string(buf, s),
     }
+}
+
+/// Encoded length of a nullable compact Kafka string.
+pub fn compact_nullable_string_len(value: Option<&KafkaString>) -> Result<usize> {
+    value.map_or(Ok(1), compact_string_len)
 }

@@ -6,8 +6,9 @@ use quote::quote;
 use super::{
     default_impl::resolve_default,
     error::CodegenErrorKind,
-    ident::{local_var_ident, safe_rust_ident, shadows_param},
+    ident::{builder_method_ident, local_var_ident, safe_rust_ident, shadows_param},
     read_expr::{generate_read_field_expr, generate_read_tagged_field_expr},
+    size_expr::generate_len_field_expr,
     struct_def::StructDef,
     ty::is_tagged_at_runtime,
     version_check::{
@@ -23,14 +24,35 @@ pub(crate) fn generate_read_write_impl(
     def: &StructDef<'_>,
 ) -> Result<TokenStream, CodegenErrorKind> {
     let name = Ident::new(&def.name, Span::call_site());
+    let builder_methods = generate_builder_methods(def);
     let read_method = generate_read_method(def)?;
-    let write_method = generate_write_method(def);
+    let write_method = generate_write_method(def)?;
+    let encoded_len_method = generate_encoded_len_method(def)?;
     Ok(quote! {
         impl #name {
+            #(#builder_methods)*
             #read_method
             #write_method
+            #encoded_len_method
         }
     })
+}
+
+fn generate_builder_methods(def: &StructDef<'_>) -> Vec<TokenStream> {
+    def.fields
+        .iter()
+        .map(|field| {
+            let field_ident = safe_rust_ident(&field.name);
+            let method_ident = builder_method_ident(&field.name);
+            let field_type = super::ty::map_field_type(field);
+            quote! {
+                pub fn #method_ident(mut self, value: #field_type) -> Self {
+                    self.#field_ident = value;
+                    self
+                }
+            }
+        })
+        .collect()
 }
 
 fn generate_read_method(def: &StructDef<'_>) -> Result<TokenStream, CodegenErrorKind> {
@@ -247,53 +269,184 @@ fn read_method_signature(def: &StructDef<'_>) -> (TokenStream, TokenStream) {
     (buf_param, ver_param)
 }
 
-fn generate_write_method(def: &StructDef<'_>) -> TokenStream {
+fn generate_write_method(def: &StructDef<'_>) -> Result<TokenStream, CodegenErrorKind> {
     let mut body: Vec<TokenStream> = Vec::new();
 
     if let Some(guard) = generate_top_level_version_guard(def) {
         body.push(guard);
     }
-    body.extend(generate_write_field_exprs(def));
+    body.extend(generate_write_field_exprs(def)?);
     if let Some(tagged) = generate_write_tagged_section(def) {
         body.push(tagged);
     }
     body.push(quote! { Ok(()) });
 
     let (buf_param, ver_param) = write_method_signature(def);
-    quote! {
+    Ok(quote! {
         pub fn write(&self, #buf_param, #ver_param) -> Result<()> {
             #(#body)*
         }
-    }
+    })
 }
 
 /// Per-field write expressions, version-gated when the field's range is
 /// narrower than the enclosing struct's effective range.
-fn generate_write_field_exprs(def: &StructDef<'_>) -> Vec<TokenStream> {
+fn generate_write_field_exprs(def: &StructDef<'_>) -> Result<Vec<TokenStream>, CodegenErrorKind> {
     def.fields
         .iter()
         .filter(|f| !is_tagged_at_runtime(f))
         .filter(|f| !version_check_never_true(&f.versions, &def.effective_versions))
         .map(|field| {
+            let rust_ident = safe_rust_ident(&field.name);
             let write_expr = generate_write_field_expr(
                 field,
-                &safe_rust_ident(&field.name),
+                &rust_ident,
                 &def.flexible_versions,
                 &def.effective_versions,
             );
             if version_check_always_true(&field.versions, &def.effective_versions) {
-                write_expr
+                Ok(write_expr)
             } else {
                 let version_check =
                     version_contains_check_with_context(&field.versions, &def.effective_versions);
-                quote! {
+                let unsupported_check = generate_unsupported_field_check(def, field, &rust_ident)?;
+                Ok(quote! {
                     if #version_check {
                         #write_expr
-                    }
-                }
+                    } #unsupported_check
+                })
             }
         })
         .collect()
+}
+
+fn generate_unsupported_field_check(
+    def: &StructDef<'_>,
+    field: &crate::ir::field::FieldSpec,
+    var_ident: &Ident,
+) -> Result<TokenStream, CodegenErrorKind> {
+    let Some(api_key) = def.api_key else {
+        return Ok(quote! {});
+    };
+    let default_val = resolve_default(field)?;
+    let api_key_lit = Literal::i16_unsuffixed(api_key);
+    let field_name = var_ident.to_string();
+    Ok(quote! {
+        else if self.#var_ident != #default_val {
+            return Err(UnsupportedFieldVersion::new(#api_key_lit, #field_name, version).into());
+        }
+    })
+}
+
+fn generate_encoded_len_method(def: &StructDef<'_>) -> Result<TokenStream, CodegenErrorKind> {
+    let mut body: Vec<TokenStream> = Vec::new();
+
+    if let Some(guard) = generate_top_level_version_guard(def) {
+        body.push(guard);
+    }
+    let needs_mut_len = def
+        .fields
+        .iter()
+        .any(|field| !version_check_never_true(&field.versions, &def.effective_versions))
+        || def.fields.iter().any(is_tagged_at_runtime)
+        || !def.flexible_versions.is_none();
+    body.push(if needs_mut_len {
+        quote! { let mut len: usize = 0; }
+    } else {
+        quote! { let len: usize = 0; }
+    });
+    body.extend(generate_len_field_exprs(def)?);
+    if let Some(tagged) = generate_len_tagged_section(def) {
+        body.push(tagged);
+    }
+    body.push(quote! { Ok(len) });
+
+    let ver_param = if version_used_in_write(def) {
+        quote! { version: i16 }
+    } else {
+        quote! { _version: i16 }
+    };
+    Ok(quote! {
+        pub fn encoded_len(&self, #ver_param) -> Result<usize> {
+            #(#body)*
+        }
+    })
+}
+
+fn generate_len_field_exprs(def: &StructDef<'_>) -> Result<Vec<TokenStream>, CodegenErrorKind> {
+    def.fields
+        .iter()
+        .filter(|f| !is_tagged_at_runtime(f))
+        .filter(|f| !version_check_never_true(&f.versions, &def.effective_versions))
+        .map(|field| {
+            let rust_ident = safe_rust_ident(&field.name);
+            let len_expr = generate_len_field_expr(
+                field,
+                &rust_ident,
+                &def.flexible_versions,
+                &def.effective_versions,
+            );
+            if version_check_always_true(&field.versions, &def.effective_versions) {
+                Ok(len_expr)
+            } else {
+                let version_check =
+                    version_contains_check_with_context(&field.versions, &def.effective_versions);
+                let unsupported_check = generate_unsupported_field_check(def, field, &rust_ident)?;
+                Ok(quote! {
+                    if #version_check {
+                        #len_expr
+                    } #unsupported_check
+                })
+            }
+        })
+        .collect()
+}
+
+fn generate_len_tagged_section(def: &StructDef<'_>) -> Option<TokenStream> {
+    let has_tagged_fields = def.fields.iter().any(is_tagged_at_runtime);
+    if !has_tagged_fields && def.flexible_versions.is_none() {
+        return None;
+    }
+
+    let tagged_context = def.flexible_versions.intersect(&def.effective_versions);
+    let tag_writes: Vec<TokenStream> = def
+        .fields
+        .iter()
+        .filter_map(|field| generate_tagged_write_arm(field, &tagged_context))
+        .collect();
+
+    let tagged_body = if tag_writes.is_empty() {
+        quote! {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+    } else {
+        quote! {
+            let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
+            #(#tag_writes)*
+            let mut all_tags = known_tagged_fields;
+            all_tags.extend(self._unknown_tagged_fields.iter().cloned());
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+    };
+
+    Some(
+        if version_check_always_true(&def.flexible_versions, &def.effective_versions) {
+            tagged_body
+        } else {
+            let flex_check = flexible_version_check_with_context(
+                &def.flexible_versions,
+                &def.effective_versions,
+            );
+            quote! {
+                if #flex_check {
+                    #tagged_body
+                }
+            }
+        },
+    )
 }
 
 /// Tagged-field writer (KIP-482), gated on the struct's flexible-version range.

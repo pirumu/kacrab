@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -29,6 +30,14 @@ impl Default for ConsumerProtocolAssignmentData {
     }
 }
 impl ConsumerProtocolAssignmentData {
+    pub fn with_assigned_partitions(mut self, value: Vec<TopicPartition>) -> Self {
+        self.assigned_partitions = value;
+        self
+    }
+    pub fn with_user_data(mut self, value: Option<Bytes>) -> Self {
+        self.user_data = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let assigned_partitions;
         let user_data;
@@ -56,6 +65,15 @@ impl ConsumerProtocolAssignmentData {
         write_nullable_bytes(buf, self.user_data.as_ref().map(|b| b.as_ref()))?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += array_length_len();
+        for el in &self.assigned_partitions {
+            len += el.encoded_len(version)?;
+        }
+        len += nullable_bytes_len(self.user_data.as_ref().map(|b| b.as_ref()))?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicPartition {
@@ -75,6 +93,14 @@ impl Default for TopicPartition {
     }
 }
 impl TopicPartition {
+    pub fn with_topic(mut self, value: KafkaString) -> Self {
+        self.topic = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<i32>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let topic;
         let partitions;
@@ -101,5 +127,12 @@ impl TopicPartition {
             write_i32(buf, *el);
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += string_len(&self.topic)?;
+        len += array_length_len();
+        len += self.partitions.len() * 4usize;
+        Ok(len)
     }
 }

@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -30,6 +31,14 @@ impl Default for DescribeConfigsResponseData {
     }
 }
 impl DescribeConfigsResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_results(mut self, value: Vec<DescribeConfigsResult>) -> Self {
+        self.results = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 4 {
             return Err(UnsupportedVersion::new(32, version).into());
@@ -96,6 +105,30 @@ impl DescribeConfigsResponseData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 4 {
+            return Err(UnsupportedVersion::new(32, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 4 {
+            len += compact_array_length_len(self.results.len() as i32);
+            for el in &self.results {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.results {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 4 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeConfigsResult {
@@ -124,6 +157,26 @@ impl Default for DescribeConfigsResult {
     }
 }
 impl DescribeConfigsResult {
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_error_message(mut self, value: Option<KafkaString>) -> Self {
+        self.error_message = value;
+        self
+    }
+    pub fn with_resource_type(mut self, value: i8) -> Self {
+        self.resource_type = value;
+        self
+    }
+    pub fn with_resource_name(mut self, value: KafkaString) -> Self {
+        self.resource_name = value;
+        self
+    }
+    pub fn with_configs(mut self, value: Vec<DescribeConfigsResourceResult>) -> Self {
+        self.configs = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let error_code;
         let error_message;
@@ -212,6 +265,38 @@ impl DescribeConfigsResult {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 2;
+        if version >= 4 {
+            len += compact_nullable_string_len(self.error_message.as_ref())?;
+        } else {
+            len += nullable_string_len(self.error_message.as_ref())?;
+        }
+        len += 1;
+        if version >= 4 {
+            len += compact_string_len(&self.resource_name)?;
+        } else {
+            len += string_len(&self.resource_name)?;
+        }
+        if version >= 4 {
+            len += compact_array_length_len(self.configs.len() as i32);
+            for el in &self.configs {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.configs {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 4 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeConfigsResourceResult {
@@ -250,6 +335,38 @@ impl Default for DescribeConfigsResourceResult {
     }
 }
 impl DescribeConfigsResourceResult {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_value(mut self, value: Option<KafkaString>) -> Self {
+        self.value = value;
+        self
+    }
+    pub fn with_read_only(mut self, value: bool) -> Self {
+        self.read_only = value;
+        self
+    }
+    pub fn with_config_source(mut self, value: i8) -> Self {
+        self.config_source = value;
+        self
+    }
+    pub fn with_is_sensitive(mut self, value: bool) -> Self {
+        self.is_sensitive = value;
+        self
+    }
+    pub fn with_synonyms(mut self, value: Vec<DescribeConfigsSynonym>) -> Self {
+        self.synonyms = value;
+        self
+    }
+    pub fn with_config_type(mut self, value: i8) -> Self {
+        self.config_type = value;
+        self
+    }
+    pub fn with_documentation(mut self, value: Option<KafkaString>) -> Self {
+        self.documentation = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let value;
@@ -351,6 +468,8 @@ impl DescribeConfigsResourceResult {
         }
         if version >= 3 {
             write_i8(buf, self.config_type);
+        } else if self.config_type != 0i8 {
+            return Err(UnsupportedFieldVersion::new(32, "config_type", version).into());
         }
         if version >= 3 {
             if version >= 4 {
@@ -358,6 +477,8 @@ impl DescribeConfigsResourceResult {
             } else {
                 write_nullable_string(buf, self.documentation.as_ref())?;
             }
+        } else if self.documentation != None {
+            return Err(UnsupportedFieldVersion::new(32, "documentation", version).into());
         }
         if version >= 4 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -365,6 +486,53 @@ impl DescribeConfigsResourceResult {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 4 {
+            len += compact_string_len(&self.name)?;
+        } else {
+            len += string_len(&self.name)?;
+        }
+        if version >= 4 {
+            len += compact_nullable_string_len(self.value.as_ref())?;
+        } else {
+            len += nullable_string_len(self.value.as_ref())?;
+        }
+        len += 1;
+        len += 1;
+        len += 1;
+        if version >= 4 {
+            len += compact_array_length_len(self.synonyms.len() as i32);
+            for el in &self.synonyms {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.synonyms {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 3 {
+            len += 1;
+        } else if self.config_type != 0i8 {
+            return Err(UnsupportedFieldVersion::new(32, "config_type", version).into());
+        }
+        if version >= 3 {
+            if version >= 4 {
+                len += compact_nullable_string_len(self.documentation.as_ref())?;
+            } else {
+                len += nullable_string_len(self.documentation.as_ref())?;
+            }
+        } else if self.documentation != None {
+            return Err(UnsupportedFieldVersion::new(32, "documentation", version).into());
+        }
+        if version >= 4 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -388,6 +556,18 @@ impl Default for DescribeConfigsSynonym {
     }
 }
 impl DescribeConfigsSynonym {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_value(mut self, value: Option<KafkaString>) -> Self {
+        self.value = value;
+        self
+    }
+    pub fn with_source(mut self, value: i8) -> Self {
+        self.source = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let value;
@@ -439,5 +619,25 @@ impl DescribeConfigsSynonym {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 4 {
+            len += compact_string_len(&self.name)?;
+        } else {
+            len += string_len(&self.name)?;
+        }
+        if version >= 4 {
+            len += compact_nullable_string_len(self.value.as_ref())?;
+        } else {
+            len += nullable_string_len(self.value.as_ref())?;
+        }
+        len += 1;
+        if version >= 4 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

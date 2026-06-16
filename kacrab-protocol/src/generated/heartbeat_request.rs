@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -35,6 +36,22 @@ impl Default for HeartbeatRequestData {
     }
 }
 impl HeartbeatRequestData {
+    pub fn with_group_id(mut self, value: KafkaString) -> Self {
+        self.group_id = value;
+        self
+    }
+    pub fn with_generation_id(mut self, value: i32) -> Self {
+        self.generation_id = value;
+        self
+    }
+    pub fn with_member_id(mut self, value: KafkaString) -> Self {
+        self.member_id = value;
+        self
+    }
+    pub fn with_group_instance_id(mut self, value: Option<KafkaString>) -> Self {
+        self.group_instance_id = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 4 {
             return Err(UnsupportedVersion::new(12, version).into());
@@ -101,6 +118,8 @@ impl HeartbeatRequestData {
             } else {
                 write_nullable_string(buf, self.group_instance_id.as_ref())?;
             }
+        } else if self.group_instance_id != None {
+            return Err(UnsupportedFieldVersion::new(12, "group_instance_id", version).into());
         }
         if version >= 4 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -108,5 +127,37 @@ impl HeartbeatRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 4 {
+            return Err(UnsupportedVersion::new(12, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 4 {
+            len += compact_string_len(&self.group_id)?;
+        } else {
+            len += string_len(&self.group_id)?;
+        }
+        len += 4;
+        if version >= 4 {
+            len += compact_string_len(&self.member_id)?;
+        } else {
+            len += string_len(&self.member_id)?;
+        }
+        if version >= 3 {
+            if version >= 4 {
+                len += compact_nullable_string_len(self.group_instance_id.as_ref())?;
+            } else {
+                len += nullable_string_len(self.group_instance_id.as_ref())?;
+            }
+        } else if self.group_instance_id != None {
+            return Err(UnsupportedFieldVersion::new(12, "group_instance_id", version).into());
+        }
+        if version >= 4 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

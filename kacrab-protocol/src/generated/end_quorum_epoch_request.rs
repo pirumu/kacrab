@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -32,6 +33,18 @@ impl Default for EndQuorumEpochRequestData {
     }
 }
 impl EndQuorumEpochRequestData {
+    pub fn with_cluster_id(mut self, value: Option<KafkaString>) -> Self {
+        self.cluster_id = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<TopicData>) -> Self {
+        self.topics = value;
+        self
+    }
+    pub fn with_leader_endpoints(mut self, value: Vec<LeaderEndpoint>) -> Self {
+        self.leader_endpoints = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 1 {
             return Err(UnsupportedVersion::new(54, version).into());
@@ -116,6 +129,8 @@ impl EndQuorumEpochRequestData {
             for el in &self.leader_endpoints {
                 el.write(buf, version)?;
             }
+        } else if self.leader_endpoints != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(54, "leader_endpoints", version).into());
         }
         if version >= 1 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -123,6 +138,42 @@ impl EndQuorumEpochRequestData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(54, version).into());
+        }
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += compact_nullable_string_len(self.cluster_id.as_ref())?;
+        } else {
+            len += nullable_string_len(self.cluster_id.as_ref())?;
+        }
+        if version >= 1 {
+            len += compact_array_length_len(self.topics.len() as i32);
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.topics {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 1 {
+            len += compact_array_length_len(self.leader_endpoints.len() as i32);
+            for el in &self.leader_endpoints {
+                len += el.encoded_len(version)?;
+            }
+        } else if self.leader_endpoints != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(54, "leader_endpoints", version).into());
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +194,14 @@ impl Default for TopicData {
     }
 }
 impl TopicData {
+    pub fn with_topic_name(mut self, value: KafkaString) -> Self {
+        self.topic_name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<PartitionData>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let topic_name;
         let partitions;
@@ -211,6 +270,31 @@ impl TopicData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 1 {
+            len += compact_string_len(&self.topic_name)?;
+        } else {
+            len += string_len(&self.topic_name)?;
+        }
+        if version >= 1 {
+            len += compact_array_length_len(self.partitions.len() as i32);
+            for el in &self.partitions {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.partitions {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartitionData {
@@ -239,6 +323,26 @@ impl Default for PartitionData {
     }
 }
 impl PartitionData {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
+    pub fn with_leader_id(mut self, value: i32) -> Self {
+        self.leader_id = value;
+        self
+    }
+    pub fn with_leader_epoch(mut self, value: i32) -> Self {
+        self.leader_epoch = value;
+        self
+    }
+    pub fn with_preferred_successors(mut self, value: Vec<i32>) -> Self {
+        self.preferred_successors = value;
+        self
+    }
+    pub fn with_preferred_candidates(mut self, value: Vec<ReplicaInfo>) -> Self {
+        self.preferred_candidates = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let partition_index;
         let leader_id;
@@ -297,12 +401,16 @@ impl PartitionData {
             for el in &self.preferred_successors {
                 write_i32(buf, *el);
             }
+        } else if self.preferred_successors != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(54, "preferred_successors", version).into());
         }
         if version >= 1 {
             write_compact_array_length(buf, self.preferred_candidates.len() as i32);
             for el in &self.preferred_candidates {
                 el.write(buf, version)?;
             }
+        } else if self.preferred_candidates != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(54, "preferred_candidates", version).into());
         }
         if version >= 1 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -310,6 +418,32 @@ impl PartitionData {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 4;
+        len += 4;
+        if version == 0 {
+            len += array_length_len();
+            len += self.preferred_successors.len() * 4usize;
+        } else if self.preferred_successors != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(54, "preferred_successors", version).into());
+        }
+        if version >= 1 {
+            len += compact_array_length_len(self.preferred_candidates.len() as i32);
+            for el in &self.preferred_candidates {
+                len += el.encoded_len(version)?;
+            }
+        } else if self.preferred_candidates != Vec::new() {
+            return Err(UnsupportedFieldVersion::new(54, "preferred_candidates", version).into());
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -330,6 +464,14 @@ impl Default for ReplicaInfo {
     }
 }
 impl ReplicaInfo {
+    pub fn with_candidate_id(mut self, value: i32) -> Self {
+        self.candidate_id = value;
+        self
+    }
+    pub fn with_candidate_directory_id(mut self, value: KafkaUuid) -> Self {
+        self.candidate_directory_id = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let candidate_id;
         let candidate_directory_id;
@@ -358,6 +500,15 @@ impl ReplicaInfo {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 16;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct LeaderEndpoint {
@@ -380,6 +531,18 @@ impl Default for LeaderEndpoint {
     }
 }
 impl LeaderEndpoint {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_host(mut self, value: KafkaString) -> Self {
+        self.host = value;
+        self
+    }
+    pub fn with_port(mut self, value: u16) -> Self {
+        self.port = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let host;
@@ -411,5 +574,15 @@ impl LeaderEndpoint {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += compact_string_len(&self.host)?;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -30,6 +31,14 @@ impl Default for DeleteTopicsResponseData {
     }
 }
 impl DeleteTopicsResponseData {
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_responses(mut self, value: Vec<DeletableTopicResult>) -> Self {
+        self.responses = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 1 || version > 6 {
             return Err(UnsupportedVersion::new(20, version).into());
@@ -96,6 +105,30 @@ impl DeleteTopicsResponseData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 1 || version > 6 {
+            return Err(UnsupportedVersion::new(20, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        if version >= 4 {
+            len += compact_array_length_len(self.responses.len() as i32);
+            for el in &self.responses {
+                len += el.encoded_len(version)?;
+            }
+        } else {
+            len += array_length_len();
+            for el in &self.responses {
+                len += el.encoded_len(version)?;
+            }
+        }
+        if version >= 4 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeletableTopicResult {
@@ -121,6 +154,22 @@ impl Default for DeletableTopicResult {
     }
 }
 impl DeletableTopicResult {
+    pub fn with_name(mut self, value: Option<KafkaString>) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_topic_id(mut self, value: KafkaUuid) -> Self {
+        self.topic_id = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_error_message(mut self, value: Option<KafkaString>) -> Self {
+        self.error_message = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let mut topic_id = KafkaUuid::ZERO;
@@ -177,10 +226,14 @@ impl DeletableTopicResult {
         }
         if version >= 6 {
             write_uuid(buf, &self.topic_id);
+        } else if self.topic_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(20, "topic_id", version).into());
         }
         write_i16(buf, self.error_code);
         if version >= 5 {
             write_compact_nullable_string(buf, self.error_message.as_ref())?;
+        } else if self.error_message != None {
+            return Err(UnsupportedFieldVersion::new(20, "error_message", version).into());
         }
         if version >= 4 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -188,5 +241,36 @@ impl DeletableTopicResult {
             write_tagged_fields(buf, &all_tags)?;
         }
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        if version >= 6 {
+            len += compact_nullable_string_len(self.name.as_ref())?;
+        } else {
+            let _nn_default = KafkaString::default();
+            let _nn_val = self.name.as_ref().unwrap_or(&_nn_default);
+            if version >= 4 {
+                len += compact_string_len(_nn_val)?;
+            } else {
+                len += string_len(_nn_val)?;
+            }
+        }
+        if version >= 6 {
+            len += 16;
+        } else if self.topic_id != KafkaUuid::ZERO {
+            return Err(UnsupportedFieldVersion::new(20, "topic_id", version).into());
+        }
+        len += 2;
+        if version >= 5 {
+            len += compact_nullable_string_len(self.error_message.as_ref())?;
+        } else if self.error_message != None {
+            return Err(UnsupportedFieldVersion::new(20, "error_message", version).into());
+        }
+        if version >= 4 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            len += tagged_fields_len(&all_tags)?;
+        }
+        Ok(len)
     }
 }

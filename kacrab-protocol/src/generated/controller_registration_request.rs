@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -38,6 +39,26 @@ impl Default for ControllerRegistrationRequestData {
     }
 }
 impl ControllerRegistrationRequestData {
+    pub fn with_controller_id(mut self, value: i32) -> Self {
+        self.controller_id = value;
+        self
+    }
+    pub fn with_incarnation_id(mut self, value: KafkaUuid) -> Self {
+        self.incarnation_id = value;
+        self
+    }
+    pub fn with_zk_migration_ready(mut self, value: bool) -> Self {
+        self.zk_migration_ready = value;
+        self
+    }
+    pub fn with_listeners(mut self, value: Vec<Listener>) -> Self {
+        self.listeners = value;
+        self
+    }
+    pub fn with_features(mut self, value: Vec<Feature>) -> Self {
+        self.features = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 0 {
             return Err(UnsupportedVersion::new(70, version).into());
@@ -104,6 +125,27 @@ impl ControllerRegistrationRequestData {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 0 {
+            return Err(UnsupportedVersion::new(70, version).into());
+        }
+        let mut len: usize = 0;
+        len += 4;
+        len += 16;
+        len += 1;
+        len += compact_array_length_len(self.listeners.len() as i32);
+        for el in &self.listeners {
+            len += el.encoded_len(version)?;
+        }
+        len += compact_array_length_len(self.features.len() as i32);
+        for el in &self.features {
+            len += el.encoded_len(version)?;
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Listener {
@@ -129,6 +171,22 @@ impl Default for Listener {
     }
 }
 impl Listener {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_host(mut self, value: KafkaString) -> Self {
+        self.host = value;
+        self
+    }
+    pub fn with_port(mut self, value: u16) -> Self {
+        self.port = value;
+        self
+    }
+    pub fn with_security_protocol(mut self, value: i16) -> Self {
+        self.security_protocol = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let host;
@@ -165,6 +223,17 @@ impl Listener {
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
     }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += compact_string_len(&self.host)?;
+        len += 2;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Feature {
@@ -187,6 +256,18 @@ impl Default for Feature {
     }
 }
 impl Feature {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_min_supported_version(mut self, value: i16) -> Self {
+        self.min_supported_version = value;
+        self
+    }
+    pub fn with_max_supported_version(mut self, value: i16) -> Self {
+        self.max_supported_version = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let name;
         let min_supported_version;
@@ -218,5 +299,15 @@ impl Feature {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += compact_string_len(&self.name)?;
+        len += 2;
+        len += 2;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

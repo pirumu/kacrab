@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -59,6 +60,46 @@ impl Default for ConsumerGroupHeartbeatRequestData {
     }
 }
 impl ConsumerGroupHeartbeatRequestData {
+    pub fn with_group_id(mut self, value: KafkaString) -> Self {
+        self.group_id = value;
+        self
+    }
+    pub fn with_member_id(mut self, value: KafkaString) -> Self {
+        self.member_id = value;
+        self
+    }
+    pub fn with_member_epoch(mut self, value: i32) -> Self {
+        self.member_epoch = value;
+        self
+    }
+    pub fn with_instance_id(mut self, value: Option<KafkaString>) -> Self {
+        self.instance_id = value;
+        self
+    }
+    pub fn with_rack_id(mut self, value: Option<KafkaString>) -> Self {
+        self.rack_id = value;
+        self
+    }
+    pub fn with_rebalance_timeout_ms(mut self, value: i32) -> Self {
+        self.rebalance_timeout_ms = value;
+        self
+    }
+    pub fn with_subscribed_topic_names(mut self, value: Option<Vec<KafkaString>>) -> Self {
+        self.subscribed_topic_names = value;
+        self
+    }
+    pub fn with_subscribed_topic_regex(mut self, value: Option<KafkaString>) -> Self {
+        self.subscribed_topic_regex = value;
+        self
+    }
+    pub fn with_server_assignor(mut self, value: Option<KafkaString>) -> Self {
+        self.server_assignor = value;
+        self
+    }
+    pub fn with_topic_partitions(mut self, value: Option<Vec<TopicPartitions>>) -> Self {
+        self.topic_partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 1 {
             return Err(UnsupportedVersion::new(68, version).into());
@@ -153,6 +194,8 @@ impl ConsumerGroupHeartbeatRequestData {
         }
         if version >= 1 {
             write_compact_nullable_string(buf, self.subscribed_topic_regex.as_ref())?;
+        } else if self.subscribed_topic_regex != None {
+            return Err(UnsupportedFieldVersion::new(68, "subscribed_topic_regex", version).into());
         }
         write_compact_nullable_string(buf, self.server_assignor.as_ref())?;
         match &self.topic_partitions {
@@ -170,6 +213,50 @@ impl ConsumerGroupHeartbeatRequestData {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(68, version).into());
+        }
+        let mut len: usize = 0;
+        len += compact_string_len(&self.group_id)?;
+        len += compact_string_len(&self.member_id)?;
+        len += 4;
+        len += compact_nullable_string_len(self.instance_id.as_ref())?;
+        len += compact_nullable_string_len(self.rack_id.as_ref())?;
+        len += 4;
+        match &self.subscribed_topic_names {
+            None => {
+                len += compact_array_length_len(-1);
+            },
+            Some(arr) => {
+                len += compact_array_length_len(arr.len() as i32);
+                for el in arr {
+                    len += compact_string_len(el)?;
+                }
+            },
+        }
+        if version >= 1 {
+            len += compact_nullable_string_len(self.subscribed_topic_regex.as_ref())?;
+        } else if self.subscribed_topic_regex != None {
+            return Err(UnsupportedFieldVersion::new(68, "subscribed_topic_regex", version).into());
+        }
+        len += compact_nullable_string_len(self.server_assignor.as_ref())?;
+        match &self.topic_partitions {
+            None => {
+                len += compact_array_length_len(-1);
+            },
+            Some(arr) => {
+                len += compact_array_length_len(arr.len() as i32);
+                for el in arr {
+                    len += el.encoded_len(version)?;
+                }
+            },
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -190,6 +277,14 @@ impl Default for TopicPartitions {
     }
 }
 impl TopicPartitions {
+    pub fn with_topic_id(mut self, value: KafkaUuid) -> Self {
+        self.topic_id = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<i32>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let topic_id;
         let partitions;
@@ -227,5 +322,15 @@ impl TopicPartitions {
         all_tags.sort_by_key(|f| f.tag);
         write_tagged_fields(buf, &all_tags)?;
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 16;
+        len += compact_array_length_len(self.partitions.len() as i32);
+        len += self.partitions.len() * 4usize;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        len += tagged_fields_len(&all_tags)?;
+        Ok(len)
     }
 }

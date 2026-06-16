@@ -4,6 +4,7 @@
     clippy::all,
     clippy::pedantic,
     clippy::nursery,
+    clippy::arithmetic_side_effects,
     reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
               hand-written lint style for reproducible wire-code output."
 )]
@@ -33,6 +34,18 @@ impl Default for OffsetDeleteResponseData {
     }
 }
 impl OffsetDeleteResponseData {
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
+    pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
+        self.throttle_time_ms = value;
+        self
+    }
+    pub fn with_topics(mut self, value: Vec<OffsetDeleteResponseTopic>) -> Self {
+        self.topics = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         if version < 0 || version > 0 {
             return Err(UnsupportedVersion::new(47, version).into());
@@ -70,6 +83,19 @@ impl OffsetDeleteResponseData {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        if version < 0 || version > 0 {
+            return Err(UnsupportedVersion::new(47, version).into());
+        }
+        let mut len: usize = 0;
+        len += 2;
+        len += 4;
+        len += array_length_len();
+        for el in &self.topics {
+            len += el.encoded_len(version)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct OffsetDeleteResponseTopic {
@@ -89,6 +115,14 @@ impl Default for OffsetDeleteResponseTopic {
     }
 }
 impl OffsetDeleteResponseTopic {
+    pub fn with_name(mut self, value: KafkaString) -> Self {
+        self.name = value;
+        self
+    }
+    pub fn with_partitions(mut self, value: Vec<OffsetDeleteResponsePartition>) -> Self {
+        self.partitions = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
         let name;
         let partitions;
@@ -116,6 +150,15 @@ impl OffsetDeleteResponseTopic {
         }
         Ok(())
     }
+    pub fn encoded_len(&self, version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += string_len(&self.name)?;
+        len += array_length_len();
+        for el in &self.partitions {
+            len += el.encoded_len(version)?;
+        }
+        Ok(len)
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct OffsetDeleteResponsePartition {
@@ -135,6 +178,14 @@ impl Default for OffsetDeleteResponsePartition {
     }
 }
 impl OffsetDeleteResponsePartition {
+    pub fn with_partition_index(mut self, value: i32) -> Self {
+        self.partition_index = value;
+        self
+    }
+    pub fn with_error_code(mut self, value: i16) -> Self {
+        self.error_code = value;
+        self
+    }
     pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
         let partition_index;
         let error_code;
@@ -151,5 +202,11 @@ impl OffsetDeleteResponsePartition {
         write_i32(buf, self.partition_index);
         write_i16(buf, self.error_code);
         Ok(())
+    }
+    pub fn encoded_len(&self, _version: i16) -> Result<usize> {
+        let mut len: usize = 0;
+        len += 4;
+        len += 2;
+        Ok(len)
     }
 }
