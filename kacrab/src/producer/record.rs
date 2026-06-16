@@ -22,7 +22,7 @@ pub(crate) const UNASSIGNED_PARTITION: i32 = -1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerRecord {
     /// Topic name.
-    pub topic: String,
+    pub topic: Arc<str>,
     /// Partition index.
     pub partition: i32,
     /// Optional record key.
@@ -33,7 +33,7 @@ pub struct ProducerRecord {
 
 impl ProducerRecord {
     /// Create a producer record for an explicit topic partition.
-    pub fn new(topic: impl Into<String>, partition: i32) -> Self {
+    pub fn new(topic: impl Into<Arc<str>>, partition: i32) -> Self {
         Self {
             topic: topic.into(),
             partition,
@@ -43,7 +43,7 @@ impl ProducerRecord {
     }
 
     /// Create a producer record whose partition will be selected from metadata.
-    pub fn unassigned(topic: impl Into<String>) -> Self {
+    pub fn unassigned(topic: impl Into<Arc<str>>) -> Self {
         Self::new(topic, UNASSIGNED_PARTITION)
     }
 

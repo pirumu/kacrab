@@ -290,14 +290,19 @@ cargo run -p kacrab-benches --release --bin producer_mock_bench
 KACRAB_BENCH_SMOKE=1 cargo run -p kacrab-benches --release --bin producer_kafka_bench
 ```
 
-Latest recorded local baselines are from 2026-06-16 on this development
+Latest recorded local baselines are from 2026-06-17 on this development
 machine. Treat these as measurement checkpoints, not release guarantees:
 
-- Producer, public API against `apache/kafka:4.3.0` single-node KRaft:
-  - `producer_kafka_bench`, 5M × 10B, in-flight 8: 5.09-5.24M
-    messages/sec, 48.6-50.0 MiB/sec.
-  - `producer_kafka_bench`, 100K × 10 KiB, in-flight 8: 39.2-43.6K
-    messages/sec, 383-426 MiB/sec.
+- Producer, public API against native Apache Kafka 4.3.0 single-node KRaft
+  on `127.0.0.1:9092`, `acks=1`, idempotence disabled, no compression,
+  3 partitions, Java-style sticky unassigned partitioning:
+  - `producer_kafka_bench`, 5M × 10B, in-flight 2: 5.08M messages/sec,
+    48.4 MiB/sec.
+  - `producer_kafka_bench`, 100K × 10 KiB, in-flight 2: 133.9K
+    messages/sec, 1.28 GiB/sec.
+  - Apache Kafka Java `kafka-producer-perf-test.sh` with matching producer
+    props measured 3.30M messages/sec for 5M × 10B and 35.4K messages/sec
+    for 100K × 10 KiB on the same broker.
 - Producer dispatcher, local mock multi-broker:
   - `producer_dispatcher/multi_broker_dispatch`: 4.08-4.56M messages/sec.
 - Producer accumulator micro-benchmarks:

@@ -70,12 +70,35 @@ The compose file exposes Kafka on `localhost:9092` and creates
 when set, defaulting to `127.0.0.1:9092` and `kacrab-bench`. It uses the
 public `KafkaProducer::builder().set(...).build()` API, warms up metadata and
 the broker session outside the measured window, then sends scenario-sized
-batches through `KafkaProducer::send_batch_untracked` with up to 8 produce
-requests in flight.
+batches through `KafkaProducer::send_batch_untracked`.
+
+Useful real-Kafka knobs:
+
+- `KACRAB_IN_FLIGHT` controls `max.in.flight.requests.per.connection`
+  (the current local sweet spot is `2` for a single native broker).
+- `KACRAB_PARTITION_MODE=unassigned` uses the default Java-style sticky
+  partitioner for null-key records. This is the default benchmark mode.
+- `KACRAB_PARTITION_MODE=manual` keeps the older manual round-robin benchmark
+  path for isolating partitioner overhead.
+- `KACRAB_BATCH_SIZE` controls producer `batch.size`; default is 16 KiB.
+- `KACRAB_BATCH_MESSAGES_10B` controls the outer API chunk size for the 10-byte
+  scenario.
+- `KACRAB_ONLY_10B=1` runs only the 5M × 10B scenario.
+
+The public API hot path is allocation-conscious rather than magically
+wire-zero-copy: payloads are cloned as `Bytes` handles, and benchmark topics are
+shared as `Arc<str>` handles, so input data is not copied per message. Kafka
+Produce still requires serialized record batches and request frames on the wire,
+including size fields and record-batch CRCs, so the client must materialize
+encoded bytes before writing to the socket. Kafka Java exposes `check.crcs` on
+the consumer/fetch side to skip fetched-record CRC verification; it does not
+remove producer-side CRC generation for Produce requests. Future work can
+reduce this further with pooled encode buffers and fewer intermediate frame/body
+moves, but it cannot skip Kafka serialization itself.
 
 ## Local Baselines
 
-Measured on 2026-06-16 on this development machine. Treat these as local
+Measured on 2026-06-17 on this development machine. Treat these as local
 measurement checkpoints, not production Kafka acceptance numbers.
 
 Benchmark host:
@@ -85,14 +108,47 @@ Benchmark host:
   GPU, 16-core Neural Engine.
 - 18GB unified memory; M3 Pro memory bandwidth: 150GB/s.
 
-Measured against `apache/kafka:4.3.0` single-node KRaft via
-`docker-compose.kafka.yml` on the same machine, through the public producer
-API:
+Measured against native Apache Kafka 4.3.0 single-node KRaft on the same
+machine, through the public producer API:
 
-- `producer_kafka_bench`, 5M × 10B, in-flight 8: 5.09-5.24M
-  messages/sec, 48.6-50.0 MiB/sec.
-- `producer_kafka_bench`, 100K × 10 KiB, in-flight 8: 39.2-43.6K
-  messages/sec, 383-426 MiB/sec.
+```bash
+KACRAB_IN_FLIGHT=2 cargo run -p kacrab-benches --release --bin producer_kafka_bench
+```
+
+Rust `producer_kafka_bench` settings: `acks=1`, idempotence disabled, no
+compression, `batch.size=16384`, 3 partitions, default
+`partition_mode=unassigned` Java-style sticky partitioning.
+
+- `producer_kafka_bench`, 5M × 10B: 5.08M messages/sec, 48.4 MiB/sec.
+- `producer_kafka_bench`, 100K × 10 KiB: 133.9K messages/sec, 1.28 GiB/sec.
+
+Same broker, same relaxed producer props through Apache Kafka's Java native
+`kafka-producer-perf-test.sh`:
+
+```bash
+kafka-producer-perf-test.sh \
+  --topic kacrab-bench \
+  --num-records 5000000 \
+  --record-size 10 \
+  --throughput -1 \
+  --producer-props \
+  bootstrap.servers=127.0.0.1:9092 \
+  acks=1 \
+  enable.idempotence=false \
+  compression.type=none \
+  batch.size=16384 \
+  linger.ms=5 \
+  max.in.flight.requests.per.connection=2
+```
+
+- Java producer perf, 5M × 10B: 3.30M records/sec, 31.43 MB/sec.
+- Java producer perf, 100K × 10 KiB: 35.4K records/sec, 345.69 MB/sec.
+
+For the Java 100K × 10 KiB case, keep the same producer props and change
+`--num-records 100000 --record-size 10240`.
+
+These Java numbers are a same-props throughput comparison, not Java client
+defaults (`acks=all`, idempotence enabled, and `max.in.flight=5`).
 
 Measured with Criterion `--sample-size 10` against local mock brokers:
 

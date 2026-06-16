@@ -20,7 +20,7 @@ use kacrab_protocol::{
 use tokio::sync::Mutex;
 
 use super::{
-    accumulator::{ReadyBatch, RecordAccumulator},
+    accumulator::{ReadyBatch, RecordAccumulator, estimate_record_bytes},
     batch::encode_record_batch_with_producer_state,
     config::{
         DEFAULT_DELIVERY_TIMEOUT, DEFAULT_TIMEOUT_MS, DEFAULT_TRANSACTION_TIMEOUT_MS,
@@ -29,10 +29,10 @@ use super::{
     error::{ProducerError, Result},
     record::ProduceReceipt,
     response::produce_receipts,
-    routing::{ProduceRoute, partition_for_record, route},
+    routing::{ProduceRoute, murmur2_java, route},
     transaction::{ProducerBatchState, ProducerIdentity},
 };
-use crate::wire::{BrokerEndpoint, WireClient};
+use crate::wire::{BrokerEndpoint, TopicMetadata, WireClient};
 
 /// Dispatcher-only fallback for tests/manual construction. Public producer
 /// configs still default to `acks=all`; this keeps `ProducerDispatcher::new`
@@ -49,6 +49,7 @@ pub struct ProducerDispatcher {
     delivery_timeout: Duration,
     compression: ProducerCompression,
     partitioner_ignore_keys: bool,
+    partition_sticky_batch_size: usize,
     idempotence: ProducerIdempotenceConfig,
     producer_state: Arc<Mutex<ProducerIdempotenceState>>,
     partitioner_state: Arc<Mutex<ProducerPartitionerState>>,
@@ -69,6 +70,7 @@ impl ProducerDispatcher {
                 level: None,
             },
             partitioner_ignore_keys: false,
+            partition_sticky_batch_size: super::AccumulatorConfig::default().batch_size,
             idempotence: ProducerIdempotenceConfig {
                 enabled: false,
                 transactional_id: None,
@@ -91,6 +93,7 @@ impl ProducerDispatcher {
             delivery_timeout: config.delivery_timeout,
             compression: config.compression,
             partitioner_ignore_keys: config.partitioner_ignore_keys,
+            partition_sticky_batch_size: config.accumulator.batch_size,
             idempotence: config.idempotence,
             producer_state: Arc::new(Mutex::new(ProducerIdempotenceState::default())),
             partitioner_state: Arc::new(Mutex::new(ProducerPartitionerState::default())),
@@ -112,30 +115,57 @@ impl ProducerDispatcher {
     }
 
     /// Assign a concrete partition to an unassigned record using current metadata.
-    #[expect(
-        clippy::significant_drop_tightening,
-        reason = "Partition selection must mutate round-robin state while holding the partitioner \
-                  lock."
-    )]
     pub async fn assign_partition(&self, record: &mut super::ProducerRecord) -> Result<()> {
         if record.has_assigned_partition() {
             return Ok(());
         }
         let metadata = self
             .wire
-            .metadata_for_topics([record.topic.as_str()])
+            .metadata_for_topics([record.topic.as_ref()])
             .await?;
         let partition = {
             let mut state = self.partitioner_state.lock().await;
-            let next_round_robin = state.next_for_topic(&record.topic);
-            partition_for_record(
+            state.partition_for_record(
                 &metadata,
                 record,
                 self.partitioner_ignore_keys,
-                next_round_robin,
+                self.partition_sticky_batch_size,
             )?
         };
         record.partition = partition;
+        Ok(())
+    }
+
+    /// Assign concrete partitions to a batch using one metadata snapshot.
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "Batch partition selection mutates sticky state while holding the partitioner \
+                  lock."
+    )]
+    pub async fn assign_partitions(&self, records: &mut [super::ProducerRecord]) -> Result<()> {
+        let topics = unique_unassigned_record_topics(records);
+        if topics.is_empty() {
+            return Ok(());
+        }
+        let metadata = self
+            .wire
+            .metadata_for_topics(topics.iter().map(String::as_str))
+            .await?;
+        let mut state = self.partitioner_state.lock().await;
+        for topic in topics {
+            let topic_metadata = metadata
+                .topic(&topic)
+                .ok_or_else(|| ProducerError::UnknownTopic(topic.clone()))?;
+            state.assign_topic_partitions(
+                TopicPartitionAssignment {
+                    topic: &topic,
+                    topic_metadata,
+                    ignore_keys: self.partitioner_ignore_keys,
+                    sticky_batch_size: self.partition_sticky_batch_size,
+                },
+                records,
+            )?;
+        }
         Ok(())
     }
 
@@ -419,11 +449,6 @@ impl ProducerDispatcher {
         Ok(receipts)
     }
 
-    #[expect(
-        clippy::significant_drop_tightening,
-        reason = "Partition selection must mutate round-robin state while holding the partitioner \
-                  lock."
-    )]
     async fn route_for_batch(
         &self,
         metadata: &crate::wire::ClusterMetadata,
@@ -436,12 +461,11 @@ impl ProducerDispatcher {
         let mut record = first_record.clone();
         let partition = {
             let mut state = self.partitioner_state.lock().await;
-            let next_round_robin = state.next_for_topic(&record.topic);
-            partition_for_record(
+            state.partition_for_record(
                 metadata,
                 &record,
                 self.partitioner_ignore_keys,
-                next_round_robin,
+                self.partition_sticky_batch_size,
             )?
         };
         record.partition = partition;
@@ -723,12 +747,206 @@ struct ProducerIdempotenceState {
 #[derive(Debug, Default)]
 struct ProducerPartitionerState {
     next_by_topic: AHashMap<String, i32>,
+    sticky_by_topic: AHashMap<String, StickyPartitionState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StickyPartitionState {
+    partition: i32,
+    bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TopicPartitionAssignment<'a> {
+    topic: &'a str,
+    topic_metadata: &'a TopicMetadata,
+    ignore_keys: bool,
+    sticky_batch_size: usize,
 }
 
 impl ProducerPartitionerState {
     fn next_for_topic(&mut self, topic: &str) -> &mut i32 {
         self.next_by_topic.entry(topic.to_owned()).or_insert(0)
     }
+
+    fn partition_for_record(
+        &mut self,
+        metadata: &crate::wire::ClusterMetadata,
+        record: &super::ProducerRecord,
+        ignore_keys: bool,
+        sticky_batch_size: usize,
+    ) -> Result<i32> {
+        if record.has_assigned_partition() {
+            return Ok(record.partition);
+        }
+        if !ignore_keys && record.key.is_some() {
+            let topic_metadata = Self::topic_metadata(metadata, &record.topic, record.partition)?;
+            return key_partition(&record.topic, record.partition, topic_metadata, record);
+        }
+        let topic_metadata = Self::topic_metadata(metadata, &record.topic, record.partition)?;
+        self.sticky_partition(&record.topic, topic_metadata, record, sticky_batch_size)
+    }
+
+    fn assign_topic_partitions(
+        &mut self,
+        assignment: TopicPartitionAssignment<'_>,
+        records: &mut [super::ProducerRecord],
+    ) -> Result<()> {
+        let TopicPartitionAssignment {
+            topic,
+            topic_metadata,
+            ignore_keys,
+            sticky_batch_size,
+        } = assignment;
+        ensure_partitions(topic, super::record::UNASSIGNED_PARTITION, topic_metadata)?;
+        let existing_sticky = self.valid_sticky(topic, topic_metadata);
+        let mut sticky = match existing_sticky {
+            Some(sticky) => sticky,
+            None => StickyPartitionState {
+                partition: self.next_partition(topic, topic_metadata)?,
+                bytes: 0,
+            },
+        };
+        let mut sticky_used = false;
+
+        for record in records {
+            if record.has_assigned_partition() || record.topic.as_ref() != topic {
+                continue;
+            }
+            if !ignore_keys && record.key.is_some() {
+                record.partition = key_partition(topic, record.partition, topic_metadata, record)?;
+                continue;
+            }
+
+            sticky_used = true;
+            record.partition = sticky.partition;
+            sticky.bytes = sticky.bytes.saturating_add(estimate_record_bytes(record));
+            if sticky.bytes >= sticky_batch_size.max(1) {
+                sticky = StickyPartitionState {
+                    partition: self.next_partition(topic, topic_metadata)?,
+                    bytes: 0,
+                };
+            }
+        }
+
+        if sticky_used {
+            let _previous = self.sticky_by_topic.insert(topic.to_owned(), sticky);
+        }
+        Ok(())
+    }
+
+    fn sticky_partition(
+        &mut self,
+        topic: &str,
+        topic_metadata: &TopicMetadata,
+        record: &super::ProducerRecord,
+        sticky_batch_size: usize,
+    ) -> Result<i32> {
+        ensure_partitions(topic, record.partition, topic_metadata)?;
+
+        let existing_sticky = self.valid_sticky(topic, topic_metadata);
+        let mut sticky = match existing_sticky {
+            Some(sticky) => sticky,
+            None => StickyPartitionState {
+                partition: self.next_partition(topic, topic_metadata)?,
+                bytes: 0,
+            },
+        };
+
+        let partition = sticky.partition;
+        sticky.bytes = sticky.bytes.saturating_add(estimate_record_bytes(record));
+        if sticky.bytes >= sticky_batch_size.max(1) {
+            sticky = StickyPartitionState {
+                partition: self.next_partition(topic, topic_metadata)?,
+                bytes: 0,
+            };
+        }
+        let _previous = self.sticky_by_topic.insert(topic.to_owned(), sticky);
+        Ok(partition)
+    }
+
+    fn next_partition(&mut self, topic: &str, topic_metadata: &TopicMetadata) -> Result<i32> {
+        ensure_partitions(topic, super::record::UNASSIGNED_PARTITION, topic_metadata)?;
+        let partition_count = topic_metadata.partitions.len();
+        let next_round_robin = self.next_for_topic(topic);
+        let next = usize::try_from(*next_round_robin).unwrap_or(0);
+        *next_round_robin = next_round_robin
+            .checked_add(1)
+            .filter(|value| *value >= 0)
+            .unwrap_or(0);
+        let offset = next.checked_rem(partition_count).unwrap_or(0);
+        topic_metadata
+            .partitions
+            .get(offset)
+            .map(|partition| partition.partition_index)
+            .ok_or_else(|| ProducerError::UnknownPartition {
+                topic: topic.to_owned(),
+                partition: super::record::UNASSIGNED_PARTITION,
+            })
+    }
+
+    fn topic_metadata<'a>(
+        metadata: &'a crate::wire::ClusterMetadata,
+        topic: &str,
+        partition: i32,
+    ) -> Result<&'a TopicMetadata> {
+        metadata
+            .topic(topic)
+            .ok_or_else(|| ProducerError::UnknownTopic(topic.to_owned()))
+            .and_then(|topic_metadata| {
+                ensure_partitions(topic, partition, topic_metadata)?;
+                Ok(topic_metadata)
+            })
+    }
+
+    fn valid_sticky(
+        &self,
+        topic: &str,
+        topic_metadata: &TopicMetadata,
+    ) -> Option<StickyPartitionState> {
+        self.sticky_by_topic.get(topic).copied().filter(|sticky| {
+            topic_metadata
+                .partitions
+                .iter()
+                .any(|partition| partition.partition_index == sticky.partition)
+        })
+    }
+}
+
+fn ensure_partitions(topic: &str, partition: i32, topic_metadata: &TopicMetadata) -> Result<()> {
+    if topic_metadata.partitions.is_empty() {
+        return Err(ProducerError::UnknownPartition {
+            topic: topic.to_owned(),
+            partition,
+        });
+    }
+    Ok(())
+}
+
+fn key_partition(
+    topic: &str,
+    partition: i32,
+    topic_metadata: &TopicMetadata,
+    record: &super::ProducerRecord,
+) -> Result<i32> {
+    ensure_partitions(topic, partition, topic_metadata)?;
+    let Some(key) = record.key.as_ref() else {
+        return Err(ProducerError::UnknownPartition {
+            topic: topic.to_owned(),
+            partition,
+        });
+    };
+    let partition_count = topic_metadata.partitions.len();
+    let hash = usize::try_from(murmur2_java(key.as_ref()) & 0x7fff_ffff).unwrap_or(0);
+    let offset = hash.checked_rem(partition_count).unwrap_or(0);
+    topic_metadata
+        .partitions
+        .get(offset)
+        .map(|partition_metadata| partition_metadata.partition_index)
+        .ok_or_else(|| ProducerError::UnknownPartition {
+            topic: topic.to_owned(),
+            partition,
+        })
 }
 
 impl ProducerIdempotenceState {
@@ -855,6 +1073,19 @@ fn unique_topics(batches: &[ReadyBatch]) -> Vec<String> {
     topics
 }
 
+fn unique_unassigned_record_topics(records: &[super::ProducerRecord]) -> Vec<String> {
+    let mut topics = Vec::new();
+    for record in records {
+        if record.has_assigned_partition()
+            || topics.iter().any(|topic| topic == record.topic.as_ref())
+        {
+            continue;
+        }
+        topics.push(record.topic.to_string());
+    }
+    topics
+}
+
 fn complete_deliveries(batches: &mut [ReadyBatch], receipts: &[ProduceReceipt]) {
     for batch in batches {
         let Some(sender) = batch.delivery.take() else {
@@ -942,15 +1173,19 @@ mod tests {
 
     use super::{
         BrokerProduceOptions, BrokerProduceRequest, DispatchError, ProducerDispatcher,
-        ProducerIdempotenceState, TopicPartitionKey, choose_coordinator_addr, complete_deliveries,
-        init_producer_id_version, is_leadership_error, unique_topics,
+        ProducerIdempotenceState, ProducerPartitionerState, TopicPartitionKey,
+        choose_coordinator_addr, complete_deliveries, init_producer_id_version,
+        is_leadership_error, unique_topics, unique_unassigned_record_topics,
     };
     use crate::{
         producer::{
             AccumulatorConfig, ProduceReceipt, ProducerError, ProducerIdempotenceConfig,
             ProducerIdentity, ProducerRecord, RecordAccumulator,
         },
-        wire::{BrokerEndpoint, ConnectionConfig, WireClient},
+        wire::{
+            BrokerEndpoint, BrokerMetadata, ClusterMetadata, ConnectionConfig, PartitionMetadata,
+            TopicMetadata, WireClient,
+        },
     };
 
     fn test_wire() -> WireClient {
@@ -1009,6 +1244,114 @@ mod tests {
             }],
             ..AddPartitionsToTxnResponseData::default()
         }
+    }
+
+    fn metadata_with_partitions(topic: &str, partitions: usize) -> ClusterMetadata {
+        let mut partition_metadata = Vec::with_capacity(partitions);
+        for partition in 0..partitions {
+            let partition_index = i32::try_from(partition).expect("test partition fits i32");
+            partition_metadata.push(PartitionMetadata {
+                partition_index,
+                leader_id: 7,
+                leader_epoch: 1,
+                replica_nodes: vec![7],
+                isr_nodes: vec![7],
+                offline_replicas: Vec::new(),
+            });
+        }
+        ClusterMetadata {
+            cluster_id: Some("cluster-a".to_owned()),
+            controller_id: 7,
+            brokers: vec![BrokerMetadata {
+                node_id: 7,
+                host: "localhost".to_owned(),
+                port: 9092,
+                rack: None,
+            }],
+            topics: vec![TopicMetadata {
+                name: topic.to_owned(),
+                topic_id: KafkaUuid::ZERO,
+                partitions: partition_metadata,
+            }],
+        }
+    }
+
+    #[test]
+    fn default_partitioner_sticks_unkeyed_records_until_batch_budget() {
+        let metadata = metadata_with_partitions("orders", 3);
+        let mut state = ProducerPartitionerState::default();
+        let record = ProducerRecord::unassigned("orders").value(Bytes::from_static(b"1234567890"));
+
+        let partitions: Vec<_> = (0..5)
+            .map(|_| {
+                state
+                    .partition_for_record(&metadata, &record, false, 256)
+                    .expect("partition")
+            })
+            .collect();
+
+        assert_eq!(partitions, vec![0, 0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn default_partitioner_hashes_keyed_records_with_java_murmur2() {
+        let metadata = metadata_with_partitions("orders", 3);
+        let mut state = ProducerPartitionerState::default();
+        let record = ProducerRecord::unassigned("orders")
+            .key(Bytes::from_static(b"customer-42"))
+            .value(Bytes::from_static(b"1234567890"));
+        let mut next_round_robin = 0;
+        let expected = super::super::routing::partition_for_record(
+            &metadata,
+            &record,
+            false,
+            &mut next_round_robin,
+        )
+        .expect("keyed partition");
+
+        for _ in 0..5 {
+            assert_eq!(
+                state
+                    .partition_for_record(&metadata, &record, false, 256)
+                    .expect("partition"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn ignore_keys_uses_sticky_default_partitioner() {
+        let metadata = metadata_with_partitions("orders", 3);
+        let mut state = ProducerPartitionerState::default();
+        let record = ProducerRecord::unassigned("orders")
+            .key(Bytes::from_static(b"customer-42"))
+            .value(Bytes::from_static(b"1234567890"));
+
+        let partitions: Vec<_> = (0..5)
+            .map(|_| {
+                state
+                    .partition_for_record(&metadata, &record, true, 256)
+                    .expect("partition")
+            })
+            .collect();
+
+        assert_eq!(partitions, vec![0, 0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn unique_unassigned_record_topics_skips_assigned_records_and_duplicates() {
+        let records = [
+            ProducerRecord::new("orders", 0),
+            ProducerRecord::unassigned("orders"),
+            ProducerRecord::unassigned("payments"),
+            ProducerRecord::unassigned("orders"),
+            ProducerRecord::new("payments", 1),
+        ];
+
+        assert_eq!(
+            unique_unassigned_record_topics(&records),
+            vec!["orders".to_owned(), "payments".to_owned()]
+        );
     }
 
     #[tokio::test]

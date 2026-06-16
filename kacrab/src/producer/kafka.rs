@@ -95,7 +95,9 @@ impl KafkaProducer {
     /// Returns producer backpressure or errors from pumping ready batches.
     pub async fn send(&mut self, record: ProducerRecord) -> Result<Delivery> {
         let mut record = record;
-        self.dispatcher.assign_partition(&mut record).await?;
+        if !record.has_assigned_partition() {
+            self.dispatcher.assign_partition(&mut record).await?;
+        }
         let delivery = self.append_for_delivery_with_max_block(record).await?;
         self.poll().await.map(|()| delivery)
     }
@@ -109,13 +111,23 @@ impl KafkaProducer {
     where
         I: IntoIterator<Item = ProducerRecord>,
     {
-        let records = records.into_iter();
+        let mut records = records.into_iter();
         let (lower_bound, _upper_bound) = records.size_hint();
         let mut deliveries = Vec::with_capacity(lower_bound);
-        for record in records {
-            let mut record = record;
-            self.dispatcher.assign_partition(&mut record).await?;
-            deliveries.push(self.append_for_delivery_with_max_block(record).await?);
+        while let Some(record) = records.next() {
+            if record.has_assigned_partition() {
+                deliveries.push(self.append_for_delivery_with_max_block(record).await?);
+                continue;
+            }
+
+            let mut pending = Vec::with_capacity(lower_bound.saturating_add(1));
+            pending.push(record);
+            pending.extend(records);
+            self.dispatcher.assign_partitions(&mut pending).await?;
+            for record in pending {
+                deliveries.push(self.append_for_delivery_with_max_block(record).await?);
+            }
+            break;
         }
         self.poll().await.map(|()| deliveries)
     }
@@ -133,10 +145,22 @@ impl KafkaProducer {
         I: IntoIterator<Item = ProducerRecord>,
     {
         let now = std::time::Instant::now();
-        for record in records {
-            let mut record = record;
-            self.dispatcher.assign_partition(&mut record).await?;
-            self.append_untracked_with_max_block(record, now).await?;
+        let mut records = records.into_iter();
+        let (lower_bound, _upper_bound) = records.size_hint();
+        while let Some(record) = records.next() {
+            if record.has_assigned_partition() {
+                self.append_untracked_with_max_block(record, now).await?;
+                continue;
+            }
+
+            let mut pending = Vec::with_capacity(lower_bound.saturating_add(1));
+            pending.push(record);
+            pending.extend(records);
+            self.dispatcher.assign_partitions(&mut pending).await?;
+            for record in pending {
+                self.append_untracked_with_max_block(record, now).await?;
+            }
+            break;
         }
         self.poll().await
     }

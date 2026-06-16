@@ -14,6 +14,7 @@
 use std::{
     env,
     net::SocketAddr,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -22,7 +23,7 @@ use kacrab::producer::{KafkaProducer, ProducerRecord};
 use tokio::runtime::Builder;
 
 const PARTITIONS: usize = 3;
-const PIPELINED_IN_FLIGHT: usize = 8;
+const DEFAULT_PIPELINED_IN_FLIGHT: usize = 8;
 
 fn main() {
     let runtime = Builder::new_current_thread()
@@ -34,12 +35,28 @@ fn main() {
         let bootstrap = bootstrap_addr();
         let topic = topic();
         let scenarios = scenarios();
+        let partitions = partitions();
+        let in_flight = in_flight();
+        let acks = acks();
+        let batch_size = batch_size();
+        let partition_mode = partition_mode();
         println!(
-            "real Kafka benchmark: bootstrap={bootstrap}, topic={topic}, partitions={PARTITIONS}, \
-             in_flight={PIPELINED_IN_FLIGHT}"
+            "real Kafka benchmark: bootstrap={bootstrap}, topic={topic}, partitions={partitions}, \
+             in_flight={in_flight}, acks={acks}, batch_size={batch_size}, \
+             partition_mode={partition_mode}"
         );
         for scenario in scenarios {
-            run_scenario(bootstrap, &topic, scenario).await;
+            run_scenario(BenchmarkRun {
+                bootstrap,
+                topic: &topic,
+                scenario,
+                partitions,
+                in_flight,
+                acks: &acks,
+                batch_size,
+                partition_mode,
+            })
+            .await;
         }
     });
 }
@@ -52,24 +69,36 @@ struct Scenario {
     batch_messages: usize,
 }
 
-async fn run_scenario(bootstrap: SocketAddr, topic: &str, scenario: Scenario) {
+#[derive(Debug, Clone, Copy)]
+struct BenchmarkRun<'a> {
+    bootstrap: SocketAddr,
+    scenario: Scenario,
+    topic: &'a str,
+    partitions: usize,
+    in_flight: usize,
+    acks: &'a str,
+    batch_size: usize,
+    partition_mode: PartitionMode,
+}
+
+async fn run_scenario(run: BenchmarkRun<'_>) {
     let mut producer = KafkaProducer::builder()
-        .set("bootstrap.servers", bootstrap.to_string())
+        .set("bootstrap.servers", run.bootstrap.to_string())
         .set("client.id", "kacrab-producer-kafka-bench")
         .set("enable.idempotence", "false")
-        .set("acks", "1")
+        .set("acks", run.acks)
         .set("compression.type", "none")
         .set("retries", "0")
         .set("request.timeout.ms", "30000")
         .set("delivery.timeout.ms", "120000")
-        .set("batch.size", "1")
+        .set("batch.size", run.batch_size.to_string())
         .set(
             "buffer.memory",
-            batch_buffer_memory(scenario.batch_messages, scenario.value_size).to_string(),
+            batch_buffer_memory(run.scenario.batch_messages, run.scenario.value_size).to_string(),
         )
         .set(
             "max.in.flight.requests.per.connection",
-            PIPELINED_IN_FLIGHT.to_string(),
+            run.in_flight.to_string(),
         )
         .set(
             "socket.read.buffer.capacity.bytes",
@@ -77,25 +106,32 @@ async fn run_scenario(bootstrap: SocketAddr, topic: &str, scenario: Scenario) {
         )
         .set(
             "broker.queue.capacity",
-            PIPELINED_IN_FLIGHT.saturating_mul(2).to_string(),
+            run.in_flight.saturating_mul(2).to_string(),
         )
         .set("buffer.pool.capacity", "128")
         .build()
         .await
         .expect("benchmark producer config should build");
-    let value = Bytes::from(vec![b'x'; scenario.value_size]);
-    warm_up_producer(&mut producer, topic, value.clone()).await;
+    let value = Bytes::from(vec![b'x'; run.scenario.value_size]);
+    warm_up_producer(&mut producer, run.topic, value.clone()).await;
+    let topic = Arc::<str>::from(run.topic);
     let started = Instant::now();
     let mut sent = 0usize;
     let mut produce_requests = 0usize;
-    while sent < scenario.messages {
-        let batch_messages = scenario
+    while sent < run.scenario.messages {
+        let batch_messages = run
+            .scenario
             .batch_messages
-            .min(scenario.messages.saturating_sub(sent));
+            .min(run.scenario.messages.saturating_sub(sent));
         producer
             .send_batch_untracked((0..batch_messages).map(|index| {
-                let partition = i32::try_from((sent + index) % PARTITIONS).unwrap_or_default();
-                ProducerRecord::new(topic.to_owned(), partition).value(value.clone())
+                benchmark_record(
+                    Arc::clone(&topic),
+                    sent + index,
+                    run.partitions,
+                    run.partition_mode,
+                )
+                .value(value.clone())
             }))
             .await
             .expect("benchmark send should fit and dispatch");
@@ -106,7 +142,7 @@ async fn run_scenario(bootstrap: SocketAddr, topic: &str, scenario: Scenario) {
         .flush()
         .await
         .expect("benchmark flush should succeed");
-    print_result(scenario, started.elapsed(), produce_requests);
+    print_result(run.scenario, started.elapsed(), produce_requests);
 }
 
 async fn warm_up_producer(producer: &mut KafkaProducer, topic: &str, value: Bytes) {
@@ -120,7 +156,45 @@ async fn warm_up_producer(producer: &mut KafkaProducer, topic: &str, value: Byte
         .expect("benchmark warmup flush should succeed");
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PartitionMode {
+    Unassigned,
+    ManualRoundRobin,
+}
+
+impl std::fmt::Display for PartitionMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unassigned => formatter.write_str("unassigned"),
+            Self::ManualRoundRobin => formatter.write_str("manual-round-robin"),
+        }
+    }
+}
+
+fn benchmark_record(
+    topic: Arc<str>,
+    index: usize,
+    partitions: usize,
+    partition_mode: PartitionMode,
+) -> ProducerRecord {
+    match partition_mode {
+        PartitionMode::Unassigned => ProducerRecord::unassigned(topic),
+        PartitionMode::ManualRoundRobin => {
+            let partition = i32::try_from(index % partitions).unwrap_or_default();
+            ProducerRecord::new(topic, partition)
+        },
+    }
+}
+
 fn scenarios() -> Vec<Scenario> {
+    if env::var("KACRAB_ONLY_10B").ok().as_deref() == Some("1") {
+        return vec![Scenario {
+            name: "5,000,000 messages x 10 bytes",
+            messages: 5_000_000,
+            value_size: 10,
+            batch_messages: env_usize("KACRAB_BATCH_MESSAGES_10B").unwrap_or(16_384),
+        }];
+    }
     if env::var("KACRAB_BENCH_SMOKE").ok().as_deref() == Some("1") {
         return vec![
             Scenario {
@@ -142,7 +216,7 @@ fn scenarios() -> Vec<Scenario> {
             name: "5,000,000 messages x 10 bytes",
             messages: 5_000_000,
             value_size: 10,
-            batch_messages: 16_384,
+            batch_messages: env_usize("KACRAB_BATCH_MESSAGES_10B").unwrap_or(16_384),
         },
         Scenario {
             name: "100,000 messages x 10 KiB",
@@ -151,6 +225,38 @@ fn scenarios() -> Vec<Scenario> {
             batch_messages: 96,
         },
     ]
+}
+
+fn partitions() -> usize {
+    env_usize("KACRAB_PARTITIONS").unwrap_or(PARTITIONS)
+}
+
+fn in_flight() -> usize {
+    env_usize("KACRAB_IN_FLIGHT").unwrap_or(DEFAULT_PIPELINED_IN_FLIGHT)
+}
+
+fn acks() -> String {
+    env::var("KACRAB_ACKS").unwrap_or_else(|_error| "1".to_owned())
+}
+
+fn batch_size() -> usize {
+    env_usize("KACRAB_BATCH_SIZE").unwrap_or(16_384)
+}
+
+fn partition_mode() -> PartitionMode {
+    match env::var("KACRAB_PARTITION_MODE")
+        .unwrap_or_else(|_error| "unassigned".to_owned())
+        .as_str()
+    {
+        "manual" | "manual-round-robin" | "round-robin" => PartitionMode::ManualRoundRobin,
+        _ => PartitionMode::Unassigned,
+    }
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
 }
 
 fn bootstrap_addr() -> SocketAddr {

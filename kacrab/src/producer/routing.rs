@@ -18,34 +18,35 @@ pub(crate) struct ProduceRoute {
 
 pub(crate) fn route(metadata: &ClusterMetadata, record: &ProducerRecord) -> Result<ProduceRoute> {
     let topic_metadata = metadata
-        .topic(&record.topic)
-        .ok_or_else(|| ProducerError::UnknownTopic(record.topic.clone()))?;
+        .topic(record.topic.as_ref())
+        .ok_or_else(|| ProducerError::UnknownTopic(record.topic.to_string()))?;
     let partition_metadata = topic_metadata
         .partitions
         .iter()
         .find(|partition_metadata| partition_metadata.partition_index == record.partition)
         .ok_or_else(|| ProducerError::UnknownPartition {
-            topic: record.topic.clone(),
+            topic: record.topic.to_string(),
             partition: record.partition,
         })?;
     if metadata
-        .leader_for(&record.topic, record.partition)
+        .leader_for(record.topic.as_ref(), record.partition)
         .is_none()
     {
         return Err(ProducerError::LeaderNotFound {
-            topic: record.topic.clone(),
+            topic: record.topic.to_string(),
             partition: record.partition,
             leader_id: partition_metadata.leader_id,
         });
     }
     Ok(ProduceRoute {
-        topic: record.topic.clone(),
+        topic: record.topic.to_string(),
         partition: record.partition,
         topic_id: topic_metadata.topic_id,
         leader_id: partition_metadata.leader_id,
     })
 }
 
+#[cfg(test)]
 pub(crate) fn partition_for_record(
     metadata: &ClusterMetadata,
     record: &ProducerRecord,
@@ -56,12 +57,12 @@ pub(crate) fn partition_for_record(
         return Ok(record.partition);
     }
     let topic_metadata = metadata
-        .topic(&record.topic)
-        .ok_or_else(|| ProducerError::UnknownTopic(record.topic.clone()))?;
+        .topic(record.topic.as_ref())
+        .ok_or_else(|| ProducerError::UnknownTopic(record.topic.to_string()))?;
     let partition_count = topic_metadata.partitions.len();
     if partition_count == 0 {
         return Err(ProducerError::UnknownPartition {
-            topic: record.topic.clone(),
+            topic: record.topic.to_string(),
             partition: record.partition,
         });
     }
@@ -81,11 +82,12 @@ pub(crate) fn partition_for_record(
         .get(offset)
         .map(|partition| partition.partition_index)
         .ok_or_else(|| ProducerError::UnknownPartition {
-            topic: record.topic.clone(),
+            topic: record.topic.to_string(),
             partition: record.partition,
         })
 }
 
+#[cfg(test)]
 fn next_round_robin_offset(next_round_robin: &mut i32, partition_count: usize) -> usize {
     let next = usize::try_from(*next_round_robin).unwrap_or(0);
     *next_round_robin = next_round_robin
@@ -95,7 +97,7 @@ fn next_round_robin_offset(next_round_robin: &mut i32, partition_count: usize) -
     next.checked_rem(partition_count).unwrap_or(0)
 }
 
-fn murmur2_java(input: &[u8]) -> u32 {
+pub(crate) fn murmur2_java(input: &[u8]) -> u32 {
     const SEED: u32 = 0x9747_b28c;
     const M: u32 = 0x5bd1_e995;
     const R: u32 = 24;

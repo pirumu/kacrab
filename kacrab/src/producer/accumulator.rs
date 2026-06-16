@@ -1,6 +1,9 @@
 //! Per topic-partition record accumulation for producer batching.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use ahash::AHashMap;
 
@@ -97,7 +100,7 @@ pub struct RecordAccumulator {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TopicPartition {
-    topic: String,
+    topic: Arc<str>,
     partition: i32,
 }
 
@@ -153,7 +156,7 @@ impl RecordAccumulator {
         }
 
         let key = TopicPartition {
-            topic: record.topic.clone(),
+            topic: Arc::<str>::clone(&record.topic),
             partition: record.partition,
         };
         let queue = self
@@ -187,7 +190,7 @@ impl RecordAccumulator {
         }
 
         let key = TopicPartition {
-            topic: record.topic.clone(),
+            topic: Arc::<str>::clone(&record.topic),
             partition: record.partition,
         };
         let queue = self
@@ -225,7 +228,7 @@ impl RecordAccumulator {
             if let Some(queue) = self.partitions.remove(&key) {
                 self.buffered_bytes = self.buffered_bytes.saturating_sub(queue.bytes);
                 ready.push(ReadyBatch {
-                    topic: key.topic,
+                    topic: key.topic.to_string(),
                     partition: key.partition,
                     records: queue.records,
                     delivery: queue.delivery,
@@ -244,7 +247,7 @@ impl RecordAccumulator {
         let mut batches = Vec::with_capacity(partitions.len());
         for (key, queue) in partitions {
             batches.push(ReadyBatch {
-                topic: key.topic,
+                topic: key.topic.to_string(),
                 partition: key.partition,
                 records: queue.records,
                 delivery: queue.delivery,
@@ -261,7 +264,7 @@ impl RecordAccumulator {
     pub fn requeue_front(&mut self, batches: Vec<ReadyBatch>) {
         for batch in batches {
             let key = TopicPartition {
-                topic: batch.topic,
+                topic: batch.topic.into(),
                 partition: batch.partition,
             };
             let entry = self
@@ -301,7 +304,7 @@ impl RecordAccumulator {
     }
 }
 
-fn estimate_record_bytes(record: &ProducerRecord) -> usize {
+pub(crate) fn estimate_record_bytes(record: &ProducerRecord) -> usize {
     let key_bytes = record.key.as_ref().map_or(0, bytes::Bytes::len);
     let value_bytes = record.value.as_ref().map_or(0, bytes::Bytes::len);
     ESTIMATED_RECORD_OVERHEAD_BYTES
