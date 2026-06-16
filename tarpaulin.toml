@@ -1,0 +1,13 @@
+[coverage]
+# Keep coverage focused on maintained source. Generated Kafka protocol/config
+# artifacts are validated by generator tests and Java oracle fixtures instead.
+exclude-files = [
+    "benches/benches/*",
+    "benches/src/bin/*",
+    "kacrab-codegen/src/main.rs",
+    "kacrab-macros/src/lib.rs",
+    "kacrab/src/config/catalog.rs",
+    "kacrab-protocol/src/generated.rs",
+    "kacrab-protocol/src/generated/*",
+    "kacrab-protocol/tests/support/generated_test_utils/*",
+]

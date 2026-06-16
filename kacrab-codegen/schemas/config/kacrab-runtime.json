@@ -1,0 +1,88 @@
+{
+  "source_ref": "kacrab-runtime@0.0.1",
+  "configs": [
+    {
+      "key": "socket.tcp.nodelay",
+      "rust_field": "socket_tcp_nodelay",
+      "type": "boolean",
+      "default": {
+        "kind": "boolean",
+        "value": true
+      },
+      "clients": ["producer", "consumer", "admin"],
+      "feature": "socket2",
+      "documentation": "Sets TCP_NODELAY on broker TCP connections."
+    },
+    {
+      "key": "socket.tcp.quickack",
+      "rust_field": "socket_tcp_quickack",
+      "type": "boolean",
+      "default": {
+        "kind": "null"
+      },
+      "clients": ["producer", "consumer", "admin"],
+      "platforms": ["linux", "android", "fuchsia", "cygwin"],
+      "feature": "socket2",
+      "documentation": "Sets TCP_QUICKACK after a broker TCP connection is established."
+    },
+    {
+      "key": "socket.tcp.notsent.lowat.bytes",
+      "rust_field": "socket_tcp_notsent_lowat_bytes",
+      "type": "int",
+      "default": {
+        "kind": "null"
+      },
+      "clients": ["producer", "consumer", "admin"],
+      "platforms": ["linux", "android"],
+      "feature": "socket2",
+      "documentation": "Sets TCP_NOTSENT_LOWAT on supported broker TCP sockets."
+    },
+    {
+      "key": "socket.tcp.user.timeout.ms",
+      "rust_field": "socket_tcp_user_timeout_ms",
+      "type": "long",
+      "default": {
+        "kind": "null"
+      },
+      "clients": ["producer", "consumer", "admin"],
+      "platforms": ["linux", "android", "fuchsia", "cygwin"],
+      "feature": "socket2",
+      "documentation": "Sets TCP_USER_TIMEOUT on supported broker TCP sockets."
+    },
+    {
+      "key": "socket.tcp.congestion",
+      "rust_field": "socket_tcp_congestion",
+      "type": "string",
+      "default": {
+        "kind": "null"
+      },
+      "clients": ["producer", "consumer", "admin"],
+      "platforms": ["linux", "freebsd"],
+      "feature": "socket2",
+      "documentation": "Sets the TCP congestion-control algorithm on supported broker TCP sockets."
+    },
+    {
+      "key": "socket.reuse.address",
+      "rust_field": "socket_reuse_address",
+      "type": "boolean",
+      "default": {
+        "kind": "boolean",
+        "value": true
+      },
+      "clients": ["producer", "consumer", "admin"],
+      "feature": "socket2",
+      "documentation": "Sets SO_REUSEADDR before connecting broker TCP sockets."
+    },
+    {
+      "key": "socket.read.buffer.capacity.bytes",
+      "rust_field": "socket_read_buffer_capacity_bytes",
+      "type": "int",
+      "default": {
+        "kind": "null"
+      },
+      "clients": ["producer", "consumer", "admin"],
+      "feature": "socket2",
+      "documentation": "Initial reusable in-process read buffer capacity for broker frame reads."
+    }
+  ]
+}

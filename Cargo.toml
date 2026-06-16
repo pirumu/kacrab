@@ -1,0 +1,227 @@
+[workspace]
+resolver = "3"
+members = [
+    "kacrab",
+    "kacrab-macros",
+    "kacrab-codegen",
+    "kacrab-protocol",
+
+    # Internal — not published.
+    "benches",
+    "examples",
+]
+
+# ============================================================================
+# Workspace-shared package metadata. Crates inherit via `field.workspace = true`.
+# ============================================================================
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+authors = ["pirumu"]
+repository = "https://github.com/pirumu/kacrab"
+publish = false
+
+# ============================================================================
+# Workspace-shared deps. Members reference via `{ workspace = true }`.
+# ============================================================================
+[workspace.dependencies]
+kacrab = { version = "0.0.1", path = "kacrab" }
+kacrab-macros = { version = "0.0.1", path = "kacrab-macros" }
+kacrab-codegen = { version = "0.0.1", path = "kacrab-codegen" }
+kacrab-protocol = { version = "0.0.1", path = "kacrab-protocol" }
+
+# Async runtime. No default features — each member opts into what it needs
+# (`rt`, `rt-multi-thread`, `net`, `io-util`, `macros`, `sync`, `time`, ...).
+tokio = { version = "1.52", default-features = false }
+
+# Zero-copy byte buffers — `Bytes` / `BytesMut` for protocol framing.
+bytes = { version = "1.11", default-features = false }
+base64 = { version = "0.22", default-features = false, features = ["std"] }
+ahash = "0.8"
+crossbeam-queue = "0.3"
+getrandom = "0.3"
+hmac = "0.12"
+jks = { version = "0.3", default-features = false, features = ["rand"] }
+jsonwebtoken = { version = "10.4", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+libgssapi = "0.11"
+p12-keystore = "0.3"
+pkcs8 = { version = "0.11", features = ["encryption", "getrandom", "pem", "std"] }
+rustls = "0.23"
+rustls-native-certs = "0.8"
+sha2 = "0.10"
+socket2 = { version = "0.6", features = ["all"] }
+tokio-rustls = "0.26"
+
+# Proc-macro toolchain — shared by `kacrab-macros` (derive macros) and
+# `kacrab-codegen` (schema → Rust source emission). Members opt into `syn`
+# features they actually need (`full` for codegen, `derive`/`parsing` for macros)
+# to keep proc-macro compile times tight.
+proc-macro2 = { version = "1", default-features = false }
+quote = { version = "1", default-features = false }
+syn = { version = "2", default-features = false }
+
+# Identifier case conversion — used by macros for derive-generated names and by
+# codegen when emitting Rust idents from Kafka schema field names.
+heck = "0.5"
+
+# Serialization — `serde` derive is generally useful workspace-wide;
+# `serde_json` is currently only the codegen schema parser but pairs naturally.
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+
+# Error type derive — broadly applicable across crates.
+thiserror = "2"
+anyhow = "1"
+
+# ============================================================================
+# Profiles — workspace-wide.
+# ============================================================================
+[profile.dev]
+opt-level = 0
+debug = "limited"
+incremental = true
+split-debuginfo = "unpacked"
+overflow-checks = true
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+debug = false
+overflow-checks = true
+
+[profile.release-debug]
+inherits = "release"
+debug = true
+strip = "none"
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+# ============================================================================
+# Lints — strict workspace-wide. Members opt in via `[lints] workspace = true`.
+# Groups use priority = -1 so individual lints (priority 0) override them.
+# ============================================================================
+
+[workspace.lints.rust]
+# Hard ban — cannot be overridden with #[allow].
+unsafe_code = "forbid"
+
+# Correctness / hygiene — block builds.
+let_underscore_drop = "deny"
+macro_use_extern_crate = "deny"
+meta_variable_misuse = "deny"
+missing_abi = "deny"
+non_ascii_idents = "deny"
+non_local_definitions = "deny"
+redundant_lifetimes = "deny"
+single_use_lifetimes = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unreachable_pub = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+unused_extern_crates = "deny"
+unused_import_braces = "deny"
+unused_lifetimes = "deny"
+unused_qualifications = "deny"
+
+# Style / docs warn (becomes deny under `-D warnings` in CI).
+elided_lifetimes_in_paths = "warn"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+unused_results = "warn"
+variant_size_differences = "warn"
+
+# Group-level (lowest priority so individual lints can override).
+keyword_idents = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+rust_2021_compatibility = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+invalid_codeblock_attributes = "deny"
+invalid_html_tags = "deny"
+invalid_rust_codeblocks = "deny"
+bare_urls = "deny"
+unescaped_backticks = "deny"
+missing_crate_level_docs = "warn"
+
+[workspace.lints.clippy]
+# Group-level (priority -1 so individual lints can override).
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+
+# Restriction lints — full group is unusable, opt in selectively.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+as_underscore = "deny"
+clone_on_ref_ptr = "deny"
+dbg_macro = "deny"
+empty_drop = "deny"
+empty_structs_with_brackets = "deny"
+exit = "deny"
+filetype_is_file = "deny"
+float_cmp_const = "deny"
+fn_to_numeric_cast_any = "deny"
+get_unwrap = "deny"
+if_then_some_else_none = "deny"
+let_underscore_must_use = "deny"
+lossy_float_literal = "deny"
+mem_forget = "deny"
+missing_assert_message = "deny"
+mixed_read_write_in_expression = "deny"
+multiple_inherent_impl = "deny"
+mutex_atomic = "deny"
+pub_without_shorthand = "deny"
+rc_buffer = "deny"
+rc_mutex = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+same_name_method = "deny"
+self_named_module_files = "allow"
+str_to_string = "deny"
+string_add = "deny"
+string_lit_chars_any = "deny"
+string_slice = "deny"
+suspicious_xor_used_as_pow = "deny"
+try_err = "deny"
+undocumented_unsafe_blocks = "deny"
+unnecessary_safety_comment = "deny"
+unnecessary_safety_doc = "deny"
+unnecessary_self_imports = "deny"
+unneeded_field_pattern = "deny"
+verbose_file_reads = "deny"
+
+# Restriction warn (allow inline overrides with reason).
+arithmetic_side_effects = "warn"
+expect_used = "warn"
+indexing_slicing = "warn"
+infinite_loop = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+unwrap_in_result = "warn"
+unwrap_used = "warn"
+
+# Pedantic / nursery exceptions — keep as allow to reduce noise.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+multiple_crate_versions = "allow"
+# Conflicts with the rust-side `unreachable_pub` lint (which already enforces
+# the same rule semantically). Keeping `pub(crate)` explicit beats relying on
+# private-module enclosure for visibility.
+redundant_pub_crate = "allow"

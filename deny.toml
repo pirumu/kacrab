@@ -1,0 +1,52 @@
+# cargo-deny configuration. Run with `cargo deny check`.
+# Install: `cargo install cargo-deny --locked`
+
+[graph]
+all-features = true
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Zlib",
+]
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+deny = []
+skip = []
+skip-tree = [
+    { crate = "criterion@0.5.1", reason = "bench-only measurement tooling pulls independent proc-macro and regex dependency versions" },
+    { crate = "jks@0.3.3", reason = "JKS TLS credential support currently pulls a legacy ASN.1/digest dependency stack" },
+    { crate = "libgssapi@0.11.0", reason = "optional GSSAPI backend uses bindgen through libgssapi-sys, which has independent build-time dependency versions" },
+    { crate = "p12-keystore@0.3.0", reason = "PKCS#12 TLS credential support currently pulls an independent ASN.1/crypto dependency stack" },
+    { crate = "rcgen@0.13.2", reason = "dev TLS certificate fixtures pull ring/getrandom/untrusted versions that differ from runtime crypto deps" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

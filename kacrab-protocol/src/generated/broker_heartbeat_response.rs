@@ -1,0 +1,88 @@
+//! Generated from BrokerHeartbeatResponse.json - DO NOT EDIT
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
+              hand-written lint style for reproducible wire-code output."
+)]
+use bytes::{Bytes, BytesMut};
+
+use crate::*;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrokerHeartbeatResponseData {
+    /// Duration in milliseconds for which the request was throttled due to a quota violation, or
+    /// zero if the request did not violate any quota.
+    pub throttle_time_ms: i32,
+    /// The error code, or 0 if there was no error.
+    pub error_code: i16,
+    /// True if the broker has approximately caught up with the latest metadata.
+    pub is_caught_up: bool,
+    /// True if the broker is fenced.
+    pub is_fenced: bool,
+    /// True if the broker should proceed with its shutdown.
+    pub should_shut_down: bool,
+    pub _unknown_tagged_fields: Vec<RawTaggedField>,
+}
+impl Default for BrokerHeartbeatResponseData {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0_i32,
+            error_code: 0_i16,
+            is_caught_up: false,
+            is_fenced: true,
+            should_shut_down: false,
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+}
+impl BrokerHeartbeatResponseData {
+    pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
+        if version < 0 || version > 2 {
+            return Err(UnsupportedVersion::new(63, version).into());
+        }
+        let throttle_time_ms;
+        let error_code;
+        let is_caught_up;
+        let is_fenced;
+        let should_shut_down;
+        let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
+        throttle_time_ms = read_i32(buf)?;
+        error_code = read_i16(buf)?;
+        is_caught_up = read_bool(buf)?;
+        is_fenced = read_bool(buf)?;
+        should_shut_down = read_bool(buf)?;
+        let tagged_fields = read_tagged_fields(buf)?;
+        for field in &tagged_fields {
+            match field.tag {
+                _ => {
+                    _unknown_tagged_fields.push(field.clone());
+                },
+            }
+        }
+        Ok(Self {
+            throttle_time_ms,
+            error_code,
+            is_caught_up,
+            is_fenced,
+            should_shut_down,
+            _unknown_tagged_fields,
+        })
+    }
+    pub fn write(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        if version < 0 || version > 2 {
+            return Err(UnsupportedVersion::new(63, version).into());
+        }
+        write_i32(buf, self.throttle_time_ms);
+        write_i16(buf, self.error_code);
+        write_bool(buf, self.is_caught_up);
+        write_bool(buf, self.is_fenced);
+        write_bool(buf, self.should_shut_down);
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        write_tagged_fields(buf, &all_tags)?;
+        Ok(())
+    }
+}

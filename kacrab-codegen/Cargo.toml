@@ -1,0 +1,31 @@
+[package]
+name = "kacrab-codegen"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Maintainer code generator for Kafka protocol schemas and config metadata."
+readme = "README.md"
+default-run = "kacrab-codegen"
+
+[dependencies]
+# Workspace-shared.
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true, features = ["full", "parsing", "printing", "extra-traits"] }
+heck = { workspace = true }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Codegen-binary-only — keep local; runtime crates have no use for these.
+clap = { version = "4", features = ["derive"] }
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl"] }
+prettyplease = "0.2"
+
+[lints]
+workspace = true

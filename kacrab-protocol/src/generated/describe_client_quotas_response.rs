@@ -1,0 +1,376 @@
+//! Generated from DescribeClientQuotasResponse.json - DO NOT EDIT
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
+              hand-written lint style for reproducible wire-code output."
+)]
+use bytes::{Bytes, BytesMut};
+
+use crate::*;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DescribeClientQuotasResponseData {
+    /// The duration in milliseconds for which the request was throttled due to a quota violation,
+    /// or zero if the request did not violate any quota.
+    pub throttle_time_ms: i32,
+    /// The error code, or `0` if the quota description succeeded.
+    pub error_code: i16,
+    /// The error message, or `null` if the quota description succeeded.
+    pub error_message: Option<KafkaString>,
+    /// A result entry.
+    pub entries: Option<Vec<EntryData>>,
+    pub _unknown_tagged_fields: Vec<RawTaggedField>,
+}
+impl Default for DescribeClientQuotasResponseData {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0_i32,
+            error_code: 0_i16,
+            error_message: None,
+            entries: None,
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+}
+impl DescribeClientQuotasResponseData {
+    pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(48, version).into());
+        }
+        let throttle_time_ms;
+        let error_code;
+        let error_message;
+        let entries;
+        let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
+        throttle_time_ms = read_i32(buf)?;
+        error_code = read_i16(buf)?;
+        if version >= 1 {
+            error_message = read_compact_nullable_string(buf)?;
+        } else {
+            error_message = read_nullable_string(buf)?;
+        }
+        if version >= 1 {
+            entries = {
+                let len = read_compact_array_length(buf)?;
+                if len < 0 {
+                    None
+                } else {
+                    let mut arr = Vec::with_capacity(len as usize);
+                    for _ in 0..len {
+                        arr.push(EntryData::read(buf, version)?);
+                    }
+                    Some(arr)
+                }
+            };
+        } else {
+            entries = {
+                let len = read_array_length(buf)?;
+                if len < 0 {
+                    None
+                } else {
+                    let mut arr = Vec::with_capacity(len as usize);
+                    for _ in 0..len {
+                        arr.push(EntryData::read(buf, version)?);
+                    }
+                    Some(arr)
+                }
+            };
+        }
+        if version >= 1 {
+            let tagged_fields = read_tagged_fields(buf)?;
+            for field in &tagged_fields {
+                match field.tag {
+                    _ => {
+                        _unknown_tagged_fields.push(field.clone());
+                    },
+                }
+            }
+        }
+        Ok(Self {
+            throttle_time_ms,
+            error_code,
+            error_message,
+            entries,
+            _unknown_tagged_fields,
+        })
+    }
+    pub fn write(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        if version < 0 || version > 1 {
+            return Err(UnsupportedVersion::new(48, version).into());
+        }
+        write_i32(buf, self.throttle_time_ms);
+        write_i16(buf, self.error_code);
+        if version >= 1 {
+            write_compact_nullable_string(buf, self.error_message.as_ref())?;
+        } else {
+            write_nullable_string(buf, self.error_message.as_ref())?;
+        }
+        if version >= 1 {
+            match &self.entries {
+                None => {
+                    write_compact_array_length(buf, -1);
+                },
+                Some(arr) => {
+                    write_compact_array_length(buf, arr.len() as i32);
+                    for el in arr {
+                        el.write(buf, version)?;
+                    }
+                },
+            }
+        } else {
+            match &self.entries {
+                None => {
+                    write_array_length(buf, -1);
+                },
+                Some(arr) => {
+                    write_array_length(buf, arr.len() as i32);
+                    for el in arr {
+                        el.write(buf, version)?;
+                    }
+                },
+            }
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            write_tagged_fields(buf, &all_tags)?;
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryData {
+    /// The quota entity description.
+    pub entity: Vec<EntityData>,
+    /// The quota values for the entity.
+    pub values: Vec<ValueData>,
+    pub _unknown_tagged_fields: Vec<RawTaggedField>,
+}
+impl Default for EntryData {
+    fn default() -> Self {
+        Self {
+            entity: Vec::new(),
+            values: Vec::new(),
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+}
+impl EntryData {
+    pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
+        let entity;
+        let values;
+        let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
+        if version >= 1 {
+            entity = {
+                let len = read_compact_array_length(buf)?;
+                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                for _ in 0..len {
+                    arr.push(EntityData::read(buf, version)?);
+                }
+                arr
+            };
+        } else {
+            entity = {
+                let len = read_array_length(buf)?;
+                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                for _ in 0..len {
+                    arr.push(EntityData::read(buf, version)?);
+                }
+                arr
+            };
+        }
+        if version >= 1 {
+            values = {
+                let len = read_compact_array_length(buf)?;
+                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                for _ in 0..len {
+                    arr.push(ValueData::read(buf, version)?);
+                }
+                arr
+            };
+        } else {
+            values = {
+                let len = read_array_length(buf)?;
+                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                for _ in 0..len {
+                    arr.push(ValueData::read(buf, version)?);
+                }
+                arr
+            };
+        }
+        if version >= 1 {
+            let tagged_fields = read_tagged_fields(buf)?;
+            for field in &tagged_fields {
+                match field.tag {
+                    _ => {
+                        _unknown_tagged_fields.push(field.clone());
+                    },
+                }
+            }
+        }
+        Ok(Self {
+            entity,
+            values,
+            _unknown_tagged_fields,
+        })
+    }
+    pub fn write(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        if version >= 1 {
+            write_compact_array_length(buf, self.entity.len() as i32);
+            for el in &self.entity {
+                el.write(buf, version)?;
+            }
+        } else {
+            write_array_length(buf, self.entity.len() as i32);
+            for el in &self.entity {
+                el.write(buf, version)?;
+            }
+        }
+        if version >= 1 {
+            write_compact_array_length(buf, self.values.len() as i32);
+            for el in &self.values {
+                el.write(buf, version)?;
+            }
+        } else {
+            write_array_length(buf, self.values.len() as i32);
+            for el in &self.values {
+                el.write(buf, version)?;
+            }
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            write_tagged_fields(buf, &all_tags)?;
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityData {
+    /// The entity type.
+    pub entity_type: KafkaString,
+    /// The entity name, or null if the default.
+    pub entity_name: Option<KafkaString>,
+    pub _unknown_tagged_fields: Vec<RawTaggedField>,
+}
+impl Default for EntityData {
+    fn default() -> Self {
+        Self {
+            entity_type: KafkaString::default(),
+            entity_name: None,
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+}
+impl EntityData {
+    pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
+        let entity_type;
+        let entity_name;
+        let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
+        if version >= 1 {
+            entity_type = read_compact_string(buf)?;
+        } else {
+            entity_type = read_string(buf)?;
+        }
+        if version >= 1 {
+            entity_name = read_compact_nullable_string(buf)?;
+        } else {
+            entity_name = read_nullable_string(buf)?;
+        }
+        if version >= 1 {
+            let tagged_fields = read_tagged_fields(buf)?;
+            for field in &tagged_fields {
+                match field.tag {
+                    _ => {
+                        _unknown_tagged_fields.push(field.clone());
+                    },
+                }
+            }
+        }
+        Ok(Self {
+            entity_type,
+            entity_name,
+            _unknown_tagged_fields,
+        })
+    }
+    pub fn write(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        if version >= 1 {
+            write_compact_string(buf, &self.entity_type)?;
+        } else {
+            write_string(buf, &self.entity_type)?;
+        }
+        if version >= 1 {
+            write_compact_nullable_string(buf, self.entity_name.as_ref())?;
+        } else {
+            write_nullable_string(buf, self.entity_name.as_ref())?;
+        }
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            write_tagged_fields(buf, &all_tags)?;
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValueData {
+    /// The quota configuration key.
+    pub key: KafkaString,
+    /// The quota configuration value.
+    pub value: f64,
+    pub _unknown_tagged_fields: Vec<RawTaggedField>,
+}
+impl Default for ValueData {
+    fn default() -> Self {
+        Self {
+            key: KafkaString::default(),
+            value: 0.0_f64,
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+}
+impl ValueData {
+    pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
+        let key;
+        let value;
+        let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
+        if version >= 1 {
+            key = read_compact_string(buf)?;
+        } else {
+            key = read_string(buf)?;
+        }
+        value = read_f64(buf)?;
+        if version >= 1 {
+            let tagged_fields = read_tagged_fields(buf)?;
+            for field in &tagged_fields {
+                match field.tag {
+                    _ => {
+                        _unknown_tagged_fields.push(field.clone());
+                    },
+                }
+            }
+        }
+        Ok(Self {
+            key,
+            value,
+            _unknown_tagged_fields,
+        })
+    }
+    pub fn write(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        if version >= 1 {
+            write_compact_string(buf, &self.key)?;
+        } else {
+            write_string(buf, &self.key)?;
+        }
+        write_f64(buf, self.value);
+        if version >= 1 {
+            let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+            all_tags.sort_by_key(|f| f.tag);
+            write_tagged_fields(buf, &all_tags)?;
+        }
+        Ok(())
+    }
+}

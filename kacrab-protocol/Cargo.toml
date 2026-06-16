@@ -1,0 +1,67 @@
+[package]
+name = "kacrab-protocol"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Kafka wire protocol types — generated from upstream message schemas by `kacrab-codegen`."
+readme = "README.md"
+
+[dependencies]
+# Shared with the rest of the workspace.
+bytes = { workspace = true }
+thiserror = { workspace = true }
+
+# Protocol-runtime-only — kept local; no other workspace member needs them.
+crc32c = "0.6"
+uuid = { version = "1", default-features = false, features = ["v4"] }
+base64 = { version = "0.22", default-features = false, features = ["std"] }
+
+# Compression codecs — feature-gated.
+#
+# * `gzip`, `snappy`, `lz4` use pure-Rust backends — no C toolchain at build
+#   time, cross-compile clean (incl. `wasm32-*`).
+# * `lz4-hc` and `zstd` pull C-FFI deps (`lz4`/`liblz4`, `zstd`/`zstd-sys`).
+#   They require a C compiler at build time and may complicate cross-compile
+#   to non-glibc / `wasm32-*` targets.
+#
+# LZ4 backend selection:
+# * `lz4`     — `lz4_flex` (pure Rust). Fast mode only; the `level` argument
+#               on `Compression::compress_with_level` is ignored. Sufficient
+#               for typical Kafka producer workloads.
+# * `lz4-hc`  — `lz4` crate (C-FFI to liblz4). Adds High-Compression mode
+#               for levels 3..=12 (level 1..=2 still routed through fast
+#               mode). Use when you need a tighter ratio and accept the
+#               build-env / cross-compile cost.
+#
+# When BOTH `lz4` and `lz4-hc` are enabled, the C-FFI backend wins
+# (`lz4_flex` is unused at runtime). Most callers should pick one.
+# For high-ratio workloads, prefer `zstd` over `lz4-hc` — better ratio at
+# similar speed and is the modern default for Kafka deployments.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
+snap = { version = "1.1", default-features = false, optional = true }
+lz4_flex = { version = "0.12", default-features = false, features = ["safe-encode", "safe-decode"], optional = true }
+lz4 = { version = "1", default-features = false, optional = true }
+zstd = { version = "0.13", default-features = false, optional = true }
+
+[features]
+default = []
+gzip = ["dep:flate2"]
+snappy = ["dep:snap"]
+# Pure-Rust LZ4 (fast mode only). See module doc on the LZ4 backend in
+# `src/compression.rs` for tradeoffs vs `lz4-hc`.
+lz4 = ["dep:lz4_flex"]
+# C-FFI LZ4 backend with High-Compression mode (levels 3..=12). Independent
+# of `lz4` — enabling `lz4-hc` alone is sufficient (the C lib also handles
+# fast mode). Adds a build-time C compiler requirement.
+lz4-hc = ["dep:lz4"]
+zstd = ["dep:zstd"]
+# Convenience meta-feature. Selects pure-Rust `lz4`; opt into `lz4-hc`
+# explicitly if HC mode is needed.
+compression = ["gzip", "snappy", "lz4", "zstd"]
+
+[lints]
+workspace = true

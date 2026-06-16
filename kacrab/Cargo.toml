@@ -1,0 +1,58 @@
+[package]
+name = "kacrab"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "A production-oriented Kafka client for Rust, built from the protocol up."
+readme = "README.md"
+categories = []
+keywords = []
+
+[features]
+default = ["std"]
+compression = ["kacrab-protocol/compression"]
+gssapi = ["dep:libgssapi"]
+gzip = ["kacrab-protocol/gzip"]
+lz4 = ["kacrab-protocol/lz4"]
+lz4-hc = ["kacrab-protocol/lz4-hc"]
+macros = []
+producer = []
+snappy = ["kacrab-protocol/snappy"]
+std = []
+zstd = ["kacrab-protocol/zstd"]
+
+[dependencies]
+ahash = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+crossbeam-queue = { workspace = true }
+getrandom = { workspace = true }
+hmac = { workspace = true }
+jks = { workspace = true }
+jsonwebtoken = { workspace = true }
+kacrab-protocol = { workspace = true }
+kacrab-macros = { workspace = true }
+libgssapi = { workspace = true, optional = true }
+p12-keystore = { workspace = true }
+pkcs8 = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+socket2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-rustls = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+kacrab-protocol = { workspace = true }
+rcgen = "0.13"
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }
+
+[lints]
+workspace = true

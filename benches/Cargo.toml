@@ -1,0 +1,31 @@
+[package]
+name = "kacrab-benches"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+readme = "README.md"
+
+[dependencies]
+kacrab = { workspace = true, features = ["producer"] }
+kacrab-protocol = { workspace = true }
+bytes = { workspace = true }
+criterion = { version = "0.5", features = ["async_tokio"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "sync", "time"] }
+
+[[bench]]
+name = "producer_accumulator"
+harness = false
+
+[[bench]]
+name = "wire_pipeline"
+harness = false
+
+[[bench]]
+name = "producer_dispatcher"
+harness = false
+
+[lints]
+workspace = true

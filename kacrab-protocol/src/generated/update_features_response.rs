@@ -1,0 +1,149 @@
+//! Generated from UpdateFeaturesResponse.json - DO NOT EDIT
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated protocol modules mirror Kafka's schema shape and intentionally trade \
+              hand-written lint style for reproducible wire-code output."
+)]
+use bytes::{Bytes, BytesMut};
+
+use crate::*;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateFeaturesResponseData {
+    /// The duration in milliseconds for which the request was throttled due to a quota violation,
+    /// or zero if the request did not violate any quota.
+    pub throttle_time_ms: i32,
+    /// The top-level error code, or `0` if there was no top-level error.
+    pub error_code: i16,
+    /// The top-level error message, or `null` if there was no top-level error.
+    pub error_message: Option<KafkaString>,
+    /// Results for each feature update.
+    pub results: Vec<UpdatableFeatureResult>,
+    pub _unknown_tagged_fields: Vec<RawTaggedField>,
+}
+impl Default for UpdateFeaturesResponseData {
+    fn default() -> Self {
+        Self {
+            throttle_time_ms: 0_i32,
+            error_code: 0_i16,
+            error_message: None,
+            results: Vec::new(),
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+}
+impl UpdateFeaturesResponseData {
+    pub fn read(buf: &mut Bytes, version: i16) -> Result<Self> {
+        if version < 0 || version > 2 {
+            return Err(UnsupportedVersion::new(57, version).into());
+        }
+        let throttle_time_ms;
+        let error_code;
+        let error_message;
+        let mut results = Vec::new();
+        let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
+        throttle_time_ms = read_i32(buf)?;
+        error_code = read_i16(buf)?;
+        error_message = read_compact_nullable_string(buf)?;
+        if version <= 1 {
+            results = {
+                let len = read_compact_array_length(buf)?;
+                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                for _ in 0..len {
+                    arr.push(UpdatableFeatureResult::read(buf, version)?);
+                }
+                arr
+            };
+        }
+        let tagged_fields = read_tagged_fields(buf)?;
+        for field in &tagged_fields {
+            match field.tag {
+                _ => {
+                    _unknown_tagged_fields.push(field.clone());
+                },
+            }
+        }
+        Ok(Self {
+            throttle_time_ms,
+            error_code,
+            error_message,
+            results,
+            _unknown_tagged_fields,
+        })
+    }
+    pub fn write(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        if version < 0 || version > 2 {
+            return Err(UnsupportedVersion::new(57, version).into());
+        }
+        write_i32(buf, self.throttle_time_ms);
+        write_i16(buf, self.error_code);
+        write_compact_nullable_string(buf, self.error_message.as_ref())?;
+        if version <= 1 {
+            write_compact_array_length(buf, self.results.len() as i32);
+            for el in &self.results {
+                el.write(buf, version)?;
+            }
+        }
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        write_tagged_fields(buf, &all_tags)?;
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdatableFeatureResult {
+    /// The name of the finalized feature.
+    pub feature: KafkaString,
+    /// The feature update error code or `0` if the feature update succeeded.
+    pub error_code: i16,
+    /// The feature update error, or `null` if the feature update succeeded.
+    pub error_message: Option<KafkaString>,
+    pub _unknown_tagged_fields: Vec<RawTaggedField>,
+}
+impl Default for UpdatableFeatureResult {
+    fn default() -> Self {
+        Self {
+            feature: KafkaString::default(),
+            error_code: 0_i16,
+            error_message: None,
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+}
+impl UpdatableFeatureResult {
+    pub fn read(buf: &mut Bytes, _version: i16) -> Result<Self> {
+        let feature;
+        let error_code;
+        let error_message;
+        let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
+        feature = read_compact_string(buf)?;
+        error_code = read_i16(buf)?;
+        error_message = read_compact_nullable_string(buf)?;
+        let tagged_fields = read_tagged_fields(buf)?;
+        for field in &tagged_fields {
+            match field.tag {
+                _ => {
+                    _unknown_tagged_fields.push(field.clone());
+                },
+            }
+        }
+        Ok(Self {
+            feature,
+            error_code,
+            error_message,
+            _unknown_tagged_fields,
+        })
+    }
+    pub fn write(&self, buf: &mut BytesMut, _version: i16) -> Result<()> {
+        write_compact_string(buf, &self.feature)?;
+        write_i16(buf, self.error_code);
+        write_compact_nullable_string(buf, self.error_message.as_ref())?;
+        let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
+        all_tags.sort_by_key(|f| f.tag);
+        write_tagged_fields(buf, &all_tags)?;
+        Ok(())
+    }
+}

@@ -1,0 +1,24 @@
+[package]
+name = "kacrab-examples"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+readme = "README.md"
+
+[dev-dependencies]
+kacrab = { workspace = true, features = ["producer"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[[example]]
+name = "producer"
+path = "producer.rs"
+
+[[example]]
+name = "config"
+path = "config.rs"
+
+[lints]
+workspace = true

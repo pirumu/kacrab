@@ -1,0 +1,25 @@
+[package]
+name = "kacrab-macros"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Procedural macros for kacrab."
+readme = "README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true, features = ["clone-impls", "full", "parsing", "printing", "proc-macro"] }
+
+[dev-dependencies]
+kacrab = { workspace = true }
+
+[lints]
+workspace = true

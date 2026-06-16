@@ -1,0 +1,297 @@
+use bytes::{Bytes, BytesMut};
+use kacrab_protocol::{generated::controller_registration_request::*, *};
+
+use crate::TestInstance;
+
+impl TestInstance for ControllerRegistrationRequestData {
+    fn test_populated() -> Self {
+        Self {
+            controller_id: 12345_i32,
+            incarnation_id: KafkaUuid::ONE,
+            zk_migration_ready: true,
+            listeners: vec![<Listener as TestInstance>::test_populated()],
+            features: vec![<Feature as TestInstance>::test_populated()],
+            _unknown_tagged_fields: vec![RawTaggedField {
+                tag: 254,
+                data: Bytes::from_static(&[0xab]),
+            }],
+        }
+    }
+    fn test_null_optionals() -> Self {
+        Self {
+            controller_id: 0_i32,
+            incarnation_id: KafkaUuid::ZERO,
+            zk_migration_ready: false,
+            listeners: vec![<Listener as TestInstance>::test_null_optionals()],
+            features: vec![<Feature as TestInstance>::test_null_optionals()],
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_empty_collections() -> Self {
+        Self {
+            controller_id: 0_i32,
+            incarnation_id: KafkaUuid::ZERO,
+            zk_migration_ready: false,
+            listeners: Vec::new(),
+            features: Vec::new(),
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_multi_element_collections() -> Self {
+        Self {
+            controller_id: 23456_i32,
+            incarnation_id: KafkaUuid::from_parts(2, 3),
+            zk_migration_ready: false,
+            listeners: vec![
+                <Listener as TestInstance>::test_populated(),
+                <Listener as TestInstance>::test_multi_element_collections(),
+            ],
+            features: vec![
+                <Feature as TestInstance>::test_populated(),
+                <Feature as TestInstance>::test_multi_element_collections(),
+            ],
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_numeric_boundaries() -> Self {
+        Self {
+            controller_id: i32::MIN,
+            incarnation_id: KafkaUuid::ONE,
+            zk_migration_ready: true,
+            listeners: vec![<Listener as TestInstance>::test_numeric_boundaries()],
+            features: vec![<Feature as TestInstance>::test_numeric_boundaries()],
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_tagged_fields() -> Self {
+        Self {
+            controller_id: 12345_i32,
+            incarnation_id: KafkaUuid::ONE,
+            zk_migration_ready: true,
+            listeners: vec![<Listener as TestInstance>::test_tagged_fields()],
+            features: vec![<Feature as TestInstance>::test_tagged_fields()],
+            _unknown_tagged_fields: vec![RawTaggedField {
+                tag: 254,
+                data: Bytes::from_static(&[0xab]),
+            }],
+        }
+    }
+}
+impl TestInstance for Listener {
+    fn test_populated() -> Self {
+        Self {
+            name: KafkaString::from("test".to_owned()),
+            host: KafkaString::from("test".to_owned()),
+            port: 42_u16,
+            security_protocol: 42_i16,
+            _unknown_tagged_fields: vec![RawTaggedField {
+                tag: 254,
+                data: Bytes::from_static(&[0xab]),
+            }],
+        }
+    }
+    fn test_null_optionals() -> Self {
+        drop(Self::default());
+        Self {
+            name: KafkaString::default(),
+            host: KafkaString::default(),
+            port: 0_u16,
+            security_protocol: 0_i16,
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_empty_collections() -> Self {
+        Self {
+            name: KafkaString::default(),
+            host: KafkaString::default(),
+            port: 0_u16,
+            security_protocol: 0_i16,
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_multi_element_collections() -> Self {
+        Self {
+            name: KafkaString::from("test-2".to_owned()),
+            host: KafkaString::from("test-2".to_owned()),
+            port: 43_u16,
+            security_protocol: 43_i16,
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_numeric_boundaries() -> Self {
+        Self {
+            name: KafkaString::from("boundary".to_owned()),
+            host: KafkaString::from("boundary".to_owned()),
+            port: u16::MAX,
+            security_protocol: i16::MIN,
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_tagged_fields() -> Self {
+        Self {
+            name: KafkaString::from("test".to_owned()),
+            host: KafkaString::from("test".to_owned()),
+            port: 42_u16,
+            security_protocol: 42_i16,
+            _unknown_tagged_fields: vec![RawTaggedField {
+                tag: 254,
+                data: Bytes::from_static(&[0xab]),
+            }],
+        }
+    }
+}
+impl TestInstance for Feature {
+    fn test_populated() -> Self {
+        Self {
+            name: KafkaString::from("test".to_owned()),
+            min_supported_version: 42_i16,
+            max_supported_version: 42_i16,
+            _unknown_tagged_fields: vec![RawTaggedField {
+                tag: 254,
+                data: Bytes::from_static(&[0xab]),
+            }],
+        }
+    }
+    fn test_null_optionals() -> Self {
+        drop(Self::default());
+        Self {
+            name: KafkaString::default(),
+            min_supported_version: 0_i16,
+            max_supported_version: 0_i16,
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_empty_collections() -> Self {
+        Self {
+            name: KafkaString::default(),
+            min_supported_version: 0_i16,
+            max_supported_version: 0_i16,
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_multi_element_collections() -> Self {
+        Self {
+            name: KafkaString::from("test-2".to_owned()),
+            min_supported_version: 43_i16,
+            max_supported_version: 43_i16,
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_numeric_boundaries() -> Self {
+        Self {
+            name: KafkaString::from("boundary".to_owned()),
+            min_supported_version: i16::MIN,
+            max_supported_version: i16::MIN,
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_tagged_fields() -> Self {
+        Self {
+            name: KafkaString::from("test".to_owned()),
+            min_supported_version: 42_i16,
+            max_supported_version: 42_i16,
+            _unknown_tagged_fields: vec![RawTaggedField {
+                tag: 254,
+                data: Bytes::from_static(&[0xab]),
+            }],
+        }
+    }
+}
+fn encode_populated(version: i16) -> crate::MatrixResult<String> {
+    let message = <ControllerRegistrationRequestData as TestInstance>::test_populated();
+    let mut out = BytesMut::new();
+    message.write(&mut out, version)?;
+    Ok(crate::hex(out.as_ref())?)
+}
+fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
+    let message = <ControllerRegistrationRequestData as TestInstance>::test_null_optionals();
+    let mut out = BytesMut::new();
+    message.write(&mut out, version)?;
+    Ok(crate::hex(out.as_ref())?)
+}
+fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
+    let message = <ControllerRegistrationRequestData as TestInstance>::test_empty_collections();
+    let mut out = BytesMut::new();
+    message.write(&mut out, version)?;
+    Ok(crate::hex(out.as_ref())?)
+}
+fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
+    let message =
+        <ControllerRegistrationRequestData as TestInstance>::test_multi_element_collections();
+    let mut out = BytesMut::new();
+    message.write(&mut out, version)?;
+    Ok(crate::hex(out.as_ref())?)
+}
+fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
+    let message = <ControllerRegistrationRequestData as TestInstance>::test_numeric_boundaries();
+    let mut out = BytesMut::new();
+    message.write(&mut out, version)?;
+    Ok(crate::hex(out.as_ref())?)
+}
+fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
+    let message = <ControllerRegistrationRequestData as TestInstance>::test_tagged_fields();
+    let mut out = BytesMut::new();
+    message.write(&mut out, version)?;
+    Ok(crate::hex(out.as_ref())?)
+}
+fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {
+    let mut input = Bytes::from(crate::decode_hex(hex_input)?);
+    let message = ControllerRegistrationRequestData::read(&mut input, version)?;
+    crate::ensure_input_consumed(&input)?;
+    let mut out = BytesMut::new();
+    message.write(&mut out, version)?;
+    Ok(crate::hex(out.as_ref())?)
+}
+const MATRIX_CASES: &[crate::MatrixCase] = &[
+    crate::MatrixCase {
+        schema_name: "ControllerRegistrationRequest",
+        java_class: "org.apache.kafka.common.message.ControllerRegistrationRequestData",
+        version: 0i16,
+        fixture: "null_optionals",
+        rust_encode: encode_null_optionals,
+        rust_reencode: reencode,
+    },
+    crate::MatrixCase {
+        schema_name: "ControllerRegistrationRequest",
+        java_class: "org.apache.kafka.common.message.ControllerRegistrationRequestData",
+        version: 0i16,
+        fixture: "populated",
+        rust_encode: encode_populated,
+        rust_reencode: reencode,
+    },
+    crate::MatrixCase {
+        schema_name: "ControllerRegistrationRequest",
+        java_class: "org.apache.kafka.common.message.ControllerRegistrationRequestData",
+        version: 0i16,
+        fixture: "empty_collections",
+        rust_encode: encode_empty_collections,
+        rust_reencode: reencode,
+    },
+    crate::MatrixCase {
+        schema_name: "ControllerRegistrationRequest",
+        java_class: "org.apache.kafka.common.message.ControllerRegistrationRequestData",
+        version: 0i16,
+        fixture: "multi_element_collections",
+        rust_encode: encode_multi_element_collections,
+        rust_reencode: reencode,
+    },
+    crate::MatrixCase {
+        schema_name: "ControllerRegistrationRequest",
+        java_class: "org.apache.kafka.common.message.ControllerRegistrationRequestData",
+        version: 0i16,
+        fixture: "numeric_boundaries",
+        rust_encode: encode_numeric_boundaries,
+        rust_reencode: reencode,
+    },
+    crate::MatrixCase {
+        schema_name: "ControllerRegistrationRequest",
+        java_class: "org.apache.kafka.common.message.ControllerRegistrationRequestData",
+        version: 0i16,
+        fixture: "tagged_fields",
+        rust_encode: encode_tagged_fields,
+        rust_reencode: reencode,
+    },
+];
+pub(crate) fn append_protocol_cases(cases: &mut Vec<crate::MatrixCase>) {
+    cases.extend_from_slice(MATRIX_CASES);
+}

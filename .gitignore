@@ -1,0 +1,29 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+*.pdb
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Local cargo overrides
+.cargo/config.local.toml
+
+# Coverage / profiling
+*.profraw
+*.profdata
+tarpaulin-report.html
+cobertura.xml

@@ -1,0 +1,253 @@
+//! Fixed-width and varint primitive read/write helpers.
+//!
+//! Every Kafka schema field eventually decomposes to one of these primitives.
+//! Helpers operate on `bytes::Bytes` / `bytes::BytesMut` and return
+//! [`PrimitiveError`] on insufficient data or malformed varints.
+
+pub mod error;
+
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+
+pub use self::error::{PrimitiveError, PrimitiveErrorKind};
+
+/// Result alias for primitive read operations.
+pub type Result<T> = core::result::Result<T, PrimitiveError>;
+
+const VARINT_MAX_BYTES: u8 = 5;
+const VARLONG_MAX_BYTES: u8 = 10;
+
+pub(crate) fn check_remaining(buf: &Bytes, needed: usize) -> Result<()> {
+    let available = buf.remaining();
+    if available < needed {
+        return Err(PrimitiveErrorKind::InsufficientData { needed, available }.into());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Fixed-width integers / float / bool — big-endian on the wire.
+// ---------------------------------------------------------------------------
+
+/// Read a boolean (1 byte: 0 = false, nonzero = true).
+pub fn read_bool(buf: &mut Bytes) -> Result<bool> {
+    check_remaining(buf, 1)?;
+    Ok(buf.get_u8() != 0)
+}
+
+/// Read a signed 8-bit integer.
+pub fn read_i8(buf: &mut Bytes) -> Result<i8> {
+    check_remaining(buf, 1)?;
+    Ok(buf.get_i8())
+}
+
+/// Read a signed 16-bit integer (big-endian).
+pub fn read_i16(buf: &mut Bytes) -> Result<i16> {
+    check_remaining(buf, 2)?;
+    Ok(buf.get_i16())
+}
+
+/// Read a signed 32-bit integer (big-endian).
+pub fn read_i32(buf: &mut Bytes) -> Result<i32> {
+    check_remaining(buf, 4)?;
+    Ok(buf.get_i32())
+}
+
+/// Read a signed 64-bit integer (big-endian).
+pub fn read_i64(buf: &mut Bytes) -> Result<i64> {
+    check_remaining(buf, 8)?;
+    Ok(buf.get_i64())
+}
+
+/// Read an unsigned 16-bit integer (big-endian).
+pub fn read_u16(buf: &mut Bytes) -> Result<u16> {
+    check_remaining(buf, 2)?;
+    Ok(buf.get_u16())
+}
+
+/// Read an unsigned 32-bit integer (big-endian).
+pub fn read_u32(buf: &mut Bytes) -> Result<u32> {
+    check_remaining(buf, 4)?;
+    Ok(buf.get_u32())
+}
+
+/// Read a 64-bit IEEE-754 float (big-endian).
+pub fn read_f64(buf: &mut Bytes) -> Result<f64> {
+    check_remaining(buf, 8)?;
+    Ok(buf.get_f64())
+}
+
+/// Write a boolean (1 byte: 0 or 1).
+pub fn write_bool(buf: &mut BytesMut, value: bool) {
+    buf.put_u8(u8::from(value));
+}
+
+/// Write a signed 8-bit integer.
+pub fn write_i8(buf: &mut BytesMut, value: i8) {
+    buf.put_i8(value);
+}
+
+/// Write a signed 16-bit integer (big-endian).
+pub fn write_i16(buf: &mut BytesMut, value: i16) {
+    buf.put_i16(value);
+}
+
+/// Write a signed 32-bit integer (big-endian).
+pub fn write_i32(buf: &mut BytesMut, value: i32) {
+    buf.put_i32(value);
+}
+
+/// Write a signed 64-bit integer (big-endian).
+pub fn write_i64(buf: &mut BytesMut, value: i64) {
+    buf.put_i64(value);
+}
+
+/// Write an unsigned 16-bit integer (big-endian).
+pub fn write_u16(buf: &mut BytesMut, value: u16) {
+    buf.put_u16(value);
+}
+
+/// Write an unsigned 32-bit integer (big-endian).
+pub fn write_u32(buf: &mut BytesMut, value: u32) {
+    buf.put_u32(value);
+}
+
+/// Write a 64-bit IEEE-754 float (big-endian).
+pub fn write_f64(buf: &mut BytesMut, value: f64) {
+    buf.put_f64(value);
+}
+
+// ---------------------------------------------------------------------------
+// Varints (Protocol Buffers style, MSB continuation bit).
+// ---------------------------------------------------------------------------
+
+/// Read an unsigned varint (1–5 bytes, `u32` payload).
+pub fn read_unsigned_varint(buf: &mut Bytes) -> Result<u32> {
+    let mut value: u32 = 0;
+    for i in 0..VARINT_MAX_BYTES {
+        check_remaining(buf, 1)?;
+        let byte = buf.get_u8();
+        value |= u32::from(byte & 0x7f) << (u32::from(i) * 7);
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(PrimitiveErrorKind::InvalidVarint {
+        max_bytes: VARINT_MAX_BYTES,
+    }
+    .into())
+}
+
+/// Write an unsigned varint (1–5 bytes, `u32` payload).
+pub fn write_unsigned_varint(buf: &mut BytesMut, mut value: u32) {
+    loop {
+        let low = value.to_le_bytes()[0] & 0x7f;
+        value >>= 7;
+        if value == 0 {
+            buf.put_u8(low);
+            return;
+        }
+        buf.put_u8(low | 0x80);
+    }
+}
+
+/// Read an unsigned varlong (1–10 bytes, `u64` payload).
+pub fn read_unsigned_varlong(buf: &mut Bytes) -> Result<u64> {
+    let mut value: u64 = 0;
+    for i in 0..VARLONG_MAX_BYTES {
+        check_remaining(buf, 1)?;
+        let byte = buf.get_u8();
+        value |= u64::from(byte & 0x7f) << (u32::from(i) * 7);
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(PrimitiveErrorKind::InvalidVarint {
+        max_bytes: VARLONG_MAX_BYTES,
+    }
+    .into())
+}
+
+/// Write an unsigned varlong (1–10 bytes, `u64` payload).
+pub fn write_unsigned_varlong(buf: &mut BytesMut, mut value: u64) {
+    loop {
+        let low = value.to_le_bytes()[0] & 0x7f;
+        value >>= 7;
+        if value == 0 {
+            buf.put_u8(low);
+            return;
+        }
+        buf.put_u8(low | 0x80);
+    }
+}
+
+/// Read a signed varint (zigzag-decoded `i32`).
+pub fn read_signed_varint(buf: &mut Bytes) -> Result<i32> {
+    let v = read_unsigned_varint(buf)?;
+    let magnitude = (v >> 1).cast_signed();
+    let sign_mask = (v & 1).cast_signed().wrapping_neg();
+    Ok(magnitude ^ sign_mask)
+}
+
+/// Write a signed varint (zigzag-encoded `i32`).
+pub fn write_signed_varint(buf: &mut BytesMut, value: i32) {
+    let encoded = ((value << 1) ^ (value >> 31)).cast_unsigned();
+    write_unsigned_varint(buf, encoded);
+}
+
+/// Read a signed varlong (zigzag-decoded `i64`).
+pub fn read_signed_varlong(buf: &mut Bytes) -> Result<i64> {
+    let v = read_unsigned_varlong(buf)?;
+    let magnitude = (v >> 1).cast_signed();
+    let sign_mask = (v & 1).cast_signed().wrapping_neg();
+    Ok(magnitude ^ sign_mask)
+}
+
+/// Write a signed varlong (zigzag-encoded `i64`).
+pub fn write_signed_varlong(buf: &mut BytesMut, value: i64) {
+    let encoded = ((value << 1) ^ (value >> 63)).cast_unsigned();
+    write_unsigned_varlong(buf, encoded);
+}
+
+// ---------------------------------------------------------------------------
+// Array length helpers (used by both fixed-width and compact array encoding).
+// ---------------------------------------------------------------------------
+
+/// Read a non-flexible array length (`i32`). `-1` indicates a null array.
+pub fn read_array_length(buf: &mut Bytes) -> Result<i32> {
+    read_i32(buf)
+}
+
+/// Write a non-flexible array length (`i32`).
+pub fn write_array_length(buf: &mut BytesMut, len: i32) {
+    write_i32(buf, len);
+}
+
+/// Read a compact array length (varint of `len + 1`, `0 → -1` (null)).
+pub fn read_compact_array_length(buf: &mut Bytes) -> Result<i32> {
+    let raw = read_unsigned_varint(buf)?;
+    if raw == 0 {
+        Ok(-1)
+    } else {
+        let len = raw
+            .checked_sub(1)
+            .ok_or(PrimitiveErrorKind::InvalidVarint {
+                max_bytes: VARINT_MAX_BYTES,
+            })?;
+        i32::try_from(len).map_err(|_| {
+            PrimitiveErrorKind::InvalidVarint {
+                max_bytes: VARINT_MAX_BYTES,
+            }
+            .into()
+        })
+    }
+}
+
+/// Write a compact array length (varint of `len + 1`, negative → `0` (null)).
+pub fn write_compact_array_length(buf: &mut BytesMut, len: i32) {
+    if len < 0 {
+        write_unsigned_varint(buf, 0);
+    } else {
+        let encoded = len.cast_unsigned().saturating_add(1);
+        write_unsigned_varint(buf, encoded);
+    }
+}
