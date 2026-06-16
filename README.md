@@ -180,7 +180,8 @@ producer.commit_transaction().await?;
 
 ## Auth
 
-Auth is configured with Java-compatible Kafka keys:
+Auth uses Kafka-compatible property names. For built-in `PLAIN` and `SCRAM`,
+kacrab only reads the credential options; it does not load Java login modules:
 
 ```rust
 let producer = KafkaProducer::builder()
@@ -190,10 +191,7 @@ let producer = KafkaProducer::builder()
     .set("ssl.truststore.password", "secret")
     .set("ssl.truststore.type", "PKCS12")
     .set("sasl.mechanism", "SCRAM-SHA-512")
-    .set(
-        "sasl.jaas.config",
-        r#"org.apache.kafka.common.security.scram.ScramLoginModule required username="user" password="pass";"#,
-    )
+    .set("sasl.jaas.config", r#"username="user" password="pass";"#)
     .build()
     .await?;
 ```
@@ -208,6 +206,9 @@ Supported runtime paths include:
   locally signed JWT assertions.
 - Native Rust custom SASL authenticators via
   `KafkaProducerBuilder::sasl_client_authenticator(...)`.
+
+Full Java JAAS strings are accepted for migration compatibility, but the Rust
+runtime parses only the options it supports.
 
 ## Protocol Compatibility
 

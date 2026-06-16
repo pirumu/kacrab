@@ -88,7 +88,7 @@ async fn build_producer(bootstrap: &str) -> Result<KafkaProducer, Box<dyn Error>
     // builder = builder
     //     .set("security.protocol", "SASL_SSL")
     //     .set("sasl.mechanism", "PLAIN")
-    //     .set("sasl.jaas.config", "...");
+    //     .set("sasl.jaas.config", r#"username="user" password="pass";"#);
 
     builder.build().await.map_err(Into::into)
 }

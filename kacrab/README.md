@@ -24,6 +24,8 @@ Auth and producer are 100% Java-compatible targets for the implemented surface:
   `security.protocol`, `ssl.truststore.location`, `sasl.mechanism`,
   `sasl.jaas.config`, `acks`, `enable.idempotence`, `transactional.id`,
   `batch.size`, `linger.ms`, and `max.in.flight.requests.per.connection`.
+  For built-in Rust SASL mechanisms, `sasl.jaas.config` is treated as a
+  credential option source; Java login module classes are not loaded.
 - `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, and `SASL_SSL` map to the wire
   connection config.
 - TLS supports PEM, JKS, and PKCS12 trust/identity material.
@@ -33,8 +35,8 @@ Auth and producer are 100% Java-compatible targets for the implemented surface:
   paths including `InitProducerId`, `FindCoordinator`, `AddPartitionsToTxn`,
   and `EndTxn`.
 
-JVM callback handler classes are the one intentional boundary: Rust cannot load
-Java classes, so custom auth should use the native Rust
+JVM login module and callback handler classes are the intentional boundary:
+Rust cannot load Java classes, so custom auth should use the native Rust
 `sasl_client_authenticator(...)` hook.
 
 ## Current Status
