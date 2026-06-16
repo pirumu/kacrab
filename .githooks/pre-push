@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "${repo_root}"
+
+remote_name="${1:-origin}"
+zero_oid="0000000000000000000000000000000000000000"
+
+while read -r local_ref local_oid remote_ref remote_oid; do
+  if [[ -z "${local_ref}" || "${local_oid}" == "${zero_oid}" ]]; then
+    continue
+  fi
+
+  if [[ "${remote_oid}" == "${zero_oid}" ]]; then
+    commit_list="$(git rev-list --no-merges "${local_oid}" --not --remotes="${remote_name}")"
+  else
+    commit_list="$(git rev-list --no-merges "${remote_oid}..${local_oid}")"
+  fi
+
+  while read -r commit; do
+    if [[ -z "${commit}" ]]; then
+      continue
+    fi
+    subject="$(git log -1 --format=%s "${commit}")"
+    scripts/check-commit-message.sh --message "${subject}" "${commit}"
+  done <<< "${commit_list}"
+done

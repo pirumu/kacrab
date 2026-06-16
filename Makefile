@@ -1,6 +1,7 @@
 .PHONY: help check build release run test test-codegen test-protocol \
         test-protocol-java test-protocol-java-matrix test-protocol-full \
         clippy fmt fmt-check doc clean audit deny udeps machete outdated \
+        install-hooks commit-lint \
         ci ci-strict tools
 
 help:
@@ -17,6 +18,8 @@ help:
 	@echo "  clippy      - clippy with -D warnings"
 	@echo "  fmt         - cargo +nightly fmt --all"
 	@echo "  fmt-check   - cargo +nightly fmt --all -- --check"
+	@echo "  install-hooks - use tracked git hooks from .githooks"
+	@echo "  commit-lint - lint the latest commit message"
 	@echo "  doc         - cargo doc --no-deps --open (with -D warnings)"
 	@echo "  clean       - cargo clean"
 	@echo ""
@@ -70,6 +73,12 @@ fmt:
 
 fmt-check:
 	cargo +nightly fmt --all -- --check
+
+install-hooks:
+	git config core.hooksPath .githooks
+
+commit-lint:
+	scripts/check-commit-message.sh --message "$$(git log -1 --format=%s)" HEAD
 
 doc:
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --open

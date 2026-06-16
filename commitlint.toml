@@ -1,0 +1,18 @@
+types = [
+  "build",
+  "chore",
+  "ci",
+  "docs",
+  "feat",
+  "fix",
+  "perf",
+  "refactor",
+  "revert",
+  "style",
+  "test",
+]
+max_header_length = 100
+allow_merge_commits = true
+allow_revert_commits = true
+require_scope = false
+subject_full_stop = false
