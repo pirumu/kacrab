@@ -71,6 +71,67 @@ fn accumulator_marks_linger_expired_partition_ready() {
 }
 
 #[test]
+fn accumulator_splits_same_partition_batches_at_batch_size() {
+    let now = Instant::now();
+    let mut accumulator = RecordAccumulator::new(
+        AccumulatorConfig::default()
+            .batch_size(150)
+            .linger(Duration::from_mins(1))
+            .buffer_memory(16 * 1024),
+    );
+    for _ in 0..24 {
+        accumulator
+            .append_at(
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+                now,
+            )
+            .unwrap();
+    }
+
+    let ready = accumulator.drain_ready(now);
+
+    assert_eq!(ready.len(), 2);
+    assert!(ready.iter().all(|batch| batch.records.len() == 11));
+    assert!(accumulator.buffered_bytes() > 0);
+}
+
+#[test]
+fn accumulator_batch_size_uses_encoded_batch_bytes_not_buffer_memory_overhead() {
+    let now = Instant::now();
+    let mut accumulator = RecordAccumulator::new(
+        AccumulatorConfig::default()
+            .batch_size(128)
+            .linger(Duration::from_mins(1))
+            .buffer_memory(16 * 1024),
+    );
+    for _ in 0..4 {
+        accumulator
+            .append_at(
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+                now,
+            )
+            .unwrap();
+    }
+
+    assert!(accumulator.buffered_bytes() > 128);
+    assert!(accumulator.drain_ready(now).is_empty());
+
+    for _ in 0..6 {
+        accumulator
+            .append_at(
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+                now,
+            )
+            .unwrap();
+    }
+
+    let ready = accumulator.drain_ready(now);
+
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].records.len(), 8);
+}
+
+#[test]
 fn accumulator_rejects_append_when_buffer_memory_is_full() {
     let mut accumulator = RecordAccumulator::new(
         AccumulatorConfig::default()

@@ -175,6 +175,16 @@ async fn kafka_producer_send_batch_returns_delivery_handles() {
             assert_eq!(produce.topic_data[0].partition_data[0].index, 0);
             produce_response_frame(header.correlation_id, 0, 40)
         }),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, 13).expect("produce request");
+            assert_eq!(produce.topic_data.len(), 1);
+            assert_eq!(produce.topic_data[0].topic_id, TOPIC_ID);
+            assert_eq!(produce.topic_data[0].partition_data.len(), 1);
+            assert_eq!(produce.topic_data[0].partition_data[0].index, 0);
+            produce_response_frame(header.correlation_id, 0, 41)
+        }),
     ])
     .await;
     let bootstrap = MockBroker::serve_many(vec![
@@ -228,10 +238,10 @@ async fn kafka_producer_send_batch_returns_delivery_handles() {
     let second = deliveries.pop().expect("second delivery").await.unwrap();
     let first = deliveries.pop().expect("first delivery").await.unwrap();
     assert_eq!(first.base_offset, 40);
-    assert_eq!(second.base_offset, 40);
+    assert_eq!(second.base_offset, 41);
     assert_eq!(producer.buffered_bytes(), 0);
     assert_eq!(bootstrap.join().await, 2);
-    assert_eq!(leader_7.join().await, 2);
+    assert_eq!(leader_7.join().await, 3);
 }
 
 #[tokio::test]
@@ -247,6 +257,16 @@ async fn kafka_producer_send_batch_untracked_skips_delivery_handles() {
             assert_eq!(produce.topic_data[0].partition_data.len(), 1);
             assert_eq!(produce.topic_data[0].partition_data[0].index, 0);
             produce_response_frame(header.correlation_id, 0, 40)
+        }),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, 13).expect("produce request");
+            assert_eq!(produce.topic_data.len(), 1);
+            assert_eq!(produce.topic_data[0].topic_id, TOPIC_ID);
+            assert_eq!(produce.topic_data[0].partition_data.len(), 1);
+            assert_eq!(produce.topic_data[0].partition_data[0].index, 0);
+            produce_response_frame(header.correlation_id, 0, 41)
         }),
     ])
     .await;
@@ -298,7 +318,7 @@ async fn kafka_producer_send_batch_untracked_skips_delivery_handles() {
 
     assert_eq!(producer.buffered_bytes(), 0);
     assert_eq!(bootstrap.join().await, 2);
-    assert_eq!(leader_7.join().await, 2);
+    assert_eq!(leader_7.join().await, 3);
 }
 
 #[tokio::test]

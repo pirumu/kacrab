@@ -24,6 +24,7 @@ use crate::{
 const MAGIC_V2: i8 = 2;
 const LOG_OVERHEAD: usize = 12;
 const BATCH_HEADER_SIZE: i32 = 49;
+const BATCH_HEADER_SIZE_USIZE: usize = 49;
 
 /// Kafka timestamp type — derived from bit 3 of the batch `attributes` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,48 +80,68 @@ impl RecordBatch {
         buf: &mut BytesMut,
         compression_level: Option<i32>,
     ) -> Result<()> {
-        let mut records_buf = BytesMut::new();
-        for record in &self.records {
-            record
-                .encode(&mut records_buf)
-                .map_err(|e| RecordError::at_offset(self.base_offset, e.kind))?;
-        }
-
         let codec =
             Compression::from_attributes(self.attributes).map_err(|e| self.lift_compression(e))?;
-        let records_payload = if codec == Compression::None {
-            records_buf.freeze()
-        } else {
-            Bytes::from(
-                codec
-                    .compress_with_level(&records_buf, compression_level)
-                    .map_err(|e| self.lift_compression(e))?,
-            )
-        };
+        if codec == Compression::None {
+            let records_payload_len = self.records_encoded_len()?;
+            return self.write_batch(buf, records_payload_len, |buf| self.write_records(buf));
+        }
 
+        let mut records_buf = BytesMut::with_capacity(self.records_encoded_len()?);
+        self.write_records(&mut records_buf)?;
+        let records_payload = Bytes::from(
+            codec
+                .compress_with_level(&records_buf, compression_level)
+                .map_err(|e| self.lift_compression(e))?,
+        );
+        self.write_batch(buf, records_payload.len(), |buf| {
+            buf.extend_from_slice(&records_payload);
+            Ok(())
+        })
+    }
+
+    /// Return the exact encoded length when records are written without
+    /// compression.
+    pub fn uncompressed_encoded_len(&self) -> Result<usize> {
+        let len = super::add_encoded_len("record batch", LOG_OVERHEAD, BATCH_HEADER_SIZE_USIZE)?;
+        super::add_encoded_len("record batch", len, self.records_encoded_len()?)
+    }
+
+    fn records_encoded_len(&self) -> Result<usize> {
+        let mut len = 0;
+        for record in &self.records {
+            len = super::add_encoded_len(
+                "record batch records",
+                len,
+                record
+                    .encoded_len()
+                    .map_err(|e| RecordError::at_offset(self.base_offset, e.kind))?,
+            )?;
+        }
+        Ok(len)
+    }
+
+    fn write_records(&self, buf: &mut BytesMut) -> Result<()> {
+        for record in &self.records {
+            record
+                .encode(buf)
+                .map_err(|e| RecordError::at_offset(self.base_offset, e.kind))?;
+        }
+        Ok(())
+    }
+
+    fn write_batch<F>(
+        &self,
+        buf: &mut BytesMut,
+        records_payload_len: usize,
+        write_records_payload: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut BytesMut) -> Result<()>,
+    {
         buf.put_i64(self.base_offset);
 
-        let payload_len = i32::try_from(records_payload.len()).map_err(|_| {
-            RecordError::at_offset(
-                self.base_offset,
-                RecordErrorKind::LengthOverflow {
-                    field: "compressed records",
-                    got: records_payload.len(),
-                    remaining: usize::try_from(i32::MAX).unwrap_or(usize::MAX),
-                },
-            )
-        })?;
-        let batch_length = BATCH_HEADER_SIZE.checked_add(payload_len).ok_or_else(|| {
-            RecordError::at_offset(
-                self.base_offset,
-                RecordErrorKind::LengthOverflow {
-                    field: "batch length",
-                    got: records_payload.len(),
-                    remaining: usize::try_from(i32::MAX).unwrap_or(usize::MAX),
-                },
-            )
-        })?;
-        buf.put_i32(batch_length);
+        buf.put_i32(self.batch_length(records_payload_len)?);
 
         buf.put_i32(self.partition_leader_epoch);
         buf.put_i8(self.magic);
@@ -136,17 +157,8 @@ impl RecordBatch {
         buf.put_i64(self.producer_id);
         buf.put_i16(self.producer_epoch);
         buf.put_i32(self.base_sequence);
-        let record_count = i32::try_from(self.records.len()).map_err(|_| {
-            RecordError::at_offset(
-                self.base_offset,
-                RecordErrorKind::RecordCountTooLarge {
-                    got: i32::MAX,
-                    max: MAX_RECORDS_PER_BATCH,
-                },
-            )
-        })?;
-        buf.put_i32(record_count);
-        buf.extend_from_slice(&records_payload);
+        buf.put_i32(self.record_count()?);
+        write_records_payload(buf)?;
 
         let crc = crc::crc32c(buf.get(crc_start..).unwrap_or(&[]));
         let crc_bytes = crc.to_be_bytes();
@@ -165,6 +177,41 @@ impl RecordBatch {
         }
 
         Ok(())
+    }
+
+    fn batch_length(&self, records_payload_len: usize) -> Result<i32> {
+        let payload_len = i32::try_from(records_payload_len).map_err(|_| {
+            RecordError::at_offset(
+                self.base_offset,
+                RecordErrorKind::LengthOverflow {
+                    field: "compressed records",
+                    got: records_payload_len,
+                    remaining: usize::try_from(i32::MAX).unwrap_or(usize::MAX),
+                },
+            )
+        })?;
+        BATCH_HEADER_SIZE.checked_add(payload_len).ok_or_else(|| {
+            RecordError::at_offset(
+                self.base_offset,
+                RecordErrorKind::LengthOverflow {
+                    field: "batch length",
+                    got: records_payload_len,
+                    remaining: usize::try_from(i32::MAX).unwrap_or(usize::MAX),
+                },
+            )
+        })
+    }
+
+    fn record_count(&self) -> Result<i32> {
+        i32::try_from(self.records.len()).map_err(|_| {
+            RecordError::at_offset(
+                self.base_offset,
+                RecordErrorKind::RecordCountTooLarge {
+                    got: i32::MAX,
+                    max: MAX_RECORDS_PER_BATCH,
+                },
+            )
+        })
     }
 
     /// Decode one batch from `buf`. Validates CRC32C, decompresses if needed,
@@ -386,4 +433,64 @@ pub fn decode_batches(buf: &mut Bytes) -> Result<Vec<RecordBatch>> {
         batches.push(RecordBatch::decode(buf)?);
     }
     Ok(batches)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::missing_assert_message,
+        reason = "Record-batch encoding tests fail fastest with contextual expect calls."
+    )]
+
+    use bytes::{Bytes, BytesMut};
+
+    use super::{Record, RecordBatch};
+    use crate::record::RecordHeader;
+
+    #[test]
+    fn batch_uncompressed_encoded_len_matches_encoded_bytes() {
+        let batch = RecordBatch {
+            base_offset: 0,
+            partition_leader_epoch: -1,
+            magic: 2,
+            attributes: 0,
+            last_offset_delta: 1,
+            first_timestamp: 10,
+            max_timestamp: 11,
+            producer_id: -1,
+            producer_epoch: -1,
+            base_sequence: -1,
+            records: vec![
+                Record {
+                    attributes: 0,
+                    timestamp_delta: 0,
+                    offset_delta: 0,
+                    key: Some(Bytes::from_static(b"key-0")),
+                    value: Some(Bytes::from_static(b"value-0")),
+                    headers: Vec::new(),
+                },
+                Record {
+                    attributes: 0,
+                    timestamp_delta: 1,
+                    offset_delta: 1,
+                    key: None,
+                    value: Some(Bytes::from_static(b"value-1")),
+                    headers: vec![RecordHeader {
+                        key: Bytes::from_static(b"h"),
+                        value: None,
+                    }],
+                },
+            ],
+        };
+        let encoded_len = batch.uncompressed_encoded_len().expect("batch encoded len");
+        let mut bytes = BytesMut::with_capacity(encoded_len);
+
+        batch.encode(&mut bytes).expect("batch encode");
+
+        assert_eq!(encoded_len, bytes.len());
+        assert_eq!(encoded_len, bytes.capacity());
+        let decoded = RecordBatch::decode(&mut bytes.freeze()).expect("record batch decode");
+        assert_eq!(decoded.records.len(), 2);
+    }
 }

@@ -23,7 +23,7 @@ use kacrab::producer::{KafkaProducer, ProducerRecord};
 use tokio::runtime::Builder;
 
 const PARTITIONS: usize = 3;
-const DEFAULT_PIPELINED_IN_FLIGHT: usize = 8;
+const DEFAULT_PIPELINED_IN_FLIGHT: usize = 5;
 
 fn main() {
     let runtime = Builder::new_current_thread()
@@ -112,8 +112,10 @@ async fn run_scenario(run: BenchmarkRun<'_>) {
         .build()
         .await
         .expect("benchmark producer config should build");
+    producer.enable_dispatch_latency_metrics();
     let value = Bytes::from(vec![b'x'; run.scenario.value_size]);
     warm_up_producer(&mut producer, run.topic, value.clone()).await;
+    let _warmup_latencies = producer.take_dispatch_latency_samples();
     let topic = Arc::<str>::from(run.topic);
     let started = Instant::now();
     let mut sent = 0usize;
@@ -142,7 +144,8 @@ async fn run_scenario(run: BenchmarkRun<'_>) {
         .flush()
         .await
         .expect("benchmark flush should succeed");
-    print_result(run.scenario, started.elapsed(), produce_requests);
+    let latency = latency_summary(producer.take_dispatch_latency_samples());
+    print_result(run.scenario, started.elapsed(), produce_requests, latency);
 }
 
 async fn warm_up_producer(producer: &mut KafkaProducer, topic: &str, value: Bytes) {
@@ -187,15 +190,33 @@ fn benchmark_record(
 }
 
 fn scenarios() -> Vec<Scenario> {
-    if env::var("KACRAB_ONLY_10B").ok().as_deref() == Some("1") {
-        return vec![Scenario {
-            name: "5,000,000 messages x 10 bytes",
-            messages: 5_000_000,
-            value_size: 10,
-            batch_messages: env_usize("KACRAB_BATCH_MESSAGES_10B").unwrap_or(16_384),
-        }];
+    let selection = ScenarioSelection {
+        only_10b: env::var("KACRAB_ONLY_10B").ok().as_deref() == Some("1"),
+        only_10kib: env::var("KACRAB_ONLY_10KIB").ok().as_deref() == Some("1"),
+        smoke: env::var("KACRAB_BENCH_SMOKE").ok().as_deref() == Some("1"),
+        batch_messages_10b: env_usize("KACRAB_BATCH_MESSAGES_10B"),
+        batch_messages_10kib: env_usize("KACRAB_BATCH_MESSAGES_10KIB"),
+    };
+    scenarios_for_selection(selection)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScenarioSelection {
+    only_10b: bool,
+    only_10kib: bool,
+    smoke: bool,
+    batch_messages_10b: Option<usize>,
+    batch_messages_10kib: Option<usize>,
+}
+
+fn scenarios_for_selection(selection: ScenarioSelection) -> Vec<Scenario> {
+    if selection.only_10b {
+        return vec![small_payload_scenario(selection.batch_messages_10b)];
     }
-    if env::var("KACRAB_BENCH_SMOKE").ok().as_deref() == Some("1") {
+    if selection.only_10kib {
+        return vec![large_payload_scenario(selection.batch_messages_10kib)];
+    }
+    if selection.smoke {
         return vec![
             Scenario {
                 name: "smoke: 10,000 messages x 10 bytes",
@@ -212,19 +233,27 @@ fn scenarios() -> Vec<Scenario> {
         ];
     }
     vec![
-        Scenario {
-            name: "5,000,000 messages x 10 bytes",
-            messages: 5_000_000,
-            value_size: 10,
-            batch_messages: env_usize("KACRAB_BATCH_MESSAGES_10B").unwrap_or(16_384),
-        },
-        Scenario {
-            name: "100,000 messages x 10 KiB",
-            messages: 100_000,
-            value_size: 10 * 1024,
-            batch_messages: 96,
-        },
+        small_payload_scenario(selection.batch_messages_10b),
+        large_payload_scenario(selection.batch_messages_10kib),
     ]
+}
+
+fn small_payload_scenario(batch_messages: Option<usize>) -> Scenario {
+    Scenario {
+        name: "5,000,000 messages x 10 bytes",
+        messages: 5_000_000,
+        value_size: 10,
+        batch_messages: batch_messages.unwrap_or(16_384),
+    }
+}
+
+fn large_payload_scenario(batch_messages: Option<usize>) -> Scenario {
+    Scenario {
+        name: "100,000 messages x 10 KiB",
+        messages: 100_000,
+        value_size: 10 * 1024,
+        batch_messages: batch_messages.unwrap_or(96),
+    }
 }
 
 fn partitions() -> usize {
@@ -277,7 +306,61 @@ fn batch_buffer_memory(batch_messages: usize, value_size: usize) -> usize {
         .expect("scenario buffer memory should not overflow")
 }
 
-fn print_result(scenario: Scenario, elapsed: Duration, produce_requests: usize) {
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LatencySummary {
+    samples: usize,
+    avg_ms: f64,
+    p50_ms: f64,
+    p95_ms: f64,
+    p99_ms: f64,
+    p999_ms: f64,
+    max_ms: f64,
+}
+
+fn latency_summary<I>(samples: I) -> Option<LatencySummary>
+where
+    I: IntoIterator<Item = Duration>,
+{
+    let mut samples: Vec<_> = samples.into_iter().collect();
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_unstable();
+    let total_ms: f64 = samples.iter().copied().map(duration_ms).sum();
+    let sample_count = samples.len();
+    let avg_ms = total_ms / f64::from(u32::try_from(sample_count).ok()?);
+    let max_ms = duration_ms(*samples.last()?);
+    Some(LatencySummary {
+        samples: sample_count,
+        avg_ms,
+        p50_ms: percentile_ms(&samples, 500),
+        p95_ms: percentile_ms(&samples, 950),
+        p99_ms: percentile_ms(&samples, 990),
+        p999_ms: percentile_ms(&samples, 999),
+        max_ms,
+    })
+}
+
+fn percentile_ms(samples: &[Duration], per_mille: usize) -> f64 {
+    let len = samples.len();
+    let rank = per_mille
+        .checked_mul(len)
+        .and_then(|scaled| scaled.checked_add(999))
+        .map_or(len, |scaled| scaled / 1000);
+    let index = rank.saturating_sub(1).min(len.saturating_sub(1));
+    duration_ms(samples[index])
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn print_result(
+    scenario: Scenario,
+    elapsed: Duration,
+    produce_requests: usize,
+    latency: Option<LatencySummary>,
+) {
     let seconds = elapsed.as_secs_f64();
     let messages_u32 =
         u32::try_from(scenario.messages).expect("scenario message count should fit in u32");
@@ -289,8 +372,75 @@ fn print_result(scenario: Scenario, elapsed: Duration, produce_requests: usize) 
         .map(|bytes| f64::from(bytes) / (1024.0 * 1024.0))
         .expect("scenario bytes should not overflow");
     let megabytes_per_second = megabytes / seconds;
-    println!(
-        "{}: {:.0} messages/s, {:.3} MiB/s ({:.3}s, {} produce requests)",
-        scenario.name, messages_per_second, megabytes_per_second, seconds, produce_requests
-    );
+    if let Some(latency) = latency {
+        println!(
+            "{}: {:.0} messages/s, {:.3} MiB/s ({:.3}s, {} produce requests, latency samples={}, \
+             avg={:.2} ms, p50={:.2} ms, p95={:.2} ms, p99={:.2} ms, p999={:.2} ms, max={:.2} ms)",
+            scenario.name,
+            messages_per_second,
+            megabytes_per_second,
+            seconds,
+            produce_requests,
+            latency.samples,
+            latency.avg_ms,
+            latency.p50_ms,
+            latency.p95_ms,
+            latency.p99_ms,
+            latency.p999_ms,
+            latency.max_ms
+        );
+    } else {
+        println!(
+            "{}: {:.0} messages/s, {:.3} MiB/s ({:.3}s, {} produce requests)",
+            scenario.name, messages_per_second, megabytes_per_second, seconds, produce_requests
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{ScenarioSelection, latency_summary, scenarios_for_selection};
+
+    #[test]
+    fn scenario_selection_can_run_large_payload_only() {
+        let scenarios = scenarios_for_selection(ScenarioSelection {
+            only_10b: false,
+            only_10kib: true,
+            smoke: false,
+            batch_messages_10b: None,
+            batch_messages_10kib: Some(192),
+        });
+
+        assert_eq!(scenarios.len(), 1);
+        assert_eq!(scenarios[0].name, "100,000 messages x 10 KiB");
+        assert_eq!(scenarios[0].messages, 100_000);
+        assert_eq!(scenarios[0].value_size, 10 * 1024);
+        assert_eq!(scenarios[0].batch_messages, 192);
+    }
+
+    #[test]
+    fn latency_summary_reports_nearest_rank_percentiles() {
+        let summary = latency_summary([
+            Duration::from_millis(5),
+            Duration::from_millis(1),
+            Duration::from_millis(3),
+            Duration::from_millis(2),
+            Duration::from_millis(4),
+        ])
+        .expect("latency summary");
+
+        assert_eq!(summary.samples, 5);
+        assert_float_eq(summary.avg_ms, 3.0);
+        assert_float_eq(summary.p50_ms, 3.0);
+        assert_float_eq(summary.p95_ms, 5.0);
+        assert_float_eq(summary.p99_ms, 5.0);
+        assert_float_eq(summary.p999_ms, 5.0);
+        assert_float_eq(summary.max_ms, 5.0);
+    }
+
+    fn assert_float_eq(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < f64::EPSILON);
+    }
 }

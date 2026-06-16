@@ -12,8 +12,8 @@ use bytes::{Buf, Bytes, BytesMut};
 
 use super::{RecordError, RecordErrorKind, RecordHeader, Result};
 use crate::primitives::{
-    read_i8, read_signed_varint, read_signed_varlong, write_i8, write_signed_varint,
-    write_signed_varlong,
+    read_i8, read_signed_varint, read_signed_varlong, signed_varint_len, signed_varlong_len,
+    write_i8, write_signed_varint, write_signed_varlong,
 };
 
 /// A single record in a v2 [`crate::record::RecordBatch`].
@@ -34,15 +34,28 @@ pub struct Record {
 }
 
 impl Record {
+    /// Return the exact encoded length of this record, including its body
+    /// length prefix.
+    pub fn encoded_len(&self) -> Result<usize> {
+        let body_len = self.body_encoded_len()?;
+        let body_len_i32 = super::encode_len("record body", body_len)?;
+        super::add_encoded_len("record body", signed_varint_len(body_len_i32), body_len)
+    }
+
     /// Encode this record into `buf` — body length + body bytes.
     pub fn encode(&self, buf: &mut BytesMut) -> Result<()> {
-        let mut body = BytesMut::new();
-        write_i8(&mut body, self.attributes);
-        write_signed_varlong(&mut body, self.timestamp_delta);
-        write_signed_varint(&mut body, self.offset_delta);
+        let body_len = self.body_encoded_len()?;
+        write_signed_varint(buf, super::encode_len("record body", body_len)?);
+        self.encode_body(buf)
+    }
 
-        super::write_nullable_bytes_field(&mut body, "record key", self.key.as_ref())?;
-        super::write_nullable_bytes_field(&mut body, "record value", self.value.as_ref())?;
+    fn encode_body(&self, buf: &mut BytesMut) -> Result<()> {
+        write_i8(buf, self.attributes);
+        write_signed_varlong(buf, self.timestamp_delta);
+        write_signed_varint(buf, self.offset_delta);
+
+        super::write_nullable_bytes_field(buf, "record key", self.key.as_ref())?;
+        super::write_nullable_bytes_field(buf, "record value", self.value.as_ref())?;
 
         let hdr_count = i32::try_from(self.headers.len()).map_err(|_| {
             RecordError::unknown_offset(RecordErrorKind::LengthOverflow {
@@ -51,21 +64,47 @@ impl Record {
                 remaining: usize::try_from(i32::MAX).unwrap_or(usize::MAX),
             })
         })?;
-        write_signed_varint(&mut body, hdr_count);
+        write_signed_varint(buf, hdr_count);
         for header in &self.headers {
-            header.encode(&mut body)?;
+            header.encode(buf)?;
         }
+        Ok(())
+    }
 
-        let body_len = i32::try_from(body.len()).map_err(|_| {
+    fn body_encoded_len(&self) -> Result<usize> {
+        let mut len = 1;
+        len = super::add_encoded_len(
+            "record timestamp delta",
+            len,
+            signed_varlong_len(self.timestamp_delta),
+        )?;
+        len = super::add_encoded_len(
+            "record offset delta",
+            len,
+            signed_varint_len(self.offset_delta),
+        )?;
+        len = super::add_encoded_len(
+            "record key",
+            len,
+            super::nullable_bytes_field_len("record key", self.key.as_ref())?,
+        )?;
+        len = super::add_encoded_len(
+            "record value",
+            len,
+            super::nullable_bytes_field_len("record value", self.value.as_ref())?,
+        )?;
+        let hdr_count = i32::try_from(self.headers.len()).map_err(|_| {
             RecordError::unknown_offset(RecordErrorKind::LengthOverflow {
-                field: "record body",
-                got: body.len(),
+                field: "header count",
+                got: self.headers.len(),
                 remaining: usize::try_from(i32::MAX).unwrap_or(usize::MAX),
             })
         })?;
-        write_signed_varint(buf, body_len);
-        buf.extend_from_slice(&body);
-        Ok(())
+        len = super::add_encoded_len("header count", len, signed_varint_len(hdr_count))?;
+        for header in &self.headers {
+            len = super::add_encoded_len("record header", len, header.encoded_len()?)?;
+        }
+        Ok(len)
     }
 
     /// Decode one record from `buf`. Validates that the body length fits in
@@ -135,5 +174,40 @@ impl Record {
             value,
             headers,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::missing_assert_message,
+        reason = "Record encoding tests fail fastest with contextual expect calls."
+    )]
+
+    use bytes::{Bytes, BytesMut};
+
+    use super::{Record, RecordHeader};
+
+    #[test]
+    fn record_encoded_len_matches_encoded_bytes_with_headers_and_nulls() {
+        let record = Record {
+            attributes: 0,
+            timestamp_delta: 300,
+            offset_delta: 127,
+            key: Some(Bytes::from_static(b"key")),
+            value: None,
+            headers: vec![RecordHeader {
+                key: Bytes::from_static(b"h"),
+                value: Some(Bytes::from_static(b"value")),
+            }],
+        };
+        let encoded_len = record.encoded_len().expect("record encoded len");
+        let mut bytes = BytesMut::with_capacity(encoded_len);
+
+        record.encode(&mut bytes).expect("record encode");
+
+        assert_eq!(encoded_len, bytes.len());
+        assert_eq!(encoded_len, bytes.capacity());
     }
 }

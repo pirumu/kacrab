@@ -104,7 +104,7 @@ fn encode_records(
         base_sequence,
         records,
     };
-    let mut bytes = BytesMut::new();
+    let mut bytes = BytesMut::with_capacity(batch.uncompressed_encoded_len()?);
     batch.encode_with_compression_level(&mut bytes, compression.level)?;
     Ok(bytes.freeze())
 }

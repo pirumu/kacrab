@@ -17,10 +17,12 @@ use kacrab_protocol::{
     },
     version::client_api_info,
 };
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, task::JoinSet};
 
 use super::{
-    accumulator::{ReadyBatch, RecordAccumulator, estimate_record_bytes},
+    accumulator::{
+        RECORD_BATCH_OVERHEAD_BYTES, ReadyBatch, RecordAccumulator, estimate_record_batch_bytes,
+    },
     batch::encode_record_batch_with_producer_state,
     config::{
         DEFAULT_DELIVERY_TIMEOUT, DEFAULT_TIMEOUT_MS, DEFAULT_TRANSACTION_TIMEOUT_MS,
@@ -48,6 +50,7 @@ pub struct ProducerDispatcher {
     retry_attempts: usize,
     delivery_timeout: Duration,
     compression: ProducerCompression,
+    max_in_flight_requests_per_connection: usize,
     partitioner_ignore_keys: bool,
     partition_sticky_batch_size: usize,
     idempotence: ProducerIdempotenceConfig,
@@ -69,6 +72,8 @@ impl ProducerDispatcher {
                 codec: kacrab_protocol::compression::Compression::None,
                 level: None,
             },
+            max_in_flight_requests_per_connection:
+                crate::wire::DEFAULT_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
             partitioner_ignore_keys: false,
             partition_sticky_batch_size: super::AccumulatorConfig::default().batch_size,
             idempotence: ProducerIdempotenceConfig {
@@ -92,6 +97,7 @@ impl ProducerDispatcher {
             retry_attempts: config.retry_attempts,
             delivery_timeout: config.delivery_timeout,
             compression: config.compression,
+            max_in_flight_requests_per_connection: config.max_in_flight_requests_per_connection,
             partitioner_ignore_keys: config.partitioner_ignore_keys,
             partition_sticky_batch_size: config.accumulator.batch_size,
             idempotence: config.idempotence,
@@ -383,7 +389,7 @@ impl ProducerDispatcher {
             .metadata_for_topics(topics.iter().map(String::as_str))
             .await
             .map_err(DispatchError::from)?;
-        let mut by_broker: AHashMap<i32, BrokerProduceRequest> = AHashMap::new();
+        let mut by_broker: AHashMap<i32, Vec<BrokerProduceRequest>> = AHashMap::new();
         for batch in batches {
             let Some(first_record) = batch.records.first().cloned() else {
                 continue;
@@ -407,7 +413,18 @@ impl ProducerDispatcher {
                 batch.producer_state,
             )
             .map_err(DispatchError::from)?;
-            by_broker.entry(route.leader_id).or_default().push(
+            let requests = by_broker.entry(route.leader_id).or_default();
+            let request_index = requests
+                .iter()
+                .position(|request| !request.contains_route(&route));
+            let request_index = request_index.unwrap_or_else(|| {
+                requests.push(BrokerProduceRequest::default());
+                requests.len().saturating_sub(1)
+            });
+            let Some(request) = requests.get_mut(request_index) else {
+                return Err(DispatchError::Producer(ProducerError::FlushIncomplete));
+            };
+            request.push(
                 route,
                 records,
                 BrokerProduceOptions {
@@ -420,16 +437,52 @@ impl ProducerDispatcher {
 
         let mut receipts = Vec::new();
         let version = client_api_info(ApiKey::Produce).max_version;
-        for (broker_id, request) in by_broker {
-            let response = self
-                .wire
-                .send_to_broker::<_, kacrab_protocol::generated::ProduceResponseData>(
-                    broker_id,
-                    ApiKey::Produce,
-                    version,
-                    &request.data,
-                )
+        for (broker_id, requests) in by_broker {
+            let mut broker_receipts = self
+                .dispatch_broker_requests(broker_id, requests, version)
                 .await?;
+            receipts.append(&mut broker_receipts);
+        }
+        Ok(receipts)
+    }
+
+    async fn dispatch_broker_requests(
+        &self,
+        broker_id: i32,
+        requests: Vec<BrokerProduceRequest>,
+        version: i16,
+    ) -> std::result::Result<Vec<ProduceReceipt>, DispatchError> {
+        let mut pending = requests.into_iter().enumerate();
+        let mut in_flight = JoinSet::new();
+        let mut completed = Vec::new();
+        let max_in_flight = self.max_in_flight_requests_per_connection.max(1);
+
+        loop {
+            while in_flight.len() < max_in_flight {
+                let Some((index, request)) = pending.next() else {
+                    break;
+                };
+                let wire = self.wire.clone();
+                let abort_handle = in_flight.spawn(async move {
+                    let response =
+                        send_produce_with_backpressure_retry(&wire, broker_id, version, &request)
+                            .await;
+                    (index, request, response)
+                });
+                drop(abort_handle);
+            }
+
+            let Some(result) = in_flight.join_next().await else {
+                break;
+            };
+            let (index, request, response) =
+                result.map_err(|error| ProducerError::DispatchTask(error.to_string()))?;
+            completed.push((index, request, response.map_err(ProducerError::from)?));
+        }
+        completed.sort_by_key(|(index, _request, _response)| *index);
+
+        let mut receipts = Vec::new();
+        for (_index, request, response) in completed {
             match produce_receipts(&response, &request.routes) {
                 Ok(mut request_receipts) => receipts.append(&mut request_receipts),
                 Err(ProducerError::Broker {
@@ -804,7 +857,7 @@ impl ProducerPartitionerState {
             Some(sticky) => sticky,
             None => StickyPartitionState {
                 partition: self.next_partition(topic, topic_metadata)?,
-                bytes: 0,
+                bytes: RECORD_BATCH_OVERHEAD_BYTES,
             },
         };
         let mut sticky_used = false;
@@ -820,11 +873,13 @@ impl ProducerPartitionerState {
 
             sticky_used = true;
             record.partition = sticky.partition;
-            sticky.bytes = sticky.bytes.saturating_add(estimate_record_bytes(record));
+            sticky.bytes = sticky
+                .bytes
+                .saturating_add(estimate_record_batch_bytes(record));
             if sticky.bytes >= sticky_batch_size.max(1) {
                 sticky = StickyPartitionState {
                     partition: self.next_partition(topic, topic_metadata)?,
-                    bytes: 0,
+                    bytes: RECORD_BATCH_OVERHEAD_BYTES,
                 };
             }
         }
@@ -849,16 +904,18 @@ impl ProducerPartitionerState {
             Some(sticky) => sticky,
             None => StickyPartitionState {
                 partition: self.next_partition(topic, topic_metadata)?,
-                bytes: 0,
+                bytes: RECORD_BATCH_OVERHEAD_BYTES,
             },
         };
 
         let partition = sticky.partition;
-        sticky.bytes = sticky.bytes.saturating_add(estimate_record_bytes(record));
+        sticky.bytes = sticky
+            .bytes
+            .saturating_add(estimate_record_batch_bytes(record));
         if sticky.bytes >= sticky_batch_size.max(1) {
             sticky = StickyPartitionState {
                 partition: self.next_partition(topic, topic_metadata)?,
-                bytes: 0,
+                bytes: RECORD_BATCH_OVERHEAD_BYTES,
             };
         }
         let _previous = self.sticky_by_topic.insert(topic.to_owned(), sticky);
@@ -1019,6 +1076,12 @@ struct BrokerProduceRequest {
 }
 
 impl BrokerProduceRequest {
+    fn contains_route(&self, route: &ProduceRoute) -> bool {
+        self.routes.iter().any(|existing| {
+            existing.topic_id == route.topic_id && existing.partition == route.partition
+        })
+    }
+
     fn push(
         &mut self,
         route: ProduceRoute,
@@ -1032,6 +1095,28 @@ impl BrokerProduceRequest {
             .map(|id| KafkaString::from(id.to_owned()));
         push_partition(&mut self.data.topic_data, &route, records);
         self.routes.push(route);
+    }
+}
+
+async fn send_produce_with_backpressure_retry(
+    wire: &WireClient,
+    broker_id: i32,
+    version: i16,
+    request: &BrokerProduceRequest,
+) -> crate::wire::Result<kacrab_protocol::generated::ProduceResponseData> {
+    loop {
+        match wire
+            .send_to_broker::<_, kacrab_protocol::generated::ProduceResponseData>(
+                broker_id,
+                ApiKey::Produce,
+                version,
+                &request.data,
+            )
+            .await
+        {
+            Err(crate::wire::WireError::Backpressure) => tokio::task::yield_now().await,
+            result => return result,
+        }
     }
 }
 
@@ -1087,6 +1172,7 @@ fn unique_unassigned_record_topics(records: &[super::ProducerRecord]) -> Vec<Str
 }
 
 fn complete_deliveries(batches: &mut [ReadyBatch], receipts: &[ProduceReceipt]) {
+    let mut used_receipts = vec![false; receipts.len()];
     for batch in batches {
         let Some(sender) = batch.delivery.take() else {
             continue;
@@ -1094,14 +1180,19 @@ fn complete_deliveries(batches: &mut [ReadyBatch], receipts: &[ProduceReceipt]) 
         if !sender.has_receivers() {
             continue;
         }
-        let Some(receipt) = receipts
-            .iter()
-            .find(|receipt| receipt.topic == batch.topic && receipt.partition == batch.partition)
-            .cloned()
+        let Some((receipt_index, receipt)) =
+            receipts.iter().enumerate().find(|(index, receipt)| {
+                !used_receipts.get(*index).copied().unwrap_or(false)
+                    && receipt.topic == batch.topic
+                    && receipt.partition == batch.partition
+            })
         else {
             continue;
         };
-        sender.send(receipt);
+        if let Some(used) = used_receipts.get_mut(receipt_index) {
+            *used = true;
+        }
+        sender.send(receipt.clone());
     }
 }
 
@@ -1285,7 +1376,7 @@ mod tests {
         let partitions: Vec<_> = (0..5)
             .map(|_| {
                 state
-                    .partition_for_record(&metadata, &record, false, 256)
+                    .partition_for_record(&metadata, &record, false, 128)
                     .expect("partition")
             })
             .collect();
@@ -1330,7 +1421,7 @@ mod tests {
         let partitions: Vec<_> = (0..5)
             .map(|_| {
                 state
-                    .partition_for_record(&metadata, &record, true, 256)
+                    .partition_for_record(&metadata, &record, true, 128)
                     .expect("partition")
             })
             .collect();
@@ -1721,6 +1812,25 @@ mod tests {
         let topic = request.data.topic_data.first().expect("topic group");
         assert_eq!(topic.partition_data.len(), 2);
         assert_eq!(request.routes.len(), 2);
+    }
+
+    #[test]
+    fn broker_produce_request_detects_duplicate_partition_route() {
+        let mut request = BrokerProduceRequest::default();
+        let options = BrokerProduceOptions {
+            acks: 1,
+            timeout_ms: 1_500,
+            transactional_id: None,
+        };
+        let route = route("orders", 0);
+
+        assert!(!request.contains_route(&route));
+        request.push(route.clone(), Bytes::from_static(b"a"), options);
+
+        let topic = request.data.topic_data.first().expect("topic group");
+        assert_eq!(topic.partition_data.len(), 1);
+        assert_eq!(request.routes.len(), 1);
+        assert!(request.contains_route(&route));
     }
 
     #[test]

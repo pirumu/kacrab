@@ -275,7 +275,7 @@ benchmark hooks live in [`benches/`](benches/) and include accumulator,
 wire-pipeline, mock multi-broker producer dispatch, and real Kafka smoke
 benchmarks through the public `KafkaProducer` API.
 
-Benchmark host for the 2026-06-16 local baselines:
+Benchmark host for the 2026-06-17 local baselines:
 
 - MacBook Pro, model identifier `Mac15,6`.
 - Apple M3 Pro base chip: 11-core CPU (5 performance, 6 efficiency), 14-core
@@ -288,34 +288,46 @@ cargo bench -p kacrab-benches --bench wire_pipeline
 cargo bench -p kacrab-benches --bench producer_dispatcher
 cargo run -p kacrab-benches --release --bin producer_mock_bench
 KACRAB_BENCH_SMOKE=1 cargo run -p kacrab-benches --release --bin producer_kafka_bench
+KACRAB_ONLY_10KIB=1 cargo run -p kacrab-benches --release --bin producer_kafka_bench
 ```
 
-Latest recorded local baselines are from 2026-06-17 on this development
-machine. Treat these as measurement checkpoints, not release guarantees:
-
-- Producer, public API against native Apache Kafka 4.3.0 single-node KRaft
-  on `127.0.0.1:9092`, `acks=1`, idempotence disabled, no compression,
-  3 partitions, Java-style sticky unassigned partitioning:
-  - `producer_kafka_bench`, 5M × 10B, in-flight 2: 5.08M messages/sec,
-    48.4 MiB/sec.
-  - `producer_kafka_bench`, 100K × 10 KiB, in-flight 2: 133.9K
-    messages/sec, 1.28 GiB/sec.
-  - Apache Kafka Java `kafka-producer-perf-test.sh` with matching producer
-    props measured 3.30M messages/sec for 5M × 10B and 35.4K messages/sec
-    for 100K × 10 KiB on the same broker.
-- Producer dispatcher, local mock multi-broker:
-  - `producer_dispatcher/multi_broker_dispatch`: 4.08-4.56M messages/sec.
-- Producer accumulator micro-benchmarks:
-  - `producer_accumulator/append_and_drain/1024`: 14.67-20.00M records/sec.
-  - `producer_accumulator/append_and_drain/16384`: 15.48-21.98M records/sec.
-- Producer mock broker executable:
-  - `producer_mock_bench`, 5M × 10B: 5.38M messages/sec, 51.27 MiB/sec.
-  - `producer_mock_bench`, 100K × 10 KiB: 249K messages/sec, 2.38 GiB/sec.
-- Wire pipeline:
-  - `wire_pipeline/api_versions_send_to_broker`: 150-166K requests/sec.
-
-Exact benchmark run notes are documented in
+Latest local performance snapshot from 2026-06-17 after the record-batch,
+request-frame, encoded batch-size, and producer polling pass, with kacrab and
+Java both using in-flight `5`.
+Detailed run commands, raw run outputs, and limits live in
 [`benches/README.md`](benches/README.md).
+
+Real Kafka / Java 5-run comparison:
+
+| Scenario | kacrab `producer_kafka_bench` | Java `kafka-producer-perf-test.sh` |
+| --- | ---: | ---: |
+| 5M × 10B | avg 7.89M msg/sec; median 7.87M; min-max 7.58M-8.15M; 75.29 MiB/sec; latency avg 2.02 ms, p99 5.25 ms | avg 3.59M records/sec; median 3.60M; min-max 3.31M-3.90M; 34.28 MB/sec; latency avg 0.59 ms, p99 9.00 ms |
+| 100K × 10 KiB | avg 46.80K msg/sec; median 47.30K; min-max 44.63K-48.74K; 457.06 MiB/sec; latency avg 1.63 ms, p99 6.72 ms | avg 31.17K records/sec; median 29.21K; min-max 25.52K-40.27K; 304.39 MB/sec; latency avg 63.31 ms, p99 146.40 ms |
+
+Shared real-Kafka comparison settings: 5 runs, in-flight `5`, `acks=1`,
+idempotence disabled, no compression, 3 partitions, RF=1. The kacrab
+100K × 10 KiB run used the default `KACRAB_BATCH_MESSAGES_10KIB=96`.
+Kacrab latency is
+dispatch latency for the untracked throughput path: earliest append timestamp
+in a ProduceRequest group to broker response handling, without per-record
+delivery handles.
+
+Internal hot-path checks:
+
+| Benchmark | Scenario | Final result |
+| --- | --- | ---: |
+| `producer_dispatcher/multi_broker_dispatch` | mock multi-broker dispatch | 9.68M messages/sec |
+| `producer_accumulator/append_and_drain/1024` | append and drain | 26.70M records/sec |
+| `producer_accumulator/append_and_drain/16384` | append and drain | 28.41M records/sec |
+| `producer_mock_bench` | 5M × 10B | 11.15M messages/sec, 106.33 MiB/sec |
+| `producer_mock_bench` | 100K × 10 KiB | 366K messages/sec, 3574 MiB/sec |
+| `wire_pipeline/api_versions_send_to_broker` | mock broker request pipeline | 172.26K requests/sec |
+
+Limits: the real Kafka numbers are local five-run smoke measurements on one Mac
+with a single-node RF=1 broker sharing the client machine. They are not release
+gates and do not include CPU profiles, allocator profiles, or broker disk
+metrics. Kacrab reports payload MiB/sec; Kafka's Java perf tool reports decimal
+MB/sec.
 
 ## Workspace
 

@@ -162,6 +162,23 @@ pub const fn unsigned_varint_len(value: u32) -> usize {
     }
 }
 
+/// Encoded length of an unsigned varlong (1–10 bytes, `u64` payload).
+#[must_use]
+pub const fn unsigned_varlong_len(value: u64) -> usize {
+    match value {
+        0x0..=0x7f => 1,
+        0x80..=0x3fff => 2,
+        0x4000..=0x1f_ffff => 3,
+        0x20_0000..=0xfff_ffff => 4,
+        0x1000_0000..=0x7_ffff_ffff => 5,
+        0x8_0000_0000..=0x3ff_ffff_ffff => 6,
+        0x400_0000_0000..=0x1_ffff_ffff_ffff => 7,
+        0x2_0000_0000_0000..=0xff_ffff_ffff_ffff => 8,
+        0x100_0000_0000_0000..=0x7fff_ffff_ffff_ffff => 9,
+        0x8000_0000_0000_0000..=u64::MAX => 10,
+    }
+}
+
 /// Read an unsigned varlong (1–10 bytes, `u64` payload).
 pub fn read_unsigned_varlong(buf: &mut Bytes) -> Result<u64> {
     let mut value: u64 = 0;
@@ -206,6 +223,13 @@ pub fn write_signed_varint(buf: &mut BytesMut, value: i32) {
     write_unsigned_varint(buf, encoded);
 }
 
+/// Encoded length of a signed varint (zigzag-encoded `i32`).
+#[must_use]
+pub const fn signed_varint_len(value: i32) -> usize {
+    let encoded = ((value << 1) ^ (value >> 31)).cast_unsigned();
+    unsigned_varint_len(encoded)
+}
+
 /// Read a signed varlong (zigzag-decoded `i64`).
 pub fn read_signed_varlong(buf: &mut Bytes) -> Result<i64> {
     let v = read_unsigned_varlong(buf)?;
@@ -218,6 +242,13 @@ pub fn read_signed_varlong(buf: &mut Bytes) -> Result<i64> {
 pub fn write_signed_varlong(buf: &mut BytesMut, value: i64) {
     let encoded = ((value << 1) ^ (value >> 63)).cast_unsigned();
     write_unsigned_varlong(buf, encoded);
+}
+
+/// Encoded length of a signed varlong (zigzag-encoded `i64`).
+#[must_use]
+pub const fn signed_varlong_len(value: i64) -> usize {
+    let encoded = ((value << 1) ^ (value >> 63)).cast_unsigned();
+    unsigned_varlong_len(encoded)
 }
 
 // ---------------------------------------------------------------------------
@@ -277,5 +308,37 @@ pub const fn compact_array_length_len(len: i32) -> usize {
         unsigned_varint_len(0)
     } else {
         unsigned_varint_len(len.cast_unsigned().saturating_add(1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::missing_assert_message,
+        reason = "Primitive helper tests keep assertions compact."
+    )]
+
+    use bytes::BytesMut;
+
+    use super::{signed_varint_len, signed_varlong_len, write_signed_varint, write_signed_varlong};
+
+    #[test]
+    fn signed_varint_len_matches_written_bytes() {
+        for value in [0, -1, 1, 63, 64, -64, i32::MAX, i32::MIN] {
+            let mut bytes = BytesMut::new();
+            write_signed_varint(&mut bytes, value);
+
+            assert_eq!(signed_varint_len(value), bytes.len());
+        }
+    }
+
+    #[test]
+    fn signed_varlong_len_matches_written_bytes() {
+        for value in [0, -1, 1, 63, 64, -64, i64::MAX, i64::MIN] {
+            let mut bytes = BytesMut::new();
+            write_signed_varlong(&mut bytes, value);
+
+            assert_eq!(signed_varlong_len(value), bytes.len());
+        }
     }
 }

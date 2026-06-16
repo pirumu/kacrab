@@ -3,7 +3,7 @@
 use tokio::task::{JoinError, JoinSet};
 
 use super::{
-    accumulator::RecordAccumulator,
+    accumulator::{AppendStatus, RecordAccumulator},
     config::ProducerRuntimeConfig,
     dispatcher::{DispatchOutcome, ProducerDispatcher},
     error::{ProducerError, Result},
@@ -22,9 +22,54 @@ use crate::{
 pub struct KafkaProducer {
     accumulator: RecordAccumulator,
     dispatcher: ProducerDispatcher,
-    in_flight: JoinSet<DispatchOutcome>,
+    in_flight: JoinSet<TimedDispatchOutcome>,
     max_in_flight_requests: usize,
     max_block: std::time::Duration,
+    dispatch_latency_samples: Option<Vec<std::time::Duration>>,
+}
+
+#[derive(Debug)]
+struct TimedDispatchOutcome {
+    outcome: DispatchOutcome,
+    latency: std::time::Duration,
+}
+
+#[derive(Debug)]
+struct AppendPollBudget {
+    ready_batches: usize,
+    threshold: usize,
+}
+
+const DENSE_READY_BATCH_RECORDS: usize = 32;
+
+impl AppendPollBudget {
+    const fn new(max_in_flight_requests: usize) -> Self {
+        let threshold = if max_in_flight_requests == 0 {
+            1
+        } else {
+            max_in_flight_requests
+        };
+        Self {
+            ready_batches: 0,
+            threshold,
+        }
+    }
+
+    const fn observe(&mut self, status: AppendStatus) -> bool {
+        if !status.batch_ready {
+            return false;
+        }
+        if status.ready_batch_records >= DENSE_READY_BATCH_RECORDS {
+            self.ready_batches = 0;
+            return true;
+        }
+        self.ready_batches = self.ready_batches.saturating_add(1);
+        if self.ready_batches < self.threshold {
+            return false;
+        }
+        self.ready_batches = 0;
+        true
+    }
 }
 
 impl KafkaProducer {
@@ -39,6 +84,7 @@ impl KafkaProducer {
             in_flight: JoinSet::new(),
             max_in_flight_requests,
             max_block,
+            dispatch_latency_samples: None,
         }
     }
 
@@ -98,7 +144,10 @@ impl KafkaProducer {
         if !record.has_assigned_partition() {
             self.dispatcher.assign_partition(&mut record).await?;
         }
-        let delivery = self.append_for_delivery_with_max_block(record).await?;
+        let (delivery, status) = self.append_for_delivery_with_max_block(record).await?;
+        if status.batch_ready {
+            self.poll().await?;
+        }
         self.poll().await.map(|()| delivery)
     }
 
@@ -114,9 +163,14 @@ impl KafkaProducer {
         let mut records = records.into_iter();
         let (lower_bound, _upper_bound) = records.size_hint();
         let mut deliveries = Vec::with_capacity(lower_bound);
+        let mut poll_budget = AppendPollBudget::new(self.max_in_flight_requests);
         while let Some(record) = records.next() {
             if record.has_assigned_partition() {
-                deliveries.push(self.append_for_delivery_with_max_block(record).await?);
+                let (delivery, status) = self.append_for_delivery_with_max_block(record).await?;
+                deliveries.push(delivery);
+                if poll_budget.observe(status) {
+                    self.poll().await?;
+                }
                 continue;
             }
 
@@ -125,7 +179,11 @@ impl KafkaProducer {
             pending.extend(records);
             self.dispatcher.assign_partitions(&mut pending).await?;
             for record in pending {
-                deliveries.push(self.append_for_delivery_with_max_block(record).await?);
+                let (delivery, status) = self.append_for_delivery_with_max_block(record).await?;
+                deliveries.push(delivery);
+                if poll_budget.observe(status) {
+                    self.poll().await?;
+                }
             }
             break;
         }
@@ -147,9 +205,13 @@ impl KafkaProducer {
         let now = std::time::Instant::now();
         let mut records = records.into_iter();
         let (lower_bound, _upper_bound) = records.size_hint();
+        let mut poll_budget = AppendPollBudget::new(self.max_in_flight_requests);
         while let Some(record) = records.next() {
             if record.has_assigned_partition() {
-                self.append_untracked_with_max_block(record, now).await?;
+                let status = self.append_untracked_with_max_block(record, now).await?;
+                if poll_budget.observe(status) {
+                    self.poll().await?;
+                }
                 continue;
             }
 
@@ -158,7 +220,10 @@ impl KafkaProducer {
             pending.extend(records);
             self.dispatcher.assign_partitions(&mut pending).await?;
             for record in pending {
-                self.append_untracked_with_max_block(record, now).await?;
+                let status = self.append_untracked_with_max_block(record, now).await?;
+                if poll_budget.observe(status) {
+                    self.poll().await?;
+                }
             }
             break;
         }
@@ -256,6 +321,24 @@ impl KafkaProducer {
         self.accumulator.buffered_bytes()
     }
 
+    /// Enable dispatch latency collection for benchmark/diagnostic runs.
+    ///
+    /// Samples are measured from the earliest append timestamp in a drained
+    /// dispatch group until the broker response has been handled. This avoids
+    /// per-record delivery handles on the untracked throughput path.
+    pub fn enable_dispatch_latency_metrics(&mut self) {
+        let _samples = self.dispatch_latency_samples.get_or_insert_with(Vec::new);
+    }
+
+    /// Take and clear collected dispatch latency samples.
+    #[must_use]
+    pub fn take_dispatch_latency_samples(&mut self) -> Vec<std::time::Duration> {
+        self.dispatch_latency_samples
+            .as_mut()
+            .map(core::mem::take)
+            .unwrap_or_default()
+    }
+
     fn collect_finished(&mut self) -> Result<()> {
         while let Some(result) = self.in_flight.try_join_next() {
             self.dispatch_task_result(result, false)?;
@@ -285,23 +368,35 @@ impl KafkaProducer {
     }
 
     fn spawn_dispatch(&mut self, batches: Vec<super::ReadyBatch>, now: std::time::Instant) {
+        let started_at = batches
+            .iter()
+            .map(|batch| batch.first_append_at)
+            .min()
+            .unwrap_or(now);
         let dispatcher = self.dispatcher.clone();
-        let abort_handle = self
-            .in_flight
-            .spawn(async move { dispatcher.dispatch_drained(batches, now).await });
+        let abort_handle = self.in_flight.spawn(async move {
+            let outcome = dispatcher.dispatch_drained(batches, now).await;
+            TimedDispatchOutcome {
+                outcome,
+                latency: started_at.elapsed(),
+            }
+        });
         drop(abort_handle);
     }
 
     async fn append_for_delivery_with_max_block(
         &mut self,
         record: ProducerRecord,
-    ) -> Result<Delivery> {
+    ) -> Result<(Delivery, AppendStatus)> {
         let deadline = std::time::Instant::now()
             .checked_add(self.max_block)
             .unwrap_or_else(std::time::Instant::now);
         loop {
             let can_wait = self.accumulator.buffered_bytes() > 0 || !self.in_flight.is_empty();
-            match self.accumulator.append_for_delivery(record.clone()) {
+            match self
+                .accumulator
+                .append_for_delivery_with_status(record.clone())
+            {
                 Ok(delivery) => return Ok(delivery),
                 Err(ProducerError::Backpressure)
                     if can_wait && std::time::Instant::now() < deadline =>
@@ -318,14 +413,14 @@ impl KafkaProducer {
         &mut self,
         record: ProducerRecord,
         now: std::time::Instant,
-    ) -> Result<()> {
+    ) -> Result<AppendStatus> {
         let deadline = std::time::Instant::now()
             .checked_add(self.max_block)
             .unwrap_or_else(std::time::Instant::now);
         loop {
             let can_wait = self.accumulator.buffered_bytes() > 0 || !self.in_flight.is_empty();
-            match self.accumulator.append_at(record.clone(), now) {
-                Ok(()) => return Ok(()),
+            match self.accumulator.append_with_status_at(record.clone(), now) {
+                Ok(status) => return Ok(status),
                 Err(ProducerError::Backpressure)
                     if can_wait && std::time::Instant::now() < deadline =>
                 {
@@ -353,12 +448,21 @@ impl KafkaProducer {
 
     fn dispatch_task_result(
         &mut self,
-        result: core::result::Result<DispatchOutcome, JoinError>,
+        result: core::result::Result<TimedDispatchOutcome, JoinError>,
         requeue_is_error: bool,
     ) -> Result<()> {
         match result {
-            Ok(DispatchOutcome::Delivered(result)) => result.map(|_receipts| ()),
-            Ok(DispatchOutcome::Requeue(batches)) => {
+            Ok(TimedDispatchOutcome {
+                outcome: DispatchOutcome::Delivered(result),
+                latency,
+            }) => {
+                self.record_dispatch_latency(latency);
+                result.map(|_receipts| ())
+            },
+            Ok(TimedDispatchOutcome {
+                outcome: DispatchOutcome::Requeue(batches),
+                ..
+            }) => {
                 self.accumulator.requeue_front(batches);
                 if requeue_is_error {
                     Err(ProducerError::FlushIncomplete)
@@ -367,6 +471,12 @@ impl KafkaProducer {
                 }
             },
             Err(error) => Err(ProducerError::DispatchTask(error.to_string())),
+        }
+    }
+
+    fn record_dispatch_latency(&mut self, latency: std::time::Duration) {
+        if let Some(samples) = &mut self.dispatch_latency_samples {
+            samples.push(latency);
         }
     }
 }
@@ -511,10 +621,16 @@ mod tests {
 
     use bytes::Bytes;
 
-    use super::{DispatchOutcome, KafkaProducer, KafkaProducerBuilder, resolve_bootstrap_brokers};
+    use super::{
+        AppendPollBudget, DispatchOutcome, KafkaProducer, KafkaProducerBuilder,
+        TimedDispatchOutcome, resolve_bootstrap_brokers,
+    };
     use crate::{
         config::ClientConfig,
-        producer::{AccumulatorConfig, ProducerError, ProducerRecord, ProducerRuntimeConfig},
+        producer::{
+            AccumulatorConfig, ProducerError, ProducerRecord, ProducerRuntimeConfig,
+            accumulator::AppendStatus,
+        },
         wire::{
             BrokerEndpoint, ConnectionConfig, SaslClientAction, SaslClientAuthenticator,
             SaslMechanism, WireClient,
@@ -595,6 +711,43 @@ mod tests {
             .expect("ready batch")
     }
 
+    fn timed(outcome: DispatchOutcome) -> TimedDispatchOutcome {
+        TimedDispatchOutcome {
+            outcome,
+            latency: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn append_poll_budget_triggers_after_in_flight_sized_ready_batches() {
+        let mut budget = AppendPollBudget::new(3);
+        let not_ready = AppendStatus {
+            batch_ready: false,
+            ready_batch_records: 0,
+        };
+        let ready = AppendStatus {
+            batch_ready: true,
+            ready_batch_records: 2,
+        };
+
+        assert!(!budget.observe(not_ready));
+        assert!(!budget.observe(ready));
+        assert!(!budget.observe(ready));
+        assert!(budget.observe(ready));
+        assert!(!budget.observe(ready));
+    }
+
+    #[test]
+    fn append_poll_budget_triggers_immediately_for_dense_ready_batches() {
+        let mut budget = AppendPollBudget::new(5);
+        let dense_ready = AppendStatus {
+            batch_ready: true,
+            ready_batch_records: 32,
+        };
+
+        assert!(budget.observe(dense_ready));
+    }
+
     #[tokio::test]
     async fn poll_waits_for_one_in_flight_slot_before_spawning_ready_batch() {
         let mut producer = producer(1);
@@ -607,7 +760,7 @@ mod tests {
             .expect("append buffered record");
         let _abort = producer.in_flight.spawn(async {
             tokio::time::sleep(Duration::from_millis(1)).await;
-            DispatchOutcome::Delivered(Ok(Vec::new()))
+            timed(DispatchOutcome::Delivered(Ok(Vec::new())))
         });
 
         producer.poll().await.expect("poll waits for a slot");
@@ -628,7 +781,7 @@ mod tests {
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let _abort = producer.in_flight.spawn(async {
             let _released = release_rx.await;
-            DispatchOutcome::Delivered(Ok(Vec::new()))
+            timed(DispatchOutcome::Delivered(Ok(Vec::new())))
         });
         let release_task = tokio::spawn(async move {
             tokio::task::yield_now().await;
@@ -655,7 +808,7 @@ mod tests {
             .expect("append buffered record");
         let _abort = producer.in_flight.spawn(async {
             tokio::time::sleep(Duration::from_millis(1)).await;
-            DispatchOutcome::Delivered(Ok(Vec::new()))
+            timed(DispatchOutcome::Delivered(Ok(Vec::new())))
         });
 
         assert!(matches!(
@@ -681,13 +834,13 @@ mod tests {
         let mut producer = producer(1);
         let _abort = producer
             .in_flight
-            .spawn(async { DispatchOutcome::Delivered(Ok(Vec::new())) });
+            .spawn(async { timed(DispatchOutcome::Delivered(Ok(Vec::new()))) });
 
         producer.wait_for_one().await.expect("wait consumes task");
 
         let _abort = producer
             .in_flight
-            .spawn(async { DispatchOutcome::Delivered(Ok(Vec::new())) });
+            .spawn(async { timed(DispatchOutcome::Delivered(Ok(Vec::new()))) });
         producer
             .wait_for_one_for_flush()
             .await
@@ -699,7 +852,7 @@ mod tests {
         let mut producer = producer(1);
         let _abort = producer
             .in_flight
-            .spawn(async { DispatchOutcome::Delivered(Ok(Vec::new())) });
+            .spawn(async { timed(DispatchOutcome::Delivered(Ok(Vec::new()))) });
         tokio::task::yield_now().await;
 
         producer
@@ -712,7 +865,7 @@ mod tests {
         let mut producer = producer(1);
         let _abort = producer
             .in_flight
-            .spawn(async { DispatchOutcome::Delivered(Ok(Vec::new())) });
+            .spawn(async { timed(DispatchOutcome::Delivered(Ok(Vec::new()))) });
         tokio::task::yield_now().await;
 
         producer
@@ -744,7 +897,7 @@ mod tests {
         let batch = ready_batch();
 
         producer
-            .dispatch_task_result(Ok(DispatchOutcome::Requeue(vec![batch])), false)
+            .dispatch_task_result(Ok(timed(DispatchOutcome::Requeue(vec![batch]))), false)
             .expect("non-flush requeue is retained");
         assert!(producer.buffered_bytes() > 0);
 
@@ -754,9 +907,29 @@ mod tests {
             .pop()
             .expect("requeued batch");
         assert!(matches!(
-            producer.dispatch_task_result(Ok(DispatchOutcome::Requeue(vec![batch])), true),
+            producer.dispatch_task_result(Ok(timed(DispatchOutcome::Requeue(vec![batch]))), true),
             Err(ProducerError::FlushIncomplete)
         ));
+    }
+
+    #[test]
+    fn dispatch_task_result_records_latency_when_metrics_are_enabled() {
+        let mut producer = producer(1);
+        let latency = Duration::from_millis(3);
+        producer.enable_dispatch_latency_metrics();
+
+        producer
+            .dispatch_task_result(
+                Ok(TimedDispatchOutcome {
+                    outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
+                    latency,
+                }),
+                false,
+            )
+            .expect("delivered dispatch result");
+
+        assert_eq!(producer.take_dispatch_latency_samples(), vec![latency]);
+        assert!(producer.take_dispatch_latency_samples().is_empty());
     }
 
     #[tokio::test]

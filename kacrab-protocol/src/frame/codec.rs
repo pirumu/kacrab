@@ -154,10 +154,15 @@ fn finish_request_frame(request_frame: &mut BytesMut) -> Result<()> {
             max: MAX_FRAME_LENGTH,
         }))
     })?;
-    let payload = request_frame.split_off(4);
-    request_frame.clear();
-    request_frame.put_i32(payload_len);
-    request_frame.unsplit(payload);
+    let Some(length_slot) = request_frame.get_mut(..4) else {
+        return Err(crate::ProtocolError::Frame(FrameError::from(
+            FrameErrorKind::Truncated {
+                needed: 4,
+                available: request_frame.len(),
+            },
+        )));
+    };
+    length_slot.copy_from_slice(&payload_len.to_be_bytes());
     Ok(())
 }
 

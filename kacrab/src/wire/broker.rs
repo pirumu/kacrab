@@ -448,27 +448,21 @@ impl BrokerTask {
         };
         let api_version = API_VERSIONS_HANDSHAKE_VERSION;
         let body_len = request.encoded_len(api_version)?;
-        let capacity_hint = self.request_frame_capacity_hint(
-            ApiKey::ApiVersions,
-            api_version,
-            HANDSHAKE_CORRELATION_ID,
-            body_len,
-        )?;
-        let frame = frame::encode_request_frame(
+        let frame = self.encode_request_frame_with_body(
             RequestFrameSpec {
                 api_key: ApiKey::ApiVersions,
                 api_version,
                 correlation_id: HANDSHAKE_CORRELATION_ID,
                 client_id: &self.client_id,
-                capacity_hint,
+                capacity_hint: 0,
             },
+            body_len,
             |buf| {
                 request.write(buf, api_version)?;
                 Ok(())
             },
         )?;
-        stream.write_all(&frame).await?;
-        stream.flush().await?;
+        self.write_pooled_frame(stream, frame).await?;
 
         let response_bytes =
             read_frame(stream, self.config.read_buffer_capacity, &self.buffers).await?;
@@ -586,27 +580,21 @@ impl BrokerTask {
             _unknown_tagged_fields: Vec::new(),
         };
         let body_len = request.encoded_len(SASL_AUTHENTICATE_VERSION)?;
-        let capacity_hint = self.request_frame_capacity_hint(
-            ApiKey::SaslAuthenticate,
-            SASL_AUTHENTICATE_VERSION,
-            SASL_AUTHENTICATE_CORRELATION_ID,
-            body_len,
-        )?;
-        let frame = frame::encode_request_frame(
+        let frame = self.encode_request_frame_with_body(
             RequestFrameSpec {
                 api_key: ApiKey::SaslAuthenticate,
                 api_version: SASL_AUTHENTICATE_VERSION,
                 correlation_id: SASL_AUTHENTICATE_CORRELATION_ID,
                 client_id: &self.client_id,
-                capacity_hint,
+                capacity_hint: 0,
             },
+            body_len,
             |buf| {
                 request.write(buf, SASL_AUTHENTICATE_VERSION)?;
                 Ok(())
             },
         )?;
-        stream.write_all(&frame).await?;
-        stream.flush().await?;
+        self.write_pooled_frame(stream, frame).await?;
 
         let response_bytes =
             read_frame(stream, self.config.read_buffer_capacity, &self.buffers).await?;
@@ -643,27 +631,21 @@ impl BrokerTask {
             _unknown_tagged_fields: Vec::new(),
         };
         let body_len = request.encoded_len(SASL_HANDSHAKE_VERSION)?;
-        let capacity_hint = self.request_frame_capacity_hint(
-            ApiKey::SaslHandshake,
-            SASL_HANDSHAKE_VERSION,
-            SASL_HANDSHAKE_CORRELATION_ID,
-            body_len,
-        )?;
-        let frame = frame::encode_request_frame(
+        let frame = self.encode_request_frame_with_body(
             RequestFrameSpec {
                 api_key: ApiKey::SaslHandshake,
                 api_version: SASL_HANDSHAKE_VERSION,
                 correlation_id: SASL_HANDSHAKE_CORRELATION_ID,
                 client_id: &self.client_id,
-                capacity_hint,
+                capacity_hint: 0,
             },
+            body_len,
             |buf| {
                 request.write(buf, SASL_HANDSHAKE_VERSION)?;
                 Ok(())
             },
         )?;
-        stream.write_all(&frame).await?;
-        stream.flush().await?;
+        self.write_pooled_frame(stream, frame).await?;
 
         let response_bytes =
             read_frame(stream, self.config.read_buffer_capacity, &self.buffers).await?;
@@ -701,19 +683,50 @@ impl BrokerTask {
         body_len: usize,
         request: &dyn EncodableRequest,
     ) -> Result<BytesMut> {
+        self.encode_request_frame_with_body(spec, body_len, |buf| {
+            request.write_body(buf, spec.api_version)
+        })
+    }
+
+    fn encode_request_frame_with_body<F>(
+        &self,
+        spec: RequestFrameSpec<'_>,
+        body_len: usize,
+        write_body: F,
+    ) -> Result<BytesMut>
+    where
+        F: FnOnce(&mut BytesMut) -> ProtocolResult<()>,
+    {
         let capacity_hint = frame::request_frame_capacity_hint(spec, body_len)?;
         let mut frame = self.buffers.acquire_write(capacity_hint);
-        frame::encode_request_frame_with_buffer(
+        if let Err(error) = frame::encode_request_frame_with_buffer(
             &mut frame,
             RequestFrameSpec {
                 capacity_hint,
                 ..spec
             },
-            |buf| request.write_body(buf, spec.api_version),
-        )?;
+            write_body,
+        ) {
+            self.buffers.release_write(frame);
+            return Err(error.into());
+        }
         Ok(frame)
     }
 
+    async fn write_pooled_frame(&self, stream: &mut BrokerStream, frame: BytesMut) -> Result<()> {
+        if let Err(error) = stream.write_all(&frame).await {
+            self.buffers.release_write(frame);
+            return Err(WireError::Io(error));
+        }
+        if let Err(error) = stream.flush().await {
+            self.buffers.release_write(frame);
+            return Err(WireError::Io(error));
+        }
+        self.buffers.release_write(frame);
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn request_frame_capacity_hint(
         &self,
         api_key: ApiKey,

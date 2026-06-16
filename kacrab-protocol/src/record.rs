@@ -7,7 +7,7 @@
 
 use bytes::{Buf, Bytes, BytesMut};
 
-use crate::primitives::{read_signed_varint, write_signed_varint};
+use crate::primitives::{read_signed_varint, signed_varint_len, write_signed_varint};
 
 pub mod batch;
 pub mod entry;
@@ -43,6 +43,27 @@ const fn length_overflow(field: &'static str, got: usize, remaining: usize) -> R
 
 fn encode_len(field: &'static str, len: usize) -> Result<i32> {
     i32::try_from(len).map_err(|_| length_overflow(field, len, max_i32_len()))
+}
+
+pub(super) fn add_encoded_len(field: &'static str, current: usize, addend: usize) -> Result<usize> {
+    current
+        .checked_add(addend)
+        .ok_or_else(|| length_overflow(field, usize::MAX, max_i32_len()))
+}
+
+pub(super) fn bytes_field_len(field: &'static str, bytes: &Bytes) -> Result<usize> {
+    let len = encode_len(field, bytes.len())?;
+    add_encoded_len(field, signed_varint_len(len), bytes.len())
+}
+
+pub(super) fn nullable_bytes_field_len(
+    field: &'static str,
+    bytes: Option<&Bytes>,
+) -> Result<usize> {
+    bytes.map_or_else(
+        || Ok(signed_varint_len(-1)),
+        |bytes| bytes_field_len(field, bytes),
+    )
 }
 
 fn split_exact(buf: &mut Bytes, field: &'static str, len: usize) -> Result<Bytes> {

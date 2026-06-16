@@ -14,6 +14,16 @@ pub struct RecordHeader {
 }
 
 impl RecordHeader {
+    /// Return the exact encoded length of this header.
+    pub fn encoded_len(&self) -> Result<usize> {
+        let len = super::bytes_field_len("header key", &self.key)?;
+        super::add_encoded_len(
+            "header value",
+            len,
+            super::nullable_bytes_field_len("header value", self.value.as_ref())?,
+        )
+    }
+
     /// Encode this header into `buf`.
     pub fn encode(&self, buf: &mut BytesMut) -> Result<()> {
         super::write_bytes_field(buf, "header key", &self.key)?;
