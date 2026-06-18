@@ -334,6 +334,49 @@ impl ProducerDispatcher {
         Ok(())
     }
 
+    /// Assign a concrete partition while allowing the default sticky partitioner
+    /// to reuse its current sticky partition without a metadata lookup.
+    pub(crate) async fn assign_partition_with_accumulator(
+        &self,
+        accumulator: &RecordAccumulator,
+        record: &mut super::ProducerRecord,
+    ) -> Result<()> {
+        if record.has_assigned_partition() {
+            return Ok(());
+        }
+        if self.try_assign_cached_sticky_partition(record).await {
+            return Ok(());
+        }
+        let metadata = self
+            .wire
+            .metadata_for_topics([record.topic.as_ref()])
+            .await?;
+        let partition = {
+            let mut state = self.partitioner_state.lock().await;
+            if self.uses_sticky_partitioner(record) {
+                let topic_metadata = metadata
+                    .topic(record.topic.as_ref())
+                    .ok_or_else(|| ProducerError::UnknownTopic(record.topic.to_string()))?;
+                state.update_partition_load_stats_from_accumulator_at(PartitionLoadRefresh {
+                    topic: record.topic.as_ref(),
+                    topic_metadata,
+                    accumulator,
+                    now: Instant::now(),
+                    availability_timeout: self.partitioner_availability_timeout,
+                });
+            }
+            state.partition_for_record(
+                &metadata,
+                record,
+                self.partitioner_ignore_keys,
+                self.partitioner_adaptive_partitioning_enable,
+                self.partition_sticky_batch_size,
+            )?
+        };
+        record.partition = partition;
+        Ok(())
+    }
+
     /// Assign a concrete partition using an already-fetched metadata snapshot.
     pub(crate) async fn assign_partition_with_metadata(
         &self,
@@ -359,6 +402,14 @@ impl ProducerDispatcher {
 
     pub(crate) const fn uses_sticky_partitioner(&self, record: &super::ProducerRecord) -> bool {
         !record.has_assigned_partition() && (self.partitioner_ignore_keys || record.key.is_none())
+    }
+
+    async fn try_assign_cached_sticky_partition(&self, record: &mut super::ProducerRecord) -> bool {
+        if !self.uses_sticky_partitioner(record) {
+            return false;
+        }
+        let mut state = self.partitioner_state.lock().await;
+        state.try_assign_cached_sticky_partition(record, self.partition_sticky_batch_size)
     }
 
     pub(crate) async fn mark_sticky_batch_ready(&self, topic: &str) {
@@ -2759,6 +2810,30 @@ impl ProducerPartitionerState {
         )
     }
 
+    fn try_assign_cached_sticky_partition(
+        &mut self,
+        record: &mut super::ProducerRecord,
+        sticky_batch_size: usize,
+    ) -> bool {
+        if record.has_assigned_partition() {
+            return true;
+        }
+        let Some(sticky) = self.sticky_by_topic.get_mut(record.topic.as_ref()) else {
+            return false;
+        };
+        if sticky.switch_on_next {
+            return false;
+        }
+        let record_bytes = estimate_record_batch_bytes(record);
+        let next_bytes = sticky.bytes.saturating_add(record_bytes);
+        if next_bytes >= sticky_batch_size.max(1).saturating_mul(2) {
+            return false;
+        }
+        record.partition = sticky.partition;
+        sticky.bytes = next_bytes;
+        true
+    }
+
     fn assign_topic_partitions(
         &mut self,
         assignment: TopicPartitionAssignment<'_>,
@@ -4598,6 +4673,31 @@ mod tests {
             partitions
                 .iter()
                 .all(|partition| *partition == partitions[0])
+        );
+    }
+
+    #[test]
+    fn cached_sticky_partition_assigns_without_metadata_until_batch_ready() {
+        let metadata = metadata_with_partitions("orders", 3);
+        let mut state = ProducerPartitionerState::default();
+        let record = ProducerRecord::unassigned("orders").value(Bytes::from_static(b"1234567890"));
+        let sticky_batch_size = 1024;
+        let partition = state
+            .partition_for_record(&metadata, &record, false, true, sticky_batch_size)
+            .expect("initial sticky partition");
+
+        let mut cached_record =
+            ProducerRecord::unassigned("orders").value(Bytes::from_static(b"cached"));
+        assert!(state.try_assign_cached_sticky_partition(&mut cached_record, sticky_batch_size));
+        assert_eq!(cached_record.partition, partition);
+
+        state.mark_sticky_batch_ready("orders", 1);
+        let mut next_record =
+            ProducerRecord::unassigned("orders").value(Bytes::from_static(b"next"));
+        assert!(!state.try_assign_cached_sticky_partition(&mut next_record, sticky_batch_size));
+        assert_eq!(
+            next_record.partition,
+            crate::producer::record::UNASSIGNED_PARTITION
         );
     }
 

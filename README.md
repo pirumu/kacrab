@@ -320,19 +320,19 @@ metrics pass, with kacrab and Java both using in-flight `5`.
 Detailed run commands, raw run outputs, and limits live in
 [`benches/README.md`](benches/README.md).
 
-Relaxed real Kafka / Java 5-run comparison:
+Relaxed real Kafka / Java 5-run comparison, using the old untracked kacrab path:
 
 | Scenario | kacrab `producer_kafka_bench` | Java `kafka-producer-perf-test.sh` |
 | --- | ---: | ---: |
-| 5M × 10B | avg 7.98M msg/sec; median 7.92M; min-max 7.77M-8.24M; 76.07 MiB/sec; latency avg 2.00 ms, p99 4.70 ms | avg 3.59M records/sec; median 3.60M; min-max 3.31M-3.90M; 34.28 MB/sec; latency avg 0.59 ms, p99 9.00 ms |
-| 100K × 10 KiB | avg 55.76K msg/sec; median 55.67K; min-max 55.12K-56.33K; 544.49 MiB/sec; latency avg 1.39 ms, p99 4.46 ms | avg 31.17K records/sec; median 29.21K; min-max 25.52K-40.27K; 304.39 MB/sec; latency avg 63.31 ms, p99 146.40 ms |
+| 5M × 10B | avg 7.98M msg/sec; median 7.92M; min-max 7.77M-8.24M; 76.07 MiB/sec; dispatch latency avg 2.00 ms, p99 4.70 ms | avg 3.59M records/sec; median 3.60M; min-max 3.31M-3.90M; 34.28 MB/sec; latency avg 0.59 ms, p99 9.00 ms |
+| 100K × 10 KiB | avg 55.76K msg/sec; median 55.67K; min-max 55.12K-56.33K; 544.49 MiB/sec; dispatch latency avg 1.39 ms, p99 4.46 ms | avg 31.17K records/sec; median 29.21K; min-max 25.52K-40.27K; 304.39 MB/sec; latency avg 63.31 ms, p99 146.40 ms |
 
 Shared relaxed comparison settings: 5 runs, in-flight `5`, `acks=1`,
 idempotence disabled, no compression, 3 partitions, RF=1. The kacrab
 100K × 10 KiB run used `KACRAB_BATCH_MESSAGES_10KIB=96`, which is the
 benchmark harness outer API chunk size, not Kafka producer `batch.size`.
 Each kacrab scenario warms up one outer API chunk before the measured window.
-Kacrab latency is
+Kacrab latency in the table is explicitly
 dispatch latency for the untracked throughput path: earliest append timestamp
 in a ProduceRequest group to broker response handling, without per-record
 delivery handles. That is not the same latency metric as Java's perf tool:
@@ -345,14 +345,18 @@ higher average dispatch latency than Java but higher throughput, which points
 at larger effective batch grouping and runtime scheduling overhead rather than
 broker-side append latency alone. Producer accounting metrics are opt-in with
 `KACRAB_ENABLE_METRICS=1`; the default throughput benchmark keeps them disabled
-to measure the baseline hot path.
+to measure the baseline hot path. Current tracked mode ports Kafka Java
+`ProducerPerformance.Stats` callback-completion accounting and total-line
+format; the saved table above predates that tracked measurement.
 
 The table above is the untracked producer path:
 `Producer::send_batch_untracked` plus a final `flush`. To measure delivery
 tracking overhead, run the same binary with `KACRAB_DELIVERY_MODE=tracked` or
-`KACRAB_DELIVERY_MODE=both`; this uses `send_with_callback` on the Java-style
-per-record path. `KACRAB_DELIVERY_MODE=batch` measures the Rust batch-receipt
-extension separately from the untracked throughput baseline.
+`KACRAB_DELIVERY_MODE=both`; this uses `send_with_callback` once per record and
+measures latency from immediately before send to callback completion, matching
+Kafka Java producer-perf tracking semantics. `KACRAB_DELIVERY_MODE=batch`
+measures the Rust batch-receipt extension separately from the untracked
+throughput baseline.
 
 Internal hot-path checks:
 

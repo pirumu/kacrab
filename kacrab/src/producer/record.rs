@@ -771,14 +771,19 @@ impl DeliverySender {
             waker.wake();
         }
         if let Some(receipt) = &callback_receipt {
+            let record_metadata = if callbacks.is_empty() {
+                Vec::new()
+            } else {
+                record_delivery_metadata_snapshot(&self.state)
+            };
             for (record_index, callback) in callbacks {
+                let metadata = record_metadata
+                    .get(record_index)
+                    .copied()
+                    .unwrap_or_else(RecordDeliveryMetadata::unknown);
                 invoke_delivery_callback(
                     callback,
-                    Ok(receipt_for_record(
-                        receipt,
-                        record_index,
-                        record_delivery_metadata(&self.state, record_index),
-                    )),
+                    Ok(receipt_for_record(receipt, record_index, metadata)),
                 );
             }
         }

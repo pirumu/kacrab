@@ -429,15 +429,12 @@ impl Producer {
                 .uses_sticky_partitioner(&record)
                 .then(|| record.topic.to_string());
             if !record.has_assigned_partition() {
-                let metadata_started_at = std::time::Instant::now();
-                if !self.partitioner.is_some() {
-                    self.dispatcher
-                        .refresh_partition_load_stats(&self.accumulator, [record.topic.as_ref()])
-                        .await?;
-                }
+                let metadata_started_at = self.metrics_enabled.then(std::time::Instant::now);
                 self.assign_partition(&mut record).await?;
-                self.metrics
-                    .record_metadata_wait(metadata_started_at.elapsed());
+                if let Some(metadata_started_at) = metadata_started_at {
+                    self.metrics
+                        .record_metadata_wait(metadata_started_at.elapsed());
+                }
             }
             error_record = record.clone();
             let ack_headers = self.interceptor_headers(&record);
@@ -490,15 +487,12 @@ impl Producer {
                 .uses_sticky_partitioner(&record)
                 .then(|| record.topic.to_string());
             if !record.has_assigned_partition() {
-                let metadata_started_at = std::time::Instant::now();
-                if !self.partitioner.is_some() {
-                    self.dispatcher
-                        .refresh_partition_load_stats(&self.accumulator, [record.topic.as_ref()])
-                        .await?;
-                }
+                let metadata_started_at = self.metrics_enabled.then(std::time::Instant::now);
                 self.assign_partition(&mut record).await?;
-                self.metrics
-                    .record_metadata_wait(metadata_started_at.elapsed());
+                if let Some(metadata_started_at) = metadata_started_at {
+                    self.metrics
+                        .record_metadata_wait(metadata_started_at.elapsed());
+                }
             }
             error_record = record.clone();
             let ack_headers = self.interceptor_headers(&record);
@@ -1639,19 +1633,17 @@ impl Producer {
             .unwrap_or_else(std::time::Instant::now);
         loop {
             let can_wait = self.accumulator.buffered_bytes() > 0 || !self.in_flight.is_empty();
-            match self
-                .accumulator
-                .append_for_delivery_with_status_at(record.clone(), now)
-            {
-                Ok(delivery) => return Ok(delivery),
-                Err(ProducerError::Backpressure)
-                    if can_wait && std::time::Instant::now() < deadline =>
-                {
+            if !self.accumulator.has_available_memory_for(&record) {
+                if can_wait && std::time::Instant::now() < deadline {
                     self.poll().await?;
                     self.wait_for_buffer(deadline).await?;
-                },
-                Err(error) => return Err(error),
+                    continue;
+                }
+                return Err(ProducerError::Backpressure);
             }
+            return self
+                .accumulator
+                .append_for_delivery_with_status_at(record, now);
         }
     }
 
@@ -1958,7 +1950,10 @@ impl Producer {
             return Ok(());
         }
         if !self.partitioner.is_some() {
-            return self.dispatcher.assign_partition(record).await;
+            return self
+                .dispatcher
+                .assign_partition_with_accumulator(&self.accumulator, record)
+                .await;
         }
         let metadata = self
             .dispatcher

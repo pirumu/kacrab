@@ -74,8 +74,10 @@ public `Producer::builder().set(...).build()` API, warms up metadata, the
 broker session, and one outer API chunk outside the measured window, then sends
 scenario-sized batches through the selected delivery path. The default delivery path is
 `Producer::send_batch_untracked`; set `KACRAB_DELIVERY_MODE=tracked` or
-`KACRAB_DELIVERY_MODE=both` to include Java-style callback tracking overhead
-separately. `KACRAB_DELIVERY_MODE=batch` measures the Rust batch-receipt
+`KACRAB_DELIVERY_MODE=both` to run the Java producer-perf style path:
+one `send_with_callback` call per record, with callback-completion latency
+reported with the same `ProducerPerformance.Stats` window and total line shape
+as Kafka Java. `KACRAB_DELIVERY_MODE=batch` measures the Rust batch-receipt
 extension path.
 
 The default benchmark profile is `kafka-default`: the binary sets only
@@ -116,16 +118,22 @@ Useful real-Kafka knobs:
   throughput does not pay for operational counters.
 - `KACRAB_ENABLE_LATENCY=1` enables dispatch latency sampling and percentile
   output. The default keeps this disabled so throughput-only runs do not pay
-  for latency accounting.
+  for latency accounting. In `tracked` mode, Java-style callback latency is
+  always collected because it is part of the tracked benchmark semantics.
 - `KACRAB_DELIVERY_MODE=untracked|tracked|batch|both|all` selects the public
   producer path. `untracked` is the baseline path used by the local summary
-  table. `tracked` uses `send_with_callback` on the Java-style per-record path.
-  `batch` uses the Rust `send_batch` batch-receipt extension. `both` runs
-  `untracked` and `tracked`. `all` runs every mode.
+  table. `tracked` uses `send_with_callback` once per record and measures
+  callback latency from immediately before send to callback completion, matching
+  Kafka Java producer-perf tracking semantics. `batch` uses the Rust
+  `send_batch` batch-receipt extension. `both` runs `untracked` and `tracked`.
+  `all` runs every mode.
 - `KACRAB_TRACKED_DELIVERY_WINDOW` bounds how many callback-tracked records are
   sent before the benchmark forces a `flush`. In `batch` mode it bounds how
   many batch receipts are retained before flushing and awaiting them. The
-  default is `262144`.
+  default is unbounded unless set explicitly.
+- `KACRAB_REPORTING_INTERVAL_MS` controls tracked-mode progress output. The
+  default is `5000`, matching Kafka Java producer-perf
+  `--reporting-interval`.
 - `KACRAB_CUSTOM_MESSAGES`, `KACRAB_CUSTOM_VALUE_SIZE`, and
   `KACRAB_CUSTOM_BATCH_MESSAGES` run one custom payload profile instead of the
   built-in extremes.
@@ -229,14 +237,18 @@ dispatch; the higher throughput indicates the client is amortizing more records
 per dispatch. Treat the latency gap as an optimization target for runtime
 scheduling, batch assembly timing, and linger behavior, not as proof of slower
 broker append latency by itself.
-Java latency is reported by `kafka-producer-perf-test.sh`.
+Java latency is reported by `kafka-producer-perf-test.sh`. Current
+`producer_kafka_bench` tracked mode reports comparable callback-completion
+latency with the same Java `ProducerPerformance.Stats` total-line format; the
+saved numbers below predate that tracked measurement and should be treated as
+untracked dispatch checkpoints.
 
-Five-run real Kafka and Java summary:
+Five-run real Kafka and Java summary, using the old untracked kacrab path:
 
 | Scenario | kacrab, 5 runs | Java, 5 runs |
 | --- | ---: | ---: |
-| 5M × 10B | avg 7,976,245 msg/sec; median 7,923,087; min 7,773,087; max 8,236,373; std dev 183,688; 76.07 MiB/sec; latency avg 2.00 ms, p99 avg 4.70 ms | avg 3,594,271 records/sec; median 3,602,305; min 3,306,878; max 3,900,156; std dev 212,766; 34.28 MB/sec; latency avg 0.59 ms, p99 avg 9.00 ms |
-| 100K × 10 KiB | avg 55,756 msg/sec; median 55,673; min 55,115; max 56,329; std dev 520; 544.49 MiB/sec; latency avg 1.39 ms, p99 avg 4.46 ms | avg 31,170 records/sec; median 29,214; min 25,517; max 40,274; std dev 5,970; 304.39 MB/sec; latency avg 63.31 ms, p99 avg 146.40 ms |
+| 5M × 10B | avg 7,976,245 msg/sec; median 7,923,087; min 7,773,087; max 8,236,373; std dev 183,688; 76.07 MiB/sec; dispatch latency avg 2.00 ms, p99 avg 4.70 ms | avg 3,594,271 records/sec; median 3,602,305; min 3,306,878; max 3,900,156; std dev 212,766; 34.28 MB/sec; latency avg 0.59 ms, p99 avg 9.00 ms |
+| 100K × 10 KiB | avg 55,756 msg/sec; median 55,673; min 55,115; max 56,329; std dev 520; 544.49 MiB/sec; dispatch latency avg 1.39 ms, p99 avg 4.46 ms | avg 31,170 records/sec; median 29,214; min 25,517; max 40,274; std dev 5,970; 304.39 MB/sec; latency avg 63.31 ms, p99 avg 146.40 ms |
 
 Shared relaxed comparison settings: in-flight `5`, `acks=1`, idempotence
 disabled, no compression, `batch.size=16384`, 3 partitions, RF=1. The kacrab
@@ -256,8 +268,11 @@ Raw kacrab runs:
 | 4 | 7,773,087 messages/sec; 74.130 MiB/sec; avg 2.05 ms; p99 5.30 ms | 55,115 messages/sec; 538.233 MiB/sec; avg 1.40 ms; p99 4.46 ms |
 | 5 | 8,082,023 messages/sec; 77.076 MiB/sec; avg 1.97 ms; p99 4.50 ms | 55,428 messages/sec; 541.285 MiB/sec; avg 1.39 ms; p99 4.55 ms |
 
-The printed kacrab request counts are outer public API chunks in the selected
-delivery mode: 306 chunks for 5M × 10B and 1042 chunks for 100K × 10 KiB.
+The printed kacrab `api_chunks` counts are outer public API chunks in the
+selected delivery mode: 306 chunks for 5M × 10B and 1042 chunks for 100K ×
+10 KiB in the untracked baseline. In tracked mode, `api_chunks` is the number of
+per-record `send_with_callback` calls, and successful callback completions are
+reported as `java_perf_records`.
 Internally, the producer accumulator splits same-partition batches at
 `batch.size`, and the dispatcher packs those split batches across partitions in
 Java-like ProduceRequest groups.
@@ -301,7 +316,7 @@ Java latency summary:
 | 5M × 10B | 0.59 ms | 9.00 ms | 136.00 ms |
 | 100K × 10 KiB | 63.31 ms | 146.40 ms | 168.00 ms |
 
-Kacrab latency summary:
+Kacrab dispatch latency summary:
 
 | Scenario | Avg latency | p50 avg | p95 avg | p99 avg | p999 avg |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -351,9 +366,12 @@ Wire pipeline:
 - Kacrab throughput prints payload MiB/sec. Kafka's Java perf tool prints
   decimal MB/sec, so MiB/sec and MB/sec values should not be compared as the
   same unit.
-- The executable Rust bench now reports dispatch latency for the untracked
-  throughput path. It still does not collect CPU profiles, allocator profiles,
-  broker disk metrics, or end-to-end replicated durability latency.
+- The executable Rust bench reports `dispatch_latency_*` for untracked/batch
+  diagnostic runs. In tracked mode it ports Kafka Java
+  `ProducerPerformance.Stats` sampling, window reporting, total summary, and
+  callback-success-only accounting. It still does not collect CPU profiles,
+  allocator profiles, broker disk metrics, or end-to-end replicated durability
+  latency.
 - Mock broker and Criterion numbers are useful for client hot-path regression
   checks, but they do not include real broker storage, replication, fetch, or
   network effects.

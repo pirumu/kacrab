@@ -293,12 +293,11 @@ impl RecordAccumulator {
                 batches: VecDeque::new(),
             });
         let batch_size = self.config.batch_size.max(1);
-        let sealed_previous_records = ensure_append_target(queue, &record, now, batch_size);
+        let (sealed_previous_records, record_batch_bytes) =
+            ensure_append_target(queue, &record, now, batch_size);
         let Some(batch) = queue.batches.back_mut() else {
             return Err(ProducerError::Backpressure);
         };
-        let record_batch_bytes =
-            estimate_record_batch_bytes_at_offset(&record, batch.records.len());
         batch.buffer_bytes = batch.buffer_bytes.saturating_add(buffer_bytes);
         batch.batch_bytes = batch.batch_bytes.saturating_add(record_batch_bytes);
         let current_batch_records = batch.records.len().saturating_add(1);
@@ -339,12 +338,11 @@ impl RecordAccumulator {
                 batches: VecDeque::new(),
             });
         let batch_size = self.config.batch_size.max(1);
-        let sealed_previous_records = ensure_append_target(queue, &record, now, batch_size);
+        let (sealed_previous_records, record_batch_bytes) =
+            ensure_append_target(queue, &record, now, batch_size);
         let Some(batch) = queue.batches.back_mut() else {
             return Err(ProducerError::Backpressure);
         };
-        let record_batch_bytes =
-            estimate_record_batch_bytes_at_offset(&record, batch.records.len());
         batch.buffer_bytes = batch.buffer_bytes.saturating_add(buffer_bytes);
         batch.batch_bytes = batch.batch_bytes.saturating_add(record_batch_bytes);
         let delivery = if let Some(sender) = &mut batch.delivery {
@@ -515,19 +513,14 @@ fn ensure_append_target(
     record: &ProducerRecord,
     now: Instant,
     batch_size: usize,
-) -> usize {
+) -> (usize, usize) {
     let should_open = match queue.batches.back_mut() {
         None => {
-            queue.batches.push_back(PartitionBatch {
-                records: Vec::new(),
-                delivery: None,
-                producer_state: None,
-                buffer_bytes: 0,
-                batch_bytes: RECORD_BATCH_OVERHEAD_BYTES,
-                sealed: false,
-                first_append_at: now,
-            });
-            return 0;
+            let record_batch_bytes = estimate_record_batch_bytes_at_offset(record, 0);
+            queue
+                .batches
+                .push_back(new_partition_batch(now, batch_size, record_batch_bytes));
+            return (0, record_batch_bytes);
         },
         Some(batch) => {
             let next_record_bytes =
@@ -537,21 +530,52 @@ fn ensure_append_target(
             if cannot_fit {
                 batch.sealed = true;
             }
-            if cannot_fit { batch.records.len() } else { 0 }
+            if cannot_fit {
+                batch.records.len()
+            } else {
+                return (0, next_record_bytes);
+            }
         },
     };
+    let record_batch_bytes = estimate_record_batch_bytes_at_offset(record, 0);
     if should_open > 0 {
-        queue.batches.push_back(PartitionBatch {
-            records: Vec::new(),
-            delivery: None,
-            producer_state: None,
-            buffer_bytes: 0,
-            batch_bytes: RECORD_BATCH_OVERHEAD_BYTES,
-            sealed: false,
-            first_append_at: now,
-        });
+        queue
+            .batches
+            .push_back(new_partition_batch(now, batch_size, record_batch_bytes));
     }
-    should_open
+    (should_open, record_batch_bytes)
+}
+
+fn new_partition_batch(
+    now: Instant,
+    batch_size: usize,
+    first_record_bytes: usize,
+) -> PartitionBatch {
+    PartitionBatch {
+        records: Vec::with_capacity(estimated_batch_record_capacity(
+            batch_size,
+            first_record_bytes,
+        )),
+        delivery: None,
+        producer_state: None,
+        buffer_bytes: 0,
+        batch_bytes: RECORD_BATCH_OVERHEAD_BYTES,
+        sealed: false,
+        first_append_at: now,
+    }
+}
+
+fn estimated_batch_record_capacity(batch_size: usize, first_record_bytes: usize) -> usize {
+    const MAX_PREALLOCATED_RECORDS: usize = 4096;
+
+    let record_bytes = first_record_bytes.max(1);
+    let payload_budget = batch_size
+        .saturating_sub(RECORD_BATCH_OVERHEAD_BYTES)
+        .max(record_bytes);
+    payload_budget
+        .checked_div(record_bytes)
+        .unwrap_or(1)
+        .clamp(1, MAX_PREALLOCATED_RECORDS)
 }
 
 fn estimate_ready_batch_encoded_bytes(records: &[ProducerRecord]) -> usize {
