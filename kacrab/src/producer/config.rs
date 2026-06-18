@@ -25,6 +25,8 @@ pub(super) const DEFAULT_DELIVERY_TIMEOUT: Duration = Duration::from_mins(2);
 pub(super) const DEFAULT_RETRY_ATTEMPTS: usize = usize::MAX;
 /// Kafka idempotent-producer limit. Values above 5 can break ordering on retry.
 pub(super) const IDEMPOTENT_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION: i32 = 5;
+/// Kafka default `max.request.size`: 1 MiB.
+pub(super) const DEFAULT_MAX_REQUEST_SIZE: usize = 1_048_576;
 /// Default transaction timeout sent to `InitProducerId`; matches Kafka's
 /// `transaction.timeout.ms` default.
 pub(super) const DEFAULT_TRANSACTION_TIMEOUT_MS: i32 = 60_000;
@@ -64,10 +66,18 @@ pub struct ProducerRuntimeConfig {
     pub max_block: Duration,
     /// Maximum unacknowledged produce requests per broker connection.
     pub max_in_flight_requests_per_connection: usize,
+    /// Maximum serialized record/request size accepted by the producer.
+    pub max_request_size: usize,
+    /// Whether Kafka client telemetry push APIs are enabled.
+    pub enable_metrics_push: bool,
     /// Record-batch compression settings.
     pub compression: ProducerCompression,
     /// Whether key-based partitioning should be disabled.
     pub partitioner_ignore_keys: bool,
+    /// Whether sticky partition switching uses adaptive load statistics.
+    pub partitioner_adaptive_partitioning_enable: bool,
+    /// How long a broker may be unable to drain before adaptive sticky excludes its partitions.
+    pub partitioner_availability_timeout: Duration,
     /// Idempotent/transactional producer settings.
     pub idempotence: ProducerIdempotenceConfig,
 }
@@ -107,8 +117,12 @@ impl Default for ProducerRuntimeConfig {
             max_block: Duration::from_mins(1),
             max_in_flight_requests_per_connection:
                 crate::wire::DEFAULT_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
+            max_request_size: DEFAULT_MAX_REQUEST_SIZE,
+            enable_metrics_push: true,
             compression: ProducerCompression::default(),
             partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
             idempotence: ProducerIdempotenceConfig::default(),
         }
     }
@@ -144,11 +158,19 @@ impl ProducerRuntimeConfig {
             delivery_timeout: config.delivery_timeout_ms.duration(),
             max_block: config.max_block_ms.duration(),
             max_in_flight_requests_per_connection,
+            max_request_size: byte_size_to_usize(
+                config.max_request_size,
+                crate::config::ProducerConfig::MAX_REQUEST_SIZE_CONFIG,
+            )?,
+            enable_metrics_push: config.enable_metrics_push,
             compression: ProducerCompression {
                 codec: parse_compression(&config.compression_type)?,
                 level: compression_level(config),
             },
             partitioner_ignore_keys: config.partitioner_ignore_keys,
+            partitioner_adaptive_partitioning_enable: config
+                .partitioner_adaptive_partitioning_enable,
+            partitioner_availability_timeout: config.partitioner_availability_timeout_ms.duration(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: config.enable_idempotence || !config.transactional_id.is_empty(),
                 transactional_id: (!config.transactional_id.is_empty())

@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use kacrab::{
-    producer::{AccumulatorConfig, ProducerDispatcher, ProducerRecord, RecordAccumulator},
+    producer::{
+        ProducerRecord,
+        internals::{AccumulatorConfig, ProducerDispatcher, RecordAccumulator},
+    },
     wire::{BrokerEndpoint, ConnectionConfig, WireClient},
 };
 use kacrab_protocol::{
@@ -32,6 +35,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     runtime::Builder,
+    sync::watch,
 };
 
 const PARTITIONS: usize = 3;
@@ -70,12 +74,12 @@ struct Scenario {
 }
 
 async fn run_scenario(scenario: Scenario) {
-    let produce_requests = scenario
+    let outer_chunks = scenario
         .messages
         .checked_add(scenario.batch_messages.saturating_sub(1))
-        .expect("scenario request count should not overflow")
+        .expect("scenario chunk count should not overflow")
         / scenario.batch_messages;
-    let broker = MockBroker::serve(produce_requests).await;
+    let broker = MockBroker::serve().await;
     let wire = WireClient::connect_with_brokers(
         ConnectionConfig::default()
             .max_in_flight_requests_per_connection(1)
@@ -86,7 +90,8 @@ async fn run_scenario(scenario: Scenario) {
         "kacrab-producer-mock-bench",
         [BrokerEndpoint::new(1, broker.addr())],
     );
-    let dispatcher = ProducerDispatcher::new(wire);
+    let mut dispatcher = ProducerDispatcher::new(wire);
+    dispatcher.enable_metrics();
     let value = Bytes::from(vec![b'x'; scenario.value_size]);
     let started = Instant::now();
     let mut sent = 0usize;
@@ -96,7 +101,7 @@ async fn run_scenario(scenario: Scenario) {
             .min(scenario.messages.saturating_sub(sent));
         let mut accumulator = RecordAccumulator::new(
             AccumulatorConfig::default()
-                .batch_size(1)
+                .batch_size(16 * 1024)
                 .buffer_memory(batch_buffer_memory(batch_messages, scenario.value_size)),
         );
         let now = Instant::now();
@@ -120,13 +125,21 @@ async fn run_scenario(scenario: Scenario) {
         sent = sent.saturating_add(batch_messages);
     }
     let elapsed = started.elapsed();
+    let metrics = dispatcher.metrics();
     let handled = broker.join().await;
     assert_eq!(
         handled,
-        produce_requests.saturating_add(2),
-        "mock broker should handle handshake, metadata, and every produce request"
+        usize::try_from(metrics.produce_request_count)
+            .expect("benchmark produce request count should fit")
+            .saturating_add(2),
+        "mock broker should handle handshake, metadata, and every broker produce request"
     );
-    print_result(scenario, elapsed, produce_requests);
+    print_result(
+        scenario,
+        elapsed,
+        outer_chunks,
+        metrics.produce_request_count,
+    );
 }
 
 fn batch_buffer_memory(batch_messages: usize, value_size: usize) -> usize {
@@ -136,7 +149,12 @@ fn batch_buffer_memory(batch_messages: usize, value_size: usize) -> usize {
         .expect("scenario buffer memory should not overflow")
 }
 
-fn print_result(scenario: Scenario, elapsed: Duration, produce_requests: usize) {
+fn print_result(
+    scenario: Scenario,
+    elapsed: Duration,
+    outer_chunks: usize,
+    broker_produce_requests: u64,
+) {
     let seconds = elapsed.as_secs_f64();
     let messages_u32 =
         u32::try_from(scenario.messages).expect("scenario message count should fit in u32");
@@ -149,20 +167,27 @@ fn print_result(scenario: Scenario, elapsed: Duration, produce_requests: usize) 
         .expect("scenario bytes should not overflow");
     let megabytes_per_second = megabytes / seconds;
     println!(
-        "{}: {:.0} messages/s, {:.3} MiB/s ({:.3}s, {} mock produce requests)",
-        scenario.name, messages_per_second, megabytes_per_second, seconds, produce_requests
+        "{}: {:.0} messages/s, {:.3} MiB/s ({:.3}s, {} API chunks, {} mock broker requests)",
+        scenario.name,
+        messages_per_second,
+        megabytes_per_second,
+        seconds,
+        outer_chunks,
+        broker_produce_requests
     );
 }
 
 struct MockBroker {
     addr: std::net::SocketAddr,
+    stop: watch::Sender<bool>,
     join: tokio::task::JoinHandle<usize>,
 }
 
 impl MockBroker {
-    async fn serve(produce_requests: usize) -> Self {
+    async fn serve() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind broker");
         let addr = listener.local_addr().expect("broker addr");
+        let (stop, mut stop_rx) = watch::channel(false);
         let join = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept broker");
             let handshake = read_frame(&mut socket).await;
@@ -181,23 +206,35 @@ impl MockBroker {
                 ))
                 .await
                 .expect("write metadata");
-            for _ in 0..produce_requests {
-                let mut request = read_frame(&mut socket).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
-                let produce = ProduceRequestData::read(&mut request, 13).expect("produce request");
-                socket
-                    .write_all(&response_frame(
-                        ApiKey::Produce,
-                        13,
-                        header.correlation_id,
-                        &produce_response(&produce),
-                    ))
-                    .await
-                    .expect("write produce response");
+            let mut produce_requests = 0usize;
+            loop {
+                tokio::select! {
+                    result = stop_rx.changed() => {
+                        result.expect("benchmark stop channel should stay open");
+                        if *stop_rx.borrow() {
+                            break;
+                        }
+                    },
+                    request = read_frame(&mut socket) => {
+                        let mut request = request;
+                        let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+                        let produce = ProduceRequestData::read(&mut request, 13).expect("produce request");
+                        socket
+                            .write_all(&response_frame(
+                                ApiKey::Produce,
+                                13,
+                                header.correlation_id,
+                                &produce_response(&produce),
+                            ))
+                            .await
+                            .expect("write produce response");
+                        produce_requests = produce_requests.saturating_add(1);
+                    },
+                }
             }
             produce_requests.saturating_add(2)
         });
-        Self { addr, join }
+        Self { addr, stop, join }
     }
 
     const fn addr(&self) -> std::net::SocketAddr {
@@ -205,6 +242,9 @@ impl MockBroker {
     }
 
     async fn join(self) -> usize {
+        self.stop
+            .send(true)
+            .expect("benchmark broker stop signal should send");
         self.join.await.expect("mock broker join")
     }
 }

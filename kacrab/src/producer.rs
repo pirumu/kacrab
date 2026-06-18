@@ -1,22 +1,58 @@
 //! Producer API built on top of the wire/session layer.
 
 mod accumulator;
+mod api;
 mod batch;
+mod client;
 mod config;
 mod dispatcher;
 mod error;
-mod kafka;
+mod interceptor;
+mod metrics;
 mod record;
 mod response;
 mod routing;
+mod serializer;
 mod transaction;
 
-pub use self::{
-    accumulator::{AccumulatorConfig, ReadyBatch, RecordAccumulator},
-    config::{ProducerCompression, ProducerIdempotenceConfig, ProducerRuntimeConfig},
-    dispatcher::ProducerDispatcher,
-    error::{ProducerError, Result},
-    kafka::{KafkaProducer, KafkaProducerBuilder},
-    record::{Delivery, ProduceReceipt, ProducerRecord},
+#[cfg(test)]
+pub(crate) use self::{
+    accumulator::RecordAccumulator,
+    config::ProducerIdempotenceConfig,
     transaction::{ProducerBatchState, ProducerIdentity},
 };
+pub(crate) use self::{
+    accumulator::{AccumulatorConfig, ReadyBatch},
+    config::ProducerRuntimeConfig,
+};
+pub use self::{
+    api::{
+        ConsumerGroupMetadata, OffsetAndMetadata, ProducerMetricSubscription,
+        ProducerPartitionInfo, TopicPartition,
+    },
+    client::{Producer, ProducerBuilder},
+    config::ProducerCompression,
+    error::{ProducerError, Result},
+    interceptor::ProducerInterceptor,
+    metrics::{ProducerMetricValue, ProducerMetricsSnapshot},
+    record::{BatchSendFuture, DeliveryCallback, ProducerRecord, RecordMetadata, SendFuture},
+    serializer::{
+        BooleanSerializer, ByteArraySerializer, BytesSerializer, ConfiguredProducerSerializer,
+        DoubleSerializer, FloatSerializer, IntegerSerializer, ListInnerSerializer,
+        ListSerializationStrategy, ListSerializer, LongSerializer, ProducerSerializer,
+        ShortSerializer, StringSerializer, TypedProducer, UuidSerializer, VoidSerializer,
+    },
+};
+
+/// Implementation details exposed for repository benchmarks and integration tests.
+///
+/// This module is not part of the stable user-facing producer API.
+#[doc(hidden)]
+pub mod internals {
+    pub use super::{
+        accumulator::{AccumulatorConfig, ReadyBatch, RecordAccumulator},
+        config::{ProducerIdempotenceConfig, ProducerRuntimeConfig},
+        dispatcher::ProducerDispatcher,
+        transaction::{ProducerBatchState, ProducerIdentity},
+    };
+}

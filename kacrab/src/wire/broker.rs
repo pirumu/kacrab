@@ -2,6 +2,7 @@
 
 use std::{
     collections::VecDeque,
+    marker::PhantomData,
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
@@ -117,12 +118,55 @@ pub(crate) struct BrokerHandle {
     tx: mpsc::Sender<RequestCommand>,
 }
 
+pub(crate) struct PendingBrokerResponse<Resp> {
+    rx: oneshot::Receiver<Result<ResponseEnvelope>>,
+    _response: PhantomData<Resp>,
+}
+
+impl<Resp> PendingBrokerResponse<Resp>
+where
+    Resp: ResponseMessage,
+{
+    pub(crate) async fn wait(self) -> Result<Resp> {
+        let envelope = self.rx.await.map_err(|_| WireError::ConnectionClosed)??;
+        decode_response::<Resp>(envelope)
+    }
+}
+
 struct RequestCommand {
     api_key: ApiKey,
     max_api_version: i16,
     request: Box<dyn EncodableRequest>,
     enqueued_at: Instant,
-    tx: oneshot::Sender<Result<ResponseEnvelope>>,
+    completion: RequestCompletion,
+}
+
+impl RequestCommand {
+    const fn expects_response(&self) -> bool {
+        self.completion.expects_response()
+    }
+}
+
+enum RequestCompletion {
+    Response(oneshot::Sender<Result<ResponseEnvelope>>),
+    NoResponse(oneshot::Sender<Result<()>>),
+}
+
+impl RequestCompletion {
+    const fn expects_response(&self) -> bool {
+        matches!(self, Self::Response(_))
+    }
+
+    fn send_error(self, error: WireError) {
+        match self {
+            Self::Response(tx) => {
+                let _ignored = tx.send(Err(error));
+            },
+            Self::NoResponse(tx) => {
+                let _ignored = tx.send(Err(error));
+            },
+        }
+    }
 }
 
 trait EncodableRequest: Send {
@@ -189,6 +233,19 @@ impl BrokerHandle {
         Req: RequestMessage + Clone + Send + Sync + 'static,
         Resp: ResponseMessage,
     {
+        self.enqueue(api_key, api_version, request)?.wait().await
+    }
+
+    pub(crate) fn enqueue<Req, Resp>(
+        &self,
+        api_key: ApiKey,
+        api_version: i16,
+        request: &Req,
+    ) -> Result<PendingBrokerResponse<Resp>>
+    where
+        Req: RequestMessage + Clone + Send + Sync + 'static,
+        Resp: ResponseMessage,
+    {
         let (tx, rx) = oneshot::channel();
         let command = RequestCommand {
             api_key,
@@ -197,15 +254,43 @@ impl BrokerHandle {
                 request: request.clone(),
             }),
             enqueued_at: Instant::now(),
-            tx,
+            completion: RequestCompletion::Response(tx),
+        };
+        self.tx.try_send(command).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => WireError::Backpressure,
+            mpsc::error::TrySendError::Closed(_) => WireError::ConnectionClosed,
+        })?;
+        Ok(PendingBrokerResponse {
+            rx,
+            _response: PhantomData,
+        })
+    }
+
+    pub(crate) async fn send_without_response<Req>(
+        &self,
+        api_key: ApiKey,
+        api_version: i16,
+        request: &Req,
+    ) -> Result<()>
+    where
+        Req: RequestMessage + Clone + Send + Sync + 'static,
+    {
+        let (tx, rx) = oneshot::channel();
+        let command = RequestCommand {
+            api_key,
+            max_api_version: api_version,
+            request: Box::new(OwnedRequest {
+                request: request.clone(),
+            }),
+            enqueued_at: Instant::now(),
+            completion: RequestCompletion::NoResponse(tx),
         };
         self.tx.try_send(command).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => WireError::Backpressure,
             mpsc::error::TrySendError::Closed(_) => WireError::ConnectionClosed,
         })?;
 
-        let envelope = rx.await.map_err(|_| WireError::ConnectionClosed)??;
-        decode_response::<Resp>(envelope)
+        rx.await.map_err(|_| WireError::ConnectionClosed)?
     }
 }
 
@@ -311,10 +396,10 @@ impl BrokerTask {
                         pipeline.fail_all();
                         return ServeOutcome::Closed;
                     };
-                    if pipeline.has_capacity() && pending.is_empty() {
+                    if (!command.expects_response() || pipeline.has_capacity()) && pending.is_empty() {
                         pending.push_back(command);
                     } else {
-                        let _ignored = command.tx.send(Err(WireError::Backpressure));
+                        command.completion.send_error(WireError::Backpressure);
                     }
                 },
                 maybe_response = response_rx.recv() => {
@@ -340,7 +425,10 @@ impl BrokerTask {
         capabilities: &BrokerCapabilities,
     ) -> Result<()> {
         let mut wrote_any = false;
-        while pipeline.has_capacity() {
+        while pending
+            .front()
+            .is_some_and(|command| !command.expects_response() || pipeline.has_capacity())
+        {
             let Some(command) = pending.pop_front() else {
                 break;
             };
@@ -369,18 +457,46 @@ impl BrokerTask {
             api_key,
             max_api_version,
             request,
-            tx,
+            completion,
             ..
         } = command;
         let Some(api_version) = capabilities.version_for_limit(api_key, max_api_version) else {
-            let _ignored = tx.send(Err(WireError::UnsupportedApiVersion(api_key)));
+            completion.send_error(WireError::UnsupportedApiVersion(api_key));
             return Ok(false);
         };
         let body_len = match request.encoded_len(api_version) {
             Ok(body_len) => body_len,
             Err(error) => {
-                let _ignored = tx.send(Err(error.into()));
+                completion.send_error(error.into());
                 return Ok(false);
+            },
+        };
+        let tx = match completion {
+            RequestCompletion::Response(tx) => tx,
+            RequestCompletion::NoResponse(tx) => {
+                let correlation_id = pipeline.next_correlation_id();
+                let spec = RequestFrameSpec {
+                    api_key,
+                    api_version,
+                    correlation_id,
+                    client_id: &self.client_id,
+                    capacity_hint: 0,
+                };
+                let frame = match self.encode_request_frame(spec, body_len, &*request) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        let _ignored = tx.send(Err(error));
+                        return Ok(false);
+                    },
+                };
+                if let Err(error) = writer.write_all(&frame).await {
+                    self.buffers.release_write(frame);
+                    let _ignored = tx.send(Err(WireError::Io(error)));
+                    return Err(WireError::ConnectionClosed);
+                }
+                self.buffers.release_write(frame);
+                let _ignored = tx.send(Ok(()));
+                return Ok(true);
             },
         };
         let correlation_id = match pipeline.reserve(api_key, api_version, tx) {
@@ -757,7 +873,7 @@ fn expire_pending_commands(pending: &mut VecDeque<RequestCommand>, request_timeo
     let mut retained = VecDeque::with_capacity(pending.len());
     while let Some(command) = pending.pop_front() {
         if now.duration_since(command.enqueued_at) >= request_timeout {
-            let _ignored = command.tx.send(Err(WireError::Timeout));
+            command.completion.send_error(WireError::Timeout);
         } else {
             retained.push_back(command);
         }
@@ -770,7 +886,7 @@ fn fail_pending_setup_error(
     error_factory: fn() -> WireError,
 ) {
     while let Some(command) = pending.pop_front() {
-        let _ignored = command.tx.send(Err(error_factory()));
+        command.completion.send_error(error_factory());
     }
 }
 
@@ -908,10 +1024,10 @@ mod tests {
     use super::KerberosLoginManager;
     use super::{
         BrokerCapabilities, BrokerEndpoint, BrokerHandle, BrokerStream, BrokerTask, BufferPools,
-        EncodableRequest, OAuthTokenCache, OwnedRequest, RequestCommand, RequestPipeline,
-        ResponseEnvelope, ServeOutcome, expire_pending_commands, next_reconnect_backoff,
-        read_frame, read_response_frames, reconnect_backoff_initial, reconnect_backoff_max,
-        timeout_tick_duration,
+        EncodableRequest, OAuthTokenCache, OwnedRequest, RequestCommand, RequestCompletion,
+        RequestPipeline, ResponseEnvelope, ServeOutcome, expire_pending_commands,
+        next_reconnect_backoff, read_frame, read_response_frames, reconnect_backoff_initial,
+        reconnect_backoff_max, timeout_tick_duration,
     };
     use crate::wire::{
         ConnectionConfig, Result as WireResult, SaslClientAction, SaslClientAuthenticator,
@@ -986,7 +1102,7 @@ mod tests {
                 request: api_versions_request(),
             }),
             enqueued_at,
-            tx,
+            completion: RequestCompletion::Response(tx),
         }
     }
 

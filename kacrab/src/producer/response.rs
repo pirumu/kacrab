@@ -5,16 +5,20 @@ use kacrab_protocol::{
     generated::{ErrorCode, PartitionProduceResponse, ProduceResponseData},
 };
 
-use super::{
-    error::{ProducerError, Result},
-    record::ProduceReceipt,
-    routing::ProduceRoute,
-};
+use super::{error::ProducerError, record::RecordMetadata, routing::ProduceRoute};
 
+#[cfg(test)]
 pub(crate) fn produce_receipts(
     response: &ProduceResponseData,
     routes: &[ProduceRoute],
-) -> Result<Vec<ProduceReceipt>> {
+) -> super::error::Result<Vec<RecordMetadata>> {
+    produce_receipts_with_error_details(response, routes).map_err(Into::into)
+}
+
+pub(crate) fn produce_receipts_with_error_details(
+    response: &ProduceResponseData,
+    routes: &[ProduceRoute],
+) -> Result<Vec<RecordMetadata>, ProduceReceiptError> {
     let mut receipts = Vec::with_capacity(routes.len());
     for route in routes {
         receipts.push(produce_receipt(response, route)?);
@@ -22,7 +26,43 @@ pub(crate) fn produce_receipts(
     Ok(receipts)
 }
 
-fn produce_receipt(response: &ProduceResponseData, route: &ProduceRoute) -> Result<ProduceReceipt> {
+#[derive(Debug)]
+pub(crate) enum ProduceReceiptError {
+    Broker(ProduceBrokerError),
+    Producer(ProducerError),
+}
+
+#[derive(Debug)]
+pub(crate) struct ProduceBrokerError {
+    pub(crate) topic: String,
+    pub(crate) partition: i32,
+    pub(crate) error: ErrorCode,
+    pub(crate) log_start_offset: i64,
+}
+
+impl From<ProducerError> for ProduceReceiptError {
+    fn from(error: ProducerError) -> Self {
+        Self::Producer(error)
+    }
+}
+
+impl From<ProduceReceiptError> for ProducerError {
+    fn from(error: ProduceReceiptError) -> Self {
+        match error {
+            ProduceReceiptError::Broker(error) => Self::Broker {
+                topic: error.topic,
+                partition: error.partition,
+                error: error.error,
+            },
+            ProduceReceiptError::Producer(error) => error,
+        }
+    }
+}
+
+fn produce_receipt(
+    response: &ProduceResponseData,
+    route: &ProduceRoute,
+) -> Result<RecordMetadata, ProduceReceiptError> {
     let topic_response = response
         .responses
         .iter()
@@ -40,26 +80,29 @@ fn produce_receipt(response: &ProduceResponseData, route: &ProduceRoute) -> Resu
             partition: route.partition,
         })?;
     check_partition_error(partition_response, route)?;
-    Ok(ProduceReceipt {
+    Ok(RecordMetadata {
         topic: route.topic.clone(),
         partition: route.partition,
         leader_id: route.leader_id,
-        base_offset: partition_response.base_offset,
-        log_append_time_ms: partition_response.log_append_time_ms,
+        offset: partition_response.base_offset,
+        timestamp_ms: partition_response.log_append_time_ms,
+        serialized_key_size: -1,
+        serialized_value_size: -1,
     })
 }
 
 fn check_partition_error(
     partition_response: &PartitionProduceResponse,
     route: &ProduceRoute,
-) -> Result<()> {
+) -> Result<(), ProduceReceiptError> {
     let error = ErrorCode::from(partition_response.error_code);
     if error.is_error() {
-        return Err(ProducerError::Broker {
+        return Err(ProduceReceiptError::Broker(ProduceBrokerError {
             topic: route.topic.clone(),
             partition: route.partition,
             error,
-        });
+            log_start_offset: partition_response.log_start_offset,
+        }));
     }
     Ok(())
 }
@@ -124,8 +167,8 @@ mod tests {
         let receipts = produce_receipts(&response, &routes).expect("receipts");
 
         assert_eq!(receipts.len(), 2);
-        assert_eq!(receipts[0].base_offset, 11);
-        assert_eq!(receipts[1].base_offset, 12);
+        assert_eq!(receipts[0].offset, 11);
+        assert_eq!(receipts[1].offset, 12);
         assert_eq!(response.responses.len(), 1);
     }
 
@@ -192,6 +235,7 @@ mod tests {
             partition,
             topic_id: TOPIC_ID,
             leader_id: 7,
+            base_sequence: None,
         }
     }
 }

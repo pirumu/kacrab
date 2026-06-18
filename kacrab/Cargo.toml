@@ -47,6 +47,7 @@ socket2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-rustls = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }

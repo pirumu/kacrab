@@ -13,6 +13,8 @@ use kacrab_protocol::{
 };
 use tokio::sync::Mutex;
 
+#[cfg(feature = "producer")]
+use super::broker::PendingBrokerResponse;
 use super::{
     auth::OAuthTokenCache,
     broker::{BrokerEndpoint, BrokerHandle},
@@ -111,6 +113,40 @@ impl WireClient {
         handle.send(api_key, api_version, request).await
     }
 
+    #[cfg(feature = "producer")]
+    pub(crate) fn enqueue_to_broker<Req, Resp>(
+        &self,
+        broker_id: i32,
+        api_key: ApiKey,
+        api_version: i16,
+        request: &Req,
+    ) -> Result<PendingBrokerResponse<Resp>>
+    where
+        Req: RequestMessage + Clone + Send + Sync + 'static,
+        Resp: ResponseMessage,
+    {
+        let handle = self.handle_for(broker_id)?;
+        handle.enqueue(api_key, api_version, request)
+    }
+
+    /// Send a generated request to a broker when the Kafka API will not return
+    /// a response for this request, such as Produce with `acks=0`.
+    pub async fn send_to_broker_without_response<Req>(
+        &self,
+        broker_id: i32,
+        api_key: ApiKey,
+        api_version: i16,
+        request: &Req,
+    ) -> Result<()>
+    where
+        Req: RequestMessage + Clone + Send + Sync + 'static,
+    {
+        let handle = self.handle_for(broker_id)?;
+        handle
+            .send_without_response(api_key, api_version, request)
+            .await
+    }
+
     /// Return cached metadata for topics, refreshing through a known broker when needed.
     pub async fn metadata_for_topics<I, S>(&self, topics: I) -> Result<Arc<ClusterMetadata>>
     where
@@ -143,22 +179,13 @@ impl WireClient {
     }
 
     /// Invalidate cached metadata when a topic-partition leadership error is observed.
-    pub fn invalidate_topic_partition(&self, topic: &str, partition: i32) {
+    pub fn invalidate_topic_partition(&self, _topic: &str, _partition: i32) {
         let mut guard = self
             .inner
             .metadata
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let should_invalidate = guard
-            .as_ref()
-            .and_then(|snapshot| snapshot.metadata.topic(topic))
-            .is_some_and(|topic_metadata| {
-                topic_metadata
-                    .partitions
-                    .iter()
-                    .any(|metadata| metadata.partition_index == partition)
-            });
-        if should_invalidate {
+        if guard.is_some() {
             *guard = None;
         }
     }

@@ -75,6 +75,12 @@ impl RequestPipeline {
         Ok(correlation_id)
     }
 
+    pub(crate) const fn next_correlation_id(&mut self) -> i32 {
+        let correlation_id = self.next_correlation_id;
+        self.next_correlation_id = self.next_correlation_id.wrapping_add(1);
+        correlation_id
+    }
+
     pub(crate) const fn has_capacity(&self) -> bool {
         self.len < self.slots.len()
     }

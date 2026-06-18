@@ -11,9 +11,10 @@ use kacrab_protocol::{signed_varint_len, signed_varlong_len};
 
 use super::{
     error::{ProducerError, Result},
-    record::{Delivery, DeliverySender, ProducerRecord},
+    record::{DeliverySender, ProducerRecord, SendFuture},
     transaction::ProducerBatchState,
 };
+use crate::wire::{PartitionMetadata, TopicMetadata};
 
 /// Kafka default `batch.size`: 16 KiB is the Java producer baseline that gives
 /// useful batching without forcing large per-partition buffers.
@@ -93,6 +94,14 @@ pub struct ReadyBatch {
     pub(crate) producer_state: Option<ProducerBatchState>,
 }
 
+/// Per-partition queue sizes used by adaptive sticky partitioning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PartitionQueueLoad {
+    pub(crate) queue_sizes: Vec<i32>,
+    pub(crate) partition_ids: Vec<i32>,
+    pub(crate) length: usize,
+}
+
 /// Result metadata for an append operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AppendStatus {
@@ -147,6 +156,56 @@ impl RecordAccumulator {
         self.buffered_bytes
     }
 
+    /// Records currently buffered in the producer accumulator.
+    #[must_use]
+    pub fn buffered_records(&self) -> usize {
+        self.partitions
+            .values()
+            .flat_map(|queue| queue.batches.iter())
+            .map(|batch| batch.records.len())
+            .sum()
+    }
+
+    /// Build Java-style queue load stats for one topic while excluding partitions
+    /// whose leaders are temporarily unavailable for adaptive sticky routing.
+    pub(crate) fn partition_queue_load_with_availability<F>(
+        &self,
+        topic_metadata: &TopicMetadata,
+        mut is_partition_available: F,
+    ) -> Option<PartitionQueueLoad>
+    where
+        F: FnMut(&PartitionMetadata) -> bool,
+    {
+        let partition_count = topic_metadata.partitions.len();
+        if partition_count < 2 {
+            return None;
+        }
+        let mut queue_sizes = vec![0; partition_count];
+        let mut partition_ids = vec![0; partition_count];
+        let mut length = 0;
+        for partition in &topic_metadata.partitions {
+            let key = TopicPartition {
+                topic: Arc::<str>::from(topic_metadata.name.as_str()),
+                partition: partition.partition_index,
+            };
+            let queue = self.partitions.get(&key)?;
+            if partition.leader_id < 0 {
+                continue;
+            }
+            let size = i32::try_from(queue.batches.len()).ok()?;
+            if is_partition_available(partition) {
+                *queue_sizes.get_mut(length)? = size;
+                *partition_ids.get_mut(length)? = partition.partition_index;
+                length = length.checked_add(1)?;
+            }
+        }
+        Some(PartitionQueueLoad {
+            queue_sizes,
+            partition_ids,
+            length,
+        })
+    }
+
     /// Append a record using the current clock.
     pub fn append(&mut self, record: ProducerRecord) -> Result<()> {
         self.append_internal(record, Instant::now())
@@ -168,16 +227,30 @@ impl RecordAccumulator {
     }
 
     /// Append a record and return a delivery handle for its eventual broker ack.
-    pub fn append_for_delivery(&mut self, record: ProducerRecord) -> Result<Delivery> {
-        self.append_internal_for_delivery(record, Instant::now())
-            .map(|(delivery, _status)| delivery)
+    pub fn append_for_delivery(&mut self, record: ProducerRecord) -> Result<SendFuture> {
+        let (delivery, _status) =
+            self.append_internal_for_delivery(record, Instant::now(), true)?;
+        delivery.ok_or(ProducerError::DeliveryDropped)
     }
 
-    pub(crate) fn append_for_delivery_with_status(
+    pub(crate) fn append_for_delivery_with_status_at(
         &mut self,
         record: ProducerRecord,
-    ) -> Result<(Delivery, AppendStatus)> {
-        self.append_internal_for_delivery(record, Instant::now())
+        now: Instant,
+    ) -> Result<(SendFuture, AppendStatus)> {
+        let (delivery, status) = self.append_internal_for_delivery(record, now, true)?;
+        let Some(delivery) = delivery else {
+            return Err(ProducerError::DeliveryDropped);
+        };
+        Ok((delivery, status))
+    }
+
+    pub(crate) fn append_for_batch_delivery_with_status_at(
+        &mut self,
+        record: ProducerRecord,
+        now: Instant,
+    ) -> Result<(Option<SendFuture>, AppendStatus)> {
+        self.append_internal_for_delivery(record, now, false)
     }
 
     fn append_internal(&mut self, record: ProducerRecord, now: Instant) -> Result<AppendStatus> {
@@ -224,7 +297,8 @@ impl RecordAccumulator {
         &mut self,
         record: ProducerRecord,
         now: Instant,
-    ) -> Result<(Delivery, AppendStatus)> {
+        per_record_delivery: bool,
+    ) -> Result<(Option<SendFuture>, AppendStatus)> {
         let buffer_bytes = estimate_record_bytes(&record);
         let available = self
             .config
@@ -253,16 +327,16 @@ impl RecordAccumulator {
             estimate_record_batch_bytes_at_offset(&record, batch.records.len());
         batch.buffer_bytes = batch.buffer_bytes.saturating_add(buffer_bytes);
         batch.batch_bytes = batch.batch_bytes.saturating_add(record_batch_bytes);
+        let delivery = if let Some(sender) = &mut batch.delivery {
+            per_record_delivery.then(|| sender.delivery_for_record(&record))
+        } else {
+            let (sender, delivery) = SendFuture::channel_for_record(&record);
+            batch.delivery = Some(sender);
+            Some(delivery)
+        };
         let current_batch_records = batch.records.len().saturating_add(1);
         let current_batch_ready = batch.batch_bytes >= batch_size;
         batch.records.push(record);
-        let delivery = if let Some(sender) = &batch.delivery {
-            sender.delivery()
-        } else {
-            let (sender, delivery) = Delivery::channel();
-            batch.delivery = Some(sender);
-            delivery
-        };
         self.buffered_bytes = self.buffered_bytes.saturating_add(buffer_bytes);
         Ok((
             delivery,
@@ -385,10 +459,12 @@ fn batch_is_ready(
 pub(crate) fn estimate_record_bytes(record: &ProducerRecord) -> usize {
     let key_bytes = record.key.as_ref().map_or(0, bytes::Bytes::len);
     let value_bytes = record.value.as_ref().map_or(0, bytes::Bytes::len);
+    let header_bytes = estimate_headers_bytes(record);
     ESTIMATED_RECORD_OVERHEAD_BYTES
         .checked_add(record.topic.len())
         .and_then(|bytes| bytes.checked_add(key_bytes))
         .and_then(|bytes| bytes.checked_add(value_bytes))
+        .and_then(|bytes| bytes.checked_add(header_bytes))
         .unwrap_or(usize::MAX)
 }
 
@@ -471,23 +547,44 @@ fn estimate_record_batch_bytes_at_offset(record: &ProducerRecord, offset_delta: 
     let key_bytes = record.key.as_ref().map_or(0, bytes::Bytes::len);
     let value_bytes = record.value.as_ref().map_or(0, bytes::Bytes::len);
     let offset_delta = i32::try_from(offset_delta).unwrap_or(i32::MAX);
+    let timestamp_delta = record.timestamp_ms.unwrap_or(0);
+    let header_count = i32::try_from(record.headers.len()).unwrap_or(i32::MAX);
     let body_len = 1usize
-        .saturating_add(signed_varlong_len(0))
+        .saturating_add(signed_varlong_len(timestamp_delta))
         .saturating_add(signed_varint_len(offset_delta))
         .saturating_add(nullable_record_bytes_len(key_bytes, record.key.is_some()))
         .saturating_add(nullable_record_bytes_len(
             value_bytes,
             record.value.is_some(),
         ))
-        .saturating_add(signed_varint_len(0));
+        .saturating_add(signed_varint_len(header_count))
+        .saturating_add(estimate_headers_bytes(record));
     let body_len = i32::try_from(body_len).unwrap_or(i32::MAX);
     signed_varint_len(body_len).saturating_add(usize::try_from(body_len).unwrap_or(usize::MAX))
 }
 
+fn estimate_headers_bytes(record: &ProducerRecord) -> usize {
+    if record.headers.is_empty() {
+        return 0;
+    }
+    record.headers.iter().fold(0usize, |bytes, header| {
+        bytes
+            .saturating_add(record_bytes_len(header.key.len()))
+            .saturating_add(nullable_record_bytes_len(
+                header.value.as_ref().map_or(0, bytes::Bytes::len),
+                header.value.is_some(),
+            ))
+    })
+}
+
+fn record_bytes_len(bytes: usize) -> usize {
+    let len = i32::try_from(bytes).unwrap_or(i32::MAX);
+    signed_varint_len(len).saturating_add(bytes)
+}
+
 fn nullable_record_bytes_len(bytes: usize, is_some: bool) -> usize {
     if is_some {
-        let len = i32::try_from(bytes).unwrap_or(i32::MAX);
-        signed_varint_len(len).saturating_add(bytes)
+        record_bytes_len(bytes)
     } else {
         signed_varint_len(-1)
     }

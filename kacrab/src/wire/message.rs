@@ -4,10 +4,14 @@ use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{
     KafkaString, KafkaUuid, Result,
     generated::{
-        AddPartitionsToTxnRequestData, AddPartitionsToTxnResponseData, ApiVersionsRequestData,
-        ApiVersionsResponseData, EndTxnRequestData, EndTxnResponseData, FindCoordinatorRequestData,
-        FindCoordinatorResponseData, InitProducerIdRequestData, InitProducerIdResponseData,
-        MetadataRequestData, MetadataResponseData, ProduceRequestData, ProduceResponseData,
+        AddOffsetsToTxnRequestData, AddOffsetsToTxnResponseData, AddPartitionsToTxnRequestData,
+        AddPartitionsToTxnResponseData, ApiVersionsRequestData, ApiVersionsResponseData,
+        EndTxnRequestData, EndTxnResponseData, FindCoordinatorRequestData,
+        FindCoordinatorResponseData, GetTelemetrySubscriptionsRequestData,
+        GetTelemetrySubscriptionsResponseData, InitProducerIdRequestData,
+        InitProducerIdResponseData, MetadataRequestData, MetadataResponseData, ProduceRequestData,
+        ProduceResponseData, PushTelemetryRequestData, PushTelemetryResponseData,
+        TxnOffsetCommitRequestData, TxnOffsetCommitResponseData,
     },
 };
 
@@ -128,6 +132,40 @@ impl ResponseMessage for AddPartitionsToTxnResponseData {
     }
 }
 
+impl RequestMessage for AddOffsetsToTxnRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        self.write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        self.encoded_len(version)
+    }
+}
+
+impl ResponseMessage for AddOffsetsToTxnResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
+impl RequestMessage for TxnOffsetCommitRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        self.write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        self.encoded_len(version)
+    }
+}
+
+impl ResponseMessage for TxnOffsetCommitResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
 impl RequestMessage for EndTxnRequestData {
     fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
         self.write(buf, version)?;
@@ -140,6 +178,40 @@ impl RequestMessage for EndTxnRequestData {
 }
 
 impl ResponseMessage for EndTxnResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
+impl RequestMessage for GetTelemetrySubscriptionsRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        self.write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        self.encoded_len(version)
+    }
+}
+
+impl ResponseMessage for GetTelemetrySubscriptionsResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
+impl RequestMessage for PushTelemetryRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        self.write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        self.encoded_len(version)
+    }
+}
+
+impl ResponseMessage for PushTelemetryResponseData {
     fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
         Self::read(buf, version)
     }

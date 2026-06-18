@@ -164,6 +164,24 @@ kafka_config! {
         #[comment("Whether the producer partitioner should ignore record keys.")]
         partitioner_ignore_keys: bool,
 
+        #[key("partitioner.adaptive.partitioning.enable")]
+        #[default(true)]
+        #[kafka_type("boolean")]
+        #[kafka_default("true")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/producer-configs/#producerconfigs_partitioner.adaptive.partitioning.enable")]
+        #[comment("Whether sticky partition switching adapts to observed broker/partition queue load.")]
+        partitioner_adaptive_partitioning_enable: bool,
+
+        #[key("partitioner.availability.timeout.ms")]
+        #[default(DurationMs::from_millis(0))]
+        #[kafka_type("long")]
+        #[kafka_default("0")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/producer-configs/#producerconfigs_partitioner.availability.timeout.ms")]
+        #[comment("How long a leader may be unable to drain produce data before adaptive sticky temporarily excludes its partitions; zero disables exclusion.")]
+        partitioner_availability_timeout_ms: DurationMs,
+
         #[key("receive.buffer.bytes")]
         #[default(32_768_i32)]
         #[kafka_type("int")]

@@ -18,6 +18,8 @@ mod sasl;
 mod socket;
 mod tls;
 
+#[cfg(feature = "producer")]
+pub(crate) use self::broker::PendingBrokerResponse;
 #[cfg(feature = "gssapi")]
 pub use self::gssapi::GssapiAuthenticator;
 pub use self::{

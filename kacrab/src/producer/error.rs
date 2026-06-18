@@ -17,9 +17,31 @@ pub enum ProducerError {
     /// Producer buffer memory is exhausted.
     #[error("producer buffer memory exhausted")]
     Backpressure,
+    /// Producer record field is invalid before serialization or append.
+    #[error("invalid producer record {field}: {message}")]
+    InvalidRecord {
+        /// Invalid producer record field.
+        field: &'static str,
+        /// Human-readable validation message.
+        message: &'static str,
+    },
+    /// Serialized record would exceed the configured producer request bound.
+    #[error("serialized record is {size} bytes, larger than max.request.size={max_request_size}")]
+    RecordTooLarge {
+        /// Estimated serialized record-batch bytes.
+        size: usize,
+        /// Configured `max.request.size`.
+        max_request_size: usize,
+    },
     /// Flush forced out buffered records but routing metadata was still incomplete.
     #[error("flush could not route all buffered records")]
     FlushIncomplete,
+    /// Producer API was called from a delivery callback where Java forbids blocking.
+    #[error("producer operation {operation} cannot be invoked from a delivery callback")]
+    CallbackOperation {
+        /// Producer operation name.
+        operation: &'static str,
+    },
     /// Batch exceeded the configured delivery timeout.
     #[error("delivery timeout expired for {topic}-{partition}")]
     DeliveryTimeout {
@@ -84,6 +106,9 @@ pub enum ProducerError {
     /// Transaction state is currently locked by another operation.
     #[error("producer transaction state is busy")]
     TransactionStateBusy,
+    /// Consumer group metadata is invalid for transactional offset commit.
+    #[error("invalid consumer group metadata: {0}")]
+    InvalidConsumerGroupMetadata(&'static str),
     /// Per-partition idempotent sequence counter overflowed.
     #[error("producer sequence overflow for {topic}-{partition}")]
     SequenceOverflow {
@@ -92,12 +117,49 @@ pub enum ProducerError {
         /// Partition index.
         partition: i32,
     },
+    /// A previous idempotent batch left the partition sequence unresolved.
+    #[error("producer sequence is unresolved for {topic}-{partition}")]
+    UnresolvedSequence {
+        /// Topic name.
+        topic: String,
+        /// Partition index.
+        partition: i32,
+    },
     /// Internal async dispatch task failed before returning a broker result.
     #[error("producer dispatch task failed: {0}")]
     DispatchTask(String),
-    /// Delivery handle was dropped before a broker receipt was produced.
+    /// `SendFuture` handle was dropped before a broker receipt was produced.
     #[error("producer delivery was dropped before completion")]
     DeliveryDropped,
+    /// Public API exists for Java compatibility, but the backend is not wired yet.
+    #[error("producer operation is not supported yet: {0}")]
+    UnsupportedOperation(&'static str),
+    /// Client telemetry APIs were called while `enable.metrics.push=false`.
+    #[error("telemetry is not enabled; set config `enable.metrics.push` to `true`")]
+    TelemetryDisabled,
+    /// Broker returned an error for a client telemetry operation.
+    #[error("producer telemetry operation {operation} failed: {error}")]
+    Telemetry {
+        /// Producer telemetry operation name.
+        operation: &'static str,
+        /// Kafka error code.
+        error: ErrorCode,
+    },
+    /// Broker returned invalid client telemetry subscription data.
+    #[error("invalid producer telemetry subscription: {0}")]
+    InvalidTelemetrySubscription(&'static str),
+    /// Client telemetry timeout argument is invalid.
+    #[error("invalid producer telemetry timeout: {timeout_ms}ms")]
+    InvalidTelemetryTimeout {
+        /// Timeout in milliseconds supplied by the caller.
+        timeout_ms: i64,
+    },
+    /// Producer close timeout argument is invalid.
+    #[error("invalid producer close timeout: {timeout_ms}ms")]
+    InvalidCloseTimeout {
+        /// Timeout in milliseconds supplied by the caller.
+        timeout_ms: i64,
+    },
     /// Public Java-style producer config could not be mapped to typed config.
     #[error("producer config error: {error}")]
     Config {

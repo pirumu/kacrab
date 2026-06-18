@@ -73,6 +73,7 @@ serde_json = { version = "1", default-features = false, features = ["std"] }
 # Error type derive — broadly applicable across crates.
 thiserror = "2"
 anyhow = "1"
+uuid = { version = "1", default-features = false, features = ["v4"] }
 
 # ============================================================================
 # Profiles — workspace-wide.
