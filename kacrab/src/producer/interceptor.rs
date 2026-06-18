@@ -28,7 +28,7 @@ pub trait ProducerInterceptor: Send + Sync + 'static {
     /// Observe a send failure before the record is appended.
     fn on_error(&self, record: &ProducerRecord, error: &ProducerError) {
         let metadata = RecordMetadata {
-            topic: record.topic.to_string(),
+            topic: Arc::clone(&record.topic),
             partition: record.partition,
             leader_id: -1,
             offset: -1,

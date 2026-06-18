@@ -2,7 +2,30 @@
         test-protocol-java test-protocol-java-matrix test-protocol-full \
         clippy fmt fmt-check doc clean audit deny udeps machete outdated \
         install-hooks commit-lint \
+        kafka-start kafka-stop kafka-data-du kafka-topic-prune-delete-dirs \
+        kafka-tools-check kafka-topic-describe kafka-topic-create \
+        kafka-topic-delete kafka-topic-recreate \
+        bench-kafka bench-kafka-tracked bench-kafka-tracked-manual \
+        bench-kafka-java-default bench-kafka-matrix \
         ci ci-strict tools
+
+KAFKA_BIN ?= $(HOME)/.local/share/kacrab-kafka/current/bin
+KAFKA_TOPICS ?= $(KAFKA_BIN)/kafka-topics.sh
+KAFKA_SERVER_START ?= $(KAFKA_BIN)/kafka-server-start.sh
+KAFKA_SERVER_STOP ?= $(KAFKA_BIN)/kafka-server-stop.sh
+KAFKA_PRODUCER_PERF ?= $(KAFKA_BIN)/kafka-producer-perf-test.sh
+KAFKA_ROOT ?= $(abspath $(KAFKA_BIN)/../..)
+KAFKA_SERVER_PROPERTIES ?= $(KAFKA_ROOT)/server.properties
+KAFKA_DATA_DIR ?= $(KAFKA_ROOT)/data
+KACRAB_BOOTSTRAP ?= 127.0.0.1:9092
+KACRAB_BENCH_TOPIC ?= kacrab-bench
+KACRAB_PARTITIONS ?= 3
+KACRAB_REPLICATION_FACTOR ?= 1
+KACRAB_BENCH_MESSAGES ?= 5000000
+KACRAB_BENCH_VALUE_SIZE ?= 10
+KACRAB_BENCH_BATCH_MESSAGES ?= 16384
+KACRAB_DELIVERY_MODE ?= untracked
+KACRAB_PARTITION_MODE ?= unassigned
 
 help:
 	@echo "Common:"
@@ -35,6 +58,21 @@ help:
 	@echo "  test-protocol-full - protocol tests + Java oracle matrix"
 	@echo "  ci-strict   - ci + audit + deny + machete + doc"
 	@echo "  tools       - install all auxiliary cargo tools"
+	@echo ""
+	@echo "Kafka bench helpers:"
+	@echo "  kafka-start           - start native Kafka daemon from KAFKA_SERVER_PROPERTIES"
+	@echo "  kafka-stop            - stop native Kafka"
+	@echo "  kafka-data-du         - show largest Kafka data dirs"
+	@echo "  kafka-topic-describe  - describe KACRAB_BENCH_TOPIC on KACRAB_BOOTSTRAP"
+	@echo "  kafka-topic-create    - create KACRAB_BENCH_TOPIC if missing"
+	@echo "  kafka-topic-delete    - delete KACRAB_BENCH_TOPIC"
+	@echo "  kafka-topic-recreate  - delete, wait, and recreate KACRAB_BENCH_TOPIC"
+	@echo "  kafka-topic-prune-delete-dirs - rm stale KACRAB_BENCH_TOPIC *-delete dirs; stop Kafka first"
+	@echo "  bench-kafka           - run Rust real-Kafka bench with current env defaults"
+	@echo "  bench-kafka-tracked   - run Rust tracked 10B default-partitioner bench"
+	@echo "  bench-kafka-tracked-manual - run Rust tracked 10B manual-partition bench"
+	@echo "  bench-kafka-java-default - run Java kafka-producer-perf-test default 10B"
+	@echo "  bench-kafka-matrix    - run benches/scripts/producer_default_matrix.sh"
 
 check:
 	cargo check --workspace --all-targets --all-features
@@ -85,6 +123,63 @@ doc:
 
 clean:
 	cargo clean
+
+kafka-tools-check:
+	@test -x "$(KAFKA_TOPICS)" || { echo "missing kafka-topics.sh at $(KAFKA_TOPICS). Set KAFKA_BIN=/path/to/kafka/bin"; exit 1; }
+	@test -x "$(KAFKA_PRODUCER_PERF)" || { echo "missing kafka-producer-perf-test.sh at $(KAFKA_PRODUCER_PERF). Set KAFKA_BIN=/path/to/kafka/bin"; exit 1; }
+
+kafka-start: kafka-tools-check
+	@test -x "$(KAFKA_SERVER_START)" || { echo "missing kafka-server-start.sh at $(KAFKA_SERVER_START). Set KAFKA_BIN=/path/to/kafka/bin"; exit 1; }
+	@test -f "$(KAFKA_SERVER_PROPERTIES)" || { echo "missing Kafka server properties at $(KAFKA_SERVER_PROPERTIES). Set KAFKA_SERVER_PROPERTIES=/path/to/server.properties"; exit 1; }
+	"$(KAFKA_SERVER_START)" -daemon "$(KAFKA_SERVER_PROPERTIES)"
+
+kafka-stop: kafka-tools-check
+	@test -x "$(KAFKA_SERVER_STOP)" || { echo "missing kafka-server-stop.sh at $(KAFKA_SERVER_STOP). Set KAFKA_BIN=/path/to/kafka/bin"; exit 1; }
+	-"$(KAFKA_SERVER_STOP)"
+
+kafka-data-du:
+	@du -sh "$(KAFKA_DATA_DIR)"/* 2>/dev/null | sort -hr | head -40
+
+kafka-topic-describe: kafka-tools-check
+	"$(KAFKA_TOPICS)" --bootstrap-server "$(KACRAB_BOOTSTRAP)" --describe --topic "$(KACRAB_BENCH_TOPIC)"
+
+kafka-topic-create: kafka-tools-check
+	"$(KAFKA_TOPICS)" --bootstrap-server "$(KACRAB_BOOTSTRAP)" --create --if-not-exists --topic "$(KACRAB_BENCH_TOPIC)" --partitions "$(KACRAB_PARTITIONS)" --replication-factor "$(KACRAB_REPLICATION_FACTOR)"
+	"$(KAFKA_TOPICS)" --bootstrap-server "$(KACRAB_BOOTSTRAP)" --describe --topic "$(KACRAB_BENCH_TOPIC)"
+
+kafka-topic-delete: kafka-tools-check
+	"$(KAFKA_TOPICS)" --bootstrap-server "$(KACRAB_BOOTSTRAP)" --delete --if-exists --topic "$(KACRAB_BENCH_TOPIC)"
+
+kafka-topic-prune-delete-dirs:
+	@echo "Pruning stale delete dirs for topic $(KACRAB_BENCH_TOPIC) under $(KAFKA_DATA_DIR)"
+	@find "$(KAFKA_DATA_DIR)" -maxdepth 1 -type d -name "$(KACRAB_BENCH_TOPIC)-*.delete" -print -exec rm -rf {} +
+	@find "$(KAFKA_DATA_DIR)" -maxdepth 1 -type d -name "$(KACRAB_BENCH_TOPIC)-*-delete" -print -exec rm -rf {} +
+
+kafka-topic-recreate: kafka-tools-check
+	"$(KAFKA_TOPICS)" --bootstrap-server "$(KACRAB_BOOTSTRAP)" --delete --if-exists --topic "$(KACRAB_BENCH_TOPIC)"
+	@for attempt in $$(seq 1 60); do \
+		if ! "$(KAFKA_TOPICS)" --bootstrap-server "$(KACRAB_BOOTSTRAP)" --describe --topic "$(KACRAB_BENCH_TOPIC)" >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		sleep 1; \
+	done
+	"$(KAFKA_TOPICS)" --bootstrap-server "$(KACRAB_BOOTSTRAP)" --create --if-not-exists --topic "$(KACRAB_BENCH_TOPIC)" --partitions "$(KACRAB_PARTITIONS)" --replication-factor "$(KACRAB_REPLICATION_FACTOR)"
+	"$(KAFKA_TOPICS)" --bootstrap-server "$(KACRAB_BOOTSTRAP)" --describe --topic "$(KACRAB_BENCH_TOPIC)"
+
+bench-kafka:
+	KACRAB_BOOTSTRAP="$(KACRAB_BOOTSTRAP)" KACRAB_BENCH_TOPIC="$(KACRAB_BENCH_TOPIC)" KACRAB_DELIVERY_MODE="$(KACRAB_DELIVERY_MODE)" KACRAB_PARTITION_MODE="$(KACRAB_PARTITION_MODE)" KACRAB_CUSTOM_MESSAGES="$(KACRAB_BENCH_MESSAGES)" KACRAB_CUSTOM_VALUE_SIZE="$(KACRAB_BENCH_VALUE_SIZE)" KACRAB_CUSTOM_BATCH_MESSAGES="$(KACRAB_BENCH_BATCH_MESSAGES)" cargo run -p kacrab-benches --bin producer_kafka_bench --release
+
+bench-kafka-tracked:
+	$(MAKE) bench-kafka KACRAB_DELIVERY_MODE=tracked KACRAB_PARTITION_MODE=unassigned KACRAB_BENCH_VALUE_SIZE=10
+
+bench-kafka-tracked-manual:
+	$(MAKE) bench-kafka KACRAB_DELIVERY_MODE=tracked KACRAB_PARTITION_MODE=manual KACRAB_BENCH_VALUE_SIZE=10
+
+bench-kafka-java-default: kafka-tools-check
+	"$(KAFKA_PRODUCER_PERF)" --bootstrap-server "$(KACRAB_BOOTSTRAP)" --topic "$(KACRAB_BENCH_TOPIC)" --num-records "$(KACRAB_BENCH_MESSAGES)" --record-size "$(KACRAB_BENCH_VALUE_SIZE)" --throughput -1 --command-property "client.id=java-default-$(KACRAB_BENCH_VALUE_SIZE)b"
+
+bench-kafka-matrix: kafka-tools-check
+	KAFKA_BIN="$(KAFKA_BIN)" KACRAB_BOOTSTRAP="$(KACRAB_BOOTSTRAP)" KACRAB_BENCH_TOPIC="$(KACRAB_BENCH_TOPIC)" KACRAB_PARTITIONS="$(KACRAB_PARTITIONS)" benches/scripts/producer_default_matrix.sh
 
 audit:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "cargo-audit not installed. Run: make tools"; exit 1; }

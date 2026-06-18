@@ -3,7 +3,10 @@
 use std::{
     collections::VecDeque,
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -20,7 +23,10 @@ use kacrab_protocol::{
     },
     version::client_api_info,
 };
-use tokio::{sync::Mutex, task::JoinSet};
+use tokio::{
+    sync::{Mutex, Notify},
+    task::JoinSet,
+};
 
 use super::{
     accumulator::{
@@ -37,7 +43,7 @@ use super::{
     record::RecordMetadata,
     response::{ProduceBrokerError, ProduceReceiptError, produce_receipts_with_error_details},
     routing::{ProduceRoute, murmur2_java, route},
-    transaction::{ProducerBatchState, ProducerIdentity},
+    transaction::{ProducerBatchState, ProducerIdentity, TransactionState},
 };
 use crate::wire::{BrokerEndpoint, TopicMetadata, WireClient};
 
@@ -154,12 +160,12 @@ impl ProducerDispatcher {
         if self.idempotence.transactional_id.is_none() {
             return Err(ProducerError::TransactionalIdRequired);
         }
-        let state = self
+        let mut state = self
             .producer_state
             .try_lock()
             .map_err(|_error| ProducerError::TransactionStateBusy)?;
         fail_transaction_state_if_needed(&state, false)?;
-        fail_pending_transaction_operation(&state)?;
+        fail_pending_transaction_operation(&mut state)?;
         if !state.in_transaction {
             return Err(ProducerError::InvalidTransactionState(
                 "no transaction is open",
@@ -172,6 +178,52 @@ impl ProducerDispatcher {
         }
         drop(state);
         Ok(())
+    }
+
+    pub(crate) async fn pending_end_transaction_matches(&self, committed: bool) -> Result<bool> {
+        if self.idempotence.transactional_id.is_none() {
+            return Err(ProducerError::TransactionalIdRequired);
+        }
+        let mut state = self.producer_state.lock().await;
+        clear_acked_pending_transaction_operation(&mut state);
+        match state.pending_operation {
+            Some(TransactionOperation::EndTransaction {
+                committed: pending_committed,
+            }) if pending_committed == committed => Ok(true),
+            Some(_operation) => Err(ProducerError::InvalidTransactionState(
+                PENDING_TRANSACTION_OPERATION_MESSAGE,
+            )),
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) async fn mark_init_transactions_timed_out(&self) {
+        self.mark_pending_transaction_operation_timed_out(TransactionOperation::InitTransactions)
+            .await;
+    }
+
+    pub(crate) async fn mark_send_offsets_to_transaction_timed_out(&self) {
+        self.mark_pending_transaction_operation_timed_out(
+            TransactionOperation::SendOffsetsToTransaction,
+        )
+        .await;
+    }
+
+    pub(crate) async fn mark_end_transaction_timed_out(&self, committed: bool) {
+        self.mark_pending_transaction_operation_timed_out(TransactionOperation::EndTransaction {
+            committed,
+        })
+        .await;
+    }
+
+    async fn mark_pending_transaction_operation_timed_out(&self, operation: TransactionOperation) {
+        if self.idempotence.transactional_id.is_none() {
+            return;
+        }
+        let mut state = self.producer_state.lock().await;
+        if state.pending_operation == Some(operation) {
+            state.pending_operation_status = PendingTransactionOperationStatus::TimedOut;
+        }
     }
 
     #[cfg(test)]
@@ -189,6 +241,7 @@ impl ProducerDispatcher {
         let mut state = self.producer_state.lock().await;
         state.identity = Some(identity);
         state.in_transaction = true;
+        state.transaction_state = TransactionState::InTransaction;
         state.transaction_started = transaction_started;
     }
 
@@ -329,11 +382,6 @@ impl ProducerDispatcher {
     }
 
     /// Assign concrete partitions to a batch using one metadata snapshot.
-    #[expect(
-        clippy::significant_drop_tightening,
-        reason = "Batch partition selection mutates sticky state while holding the partitioner \
-                  lock."
-    )]
     pub async fn assign_partitions(&self, records: &mut [super::ProducerRecord]) -> Result<()> {
         let topics = unique_unassigned_record_topics(records);
         if topics.is_empty() {
@@ -359,6 +407,85 @@ impl ProducerDispatcher {
                 records,
             )?;
         }
+        drop(state);
+        Ok(())
+    }
+
+    /// Assign concrete partitions to a batch using a caller-provided metadata snapshot.
+    pub(crate) async fn assign_partitions_with_metadata(
+        &self,
+        metadata: &crate::wire::ClusterMetadata,
+        records: &mut [super::ProducerRecord],
+    ) -> Result<()> {
+        let topics = unique_unassigned_record_topics(records);
+        if topics.is_empty() {
+            return Ok(());
+        }
+        let mut state = self.partitioner_state.lock().await;
+        for topic in topics {
+            let topic_metadata = metadata
+                .topic(&topic)
+                .ok_or_else(|| ProducerError::UnknownTopic(topic.clone()))?;
+            state.assign_topic_partitions(
+                TopicPartitionAssignment {
+                    topic: &topic,
+                    topic_metadata,
+                    ignore_keys: self.partitioner_ignore_keys,
+                    adaptive: self.partitioner_adaptive_partitioning_enable,
+                    sticky_batch_size: self.partition_sticky_batch_size,
+                },
+                records,
+            )?;
+        }
+        drop(state);
+        Ok(())
+    }
+
+    pub(crate) async fn assign_topic_partitions_with_metadata(
+        &self,
+        metadata: &crate::wire::ClusterMetadata,
+        topic: &str,
+        records: &mut [super::ProducerRecord],
+    ) -> Result<()> {
+        let topic_metadata = metadata
+            .topic(topic)
+            .ok_or_else(|| ProducerError::UnknownTopic(topic.to_owned()))?;
+        let mut state = self.partitioner_state.lock().await;
+        state.assign_topic_partitions(
+            TopicPartitionAssignment {
+                topic,
+                topic_metadata,
+                ignore_keys: self.partitioner_ignore_keys,
+                adaptive: self.partitioner_adaptive_partitioning_enable,
+                sticky_batch_size: self.partition_sticky_batch_size,
+            },
+            records,
+        )?;
+        drop(state);
+        Ok(())
+    }
+
+    pub(crate) async fn assign_sticky_topic_partitions_with_metadata(
+        &self,
+        metadata: &crate::wire::ClusterMetadata,
+        topic: &str,
+        records: &mut [super::ProducerRecord],
+    ) -> Result<()> {
+        let topic_metadata = metadata
+            .topic(topic)
+            .ok_or_else(|| ProducerError::UnknownTopic(topic.to_owned()))?;
+        let mut state = self.partitioner_state.lock().await;
+        state.assign_sticky_topic_partitions(
+            TopicPartitionAssignment {
+                topic,
+                topic_metadata,
+                ignore_keys: self.partitioner_ignore_keys,
+                adaptive: self.partitioner_adaptive_partitioning_enable,
+                sticky_batch_size: self.partition_sticky_batch_size,
+            },
+            records,
+        )?;
+        drop(state);
         Ok(())
     }
 
@@ -383,11 +510,37 @@ impl ProducerDispatcher {
             .wire
             .metadata_for_topics(topics.iter().map(String::as_str))
             .await?;
+        self.refresh_partition_load_stats_with_metadata(
+            accumulator,
+            &metadata,
+            topics.iter().map(String::as_str),
+        )
+        .await
+    }
+
+    /// Refresh adaptive sticky partition load stats using a caller-provided metadata snapshot.
+    pub(crate) async fn refresh_partition_load_stats_with_metadata<I, S>(
+        &self,
+        accumulator: &RecordAccumulator,
+        metadata: &crate::wire::ClusterMetadata,
+        topics: I,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let topics: Vec<String> = topics
+            .into_iter()
+            .map(|topic| topic.as_ref().to_owned())
+            .collect();
+        if topics.is_empty() {
+            return Ok(());
+        }
+        let mut state = self.partitioner_state.lock().await;
         for topic in topics {
             let topic_metadata = metadata
                 .topic(&topic)
                 .ok_or_else(|| ProducerError::UnknownTopic(topic.clone()))?;
-            let mut state = self.partitioner_state.lock().await;
             state.update_partition_load_stats_from_accumulator_at(PartitionLoadRefresh {
                 topic: &topic,
                 topic_metadata,
@@ -396,6 +549,28 @@ impl ProducerDispatcher {
                 availability_timeout: self.partitioner_availability_timeout,
             });
         }
+        drop(state);
+        Ok(())
+    }
+
+    pub(crate) async fn refresh_topic_load_stats_with_metadata(
+        &self,
+        accumulator: &RecordAccumulator,
+        metadata: &crate::wire::ClusterMetadata,
+        topic: &str,
+    ) -> Result<()> {
+        let topic_metadata = metadata
+            .topic(topic)
+            .ok_or_else(|| ProducerError::UnknownTopic(topic.to_owned()))?;
+        let mut state = self.partitioner_state.lock().await;
+        state.update_partition_load_stats_from_accumulator_at(PartitionLoadRefresh {
+            topic,
+            topic_metadata,
+            accumulator,
+            now: Instant::now(),
+            availability_timeout: self.partitioner_availability_timeout,
+        });
+        drop(state);
         Ok(())
     }
 
@@ -417,18 +592,51 @@ impl ProducerDispatcher {
 
     /// Initialize a transactional producer id through the transaction coordinator.
     pub async fn init_transactions(&self) -> Result<()> {
-        {
-            let state = self.producer_state.lock().await;
+        let operation = TransactionOperation::InitTransactions;
+        let pending_result = {
+            let mut state = self.producer_state.lock().await;
             fail_transaction_state_if_needed(&state, false)?;
+            clear_acked_pending_transaction_operation(&mut state);
+            if state.pending_operation.is_some() {
+                match state.begin_pending_transaction_operation(operation)? {
+                    TransactionPendingOperationStart::Started(_result) => {
+                        return Err(ProducerError::InvalidTransactionState(
+                            PENDING_TRANSACTION_OPERATION_MESSAGE,
+                        ));
+                    },
+                    TransactionPendingOperationStart::Cached(result) => {
+                        drop(state);
+                        return result.wait().await;
+                    },
+                }
+            }
             if state.identity.is_some() {
                 return Err(ProducerError::InvalidTransactionState(
                     "init_transactions must only run once",
                 ));
             }
+            state.transition_to(TransactionState::Initializing)?;
+            match state.begin_pending_transaction_operation(operation)? {
+                TransactionPendingOperationStart::Started(result) => result,
+                TransactionPendingOperationStart::Cached(result) => {
+                    drop(state);
+                    return result.wait().await;
+                },
+            }
+        };
+        let mut pending_operation = PendingTransactionOperationGuard::new(
+            Arc::clone(&self.producer_state),
+            operation,
+            pending_result,
+        );
+        let result = async {
+            let coordinator_id = self.coordinator_id().await?;
+            let _identity = self.producer_identity(coordinator_id).await?;
+            Ok(())
         }
-        let coordinator_id = self.coordinator_id().await?;
-        let _identity = self.producer_identity(coordinator_id).await?;
-        Ok(())
+        .await;
+        pending_operation.complete(&result).await;
+        result
     }
 
     /// Begin a transaction after [`Self::init_transactions`] has succeeded.
@@ -440,20 +648,27 @@ impl ProducerDispatcher {
             .producer_state
             .try_lock()
             .map_err(|_error| ProducerError::TransactionStateBusy)?;
+        fail_pending_transaction_operation(&mut state)?;
         fail_transaction_state_if_needed(&state, false)?;
-        fail_pending_transaction_operation(&state)?;
         if state.identity.is_none() {
             return Err(ProducerError::InvalidTransactionState(
                 "init_transactions must run before begin_transaction",
             ));
         }
-        if state.in_transaction {
+        if state.transaction_state == TransactionState::Uninitialized {
+            state.transaction_state = TransactionState::Ready;
+        }
+        if state.transaction_state == TransactionState::InTransaction || state.in_transaction {
             return Err(ProducerError::InvalidTransactionState(
                 "transaction is already open",
             ));
         }
+        state.transition_to(TransactionState::InTransaction)?;
         state.in_transaction = true;
         state.transaction_started = false;
+        state.new_partitions_in_transaction.clear();
+        state.pending_partitions_in_transaction.clear();
+        state.partitions_in_transaction.clear();
         state.transaction_partitions.clear();
         drop(state);
         Ok(())
@@ -478,25 +693,37 @@ impl ProducerDispatcher {
         if offsets.is_empty() {
             return Ok(());
         }
-        {
+        let pending_result = {
             let mut state = self
                 .producer_state
                 .try_lock()
                 .map_err(|_error| ProducerError::TransactionStateBusy)?;
             fail_transaction_state_if_needed(&state, false)?;
-            fail_pending_transaction_operation(&state)?;
             if state.identity.is_none() {
                 return Err(ProducerError::InvalidTransactionState(
                     "init_transactions must run before send_offsets_to_transaction",
                 ));
             }
-            if !state.in_transaction {
+            if state.transaction_state != TransactionState::InTransaction && !state.in_transaction {
                 return Err(ProducerError::InvalidTransactionState(
                     "cannot send offsets outside an open transaction",
                 ));
             }
-            state.pending_operation = Some(TransactionOperation::SendOffsetsToTransaction);
-        }
+            match state.begin_pending_transaction_operation(
+                TransactionOperation::SendOffsetsToTransaction,
+            )? {
+                TransactionPendingOperationStart::Started(result) => result,
+                TransactionPendingOperationStart::Cached(result) => {
+                    drop(state);
+                    return result.wait().await;
+                },
+            }
+        };
+        let mut pending_operation = PendingTransactionOperationGuard::new(
+            Arc::clone(&self.producer_state),
+            TransactionOperation::SendOffsetsToTransaction,
+            pending_result,
+        );
         let result = async {
             let transaction_coordinator_id = self.coordinator_id().await?;
             let identity = self.producer_identity(transaction_coordinator_id).await?;
@@ -533,25 +760,29 @@ impl ProducerDispatcher {
             .await
         }
         .await;
-        self.clear_pending_transaction_operation(TransactionOperation::SendOffsetsToTransaction)
-            .await;
+        pending_operation.complete(&result).await;
         result
     }
 
     /// End the currently open transaction.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "EndTxn retry, coordinator refresh, epoch bump, and transaction error \
+                  classification stay together to mirror Java TransactionManager ordering."
+    )]
     pub async fn end_transaction(&self, committed: bool) -> Result<()> {
         let transactional_id = self
             .idempotence
             .transactional_id
             .as_ref()
             .ok_or(ProducerError::TransactionalIdRequired)?;
-        let identity = {
+        let operation = TransactionOperation::EndTransaction { committed };
+        let (identity, pending_result) = {
             let mut state = self
                 .producer_state
                 .try_lock()
                 .map_err(|_error| ProducerError::TransactionStateBusy)?;
             fail_transaction_state_if_needed(&state, !committed)?;
-            fail_pending_transaction_operation(&state)?;
             if !state.in_transaction {
                 return Err(ProducerError::InvalidTransactionState(
                     "no transaction is open",
@@ -567,10 +798,26 @@ impl ProducerDispatcher {
                 self.complete_empty_transaction_after_end(committed).await?;
                 return Ok(());
             }
-            state.pending_operation = Some(TransactionOperation::EndTransaction);
+            let pending_result = match state.begin_pending_transaction_operation(operation)? {
+                TransactionPendingOperationStart::Started(result) => result,
+                TransactionPendingOperationStart::Cached(result) => {
+                    drop(state);
+                    return result.wait().await;
+                },
+            };
+            state.transition_to(if committed {
+                TransactionState::CommittingTransaction
+            } else {
+                TransactionState::AbortingTransaction
+            })?;
             drop(state);
-            identity
+            (identity, pending_result)
         };
+        let mut pending_operation = PendingTransactionOperationGuard::new(
+            Arc::clone(&self.producer_state),
+            operation,
+            pending_result,
+        );
         let result = async {
             let mut coordinator_id = self.coordinator_id().await?;
             let request = EndTxnRequestData {
@@ -635,8 +882,7 @@ impl ProducerDispatcher {
             }
         }
         .await;
-        self.clear_pending_transaction_operation(TransactionOperation::EndTransaction)
-            .await;
+        pending_operation.complete(&result).await;
         result
     }
 
@@ -654,13 +900,6 @@ impl ProducerDispatcher {
             state.reset_sequences_after_epoch_bump();
         }
         Ok(())
-    }
-
-    async fn clear_pending_transaction_operation(&self, operation: TransactionOperation) {
-        let mut state = self.producer_state.lock().await;
-        if state.pending_operation == Some(operation) {
-            state.pending_operation = None;
-        }
     }
 
     /// Drain ready accumulator batches, route them by leader, and send produce requests.
@@ -1071,17 +1310,30 @@ impl ProducerDispatcher {
                 self.record_broker_drain_started(broker_id, Instant::now())
                     .await;
                 let wire = self.wire.clone();
+                let partitioner_state = if self.partitioner_availability_timeout.is_zero() {
+                    None
+                } else {
+                    Some(Arc::clone(&self.partitioner_state))
+                };
                 let abort_handle = if request.data.acks == ACKS_NONE {
                     in_flight.spawn(async move {
                         let response = send_produce_with_backpressure_retry(
-                            &wire, broker_id, version, &request,
+                            &wire,
+                            broker_id,
+                            version,
+                            &request,
+                            partitioner_state,
                         )
                         .await;
                         (index, broker_id, request, response)
                     })
                 } else {
                     let pending_response = enqueue_produce_with_backpressure_retry(
-                        &wire, broker_id, version, &request,
+                        &wire,
+                        broker_id,
+                        version,
+                        &request,
+                        partitioner_state,
                     )
                     .await;
                     in_flight.spawn(async move {
@@ -1409,10 +1661,9 @@ impl ProducerDispatcher {
             let Some(producer_state) = batch.producer_state else {
                 continue;
             };
-            if !receipts
-                .iter()
-                .any(|receipt| receipt.topic == batch.topic && receipt.partition == batch.partition)
-            {
+            if !receipts.iter().any(|receipt| {
+                receipt.topic.as_ref() == batch.topic && receipt.partition == batch.partition
+            }) {
                 continue;
             }
             let Ok(record_count) = i32::try_from(batch.records.len()) else {
@@ -1425,6 +1676,11 @@ impl ProducerDispatcher {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "AddPartitions state tracking, coordinator retry, and partition-set promotion \
+                  mirror Java ordering."
+    )]
     async fn add_partition_to_transaction(&self, route: &ProduceRoute) -> Result<()> {
         let Some(transactional_id) = self.idempotence.transactional_id.as_ref() else {
             return Ok(());
@@ -1435,7 +1691,7 @@ impl ProducerDispatcher {
         };
         {
             let mut state = self.producer_state.lock().await;
-            fail_pending_transaction_operation(&state)?;
+            fail_pending_transaction_operation(&mut state)?;
             if !state.in_transaction {
                 return Err(ProducerError::InvalidTransactionState(
                     "produce called outside an open transaction",
@@ -1446,22 +1702,31 @@ impl ProducerDispatcher {
                     "init_transactions must run before produce",
                 ));
             }
-            if state.transaction_partitions.contains(&key) {
+            if state.transaction_contains_partition(&key) {
                 return Ok(());
             }
             if self.idempotence.transaction_two_phase_commit {
+                let _inserted = state.partitions_in_transaction.insert(key.clone());
                 let _inserted = state.transaction_partitions.insert(key);
                 state.transaction_started = true;
                 drop(state);
                 return Ok(());
             }
+            let _inserted = state.mark_new_transaction_partition(key.clone());
         }
 
         let mut coordinator_id = self.coordinator_id().await?;
         let identity = self.producer_identity(coordinator_id).await?;
+        let pending_partitions = {
+            let mut state = self.producer_state.lock().await;
+            state.begin_pending_transaction_partitions()
+        };
         let request = add_partitions_to_txn_request(transactional_id, identity, route);
         let version = client_api_info(ApiKey::AddPartitionsToTxn).max_version;
         let mut attempts_remaining = self.retry_attempts;
+        let mut request_guard = self
+            .track_transaction_request(TransactionRequestKind::AddPartitionsOrOffsets)
+            .await;
         loop {
             let response: AddPartitionsToTxnResponseData = self
                 .wire
@@ -1498,6 +1763,9 @@ impl ProducerDispatcher {
                     error: transaction_error,
                 }) => {
                     let transaction_error = transaction_control_error_for_client(transaction_error);
+                    let mut state = self.producer_state.lock().await;
+                    state.fail_pending_transaction_partitions(&pending_partitions);
+                    drop(state);
                     self.record_transaction_error(transaction_error).await;
                     return Err(ProducerError::Transaction {
                         operation,
@@ -1507,9 +1775,10 @@ impl ProducerDispatcher {
                 Err(error) => return Err(error),
             }
         }
+        request_guard.clear().await;
         {
             let mut state = self.producer_state.lock().await;
-            let _inserted = state.transaction_partitions.insert(key);
+            state.complete_pending_transaction_partitions(&pending_partitions);
             state.transaction_started = true;
             drop(state);
         }
@@ -1670,8 +1939,10 @@ impl ProducerDispatcher {
         let mut state = self.producer_state.lock().await;
         if is_fatal_transaction_error(error) {
             state.fatal_error = Some(error);
-        } else if state.in_transaction {
+            state.transaction_state = TransactionState::FatalError;
+        } else if state.in_transaction || state.transaction_state.is_completing() {
             state.abortable_error = Some(error);
+            state.transaction_state = TransactionState::AbortableError;
             if matches!(error, ErrorCode::UnknownProducerId) {
                 state.epoch_bump_required = true;
             }
@@ -1682,6 +1953,7 @@ impl ProducerDispatcher {
         let mut state = self.producer_state.lock().await;
         if state.in_transaction {
             state.abortable_error = Some(error);
+            state.transaction_state = TransactionState::AbortableError;
         }
     }
 
@@ -1696,8 +1968,10 @@ impl ProducerDispatcher {
             if is_fatal_transactional_produce_error(error) {
                 state.abortable_error = None;
                 state.fatal_error = Some(error);
+                state.transaction_state = TransactionState::FatalError;
             } else {
                 state.abortable_error = Some(error);
+                state.transaction_state = TransactionState::AbortableError;
                 state.epoch_bump_required = true;
             }
             if matches!(error, ErrorCode::UnknownProducerId) {
@@ -1711,6 +1985,7 @@ impl ProducerDispatcher {
         let mut state = self.producer_state.lock().await;
         state.abortable_error = None;
         state.fatal_error = Some(error);
+        state.transaction_state = TransactionState::FatalError;
     }
 
     async fn producer_identity(&self, broker_id: i32) -> Result<ProducerIdentity> {
@@ -1736,6 +2011,14 @@ impl ProducerDispatcher {
         };
         let mut state = self.producer_state.lock().await;
         let identity = *state.identity.get_or_insert(identity);
+        if self.idempotence.transactional_id.is_some()
+            && matches!(
+                state.transaction_state,
+                TransactionState::Uninitialized | TransactionState::Initializing
+            )
+        {
+            state.transition_to(TransactionState::Ready)?;
+        }
         drop(state);
         Ok(identity)
     }
@@ -1752,6 +2035,11 @@ impl ProducerDispatcher {
         };
         let mut state = self.producer_state.lock().await;
         state.identity = Some(identity);
+        if self.idempotence.transactional_id.is_some()
+            && state.transaction_state == TransactionState::Initializing
+        {
+            state.transition_to(TransactionState::Ready)?;
+        }
         drop(state);
         Ok(identity)
     }
@@ -1774,6 +2062,12 @@ impl ProducerDispatcher {
         };
         let version = init_producer_id_version(self.idempotence.transaction_two_phase_commit);
         let mut attempts_remaining = self.retry_attempts;
+        let request_kind = if current.is_some() {
+            TransactionRequestKind::EpochBump
+        } else {
+            TransactionRequestKind::InitProducerId
+        };
+        let mut request_guard = self.track_transaction_request(request_kind).await;
         loop {
             let response: InitProducerIdResponseData = self
                 .wire
@@ -1781,6 +2075,7 @@ impl ProducerDispatcher {
                 .await?;
             let error = ErrorCode::from(response.error_code);
             if !error.is_error() {
+                request_guard.clear().await;
                 return Ok(response);
             }
             if attempts_remaining > 0
@@ -1812,6 +2107,7 @@ impl ProducerDispatcher {
         if is_init_producer_abortable_error(error) {
             let mut state = self.producer_state.lock().await;
             state.abortable_error = Some(error);
+            state.transaction_state = TransactionState::AbortableError;
         } else {
             self.record_fatal_transaction_error(error).await;
         }
@@ -1884,6 +2180,9 @@ impl ProducerDispatcher {
         let broker_id = self.wire.any_broker_id()?;
         let version = client_api_info(ApiKey::FindCoordinator).max_version;
         let mut attempts_remaining = self.retry_attempts;
+        let mut request_guard = self
+            .track_transaction_request(TransactionRequestKind::FindCoordinator)
+            .await;
         let coordinator = loop {
             let response: FindCoordinatorResponseData = self
                 .wire
@@ -1921,7 +2220,21 @@ impl ProducerDispatcher {
             port,
             addr,
         ));
+        request_guard.clear().await;
         Ok(coordinator.node_id)
+    }
+
+    async fn track_transaction_request(
+        &self,
+        kind: TransactionRequestKind,
+    ) -> TransactionRequestGuard {
+        if self.idempotence.transactional_id.is_none() {
+            return TransactionRequestGuard::empty();
+        }
+        let mut state = self.producer_state.lock().await;
+        state.pending_requests.push(kind);
+        drop(state);
+        TransactionRequestGuard::new(Arc::clone(&self.producer_state), kind)
     }
 }
 
@@ -1931,19 +2244,439 @@ struct ProducerIdempotenceState {
     sequences: AHashMap<TopicPartitionKey, i32>,
     unresolved_sequences: AHashMap<TopicPartitionKey, i32>,
     coordinator_id: Option<i32>,
+    transaction_state: TransactionState,
     in_transaction: bool,
     transaction_started: bool,
+    new_partitions_in_transaction: AHashSet<TopicPartitionKey>,
+    pending_partitions_in_transaction: AHashSet<TopicPartitionKey>,
+    partitions_in_transaction: AHashSet<TopicPartitionKey>,
     transaction_partitions: AHashSet<TopicPartitionKey>,
     abortable_error: Option<ErrorCode>,
     fatal_error: Option<ErrorCode>,
     epoch_bump_required: bool,
     pending_operation: Option<TransactionOperation>,
+    pending_result: Option<TransactionalRequestResult>,
+    pending_operation_status: PendingTransactionOperationStatus,
+    pending_requests: TransactionRequestQueue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransactionOperation {
+    InitTransactions,
     SendOffsetsToTransaction,
-    EndTransaction,
+    EndTransaction { committed: bool },
+}
+
+impl TransactionOperation {
+    const fn request_kind(self) -> TransactionRequestKind {
+        match self {
+            Self::InitTransactions => TransactionRequestKind::InitProducerId,
+            Self::SendOffsetsToTransaction => TransactionRequestKind::AddPartitionsOrOffsets,
+            Self::EndTransaction { .. } => TransactionRequestKind::EndTxn,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum TransactionPendingOperationStart {
+    Started(TransactionalRequestResult),
+    Cached(TransactionalRequestResult),
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum PendingTransactionOperationStatus {
+    #[default]
+    Active,
+    TimedOut,
+}
+
+#[derive(Debug, Clone)]
+struct TransactionalRequestResult {
+    inner: Arc<TransactionalRequestResultInner>,
+}
+
+#[derive(Debug)]
+struct TransactionalRequestResultInner {
+    completion: StdMutex<Option<TransactionRequestCompletion>>,
+    acked: AtomicBool,
+    notify: Notify,
+}
+
+impl TransactionalRequestResult {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(TransactionalRequestResultInner {
+                completion: StdMutex::new(None),
+                acked: AtomicBool::new(false),
+                notify: Notify::new(),
+            }),
+        }
+    }
+
+    fn done(&self) {
+        self.complete(TransactionRequestCompletion::Success);
+    }
+
+    fn fail(&self, error: &ProducerError) {
+        self.complete(TransactionRequestCompletion::Failure(
+            CachedProducerError::from(error),
+        ));
+    }
+
+    async fn wait(&self) -> Result<()> {
+        loop {
+            if let Some(completion) = self.completion()? {
+                self.inner.acked.store(true, Ordering::Release);
+                return completion.into_result();
+            }
+            self.inner.notify.notified().await;
+        }
+    }
+
+    fn completion(&self) -> Result<Option<TransactionRequestCompletion>> {
+        let completion = self.inner.completion.lock().map_err(|_error| {
+            ProducerError::InvalidTransactionState("cached transaction result lock poisoned")
+        })?;
+        Ok(completion.clone())
+    }
+
+    fn complete(&self, completion: TransactionRequestCompletion) {
+        if let Ok(mut pending_completion) = self.inner.completion.lock()
+            && pending_completion.is_none()
+        {
+            *pending_completion = Some(completion);
+            self.inner.notify.notify_waiters();
+        }
+    }
+
+    #[cfg(test)]
+    fn is_same_handle(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    #[cfg(test)]
+    fn is_completed(&self) -> bool {
+        self.completion()
+            .is_ok_and(|completion| completion.is_some())
+    }
+
+    fn is_acked(&self) -> bool {
+        self.inner.acked.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn is_successful(&self) -> bool {
+        self.completion().is_ok_and(|completion| {
+            matches!(completion, Some(TransactionRequestCompletion::Success))
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+enum TransactionRequestCompletion {
+    Success,
+    Failure(CachedProducerError),
+}
+
+impl TransactionRequestCompletion {
+    fn into_result(self) -> Result<()> {
+        match self {
+            Self::Success => Ok(()),
+            Self::Failure(error) => Err(error.into_producer_error()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CachedProducerError {
+    Transaction {
+        operation: &'static str,
+        error: ErrorCode,
+    },
+    InvalidTransactionState(&'static str),
+    TransactionalIdRequired,
+    TransactionStateBusy,
+    InvalidConsumerGroupMetadata(&'static str),
+    TelemetryDisabled,
+    Telemetry {
+        operation: &'static str,
+        error: ErrorCode,
+    },
+    InvalidTelemetrySubscription(&'static str),
+    InvalidTelemetryTimeout {
+        timeout_ms: i64,
+    },
+    InvalidCloseTimeout {
+        timeout_ms: i64,
+    },
+    UnsupportedOperation(&'static str),
+    DispatchTask(String),
+}
+
+impl CachedProducerError {
+    fn into_producer_error(self) -> ProducerError {
+        match self {
+            Self::Transaction { operation, error } => {
+                ProducerError::Transaction { operation, error }
+            },
+            Self::InvalidTransactionState(message) => {
+                ProducerError::InvalidTransactionState(message)
+            },
+            Self::TransactionalIdRequired => ProducerError::TransactionalIdRequired,
+            Self::TransactionStateBusy => ProducerError::TransactionStateBusy,
+            Self::InvalidConsumerGroupMetadata(message) => {
+                ProducerError::InvalidConsumerGroupMetadata(message)
+            },
+            Self::TelemetryDisabled => ProducerError::TelemetryDisabled,
+            Self::Telemetry { operation, error } => ProducerError::Telemetry { operation, error },
+            Self::InvalidTelemetrySubscription(message) => {
+                ProducerError::InvalidTelemetrySubscription(message)
+            },
+            Self::InvalidTelemetryTimeout { timeout_ms } => {
+                ProducerError::InvalidTelemetryTimeout { timeout_ms }
+            },
+            Self::InvalidCloseTimeout { timeout_ms } => {
+                ProducerError::InvalidCloseTimeout { timeout_ms }
+            },
+            Self::UnsupportedOperation(operation) => ProducerError::UnsupportedOperation(operation),
+            Self::DispatchTask(message) => ProducerError::DispatchTask(message),
+        }
+    }
+}
+
+impl From<&ProducerError> for CachedProducerError {
+    fn from(error: &ProducerError) -> Self {
+        match error {
+            ProducerError::Transaction { operation, error } => Self::Transaction {
+                operation,
+                error: *error,
+            },
+            ProducerError::InvalidTransactionState(message) => {
+                Self::InvalidTransactionState(message)
+            },
+            ProducerError::TransactionalIdRequired => Self::TransactionalIdRequired,
+            ProducerError::TransactionStateBusy => Self::TransactionStateBusy,
+            ProducerError::InvalidConsumerGroupMetadata(message) => {
+                Self::InvalidConsumerGroupMetadata(message)
+            },
+            ProducerError::TelemetryDisabled => Self::TelemetryDisabled,
+            ProducerError::Telemetry { operation, error } => Self::Telemetry {
+                operation,
+                error: *error,
+            },
+            ProducerError::InvalidTelemetrySubscription(message) => {
+                Self::InvalidTelemetrySubscription(message)
+            },
+            ProducerError::InvalidTelemetryTimeout { timeout_ms } => {
+                Self::InvalidTelemetryTimeout {
+                    timeout_ms: *timeout_ms,
+                }
+            },
+            ProducerError::InvalidCloseTimeout { timeout_ms } => Self::InvalidCloseTimeout {
+                timeout_ms: *timeout_ms,
+            },
+            ProducerError::UnsupportedOperation(operation) => Self::UnsupportedOperation(operation),
+            _ => Self::DispatchTask(format!("cached transaction operation failed: {error}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransactionRequestKind {
+    FindCoordinator,
+    InitProducerId,
+    AddPartitionsOrOffsets,
+    EndTxn,
+    EpochBump,
+}
+
+impl TransactionRequestKind {
+    const fn priority(self) -> u8 {
+        match self {
+            Self::FindCoordinator => 0,
+            Self::InitProducerId => 1,
+            Self::AddPartitionsOrOffsets => 2,
+            Self::EndTxn => 3,
+            Self::EpochBump => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TransactionRequestQueueEntry {
+    kind: TransactionRequestKind,
+    sequence: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TransactionRequestQueue {
+    entries: Vec<TransactionRequestQueueEntry>,
+    next_sequence: u64,
+}
+
+impl TransactionRequestQueue {
+    pub(crate) fn push(&mut self, kind: TransactionRequestKind) {
+        self.entries.push(TransactionRequestQueueEntry {
+            kind,
+            sequence: self.next_sequence,
+        });
+        self.next_sequence = self.next_sequence.saturating_add(1);
+    }
+
+    pub(crate) fn pop_next(&mut self) -> Option<TransactionRequestKind> {
+        let index = self.next_index()?;
+        Some(self.entries.remove(index).kind)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Sender-loop transaction request selection is covered before the async \
+                      dispatcher consumes it directly."
+        )
+    )]
+    pub(crate) fn next_request(
+        &mut self,
+        has_incomplete_batches: bool,
+    ) -> Option<TransactionRequestKind> {
+        let index = self.next_index()?;
+        let kind = self.entries.get(index)?.kind;
+        if kind == TransactionRequestKind::EndTxn && has_incomplete_batches {
+            return None;
+        }
+        Some(self.entries.remove(index).kind)
+    }
+
+    fn remove_first(&mut self, kind: TransactionRequestKind) -> bool {
+        if self
+            .next_index()
+            .and_then(|index| self.entries.get(index))
+            .is_some_and(|entry| entry.kind == kind)
+        {
+            return self.pop_next().is_some();
+        }
+        let Some(index) = self.entries.iter().position(|entry| entry.kind == kind) else {
+            return false;
+        };
+        let _entry = self.entries.remove(index);
+        true
+    }
+
+    fn next_index(&self) -> Option<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .min_by_key(|(_index, entry)| (entry.kind.priority(), entry.sequence))
+            .map(|(index, _entry)| index)
+    }
+}
+
+#[derive(Debug)]
+struct TransactionRequestGuard {
+    producer_state: Option<Arc<Mutex<ProducerIdempotenceState>>>,
+    kind: TransactionRequestKind,
+    armed: bool,
+}
+
+impl TransactionRequestGuard {
+    const fn new(
+        producer_state: Arc<Mutex<ProducerIdempotenceState>>,
+        kind: TransactionRequestKind,
+    ) -> Self {
+        Self {
+            producer_state: Some(producer_state),
+            kind,
+            armed: true,
+        }
+    }
+
+    const fn empty() -> Self {
+        Self {
+            producer_state: None,
+            kind: TransactionRequestKind::FindCoordinator,
+            armed: false,
+        }
+    }
+
+    async fn clear(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Some(producer_state) = &self.producer_state {
+            clear_transaction_request(producer_state, self.kind).await;
+        }
+        self.armed = false;
+    }
+}
+
+impl Drop for TransactionRequestGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Some(producer_state) = self.producer_state.clone() else {
+            return;
+        };
+        let kind = self.kind;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let _clear_task = handle.spawn(async move {
+                clear_transaction_request(&producer_state, kind).await;
+            });
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PendingTransactionOperationGuard {
+    producer_state: Arc<Mutex<ProducerIdempotenceState>>,
+    operation: TransactionOperation,
+    result: TransactionalRequestResult,
+    armed: bool,
+}
+
+impl PendingTransactionOperationGuard {
+    const fn new(
+        producer_state: Arc<Mutex<ProducerIdempotenceState>>,
+        operation: TransactionOperation,
+        result: TransactionalRequestResult,
+    ) -> Self {
+        Self {
+            producer_state,
+            operation,
+            result,
+            armed: true,
+        }
+    }
+
+    async fn complete(&mut self, result: &Result<()>) {
+        if self.armed {
+            match result {
+                Ok(()) => self.result.done(),
+                Err(error) => self.result.fail(error),
+            }
+            complete_pending_transaction_operation(&self.producer_state, self.operation).await;
+            self.armed = false;
+        }
+    }
+}
+
+impl Drop for PendingTransactionOperationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let producer_state = Arc::clone(&self.producer_state);
+        let operation = self.operation;
+        self.result.fail(&ProducerError::InvalidTransactionState(
+            "pending transaction operation dropped before completion",
+        ));
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let _clear_task = handle.spawn(async move {
+                clear_pending_transaction_operation(&producer_state, operation).await;
+            });
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2086,6 +2819,54 @@ impl ProducerPartitionerState {
         Ok(())
     }
 
+    fn assign_sticky_topic_partitions(
+        &mut self,
+        assignment: TopicPartitionAssignment<'_>,
+        records: &mut [super::ProducerRecord],
+    ) -> Result<()> {
+        let TopicPartitionAssignment {
+            topic,
+            topic_metadata,
+            adaptive,
+            sticky_batch_size,
+            ..
+        } = assignment;
+        ensure_partitions(topic, super::record::UNASSIGNED_PARTITION, topic_metadata)?;
+        let existing_sticky = self.valid_sticky(topic, topic_metadata);
+        let mut sticky = match existing_sticky {
+            Some(sticky) => sticky,
+            None => StickyPartitionState {
+                partition: self.next_partition(topic, topic_metadata, adaptive)?,
+                bytes: RECORD_BATCH_OVERHEAD_BYTES,
+                switch_on_next: false,
+            },
+        };
+
+        for record in records {
+            if sticky.switch_on_next {
+                sticky = StickyPartitionState {
+                    partition: self.next_partition(topic, topic_metadata, adaptive)?,
+                    bytes: RECORD_BATCH_OVERHEAD_BYTES,
+                    switch_on_next: false,
+                };
+            }
+            record.partition = sticky.partition;
+            sticky.bytes = sticky
+                .bytes
+                .saturating_add(estimate_record_batch_bytes(record));
+            if sticky.bytes >= sticky_batch_size.max(1).saturating_mul(2) {
+                sticky = StickyPartitionState {
+                    partition: self.next_partition(topic, topic_metadata, adaptive)?,
+                    bytes: RECORD_BATCH_OVERHEAD_BYTES,
+                    switch_on_next: false,
+                };
+            }
+        }
+
+        let _previous = self.sticky_by_topic.insert(topic.to_owned(), sticky);
+        Ok(())
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "Sticky partitioning combines metadata, record size, and active policy knobs."
@@ -2151,44 +2932,24 @@ impl ProducerPartitionerState {
         if adaptive && let Some(partition) = self.next_adaptive_partition(topic, topic_metadata) {
             return Ok(partition);
         }
-        let available_partition_count = topic_metadata
-            .partitions
-            .iter()
-            .filter(|partition| partition.leader_id >= 0)
-            .count();
-        let partition_count = if available_partition_count > 0 {
-            available_partition_count
-        } else {
-            topic_metadata.partitions.len()
-        };
-        let next_round_robin = self.next_for_topic(topic);
-        let next = usize::try_from(*next_round_robin).unwrap_or(0);
-        *next_round_robin = next_round_robin
-            .checked_add(1)
-            .filter(|value| *value >= 0)
-            .unwrap_or(0);
-        let offset = next.checked_rem(partition_count).unwrap_or(0);
-        let selected = if available_partition_count > 0 {
-            topic_metadata
-                .partitions
-                .iter()
-                .filter(|partition| partition.leader_id >= 0)
-                .nth(offset)
-        } else {
-            topic_metadata.partitions.get(offset)
-        };
-        selected
-            .map(|partition| partition.partition_index)
-            .ok_or_else(|| ProducerError::UnknownPartition {
-                topic: topic.to_owned(),
-                partition: super::record::UNASSIGNED_PARTITION,
-            })
+        let random = self.next_partition_counter(topic);
+        uniform_partition_for_random(topic, topic_metadata, random)
     }
 
     fn next_adaptive_partition(
         &mut self,
         topic: &str,
         topic_metadata: &TopicMetadata,
+    ) -> Option<i32> {
+        let random = self.next_partition_counter(topic);
+        self.adaptive_partition_for_random(topic, topic_metadata, random)
+    }
+
+    fn adaptive_partition_for_random(
+        &self,
+        topic: &str,
+        topic_metadata: &TopicMetadata,
+        random: usize,
     ) -> Option<i32> {
         let range_end = self
             .load_stats_by_topic
@@ -2197,12 +2958,6 @@ impl ProducerPartitionerState {
             .last()
             .copied()?;
         let range_end = usize::try_from(range_end).ok()?.max(1);
-        let next_round_robin = self.next_for_topic(topic);
-        let random = usize::try_from(*next_round_robin).unwrap_or(0);
-        *next_round_robin = next_round_robin
-            .checked_add(1)
-            .filter(|value| *value >= 0)
-            .unwrap_or(0);
         let weighted = i32::try_from(random.checked_rem(range_end).unwrap_or(0)).ok()?;
         let stats = self.load_stats_by_topic.get(topic)?;
         let partition = stats
@@ -2275,6 +3030,10 @@ impl ProducerPartitionerState {
 
     #[cfg(test)]
     fn update_broker_drain_stats(&mut self, broker_id: i32, now: Instant, can_drain: bool) {
+        self.update_broker_latency_stats(broker_id, now, can_drain);
+    }
+
+    fn update_broker_latency_stats(&mut self, broker_id: i32, now: Instant, can_drain: bool) {
         let stats = self
             .broker_drain_stats_by_id
             .entry(broker_id)
@@ -2285,12 +3044,12 @@ impl ProducerPartitionerState {
             });
         if can_drain {
             stats.drain_at = now;
-            stats.in_flight = 0;
         }
         stats.ready_at = now;
     }
 
     fn record_broker_drain_started(&mut self, broker_id: i32, now: Instant) {
+        self.update_broker_latency_stats(broker_id, now, true);
         let stats = self
             .broker_drain_stats_by_id
             .entry(broker_id)
@@ -2299,8 +3058,6 @@ impl ProducerPartitionerState {
                 drain_at: now,
                 in_flight: 0,
             });
-        stats.drain_at = now;
-        stats.ready_at = now;
         stats.in_flight = stats.in_flight.saturating_add(1);
     }
 
@@ -2376,6 +3133,16 @@ impl ProducerPartitionerState {
                 .any(|partition| partition.partition_index == sticky.partition)
         })
     }
+
+    fn next_partition_counter(&mut self, topic: &str) -> usize {
+        let next_round_robin = self.next_for_topic(topic);
+        let next = usize::try_from(*next_round_robin).unwrap_or(0);
+        *next_round_robin = next_round_robin
+            .checked_add(1)
+            .filter(|value| *value >= 0)
+            .unwrap_or(0);
+        next
+    }
 }
 
 fn ensure_partitions(topic: &str, partition: i32, topic_metadata: &TopicMetadata) -> Result<()> {
@@ -2411,6 +3178,40 @@ fn key_partition(
         .ok_or_else(|| ProducerError::UnknownPartition {
             topic: topic.to_owned(),
             partition,
+        })
+}
+
+fn uniform_partition_for_random(
+    topic: &str,
+    topic_metadata: &TopicMetadata,
+    random: usize,
+) -> Result<i32> {
+    ensure_partitions(topic, super::record::UNASSIGNED_PARTITION, topic_metadata)?;
+    let available_count = topic_metadata
+        .partitions
+        .iter()
+        .filter(|partition| partition.leader_id >= 0)
+        .count();
+    let partition_count = if available_count > 0 {
+        available_count
+    } else {
+        topic_metadata.partitions.len()
+    };
+    let offset = random.checked_rem(partition_count).unwrap_or(0);
+    let selected = if available_count > 0 {
+        topic_metadata
+            .partitions
+            .iter()
+            .filter(|partition| partition.leader_id >= 0)
+            .nth(offset)
+    } else {
+        topic_metadata.partitions.get(offset)
+    };
+    selected
+        .map(|partition| partition.partition_index)
+        .ok_or_else(|| ProducerError::UnknownPartition {
+            topic: topic.to_owned(),
+            partition: super::record::UNASSIGNED_PARTITION,
         })
 }
 
@@ -2517,7 +3318,7 @@ const fn validate_consumer_group_metadata(group_metadata: &ConsumerGroupMetadata
     Ok(())
 }
 
-const fn fail_transaction_state_if_needed(
+fn fail_transaction_state_if_needed(
     state: &ProducerIdempotenceState,
     allow_abortable_abort: bool,
 ) -> Result<()> {
@@ -2527,22 +3328,85 @@ const fn fail_transaction_state_if_needed(
             error,
         });
     }
+    if state.transaction_state == TransactionState::FatalError {
+        return Err(ProducerError::Transaction {
+            operation: "transaction_state",
+            error: ErrorCode::InvalidTxnState,
+        });
+    }
     if !allow_abortable_abort && let Some(error) = state.abortable_error {
         return Err(ProducerError::Transaction {
             operation: "transaction_state",
             error,
         });
     }
+    if !allow_abortable_abort && state.transaction_state == TransactionState::AbortableError {
+        return Err(ProducerError::Transaction {
+            operation: "transaction_state",
+            error: ErrorCode::InvalidTxnState,
+        });
+    }
     Ok(())
 }
 
-const fn fail_pending_transaction_operation(state: &ProducerIdempotenceState) -> Result<()> {
+fn fail_pending_transaction_operation(state: &mut ProducerIdempotenceState) -> Result<()> {
+    clear_acked_pending_transaction_operation(state);
     if state.pending_operation.is_some() {
         return Err(ProducerError::InvalidTransactionState(
             PENDING_TRANSACTION_OPERATION_MESSAGE,
         ));
     }
     Ok(())
+}
+
+fn clear_acked_pending_transaction_operation(state: &mut ProducerIdempotenceState) {
+    let Some(pending_operation) = state.pending_operation else {
+        return;
+    };
+    if state
+        .pending_result
+        .as_ref()
+        .is_some_and(TransactionalRequestResult::is_acked)
+    {
+        state.clear_pending_transaction_operation(pending_operation);
+    }
+}
+
+async fn complete_pending_transaction_operation(
+    producer_state: &Mutex<ProducerIdempotenceState>,
+    operation: TransactionOperation,
+) {
+    let mut state = producer_state.lock().await;
+    let _removed = state
+        .pending_requests
+        .remove_first(operation.request_kind());
+    if state.pending_operation == Some(operation) {
+        let keep_for_retry = state.pending_operation_status
+            == PendingTransactionOperationStatus::TimedOut
+            && state
+                .pending_result
+                .as_ref()
+                .is_some_and(|result| !result.is_acked());
+        if !keep_for_retry {
+            state.clear_pending_transaction_operation(operation);
+        }
+    }
+}
+
+async fn clear_pending_transaction_operation(
+    producer_state: &Mutex<ProducerIdempotenceState>,
+    operation: TransactionOperation,
+) {
+    let mut state = producer_state.lock().await;
+    state.clear_pending_transaction_operation(operation);
+}
+
+async fn clear_transaction_request(
+    producer_state: &Mutex<ProducerIdempotenceState>,
+    kind: TransactionRequestKind,
+) {
+    let mut state = producer_state.lock().await;
+    let _removed = state.pending_requests.remove_first(kind);
 }
 
 const fn transaction_control_error_for_client(error: ErrorCode) -> ErrorCode {
@@ -2645,9 +3509,116 @@ fn txn_offset_commit_error(response: &TxnOffsetCommitResponseData) -> Option<Err
 }
 
 impl ProducerIdempotenceState {
+    const fn transition_to(&mut self, target: TransactionState) -> Result<()> {
+        if !self.transaction_state.is_transition_valid(target) {
+            self.transaction_state = TransactionState::FatalError;
+            self.fatal_error = Some(ErrorCode::InvalidTxnState);
+            return Err(ProducerError::InvalidTransactionState(
+                "invalid transaction state transition",
+            ));
+        }
+        self.transaction_state = target;
+        match target {
+            TransactionState::InTransaction
+            | TransactionState::PreparedTransaction
+            | TransactionState::CommittingTransaction
+            | TransactionState::AbortingTransaction
+            | TransactionState::AbortableError => {
+                self.in_transaction = true;
+            },
+            TransactionState::Uninitialized
+            | TransactionState::Initializing
+            | TransactionState::Ready
+            | TransactionState::FatalError => {
+                self.in_transaction = false;
+            },
+        }
+        Ok(())
+    }
+
+    fn mark_new_transaction_partition(&mut self, key: TopicPartitionKey) -> bool {
+        if self.transaction_contains_partition(&key) || self.is_partition_pending_add(&key) {
+            return false;
+        }
+        self.new_partitions_in_transaction.insert(key)
+    }
+
+    fn begin_pending_transaction_partitions(&mut self) -> Vec<TopicPartitionKey> {
+        let pending: Vec<_> = self.new_partitions_in_transaction.drain().collect();
+        self.pending_partitions_in_transaction
+            .extend(pending.iter().cloned());
+        pending
+    }
+
+    fn complete_pending_transaction_partitions(&mut self, partitions: &[TopicPartitionKey]) {
+        for partition in partitions {
+            let _removed = self.pending_partitions_in_transaction.remove(partition);
+            let _inserted = self.partitions_in_transaction.insert(partition.clone());
+            let _inserted = self.transaction_partitions.insert(partition.clone());
+        }
+    }
+
+    fn fail_pending_transaction_partitions(&mut self, partitions: &[TopicPartitionKey]) {
+        for partition in partitions {
+            let _removed = self.pending_partitions_in_transaction.remove(partition);
+        }
+    }
+
+    fn is_partition_pending_add(&self, key: &TopicPartitionKey) -> bool {
+        self.new_partitions_in_transaction.contains(key)
+            || self.pending_partitions_in_transaction.contains(key)
+    }
+
+    fn transaction_contains_partition(&self, key: &TopicPartitionKey) -> bool {
+        self.partitions_in_transaction.contains(key) || self.transaction_partitions.contains(key)
+    }
+
+    fn clear_pending_transaction_operation(&mut self, operation: TransactionOperation) {
+        let _removed = self.pending_requests.remove_first(operation.request_kind());
+        if self.pending_operation == Some(operation) {
+            self.pending_operation = None;
+            self.pending_result = None;
+            self.pending_operation_status = PendingTransactionOperationStatus::Active;
+        }
+    }
+
+    fn begin_pending_transaction_operation(
+        &mut self,
+        operation: TransactionOperation,
+    ) -> Result<TransactionPendingOperationStart> {
+        if let Some(pending_operation) = self.pending_operation {
+            if let Some(result) = self.pending_result.clone() {
+                if result.is_acked() {
+                    self.clear_pending_transaction_operation(pending_operation);
+                } else if pending_operation == operation {
+                    return Ok(TransactionPendingOperationStart::Cached(result));
+                } else {
+                    return Err(ProducerError::InvalidTransactionState(
+                        PENDING_TRANSACTION_OPERATION_MESSAGE,
+                    ));
+                }
+            } else {
+                return Err(ProducerError::InvalidTransactionState(
+                    PENDING_TRANSACTION_OPERATION_MESSAGE,
+                ));
+            }
+        }
+
+        let result = TransactionalRequestResult::new();
+        self.pending_operation = Some(operation);
+        self.pending_result = Some(result.clone());
+        self.pending_operation_status = PendingTransactionOperationStatus::Active;
+        self.pending_requests.push(operation.request_kind());
+        Ok(TransactionPendingOperationStart::Started(result))
+    }
+
     fn reset_transaction_after_end(&mut self, clear_abortable_error: bool) {
         self.in_transaction = false;
+        self.transaction_state = TransactionState::Ready;
         self.transaction_started = false;
+        self.new_partitions_in_transaction.clear();
+        self.pending_partitions_in_transaction.clear();
+        self.partitions_in_transaction.clear();
         self.transaction_partitions.clear();
         if clear_abortable_error {
             self.abortable_error = None;
@@ -2903,6 +3874,7 @@ async fn send_produce_with_backpressure_retry(
     broker_id: i32,
     version: i16,
     request: &BrokerProduceRequest,
+    partitioner_state: Option<Arc<Mutex<ProducerPartitionerState>>>,
 ) -> crate::wire::Result<ProduceDispatchResponse> {
     loop {
         let result = if request.data.acks == ACKS_NONE {
@@ -2920,7 +3892,10 @@ async fn send_produce_with_backpressure_retry(
             .map(ProduceDispatchResponse::Acknowledged)
         };
         match result {
-            Err(crate::wire::WireError::Backpressure) => tokio::task::yield_now().await,
+            Err(crate::wire::WireError::Backpressure) => {
+                record_broker_backpressure(partitioner_state.as_ref(), broker_id).await;
+                tokio::task::yield_now().await;
+            },
             result => return result,
         }
     }
@@ -2931,6 +3906,7 @@ async fn enqueue_produce_with_backpressure_retry(
     broker_id: i32,
     version: i16,
     request: &BrokerProduceRequest,
+    partitioner_state: Option<Arc<Mutex<ProducerPartitionerState>>>,
 ) -> crate::wire::Result<
     crate::wire::PendingBrokerResponse<kacrab_protocol::generated::ProduceResponseData>,
 > {
@@ -2942,10 +3918,24 @@ async fn enqueue_produce_with_backpressure_retry(
             &request.data,
         );
         match result {
-            Err(crate::wire::WireError::Backpressure) => tokio::task::yield_now().await,
+            Err(crate::wire::WireError::Backpressure) => {
+                record_broker_backpressure(partitioner_state.as_ref(), broker_id).await;
+                tokio::task::yield_now().await;
+            },
             result => return result,
         }
     }
+}
+
+async fn record_broker_backpressure(
+    partitioner_state: Option<&Arc<Mutex<ProducerPartitionerState>>>,
+    broker_id: i32,
+) {
+    let Some(partitioner_state) = partitioner_state else {
+        return;
+    };
+    let mut state = partitioner_state.lock().await;
+    state.update_broker_latency_stats(broker_id, Instant::now(), false);
 }
 
 #[derive(Debug)]
@@ -2958,7 +3948,7 @@ fn no_ack_receipts(routes: &[ProduceRoute]) -> Vec<RecordMetadata> {
     routes
         .iter()
         .map(|route| RecordMetadata {
-            topic: route.topic.clone(),
+            topic: Arc::from(route.topic.as_str()),
             partition: route.partition,
             leader_id: route.leader_id,
             offset: -1,
@@ -3035,7 +4025,7 @@ fn complete_deliveries(batches: &mut [ReadyBatch], receipts: &[RecordMetadata]) 
         let Some((receipt_index, receipt)) =
             receipts.iter().enumerate().find(|(index, receipt)| {
                 !used_receipts.get(*index).copied().unwrap_or(false)
-                    && receipt.topic == batch.topic
+                    && receipt.topic.as_ref() == batch.topic
                     && receipt.partition == batch.partition
             })
         else {
@@ -3146,6 +4136,7 @@ mod tests {
     use std::{
         collections::VecDeque,
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+        sync::Arc,
         time::{Duration, Instant},
     };
 
@@ -3162,13 +4153,15 @@ mod tests {
 
     use super::{
         BrokerProduceOptions, BrokerProduceRequest, DispatchError, IdempotentRetryDecision,
-        PartitionLoadRefresh, ProducerDispatcher, ProducerIdempotenceState,
-        ProducerPartitionerState, RECORD_BATCH_OVERHEAD_BYTES, TopicPartitionKey,
-        TransactionOperation, build_partition_load_stats, choose_coordinator_addr,
-        complete_deliveries, end_txn_version, estimate_record_batch_bytes,
-        init_producer_id_version, is_fatal_transaction_error, is_leadership_error, no_ack_receipts,
-        pop_dispatchable_broker_request, produce_version, txn_offset_commit_version, unique_topics,
-        unique_unassigned_record_topics, validate_consumer_group_metadata,
+        PartitionLoadRefresh, PendingTransactionOperationGuard, ProducerDispatcher,
+        ProducerIdempotenceState, ProducerPartitionerState, RECORD_BATCH_OVERHEAD_BYTES,
+        TopicPartitionKey, TransactionOperation, TransactionPendingOperationStart,
+        build_partition_load_stats, choose_coordinator_addr, complete_deliveries, end_txn_version,
+        estimate_record_batch_bytes, fail_pending_transaction_operation, init_producer_id_version,
+        is_fatal_transaction_error, is_leadership_error, no_ack_receipts,
+        pop_dispatchable_broker_request, produce_version, txn_offset_commit_version,
+        uniform_partition_for_random, unique_topics, unique_unassigned_record_topics,
+        validate_consumer_group_metadata,
     };
     use crate::{
         producer::{
@@ -3250,6 +4243,166 @@ mod tests {
     #[test]
     fn transaction_control_unsupported_version_is_fatal_like_java() {
         assert!(is_fatal_transaction_error(ErrorCode::UnsupportedVersion));
+    }
+
+    #[test]
+    fn transaction_request_queue_orders_requests_like_java_transaction_manager() {
+        let mut queue = super::TransactionRequestQueue::default();
+        queue.push(super::TransactionRequestKind::EndTxn);
+        queue.push(super::TransactionRequestKind::AddPartitionsOrOffsets);
+        queue.push(super::TransactionRequestKind::EpochBump);
+        queue.push(super::TransactionRequestKind::FindCoordinator);
+        queue.push(super::TransactionRequestKind::InitProducerId);
+        queue.push(super::TransactionRequestKind::AddPartitionsOrOffsets);
+
+        let mut ordered = Vec::new();
+        while let Some(kind) = queue.pop_next() {
+            ordered.push(kind);
+        }
+
+        assert_eq!(
+            ordered,
+            vec![
+                super::TransactionRequestKind::FindCoordinator,
+                super::TransactionRequestKind::InitProducerId,
+                super::TransactionRequestKind::AddPartitionsOrOffsets,
+                super::TransactionRequestKind::AddPartitionsOrOffsets,
+                super::TransactionRequestKind::EndTxn,
+                super::TransactionRequestKind::EpochBump,
+            ]
+        );
+    }
+
+    #[test]
+    fn transaction_state_transition_matrix_matches_java_transaction_manager() {
+        use super::super::transaction::TransactionState;
+
+        let allowed = [
+            (TransactionState::Ready, TransactionState::Uninitialized),
+            (
+                TransactionState::AbortableError,
+                TransactionState::Uninitialized,
+            ),
+            (
+                TransactionState::Uninitialized,
+                TransactionState::Initializing,
+            ),
+            (
+                TransactionState::CommittingTransaction,
+                TransactionState::Initializing,
+            ),
+            (
+                TransactionState::AbortingTransaction,
+                TransactionState::Initializing,
+            ),
+            (TransactionState::Initializing, TransactionState::Ready),
+            (
+                TransactionState::CommittingTransaction,
+                TransactionState::Ready,
+            ),
+            (
+                TransactionState::AbortingTransaction,
+                TransactionState::Ready,
+            ),
+            (TransactionState::Ready, TransactionState::InTransaction),
+            (
+                TransactionState::InTransaction,
+                TransactionState::PreparedTransaction,
+            ),
+            (
+                TransactionState::Initializing,
+                TransactionState::PreparedTransaction,
+            ),
+            (
+                TransactionState::InTransaction,
+                TransactionState::CommittingTransaction,
+            ),
+            (
+                TransactionState::PreparedTransaction,
+                TransactionState::CommittingTransaction,
+            ),
+            (
+                TransactionState::InTransaction,
+                TransactionState::AbortingTransaction,
+            ),
+            (
+                TransactionState::PreparedTransaction,
+                TransactionState::AbortingTransaction,
+            ),
+            (
+                TransactionState::AbortableError,
+                TransactionState::AbortingTransaction,
+            ),
+            (
+                TransactionState::InTransaction,
+                TransactionState::AbortableError,
+            ),
+            (
+                TransactionState::CommittingTransaction,
+                TransactionState::AbortableError,
+            ),
+            (
+                TransactionState::AbortableError,
+                TransactionState::AbortableError,
+            ),
+            (
+                TransactionState::Initializing,
+                TransactionState::AbortableError,
+            ),
+        ];
+
+        for source in TransactionState::ALL {
+            for target in TransactionState::ALL {
+                let expected =
+                    target == TransactionState::FatalError || allowed.contains(&(source, target));
+                assert_eq!(
+                    source.is_transition_valid(target),
+                    expected,
+                    "transition {source:?} -> {target:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transaction_request_queue_holds_end_txn_until_batches_drain_like_java() {
+        let mut queue = super::TransactionRequestQueue::default();
+        queue.push(super::TransactionRequestKind::EndTxn);
+        queue.push(super::TransactionRequestKind::EpochBump);
+
+        assert_eq!(queue.next_request(true), None);
+        assert_eq!(
+            queue.next_request(false),
+            Some(super::TransactionRequestKind::EndTxn)
+        );
+        assert_eq!(
+            queue.next_request(false),
+            Some(super::TransactionRequestKind::EpochBump)
+        );
+    }
+
+    #[test]
+    fn transaction_partition_sets_move_new_to_pending_to_in_transaction_like_java() {
+        let mut state = ProducerIdempotenceState::default();
+        let key = TopicPartitionKey {
+            topic: "orders".to_owned(),
+            partition: 0,
+        };
+
+        assert!(state.mark_new_transaction_partition(key.clone()));
+        assert!(!state.mark_new_transaction_partition(key.clone()));
+        assert!(state.is_partition_pending_add(&key));
+        assert!(!state.transaction_contains_partition(&key));
+
+        let pending = state.begin_pending_transaction_partitions();
+        assert_eq!(pending, vec![key.clone()]);
+        assert!(state.new_partitions_in_transaction.is_empty());
+        assert!(state.pending_partitions_in_transaction.contains(&key));
+        assert!(state.is_partition_pending_add(&key));
+
+        state.complete_pending_transaction_partitions(&pending);
+        assert!(!state.is_partition_pending_add(&key));
+        assert!(state.transaction_contains_partition(&key));
     }
 
     #[test]
@@ -3400,21 +4553,29 @@ mod tests {
         let mut state = ProducerPartitionerState::default();
         let record = ProducerRecord::unassigned("orders").value(Bytes::from_static(b"1234567890"));
 
-        let mut partitions: Vec<_> = (0..4)
+        let partitions: Vec<_> = (0..4)
             .map(|_| {
                 state
                     .partition_for_record(&metadata, &record, false, true, 128)
                     .expect("partition")
             })
             .collect();
-        state.mark_sticky_batch_ready("orders", 128);
-        partitions.push(
-            state
-                .partition_for_record(&metadata, &record, false, true, 128)
-                .expect("partition"),
+        assert!(
+            partitions
+                .iter()
+                .all(|partition| *partition == partitions[0])
         );
 
-        assert_eq!(partitions, vec![0, 0, 0, 0, 1]);
+        state.mark_sticky_batch_ready("orders", 128);
+        let _next_partition = state
+            .partition_for_record(&metadata, &record, false, true, 128)
+            .expect("partition");
+        let sticky = state
+            .sticky_by_topic
+            .get("orders")
+            .expect("sticky state should exist");
+
+        assert!(!sticky.switch_on_next);
     }
 
     #[test]
@@ -3433,7 +4594,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(partitions, vec![0, 0, 0]);
+        assert!(
+            partitions
+                .iter()
+                .all(|partition| *partition == partitions[0])
+        );
     }
 
     #[test]
@@ -3470,21 +4635,33 @@ mod tests {
             .key(Bytes::from_static(b"customer-42"))
             .value(Bytes::from_static(b"1234567890"));
 
-        let mut partitions: Vec<_> = (0..3)
+        let partitions: Vec<_> = (0..3)
             .map(|_| {
                 state
                     .partition_for_record(&metadata, &record, true, true, 128)
                     .expect("partition")
             })
             .collect();
-        state.mark_sticky_batch_ready("orders", 128);
-        partitions.extend((0..2).map(|_| {
-            state
-                .partition_for_record(&metadata, &record, true, true, 128)
-                .expect("partition")
-        }));
+        assert!(
+            partitions
+                .iter()
+                .all(|partition| *partition == partitions[0])
+        );
 
-        assert_eq!(partitions, vec![0, 0, 0, 1, 1]);
+        state.mark_sticky_batch_ready("orders", 128);
+        let after_switch: Vec<_> = (0..2)
+            .map(|_| {
+                state
+                    .partition_for_record(&metadata, &record, true, true, 128)
+                    .expect("partition")
+            })
+            .collect();
+
+        assert!(
+            after_switch
+                .iter()
+                .all(|partition| *partition == after_switch[0])
+        );
     }
 
     #[test]
@@ -3518,16 +4695,65 @@ mod tests {
     #[test]
     fn adaptive_sticky_selects_partition_from_weighted_frequency_table() {
         let metadata = metadata_with_partitions("orders", 3);
+        let topic_metadata = metadata.topic("orders").expect("topic metadata");
         let mut state = ProducerPartitionerState::default();
         state.update_partition_load_stats("orders", &[0, 3, 1], &[0, 1, 2], 3);
-        let _previous = state.next_by_topic.insert("orders".to_owned(), 4);
-        let record = ProducerRecord::unassigned("orders");
 
         let partition = state
-            .partition_for_record(&metadata, &record, true, true, 1)
+            .adaptive_partition_for_random("orders", topic_metadata, 4)
             .expect("adaptive partition");
 
         assert_eq!(partition, 1);
+    }
+
+    #[test]
+    fn adaptive_sticky_distribution_matches_java_builtin_partitioner_oracle() {
+        let metadata = metadata_with_partitions("orders", 5);
+        let topic_metadata = metadata.topic("orders").expect("topic metadata");
+        let mut state = ProducerPartitionerState::default();
+        state.update_partition_load_stats("orders", &[5, 0, 3, 0, 1], &[0, 1, 2, 3, 4], 5);
+        let expected_frequencies = [1_usize, 6, 3, 6, 5];
+        let range_end = expected_frequencies.iter().copied().sum::<usize>();
+        let mut actual_frequencies = [0_usize; 5];
+
+        for random in 0..range_end {
+            let partition = state
+                .adaptive_partition_for_random("orders", topic_metadata, random)
+                .expect("adaptive partition");
+            let index = usize::try_from(partition).expect("non-negative partition");
+            actual_frequencies[index] += 1;
+        }
+
+        assert_eq!(actual_frequencies, expected_frequencies);
+    }
+
+    #[test]
+    fn sticky_uniform_fallback_uses_random_available_partition_like_java() {
+        let mut metadata = metadata_with_partitions("orders", 4);
+        metadata.topics[0].partitions[0].leader_id = -1;
+        metadata.topics[0].partitions[1].leader_id = 7;
+        metadata.topics[0].partitions[2].leader_id = -1;
+        metadata.topics[0].partitions[3].leader_id = 9;
+        let topic_metadata = metadata.topic("orders").expect("topic metadata");
+
+        assert_eq!(
+            uniform_partition_for_random("orders", topic_metadata, 0).expect("partition"),
+            1
+        );
+        assert_eq!(
+            uniform_partition_for_random("orders", topic_metadata, 1).expect("partition"),
+            3
+        );
+
+        metadata.topics[0]
+            .partitions
+            .iter_mut()
+            .for_each(|partition| partition.leader_id = -1);
+        let topic_metadata = metadata.topic("orders").expect("topic metadata");
+        assert_eq!(
+            uniform_partition_for_random("orders", topic_metadata, 2).expect("partition"),
+            2
+        );
     }
 
     #[test]
@@ -3550,19 +4776,49 @@ mod tests {
 
         let mut state = ProducerPartitionerState::default();
         state.update_partition_load_stats_from_accumulator("orders", topic_metadata, &accumulator);
-        let _previous = state.next_by_topic.insert("orders".to_owned(), 4);
 
         let partition = state
-            .partition_for_record(
-                &metadata,
-                &ProducerRecord::unassigned("orders"),
-                true,
-                true,
-                1,
-            )
+            .adaptive_partition_for_random("orders", topic_metadata, 4)
             .expect("adaptive partition");
 
         assert_eq!(partition, 2);
+    }
+
+    #[test]
+    fn adaptive_sticky_keeps_drained_empty_partition_queues_like_java() {
+        let metadata = metadata_with_partitions("orders", 3);
+        let topic_metadata = metadata.topic("orders").expect("topic metadata");
+        let mut accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(128)
+                .linger(Duration::from_mins(1)),
+        );
+        let now = Instant::now();
+        accumulator
+            .append_at(
+                ProducerRecord::partition_value("orders", 0, vec![0_u8; 256]),
+                now,
+            )
+            .expect("append ready partition 0");
+        accumulator
+            .append_at(ProducerRecord::new("orders", 1), now)
+            .expect("append partition 1");
+        accumulator
+            .append_at(ProducerRecord::new("orders", 2), now)
+            .expect("append partition 2");
+
+        let drained = accumulator.drain_ready(now);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].partition, 0);
+
+        let mut state = ProducerPartitionerState::default();
+        state.update_partition_load_stats_from_accumulator("orders", topic_metadata, &accumulator);
+
+        let partition = state
+            .adaptive_partition_for_random("orders", topic_metadata, 0)
+            .expect("adaptive partition should include the drained empty queue");
+
+        assert_eq!(partition, 0);
     }
 
     #[test]
@@ -3595,16 +4851,61 @@ mod tests {
             now,
             availability_timeout: Duration::from_secs(1),
         });
-        let _previous = state.next_by_topic.insert("orders".to_owned(), 1);
 
         let partition = state
-            .partition_for_record(
-                &metadata,
-                &ProducerRecord::unassigned("orders"),
-                true,
-                true,
-                1,
-            )
+            .adaptive_partition_for_random("orders", topic_metadata, 1)
+            .expect("adaptive partition");
+
+        assert_eq!(partition, 2);
+    }
+
+    #[test]
+    fn adaptive_sticky_updates_node_latency_stats_like_java_record_accumulator() {
+        let mut metadata = metadata_with_partitions("orders", 3);
+        metadata.topics[0].partitions[0].leader_id = 7;
+        metadata.topics[0].partitions[1].leader_id = 8;
+        metadata.topics[0].partitions[2].leader_id = 9;
+        let topic_metadata = metadata.topic("orders").expect("topic metadata");
+        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default().batch_size(1024));
+        let now = Instant::now();
+        for partition in 0..3 {
+            accumulator
+                .append_at(ProducerRecord::new("orders", partition), now)
+                .expect("append partition");
+        }
+
+        let mut state = ProducerPartitionerState::default();
+        state.update_broker_latency_stats(8, now, true);
+        state.update_broker_latency_stats(
+            8,
+            now.checked_add(Duration::from_secs(2))
+                .expect("test time after now"),
+            false,
+        );
+
+        let latency = state
+            .broker_drain_stats_by_id
+            .get(&8)
+            .expect("broker stats should exist");
+        assert_eq!(latency.drain_at, now);
+        assert_eq!(
+            latency.ready_at,
+            now.checked_add(Duration::from_secs(2))
+                .expect("test time after now")
+        );
+
+        state.update_partition_load_stats_from_accumulator_at(PartitionLoadRefresh {
+            topic: "orders",
+            topic_metadata,
+            accumulator: &accumulator,
+            now: now
+                .checked_add(Duration::from_secs(2))
+                .expect("test time after now"),
+            availability_timeout: Duration::from_secs(1),
+        });
+
+        let partition = state
+            .adaptive_partition_for_random("orders", topic_metadata, 1)
             .expect("adaptive partition");
 
         assert_eq!(partition, 2);
@@ -3724,6 +5025,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn begin_transaction_reports_pending_operation_before_transaction_error_like_java() {
+        let dispatcher = transactional_dispatcher();
+        {
+            let mut state = dispatcher.producer_state.lock().await;
+            state.fatal_error = Some(ErrorCode::ProducerFenced);
+            state.pending_operation = Some(TransactionOperation::SendOffsetsToTransaction);
+        }
+
+        assert!(matches!(
+            dispatcher.begin_transaction(),
+            Err(ProducerError::InvalidTransactionState(
+                "previous transaction operation is pending and must be retried"
+            ))
+        ));
+    }
+
+    #[tokio::test]
     async fn init_transactions_rejects_repeated_initialization_like_java() {
         let dispatcher = transactional_dispatcher();
         {
@@ -3811,6 +5129,193 @@ mod tests {
         ));
         assert!(matches!(
             dispatcher.end_transaction(false).await,
+            Err(ProducerError::InvalidTransactionState(
+                "previous transaction operation is pending and must be retried"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropped_pending_transaction_operation_clears_state_for_retry_like_java() {
+        let dispatcher = transactional_dispatcher();
+        let mut state = dispatcher.producer_state.lock().await;
+        let TransactionPendingOperationStart::Started(result) = state
+            .begin_pending_transaction_operation(TransactionOperation::SendOffsetsToTransaction)
+            .expect("operation should start")
+        else {
+            panic!("operation should not be cached");
+        };
+        drop(state);
+        {
+            let state = dispatcher.producer_state.lock().await;
+            assert!(state.pending_operation.is_some());
+            drop(state);
+        }
+
+        drop(PendingTransactionOperationGuard::new(
+            Arc::clone(&dispatcher.producer_state),
+            TransactionOperation::SendOffsetsToTransaction,
+            result,
+        ));
+
+        tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                let pending_operation = {
+                    let state = dispatcher.producer_state.lock().await;
+                    state.pending_operation
+                };
+                if pending_operation.is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped pending operation should clear promptly");
+        let mut state = dispatcher.producer_state.lock().await;
+        fail_pending_transaction_operation(&mut state).expect("retry should not be blocked");
+    }
+
+    #[tokio::test]
+    async fn same_pending_transaction_operation_reuses_cached_result_like_java() {
+        let mut state = ProducerIdempotenceState::default();
+        let TransactionPendingOperationStart::Started(first_result) = state
+            .begin_pending_transaction_operation(TransactionOperation::EndTransaction {
+                committed: true,
+            })
+            .expect("first commit operation should start")
+        else {
+            panic!("first operation should start");
+        };
+
+        let TransactionPendingOperationStart::Cached(second_result) = state
+            .begin_pending_transaction_operation(TransactionOperation::EndTransaction {
+                committed: true,
+            })
+            .expect("same commit operation should reuse cached result")
+        else {
+            panic!("same operation should return cached result");
+        };
+
+        assert!(first_result.is_same_handle(&second_result));
+        assert!(!second_result.is_completed());
+        first_result.done();
+        second_result
+            .wait()
+            .await
+            .expect("cached waiter should observe successful completion");
+        assert!(second_result.is_successful());
+    }
+
+    #[test]
+    fn completed_unacked_pending_transaction_result_blocks_next_operation_like_java() {
+        let mut state = ProducerIdempotenceState::default();
+        let TransactionPendingOperationStart::Started(first_result) = state
+            .begin_pending_transaction_operation(TransactionOperation::InitTransactions)
+            .expect("first init operation should start")
+        else {
+            panic!("first operation should start");
+        };
+        first_result.done();
+
+        assert!(matches!(
+            state.begin_pending_transaction_operation(
+                TransactionOperation::SendOffsetsToTransaction
+            ),
+            Err(ProducerError::InvalidTransactionState(
+                "previous transaction operation is pending and must be retried"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn acked_pending_transaction_result_allows_next_operation_like_java() {
+        let mut state = ProducerIdempotenceState::default();
+        let TransactionPendingOperationStart::Started(first_result) = state
+            .begin_pending_transaction_operation(TransactionOperation::InitTransactions)
+            .expect("first init operation should start")
+        else {
+            panic!("first operation should start");
+        };
+        first_result.done();
+        first_result
+            .wait()
+            .await
+            .expect("awaiting the cached result should ack it like Java");
+
+        let TransactionPendingOperationStart::Started(second_result) = state
+            .begin_pending_transaction_operation(TransactionOperation::SendOffsetsToTransaction)
+            .expect("acked pending operation should be cleared for the next operation")
+        else {
+            panic!("next operation should start instead of using a cached result");
+        };
+
+        assert!(!first_result.is_same_handle(&second_result));
+        assert_eq!(
+            state.pending_operation,
+            Some(TransactionOperation::SendOffsetsToTransaction)
+        );
+        assert_eq!(
+            state.pending_requests.pop_next(),
+            Some(super::TransactionRequestKind::AddPartitionsOrOffsets)
+        );
+    }
+
+    #[test]
+    fn completed_unacked_pending_transaction_result_blocks_non_cached_operation_like_java() {
+        let mut state = ProducerIdempotenceState::default();
+        let TransactionPendingOperationStart::Started(first_result) = state
+            .begin_pending_transaction_operation(TransactionOperation::InitTransactions)
+            .expect("first init operation should start")
+        else {
+            panic!("first operation should start");
+        };
+        first_result.done();
+
+        assert!(matches!(
+            fail_pending_transaction_operation(&mut state),
+            Err(ProducerError::InvalidTransactionState(
+                "previous transaction operation is pending and must be retried"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn acked_pending_transaction_result_allows_non_cached_operation_like_java() {
+        let mut state = ProducerIdempotenceState::default();
+        let TransactionPendingOperationStart::Started(first_result) = state
+            .begin_pending_transaction_operation(TransactionOperation::InitTransactions)
+            .expect("first init operation should start")
+        else {
+            panic!("first operation should start");
+        };
+        first_result.done();
+        first_result
+            .wait()
+            .await
+            .expect("awaiting the cached result should ack it like Java");
+
+        fail_pending_transaction_operation(&mut state)
+            .expect("acked pending operation should be cleared");
+
+        assert_eq!(state.pending_operation, None);
+        assert!(state.pending_result.is_none());
+        assert!(state.pending_requests.pop_next().is_none());
+    }
+
+    #[test]
+    fn different_pending_transaction_operation_still_reports_busy_like_java() {
+        let mut state = ProducerIdempotenceState::default();
+        let _started = state
+            .begin_pending_transaction_operation(TransactionOperation::EndTransaction {
+                committed: true,
+            })
+            .expect("first commit operation should start");
+
+        assert!(matches!(
+            state.begin_pending_transaction_operation(TransactionOperation::EndTransaction {
+                committed: false,
+            }),
             Err(ProducerError::InvalidTransactionState(
                 "previous transaction operation is pending and must be retried"
             ))
@@ -4377,7 +5882,7 @@ mod tests {
         assert_eq!(
             receipts,
             [RecordMetadata {
-                topic: "orders".to_owned(),
+                topic: Arc::from("orders"),
                 partition: 2,
                 leader_id: 7,
                 offset: -1,
@@ -4422,7 +5927,7 @@ mod tests {
             .expect("append for delivery");
         let mut batches = accumulator.drain_ready(Instant::now());
         let receipt = RecordMetadata {
-            topic: "orders".to_owned(),
+            topic: Arc::from("orders"),
             partition: 0,
             leader_id: 7,
             offset: 9,

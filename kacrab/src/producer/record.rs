@@ -15,12 +15,223 @@ use std::{
 };
 
 use bytes::Bytes;
-use kacrab_protocol::record::RecordHeader;
+pub use kacrab_protocol::record::RecordHeader;
 
 use super::{ProducerError, Result};
 
+/// Java-style `Header` alias for a Kafka record header.
+pub type Header = RecordHeader;
+
+/// Java-style `Headers` alias for an ordered mutable record header collection.
+pub type Headers = RecordHeaders;
+
+/// Ordered mutable collection of Kafka record headers.
+///
+/// This mirrors Java's `RecordHeaders` shape while keeping mutation failures
+/// explicit through [`Result`] instead of throwing `IllegalStateException`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordHeaders {
+    entries: Vec<RecordHeader>,
+    read_only: bool,
+}
+
+impl RecordHeaders {
+    /// Create an empty header collection.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            read_only: false,
+        }
+    }
+
+    /// Create a header collection from headers in insertion order.
+    #[must_use]
+    pub fn from_headers(headers: impl IntoIterator<Item = RecordHeader>) -> Self {
+        Self {
+            entries: headers.into_iter().collect(),
+            read_only: false,
+        }
+    }
+
+    /// Append a non-null header value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProducerError::InvalidRecord`] when the collection is read-only.
+    pub fn add(&mut self, key: impl Into<Bytes>, value: impl Into<Bytes>) -> Result<&mut Self> {
+        self.add_header(RecordHeader {
+            key: key.into(),
+            value: Some(value.into()),
+        })
+    }
+
+    /// Append a null-valued header.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProducerError::InvalidRecord`] when the collection is read-only.
+    pub fn add_null(&mut self, key: impl Into<Bytes>) -> Result<&mut Self> {
+        self.add_header(RecordHeader {
+            key: key.into(),
+            value: None,
+        })
+    }
+
+    /// Append an existing header.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProducerError::InvalidRecord`] when the collection is read-only.
+    pub fn add_header(&mut self, header: RecordHeader) -> Result<&mut Self> {
+        self.ensure_writable()?;
+        self.entries.push(header);
+        Ok(self)
+    }
+
+    /// Remove all headers for `key` while preserving remaining insertion order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProducerError::InvalidRecord`] when the collection is read-only.
+    pub fn remove(&mut self, key: &[u8]) -> Result<&mut Self> {
+        self.ensure_writable()?;
+        self.entries.retain(|header| header.key.as_ref() != key);
+        Ok(self)
+    }
+
+    /// Return the last header for `key`, if present.
+    #[must_use]
+    pub fn last_header(&self, key: &[u8]) -> Option<&RecordHeader> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|header| header.key.as_ref() == key)
+    }
+
+    /// Return all headers for `key` in insertion order.
+    pub fn headers<'a>(&'a self, key: &'a [u8]) -> impl Iterator<Item = &'a RecordHeader> + 'a {
+        self.entries
+            .iter()
+            .filter(move |header| header.key.as_ref() == key)
+    }
+
+    /// Return all headers as a cloned vector in insertion order.
+    #[must_use]
+    pub fn to_array(&self) -> Vec<RecordHeader> {
+        self.entries.clone()
+    }
+
+    /// Borrow all headers in insertion order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[RecordHeader] {
+        &self.entries
+    }
+
+    /// Number of headers in the collection.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the collection is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Mark this collection read-only, matching Java `RecordHeaders#setReadOnly`.
+    pub const fn set_read_only(&mut self) {
+        self.read_only = true;
+    }
+
+    /// Whether this collection is read-only.
+    #[must_use]
+    pub const fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    const fn ensure_writable(&self) -> Result<()> {
+        if self.read_only {
+            return Err(ProducerError::InvalidRecord {
+                field: "headers",
+                message: "headers are read-only",
+            });
+        }
+        Ok(())
+    }
+
+    /// Iterate over all headers in insertion order.
+    pub fn iter(&self) -> std::slice::Iter<'_, RecordHeader> {
+        self.entries.iter()
+    }
+}
+
+impl From<Vec<RecordHeader>> for RecordHeaders {
+    fn from(headers: Vec<RecordHeader>) -> Self {
+        Self::from_headers(headers)
+    }
+}
+
+impl From<RecordHeaders> for Vec<RecordHeader> {
+    fn from(headers: RecordHeaders) -> Self {
+        headers.entries
+    }
+}
+
+impl FromIterator<RecordHeader> for RecordHeaders {
+    fn from_iter<T: IntoIterator<Item = RecordHeader>>(iter: T) -> Self {
+        Self::from_headers(iter)
+    }
+}
+
+impl IntoIterator for RecordHeaders {
+    type IntoIter = std::vec::IntoIter<RecordHeader>;
+    type Item = RecordHeader;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a RecordHeaders {
+    type IntoIter = std::slice::Iter<'a, RecordHeader>;
+    type Item = &'a RecordHeader;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter()
+    }
+}
+
 /// Callback invoked when a produced record is acknowledged or dropped.
 pub type DeliveryCallback = Box<dyn FnOnce(Result<RecordMetadata>) + Send + 'static>;
+pub(crate) type SharedDeliveryCallback =
+    Arc<dyn Fn(Result<RecordMetadata>) + Send + Sync + 'static>;
+
+/// Java-style producer callback shape.
+pub trait Callback: Send + 'static {
+    /// Called when the send completes.
+    fn on_completion(&mut self, metadata: RecordMetadata, exception: Option<&ProducerError>);
+}
+
+impl<F> Callback for F
+where
+    F: FnMut(RecordMetadata, Option<&ProducerError>) + Send + 'static,
+{
+    fn on_completion(&mut self, metadata: RecordMetadata, exception: Option<&ProducerError>) {
+        self(metadata, exception);
+    }
+}
+
+pub(crate) fn java_delivery_callback<C>(mut callback: C) -> DeliveryCallback
+where
+    C: Callback,
+{
+    Box::new(move |result| match result {
+        Ok(metadata) => callback.on_completion(metadata, None),
+        Err(error) => callback.on_completion(RecordMetadata::failed(), Some(&error)),
+    })
+}
 
 /// Sentinel used by [`ProducerRecord::unassigned`] before metadata-based
 /// partitioning selects a concrete topic partition.
@@ -293,7 +504,7 @@ impl ProducerRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordMetadata {
     /// Topic name.
-    pub topic: String,
+    pub topic: Arc<str>,
     /// Partition index.
     pub partition: i32,
     /// Leader broker id used for routing.
@@ -306,6 +517,22 @@ pub struct RecordMetadata {
     pub serialized_key_size: i32,
     /// Serialized value size in bytes, or `-1` when the value is null/unknown.
     pub serialized_value_size: i32,
+}
+
+impl RecordMetadata {
+    /// Sentinel metadata used for Java-style callbacks when delivery fails.
+    #[must_use]
+    pub fn failed() -> Self {
+        Self {
+            topic: Arc::from(""),
+            partition: -1,
+            leader_id: -1,
+            offset: -1,
+            timestamp_ms: -1,
+            serialized_key_size: -1,
+            serialized_value_size: -1,
+        }
+    }
 }
 
 /// Future-like delivery handle returned by [`crate::producer::Producer::send`].
@@ -336,6 +563,7 @@ struct DeliveryState {
     record_metadata: Mutex<Vec<RecordDeliveryMetadata>>,
     wakers: Mutex<Vec<Waker>>,
     callbacks: Mutex<Vec<(usize, DeliveryCallback)>>,
+    batch_callbacks: Mutex<Vec<SharedDeliveryCallback>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,6 +580,7 @@ impl Default for DeliveryState {
             record_metadata: Mutex::new(Vec::new()),
             wakers: Mutex::new(Vec::new()),
             callbacks: Mutex::new(Vec::new()),
+            batch_callbacks: Mutex::new(Vec::new()),
         }
     }
 }
@@ -364,6 +593,7 @@ impl core::fmt::Debug for DeliveryState {
             .field("record_metadata_count", &lock_len(&self.record_metadata))
             .field("waker_count", &lock_len(&self.wakers))
             .field("callback_count", &lock_len(&self.callbacks))
+            .field("batch_callback_count", &lock_len(&self.batch_callbacks))
             .finish()
     }
 }
@@ -371,17 +601,29 @@ impl core::fmt::Debug for DeliveryState {
 impl SendFuture {
     #[cfg(test)]
     pub(crate) fn channel() -> (DeliverySender, Self) {
-        Self::channel_with_record_metadata(RecordDeliveryMetadata::unknown())
+        Self::channel_with_record_metadata(RecordDeliveryMetadata::unknown(), 1)
     }
 
+    #[cfg(test)]
     pub(crate) fn channel_for_record(record: &ProducerRecord) -> (DeliverySender, Self) {
-        Self::channel_with_record_metadata(RecordDeliveryMetadata::from(record))
+        Self::channel_for_record_with_metadata_capacity(record, 1)
+    }
+
+    pub(crate) fn channel_for_record_with_metadata_capacity(
+        record: &ProducerRecord,
+        metadata_capacity: usize,
+    ) -> (DeliverySender, Self) {
+        Self::channel_with_record_metadata(RecordDeliveryMetadata::from(record), metadata_capacity)
     }
 
     fn channel_with_record_metadata(
         record_metadata: RecordDeliveryMetadata,
+        metadata_capacity: usize,
     ) -> (DeliverySender, Self) {
-        let state = Arc::new(DeliveryState::default());
+        let state = Arc::new(DeliveryState {
+            record_metadata: Mutex::new(Vec::with_capacity(metadata_capacity.max(1))),
+            ..DeliveryState::default()
+        });
         {
             let mut metadata = state
                 .record_metadata
@@ -439,6 +681,15 @@ impl SendFuture {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         callbacks.push((self.record_index, callback));
     }
+
+    pub(crate) fn register_batch_callback(&self, callback: SharedDeliveryCallback) {
+        let mut callbacks = self
+            .state
+            .batch_callbacks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        callbacks.push(callback);
+    }
 }
 
 impl BatchSendFuture {
@@ -459,6 +710,24 @@ impl DeliverySender {
 
     pub(crate) fn delivery_for_record(&mut self, record: &ProducerRecord) -> SendFuture {
         self.delivery_with_record_metadata(RecordDeliveryMetadata::from(record))
+    }
+
+    pub(crate) fn record_for_batch_callback(&mut self, record: &ProducerRecord) {
+        self.next_record_index = self.next_record_index.saturating_add(1);
+        if let Some(state) = Arc::get_mut(&mut self.state) {
+            state
+                .record_metadata
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(RecordDeliveryMetadata::from(record));
+            return;
+        }
+        let mut metadata = self
+            .state
+            .record_metadata
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        metadata.push(RecordDeliveryMetadata::from(record));
     }
 
     fn delivery_with_record_metadata(
@@ -482,12 +751,16 @@ impl DeliverySender {
     }
 
     pub(crate) fn has_receivers(&self) -> bool {
-        Arc::strong_count(&self.state) > 1 || !lock_is_empty(&self.state.callbacks)
+        Arc::strong_count(&self.state) > 1
+            || !lock_is_empty(&self.state.callbacks)
+            || !lock_is_empty(&self.state.batch_callbacks)
     }
 
     pub(crate) fn send(mut self, receipt: RecordMetadata) {
         let callbacks = take_callbacks(&self.state);
-        let callback_receipt = (!callbacks.is_empty()).then(|| receipt.clone());
+        let batch_callbacks = take_batch_callbacks(&self.state);
+        let callback_receipt =
+            (!callbacks.is_empty() || !batch_callbacks.is_empty()).then(|| receipt.clone());
         let _receipt = self.state.receipt.set(receipt);
         self.state
             .status
@@ -497,16 +770,40 @@ impl DeliverySender {
         for waker in wakers {
             waker.wake();
         }
-        if let Some(receipt) = callback_receipt {
+        if let Some(receipt) = &callback_receipt {
             for (record_index, callback) in callbacks {
                 invoke_delivery_callback(
                     callback,
                     Ok(receipt_for_record(
-                        &receipt,
+                        receipt,
                         record_index,
                         record_delivery_metadata(&self.state, record_index),
                     )),
                 );
+            }
+        }
+        if let Some(receipt) = &callback_receipt
+            && !batch_callbacks.is_empty()
+        {
+            let _scope = enter_delivery_callback_scope();
+            let record_metadata = record_delivery_metadata_snapshot(&self.state);
+            if let [callback] = batch_callbacks.as_slice() {
+                for (record_index, metadata) in record_metadata.into_iter().enumerate() {
+                    invoke_shared_delivery_callback_in_scope(
+                        callback,
+                        Ok(receipt_for_record(receipt, record_index, metadata)),
+                    );
+                }
+            } else {
+                for (record_index, metadata) in record_metadata.into_iter().enumerate() {
+                    let record_receipt = receipt_for_record(receipt, record_index, metadata);
+                    for callback in &batch_callbacks {
+                        invoke_shared_delivery_callback_in_scope(
+                            callback,
+                            Ok(record_receipt.clone()),
+                        );
+                    }
+                }
             }
         }
     }
@@ -532,11 +829,24 @@ impl Drop for DeliverySender {
         }
         let wakers = take_wakers(&self.state);
         let callbacks = take_callbacks(&self.state);
+        let batch_callbacks = take_batch_callbacks(&self.state);
+        let record_metadata = record_delivery_metadata_snapshot(&self.state);
         for waker in wakers {
             waker.wake();
         }
         for (_record_index, callback) in callbacks {
             invoke_delivery_callback(callback, Err(ProducerError::DeliveryDropped));
+        }
+        if !batch_callbacks.is_empty() {
+            let _scope = enter_delivery_callback_scope();
+            for _metadata in record_metadata {
+                for callback in &batch_callbacks {
+                    invoke_shared_delivery_callback_in_scope(
+                        callback,
+                        Err(ProducerError::DeliveryDropped),
+                    );
+                }
+            }
         }
     }
 }
@@ -596,11 +906,33 @@ fn take_callbacks(state: &DeliveryState) -> Vec<(usize, DeliveryCallback)> {
     core::mem::take(&mut *callbacks)
 }
 
+fn take_batch_callbacks(state: &DeliveryState) -> Vec<SharedDeliveryCallback> {
+    let mut callbacks = state
+        .batch_callbacks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    core::mem::take(&mut *callbacks)
+}
+
 fn invoke_delivery_callback(callback: DeliveryCallback, result: Result<RecordMetadata>) {
     #[cfg(feature = "std")]
     {
         let _ignored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _scope = enter_delivery_callback_scope();
+            callback(result);
+        }));
+    }
+    #[cfg(not(feature = "std"))]
+    callback(result);
+}
+
+fn invoke_shared_delivery_callback_in_scope(
+    callback: &SharedDeliveryCallback,
+    result: Result<RecordMetadata>,
+) {
+    #[cfg(feature = "std")]
+    {
+        let _ignored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             callback(result);
         }));
     }
@@ -645,6 +977,14 @@ fn record_delivery_metadata(state: &DeliveryState, record_index: usize) -> Recor
         .unwrap_or_else(RecordDeliveryMetadata::unknown)
 }
 
+fn record_delivery_metadata_snapshot(state: &DeliveryState) -> Vec<RecordDeliveryMetadata> {
+    state
+        .record_metadata
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 impl RecordDeliveryMetadata {
     const fn unknown() -> Self {
         Self {
@@ -683,7 +1023,7 @@ mod tests {
         future::Future,
         pin::Pin,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
         task::{Context, Poll, Wake, Waker},
@@ -693,6 +1033,7 @@ mod tests {
 
     use super::{
         DELIVERY_CLOSED, ProducerError, ProducerRecord, RecordHeader, RecordMetadata, SendFuture,
+        java_delivery_callback,
     };
 
     #[test]
@@ -822,6 +1163,95 @@ mod tests {
         assert_eq!(record.headers()[0].key, Bytes::from_static(b"user"));
     }
 
+    #[test]
+    fn public_header_aliases_match_java_header_shape() {
+        use crate::producer::{Header as PublicHeader, RecordHeader as PublicRecordHeader};
+
+        let header: PublicHeader = PublicRecordHeader {
+            key: Bytes::from_static(b"trace-id"),
+            value: None,
+        };
+        let record = ProducerRecord::unassigned("orders").with_headers([header]);
+
+        assert_eq!(
+            record
+                .last_header(b"trace-id")
+                .expect("public header alias")
+                .value,
+            None
+        );
+    }
+
+    #[test]
+    fn public_record_headers_match_java_headers_collection_shape() {
+        use crate::producer::{Headers as PublicHeaders, RecordHeaders as PublicRecordHeaders};
+
+        let mut headers: PublicHeaders = PublicRecordHeaders::new();
+        assert!(
+            headers
+                .add("trace-id", Bytes::from_static(b"first"))
+                .is_ok()
+        );
+        assert!(headers.add("user", Bytes::from_static(b"42")).is_ok());
+        assert!(headers.add("trace-id", Bytes::from_static(b"last")).is_ok());
+        assert!(headers.add_null("trace-id").is_ok());
+
+        assert_eq!(
+            headers.last_header(b"trace-id").expect("last trace").value,
+            None
+        );
+        let trace_values: Vec<_> = headers
+            .headers(b"trace-id")
+            .map(|header| header.value.clone())
+            .collect();
+        assert_eq!(
+            trace_values,
+            vec![
+                Some(Bytes::from_static(b"first")),
+                Some(Bytes::from_static(b"last")),
+                None
+            ]
+        );
+
+        let mut copied = headers.to_array();
+        assert_eq!(copied.len(), 4);
+        copied.clear();
+        assert_eq!(headers.as_slice().len(), 4);
+
+        assert!(headers.remove(b"trace-id").is_ok());
+
+        assert!(headers.last_header(b"trace-id").is_none());
+        assert_eq!(headers.as_slice().len(), 1);
+        assert_eq!(headers.as_slice()[0].key, Bytes::from_static(b"user"));
+    }
+
+    #[test]
+    fn public_record_headers_reject_mutation_when_read_only_like_java() {
+        let mut headers = super::RecordHeaders::new();
+        assert!(
+            headers
+                .add("trace-id", Bytes::from_static(b"first"))
+                .is_ok()
+        );
+        headers.set_read_only();
+
+        assert!(headers.is_read_only());
+        assert!(matches!(
+            headers.add("trace-id", Bytes::from_static(b"second")),
+            Err(ProducerError::InvalidRecord {
+                field: "headers",
+                message: "headers are read-only"
+            })
+        ));
+        assert!(matches!(
+            headers.remove(b"trace-id"),
+            Err(ProducerError::InvalidRecord {
+                field: "headers",
+                message: "headers are read-only"
+            })
+        ));
+    }
+
     #[derive(Debug, Default)]
     struct WakeCounter {
         count: AtomicUsize,
@@ -845,7 +1275,7 @@ mod tests {
 
         sender.send(receipt);
 
-        assert_eq!(first.await.unwrap().topic, "orders");
+        assert_eq!(first.await.unwrap().topic.as_ref(), "orders");
         assert_eq!(second.await.unwrap().offset, 41);
     }
 
@@ -881,6 +1311,74 @@ mod tests {
         assert!(sender.has_receivers());
         sender.send(metadata(40));
         assert_eq!(callback_base_offset.load(Ordering::Relaxed), 40);
+    }
+
+    #[test]
+    fn batch_callback_runs_for_each_record_in_delivery_batch() {
+        let (mut sender, delivery) = SendFuture::channel();
+        let _second = sender.delivery();
+        let _third = sender.delivery();
+        let callback_offsets = Arc::new(Mutex::new(Vec::new()));
+        let callback_sink = Arc::clone(&callback_offsets);
+        delivery.register_batch_callback(Arc::new(move |result| {
+            let receipt = result.expect("callback receipt");
+            callback_sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(receipt.offset);
+        }));
+
+        drop(delivery);
+        assert!(sender.has_receivers());
+        sender.send(metadata(40));
+
+        let offsets = callback_offsets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(offsets, [40, 41, 42]);
+    }
+
+    #[test]
+    fn java_callback_adapter_reports_metadata_and_exception_slots_like_java() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let success_calls = Arc::clone(&calls);
+        let success_callback = java_delivery_callback(
+            move |metadata: RecordMetadata, exception: Option<&ProducerError>| {
+                success_calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((metadata, exception.is_some()));
+            },
+        );
+        success_callback(Ok(metadata(40)));
+
+        let error_calls = Arc::clone(&calls);
+        let error_callback = java_delivery_callback(
+            move |metadata: RecordMetadata, exception: Option<&ProducerError>| {
+                error_calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((metadata, exception.is_some()));
+            },
+        );
+        error_callback(Err(ProducerError::DeliveryDropped));
+
+        let calls = {
+            let calls = calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            calls.clone()
+        };
+        assert_eq!(calls[0].0.offset, 40);
+        assert!(!calls[0].1);
+        assert_eq!(calls[1].0.partition, -1);
+        assert_eq!(calls[1].0.leader_id, -1);
+        assert_eq!(calls[1].0.offset, -1);
+        assert_eq!(calls[1].0.timestamp_ms, -1);
+        assert_eq!(calls[1].0.serialized_key_size, -1);
+        assert_eq!(calls[1].0.serialized_value_size, -1);
+        assert!(calls[1].1);
     }
 
     #[tokio::test]
@@ -993,7 +1491,7 @@ mod tests {
 
     fn metadata(offset: i64) -> RecordMetadata {
         RecordMetadata {
-            topic: "orders".to_owned(),
+            topic: Arc::from("orders"),
             partition: 0,
             leader_id: 7,
             offset,

@@ -1,5 +1,7 @@
 //! Produce response normalization.
 
+use std::sync::Arc;
+
 use kacrab_protocol::{
     KafkaUuid,
     generated::{ErrorCode, PartitionProduceResponse, ProduceResponseData},
@@ -81,7 +83,7 @@ fn produce_receipt(
         })?;
     check_partition_error(partition_response, route)?;
     Ok(RecordMetadata {
-        topic: route.topic.clone(),
+        topic: Arc::from(route.topic.as_str()),
         partition: route.partition,
         leader_id: route.leader_id,
         offset: partition_response.base_offset,

@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        RwLock,
+        Arc, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -32,14 +32,18 @@ use super::{
     dispatcher::{DispatchOutcome, ProducerDispatcher},
     error::{ProducerError, Result},
     interceptor::{ProducerInterceptor, ProducerInterceptors},
-    metrics::{ProducerMetricValue, ProducerMetrics, ProducerMetricsSnapshot},
+    metrics::{
+        KafkaMetric, MetricName, MetricReporter, ProducerMetricValue, ProducerMetrics,
+        ProducerMetricsSnapshot,
+    },
+    partitioner::{ProducerPartitioner, ProducerPartitionerHandle},
     record::{BatchSendFuture, ProducerRecord, RecordMetadata, SendFuture},
     serializer::{ConfiguredProducerSerializer, ProducerSerializer, TypedProducer},
 };
 use crate::{
     config::{ClientConfig, ConfigKey, ConfigValue, ProducerConfig, Properties},
     wire::{
-        BrokerEndpoint, SaslClientAuthenticator, SaslClientAuthenticatorFactory,
+        BrokerEndpoint, ClusterMetadata, SaslClientAuthenticator, SaslClientAuthenticatorFactory,
         SaslClientAuthenticatorFactoryHandle, SaslClientAuthenticatorHandle, WireClient, WireError,
     },
 };
@@ -64,7 +68,10 @@ pub struct Producer {
     enable_metrics_push: bool,
     telemetry_disabled: AtomicBool,
     metric_subscriptions: BTreeSet<String>,
+    application_metrics: BTreeMap<MetricName, KafkaMetric>,
     interceptors: ProducerInterceptors,
+    partitioner: ProducerPartitionerHandle,
+    metric_reporters: Vec<Arc<dyn MetricReporter>>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +108,18 @@ struct AppendPollBudget {
     threshold: usize,
 }
 
+#[derive(Debug)]
+enum StickyTopicSelection {
+    Single(Arc<str>),
+    PerRecord(Vec<Option<Arc<str>>>),
+}
+
+#[derive(Debug)]
+struct BatchTopicPlan {
+    topics: Vec<Arc<str>>,
+    sticky_topics: StickyTopicSelection,
+}
+
 const DENSE_READY_BATCH_RECORDS: usize = 32;
 
 impl AppendPollBudget {
@@ -130,6 +149,15 @@ impl AppendPollBudget {
         }
         self.ready_batches = 0;
         true
+    }
+}
+
+impl StickyTopicSelection {
+    fn topic_for(&self, index: usize) -> Option<&str> {
+        match self {
+            Self::Single(topic) => Some(topic.as_ref()),
+            Self::PerRecord(topics) => topics.get(index).and_then(Option::as_deref),
+        }
     }
 }
 
@@ -164,7 +192,10 @@ impl Producer {
             enable_metrics_push,
             telemetry_disabled: AtomicBool::new(false),
             metric_subscriptions: BTreeSet::new(),
+            application_metrics: BTreeMap::new(),
             interceptors: ProducerInterceptors::default(),
+            partitioner: ProducerPartitionerHandle::default(),
+            metric_reporters: Vec::new(),
         }
     }
 
@@ -395,15 +426,16 @@ impl Producer {
         let mut error_record = record.clone();
         let result = async {
             let sticky_topic = self
-                .dispatcher
                 .uses_sticky_partitioner(&record)
                 .then(|| record.topic.to_string());
             if !record.has_assigned_partition() {
                 let metadata_started_at = std::time::Instant::now();
-                self.dispatcher
-                    .refresh_partition_load_stats(&self.accumulator, [record.topic.as_ref()])
-                    .await?;
-                self.dispatcher.assign_partition(&mut record).await?;
+                if !self.partitioner.is_some() {
+                    self.dispatcher
+                        .refresh_partition_load_stats(&self.accumulator, [record.topic.as_ref()])
+                        .await?;
+                }
+                self.assign_partition(&mut record).await?;
                 self.metrics
                     .record_metadata_wait(metadata_started_at.elapsed());
             }
@@ -427,7 +459,8 @@ impl Producer {
             }
             self.poll().await?;
         }
-        self.poll().await.map(|()| delivery)
+        self.collect_finished()?;
+        Ok(delivery)
     }
 
     /// Append one record with a Java-style completion callback.
@@ -454,15 +487,16 @@ impl Producer {
         let mut callback = Some(callback);
         let result = async {
             let sticky_topic = self
-                .dispatcher
                 .uses_sticky_partitioner(&record)
                 .then(|| record.topic.to_string());
             if !record.has_assigned_partition() {
                 let metadata_started_at = std::time::Instant::now();
-                self.dispatcher
-                    .refresh_partition_load_stats(&self.accumulator, [record.topic.as_ref()])
-                    .await?;
-                self.dispatcher.assign_partition(&mut record).await?;
+                if !self.partitioner.is_some() {
+                    self.dispatcher
+                        .refresh_partition_load_stats(&self.accumulator, [record.topic.as_ref()])
+                        .await?;
+                }
+                self.assign_partition(&mut record).await?;
                 self.metrics
                     .record_metadata_wait(metadata_started_at.elapsed());
             }
@@ -494,7 +528,25 @@ impl Producer {
             }
             self.poll().await?;
         }
-        self.poll().await.map(|()| delivery)
+        self.collect_finished()?;
+        Ok(delivery)
+    }
+
+    /// Append one record with a Java `Callback.onCompletion(metadata, exception)` shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns producer backpressure or errors from pumping ready batches.
+    pub async fn send_with_java_callback<C>(
+        &mut self,
+        record: ProducerRecord,
+        callback: C,
+    ) -> Result<SendFuture>
+    where
+        C: super::record::Callback,
+    {
+        self.send_with_callback(record, super::record::java_delivery_callback(callback))
+            .await
     }
 
     /// Append multiple records, then dispatch any batches that are already ready.
@@ -510,12 +562,19 @@ impl Producer {
         let now = std::time::Instant::now();
         let mut records = records.into_iter();
         let (lower_bound, _upper_bound) = records.size_hint();
-        let mut deliveries = Vec::new();
+        let batch_delivery_metadata_capacity = lower_bound.saturating_add(1);
+        let deadline = self.append_deadline();
+        let mut deliveries = Vec::with_capacity(batch_delivery_metadata_capacity);
         let mut poll_budget = AppendPollBudget::new(self.max_in_flight_requests);
         while let Some(record) = records.next() {
             if record.has_assigned_partition() {
                 let (delivery, status) = self
-                    .append_for_batch_delivery_with_max_block(record, now)
+                    .append_for_batch_delivery_until(
+                        record,
+                        now,
+                        deadline,
+                        batch_delivery_metadata_capacity,
+                    )
                     .await?;
                 if let Some(delivery) = delivery {
                     deliveries.push(delivery);
@@ -529,37 +588,34 @@ impl Producer {
             let mut pending = Vec::with_capacity(lower_bound.saturating_add(1));
             pending.push(record);
             pending.extend(records);
-            let topics: Vec<String> = pending
-                .iter()
-                .filter(|record| !record.has_assigned_partition())
-                .map(|record| record.topic.to_string())
-                .collect();
+            let topic_plan = self.topic_plan_for_batch(&pending);
             let metadata_started_at = std::time::Instant::now();
-            self.dispatcher
-                .refresh_partition_load_stats(&self.accumulator, topics.iter().map(String::as_str))
-                .await?;
             let metadata = self
                 .dispatcher
-                .metadata_for_topics(topics.iter().map(String::as_str))
+                .metadata_for_topics(topic_plan.topics.iter().map(Arc::as_ref))
+                .await?;
+            self.assign_default_partitions_for_batch(&topic_plan, &metadata, &mut pending)
                 .await?;
             self.metrics
                 .record_metadata_wait(metadata_started_at.elapsed());
-            for mut record in pending {
-                let sticky_topic = self
-                    .dispatcher
-                    .uses_sticky_partitioner(&record)
-                    .then(|| record.topic.to_string());
-                self.dispatcher
-                    .assign_partition_with_metadata(&metadata, &mut record)
-                    .await?;
+            for (record_index, mut record) in pending.into_iter().enumerate() {
+                if self.partitioner.is_some() {
+                    self.assign_partition_with_metadata(&metadata, &mut record)
+                        .await?;
+                }
                 let (delivery, status) = self
-                    .append_for_batch_delivery_with_max_block(record, now)
+                    .append_for_batch_delivery_until(
+                        record,
+                        now,
+                        deadline,
+                        batch_delivery_metadata_capacity,
+                    )
                     .await?;
                 if let Some(delivery) = delivery {
                     deliveries.push(delivery);
                 }
                 if status.batch_ready
-                    && let Some(topic) = sticky_topic.as_deref()
+                    && let Some(topic) = topic_plan.sticky_topics.topic_for(record_index)
                 {
                     self.dispatcher.mark_sticky_batch_ready(topic).await;
                 }
@@ -570,6 +626,90 @@ impl Producer {
             break;
         }
         self.poll().await.map(|()| BatchSendFuture::new(deliveries))
+    }
+
+    /// Append multiple records with one callback registered for each record.
+    ///
+    /// This keeps Java-style tracked delivery semantics while amortizing
+    /// metadata lookup, partition assignment, and sender polling across the
+    /// supplied records.
+    ///
+    /// # Errors
+    ///
+    /// Returns producer backpressure or errors from pumping ready batches.
+    pub async fn send_batch_with_callback<I, F>(&mut self, records: I, callback: F) -> Result<()>
+    where
+        I: IntoIterator<Item = ProducerRecord>,
+        F: Fn(Result<RecordMetadata>) + Send + Sync + 'static,
+    {
+        self.dispatcher.fail_if_transaction_error().await?;
+        let now = std::time::Instant::now();
+        let mut records = records.into_iter();
+        let (lower_bound, _upper_bound) = records.size_hint();
+        let batch_delivery_metadata_capacity = lower_bound.saturating_add(1);
+        let deadline = self.append_deadline();
+        let mut poll_budget = AppendPollBudget::new(self.max_in_flight_requests);
+        let callback: super::record::SharedDeliveryCallback = Arc::new(callback);
+        while let Some(record) = records.next() {
+            if record.has_assigned_partition() {
+                let (delivery, status) = self
+                    .append_for_batch_delivery_until(
+                        record,
+                        now,
+                        deadline,
+                        batch_delivery_metadata_capacity,
+                    )
+                    .await?;
+                if let Some(delivery) = delivery {
+                    delivery.register_batch_callback(Arc::clone(&callback));
+                }
+                if poll_budget.observe(status) {
+                    self.poll().await?;
+                }
+                continue;
+            }
+
+            let mut pending = Vec::with_capacity(lower_bound.saturating_add(1));
+            pending.push(record);
+            pending.extend(records);
+            let topic_plan = self.topic_plan_for_batch(&pending);
+            let metadata_started_at = std::time::Instant::now();
+            let metadata = self
+                .dispatcher
+                .metadata_for_topics(topic_plan.topics.iter().map(Arc::as_ref))
+                .await?;
+            self.assign_default_partitions_for_batch(&topic_plan, &metadata, &mut pending)
+                .await?;
+            self.metrics
+                .record_metadata_wait(metadata_started_at.elapsed());
+            for (record_index, mut record) in pending.into_iter().enumerate() {
+                if self.partitioner.is_some() {
+                    self.assign_partition_with_metadata(&metadata, &mut record)
+                        .await?;
+                }
+                let (delivery, status) = self
+                    .append_for_batch_delivery_until(
+                        record,
+                        now,
+                        deadline,
+                        batch_delivery_metadata_capacity,
+                    )
+                    .await?;
+                if let Some(delivery) = delivery {
+                    delivery.register_batch_callback(Arc::clone(&callback));
+                }
+                if status.batch_ready
+                    && let Some(topic) = topic_plan.sticky_topics.topic_for(record_index)
+                {
+                    self.dispatcher.mark_sticky_batch_ready(topic).await;
+                }
+                if poll_budget.observe(status) {
+                    self.poll().await?;
+                }
+            }
+            break;
+        }
+        self.poll().await
     }
 
     /// Append multiple records without creating per-record delivery handles.
@@ -601,32 +741,51 @@ impl Producer {
             let mut pending = Vec::with_capacity(lower_bound.saturating_add(1));
             pending.push(record);
             pending.extend(records);
-            let topics: Vec<String> = pending
-                .iter()
-                .filter(|record| !record.has_assigned_partition())
-                .map(|record| record.topic.to_string())
-                .collect();
+            let topic_plan = self.topic_plan_for_batch(&pending);
             let metadata_started_at = std::time::Instant::now();
-            self.dispatcher
-                .refresh_partition_load_stats(&self.accumulator, topics.iter().map(String::as_str))
-                .await?;
             let metadata = self
                 .dispatcher
-                .metadata_for_topics(topics.iter().map(String::as_str))
+                .metadata_for_topics(topic_plan.topics.iter().map(Arc::as_ref))
                 .await?;
+            if !self.partitioner.is_some() {
+                if let [topic] = topic_plan.topics.as_slice() {
+                    self.dispatcher
+                        .refresh_topic_load_stats_with_metadata(
+                            &self.accumulator,
+                            &metadata,
+                            topic.as_ref(),
+                        )
+                        .await?;
+                    self.dispatcher
+                        .assign_topic_partitions_with_metadata(
+                            &metadata,
+                            topic.as_ref(),
+                            &mut pending,
+                        )
+                        .await?;
+                } else {
+                    self.dispatcher
+                        .refresh_partition_load_stats_with_metadata(
+                            &self.accumulator,
+                            &metadata,
+                            topic_plan.topics.iter().map(Arc::as_ref),
+                        )
+                        .await?;
+                    self.dispatcher
+                        .assign_partitions_with_metadata(&metadata, &mut pending)
+                        .await?;
+                }
+            }
             self.metrics
                 .record_metadata_wait(metadata_started_at.elapsed());
-            for mut record in pending {
-                let sticky_topic = self
-                    .dispatcher
-                    .uses_sticky_partitioner(&record)
-                    .then(|| record.topic.to_string());
-                self.dispatcher
-                    .assign_partition_with_metadata(&metadata, &mut record)
-                    .await?;
+            for (record_index, mut record) in pending.into_iter().enumerate() {
+                if self.partitioner.is_some() {
+                    self.assign_partition_with_metadata(&metadata, &mut record)
+                        .await?;
+                }
                 let status = self.append_untracked_with_max_block(record, now).await?;
                 if status.batch_ready
-                    && let Some(topic) = sticky_topic.as_deref()
+                    && let Some(topic) = topic_plan.sticky_topics.topic_for(record_index)
                 {
                     self.dispatcher.mark_sticky_batch_ready(topic).await;
                 }
@@ -739,11 +898,27 @@ impl Producer {
     /// the coordinator rejects `InitProducerId`.
     pub async fn init_transactions(&self) -> Result<()> {
         let started_at = std::time::Instant::now();
-        let result = self.dispatcher.init_transactions().await;
+        let result = self.init_transactions_with_max_block().await;
         if result.is_ok() {
             self.metrics.record_transaction_init(started_at.elapsed());
         }
         result
+    }
+
+    async fn init_transactions_with_max_block(&self) -> Result<()> {
+        let dispatcher = self.dispatcher.clone();
+        let mut task = tokio::spawn(async move { dispatcher.init_transactions().await });
+        match tokio::time::timeout(self.max_block, &mut task).await {
+            Ok(joined) => joined.map_err(|error| ProducerError::DispatchTask(error.to_string()))?,
+            Err(_elapsed) => {
+                self.dispatcher.mark_init_transactions_timed_out().await;
+                Err(ProducerError::DispatchTask(
+                    "InitTransactions timed out - did not complete InitProducerId with the \
+                     transaction coordinator within max.block.ms"
+                        .to_owned(),
+                ))
+            },
+        }
     }
 
     /// Begin a producer transaction.
@@ -768,9 +943,17 @@ impl Producer {
     /// Returns an error from flushing records or `EndTxn`.
     pub async fn commit_transaction(&mut self) -> Result<()> {
         let started_at = std::time::Instant::now();
-        self.dispatcher.validate_commit_transaction_start()?;
-        self.flush().await?;
-        let result = self.dispatcher.end_transaction(true).await;
+        let retry_pending_commit = self
+            .dispatcher
+            .pending_end_transaction_matches(true)
+            .await?;
+        if !retry_pending_commit {
+            self.dispatcher.validate_commit_transaction_start()?;
+            self.flush().await?;
+        }
+        let result = self
+            .end_transaction_with_max_block(true, "CommitTransaction")
+            .await;
         if result.is_ok() {
             self.metrics.record_transaction_commit(started_at.elapsed());
         }
@@ -784,12 +967,44 @@ impl Producer {
     /// Returns an error from `EndTxn`.
     pub async fn abort_transaction(&mut self) -> Result<()> {
         let started_at = std::time::Instant::now();
-        let result = self.dispatcher.end_transaction(false).await;
-        if result.is_ok() {
+        let retry_pending_abort = self
+            .dispatcher
+            .pending_end_transaction_matches(false)
+            .await?;
+        if !retry_pending_abort {
             let _dropped_batches = self.accumulator.drain_all();
+            while !self.in_flight.is_empty() {
+                self.wait_for_one_for_flush().await?;
+            }
+        }
+        let result = self
+            .end_transaction_with_max_block(false, "AbortTransaction")
+            .await;
+        if result.is_ok() {
             self.metrics.record_transaction_abort(started_at.elapsed());
         }
         result
+    }
+
+    async fn end_transaction_with_max_block(
+        &self,
+        committed: bool,
+        operation: &'static str,
+    ) -> Result<()> {
+        let dispatcher = self.dispatcher.clone();
+        let mut task = tokio::spawn(async move { dispatcher.end_transaction(committed).await });
+        match tokio::time::timeout(self.max_block, &mut task).await {
+            Ok(joined) => joined.map_err(|error| ProducerError::DispatchTask(error.to_string()))?,
+            Err(_elapsed) => {
+                self.dispatcher
+                    .mark_end_transaction_timed_out(committed)
+                    .await;
+                Err(ProducerError::DispatchTask(format!(
+                    "{operation} timed out - did not complete EndTxn with the transaction \
+                     coordinator within max.block.ms"
+                )))
+            },
+        }
     }
 
     /// Add consumer offsets to the active transaction.
@@ -816,14 +1031,39 @@ impl Producer {
         }
         let started_at = std::time::Instant::now();
         let result = self
-            .dispatcher
-            .send_offsets_to_transaction(offsets, group_metadata)
+            .send_offsets_to_transaction_with_max_block(offsets, group_metadata)
             .await;
         if result.is_ok() {
             self.metrics
                 .record_send_offsets_to_transaction(started_at.elapsed());
         }
         result
+    }
+
+    async fn send_offsets_to_transaction_with_max_block(
+        &self,
+        offsets: Vec<(TopicPartition, OffsetAndMetadata)>,
+        group_metadata: ConsumerGroupMetadata,
+    ) -> Result<()> {
+        let dispatcher = self.dispatcher.clone();
+        let mut task = tokio::spawn(async move {
+            dispatcher
+                .send_offsets_to_transaction(offsets, group_metadata)
+                .await
+        });
+        match tokio::time::timeout(self.max_block, &mut task).await {
+            Ok(joined) => joined.map_err(|error| ProducerError::DispatchTask(error.to_string()))?,
+            Err(_elapsed) => {
+                self.dispatcher
+                    .mark_send_offsets_to_transaction_timed_out()
+                    .await;
+                Err(ProducerError::DispatchTask(
+                    "SendOffsetsToTransaction timed out - did not reach the coordinator or \
+                     receive the TxnOffsetCommit/AddOffsetsToTxn response within max.block.ms"
+                        .to_owned(),
+                ))
+            },
+        }
     }
 
     /// Flush buffered records and consume the producer.
@@ -900,6 +1140,15 @@ impl Producer {
     #[must_use]
     pub fn metrics_registry(&self) -> BTreeMap<&'static str, ProducerMetricValue> {
         self.metrics().as_metric_map()
+    }
+
+    /// Serialize producer and registered application metrics as OTLP `MetricsData`.
+    #[must_use]
+    pub fn otlp_metrics_data(&self, time_unix_nanos: u64) -> Bytes {
+        self.metrics().to_otlp_metrics_data_with_kafka_metrics(
+            time_unix_nanos,
+            self.application_metrics.values(),
+        )
     }
 
     /// Fetch partition metadata for one topic through the wire metadata cache.
@@ -1069,6 +1318,21 @@ impl Producer {
             })?
     }
 
+    /// Aggregate current producer metrics and push them as uncompressed OTLP.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same telemetry, subscription, and timeout errors as
+    /// [`Self::push_telemetry`].
+    pub async fn push_current_telemetry(
+        &self,
+        terminating: bool,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        let metrics = self.otlp_metrics_data(current_unix_time_nanos());
+        self.push_telemetry(metrics, terminating, timeout).await
+    }
+
     async fn fetch_telemetry_subscription(&self) -> Result<TelemetrySubscription> {
         if !self.telemetry_is_enabled() {
             return Err(ProducerError::TelemetryDisabled);
@@ -1188,6 +1452,28 @@ impl Producer {
         let _inserted = self.metric_subscriptions.insert(subscription.name);
     }
 
+    /// Register one application Kafka metric for client telemetry subscription.
+    ///
+    /// Rust cannot JVM-load arbitrary `KafkaMetric` instances, so this native API
+    /// mirrors Java's reporter lifecycle for caller-provided metrics.
+    pub fn register_kafka_metric_for_subscription(&mut self, metric: KafkaMetric) {
+        if !self.enable_metrics_push {
+            return;
+        }
+        if ProducerMetricsSnapshot::is_internal_metric_name(metric.metric_name().name()) {
+            return;
+        }
+        for reporter in &self.metric_reporters {
+            reporter.metric_change(&metric);
+        }
+        let _inserted = self
+            .metric_subscriptions
+            .insert(metric.metric_name().name().to_owned());
+        let _previous = self
+            .application_metrics
+            .insert(metric.metric_name().clone(), metric);
+    }
+
     /// Remove one metric name from the client-metrics subscription set.
     pub fn unregister_metric_from_subscription(
         &mut self,
@@ -1202,6 +1488,23 @@ impl Producer {
         let _removed = self.metric_subscriptions.remove(subscription.name.as_str());
     }
 
+    /// Remove one application Kafka metric from client telemetry subscription.
+    pub fn unregister_kafka_metric_from_subscription(&mut self, metric_name: &MetricName) {
+        if !self.enable_metrics_push {
+            return;
+        }
+        if ProducerMetricsSnapshot::is_internal_metric_name(metric_name.name()) {
+            return;
+        }
+        let Some(metric) = self.application_metrics.remove(metric_name) else {
+            return;
+        };
+        for reporter in &self.metric_reporters {
+            reporter.metric_removal(&metric);
+        }
+        let _removed = self.metric_subscriptions.remove(metric_name.name());
+    }
+
     /// Enable dispatch latency collection for benchmark/diagnostic runs.
     ///
     /// Samples are measured from the earliest append timestamp in a drained
@@ -1214,6 +1517,18 @@ impl Producer {
     /// Add a producer interceptor to this producer instance.
     pub fn add_interceptor(&mut self, interceptor: impl ProducerInterceptor) {
         self.interceptors.push(interceptor);
+    }
+
+    /// Add a Rust-native metrics reporter.
+    pub fn add_metric_reporter(&mut self, reporter: impl MetricReporter) {
+        let reporter = Arc::new(reporter);
+        reporter.init(&[]);
+        self.metric_reporters.push(reporter);
+    }
+
+    /// Set a Rust-native producer partitioner for unassigned records.
+    pub fn set_partitioner(&mut self, partitioner: impl ProducerPartitioner) {
+        self.partitioner = ProducerPartitionerHandle::new(partitioner);
     }
 
     /// Take and clear collected dispatch latency samples.
@@ -1340,31 +1655,34 @@ impl Producer {
         }
     }
 
-    async fn append_for_batch_delivery_with_max_block(
+    async fn append_for_batch_delivery_until(
         &mut self,
         record: ProducerRecord,
         now: std::time::Instant,
+        deadline: std::time::Instant,
+        metadata_capacity: usize,
     ) -> Result<(Option<SendFuture>, AppendStatus)> {
         self.validate_record_size(&record)?;
-        let deadline = std::time::Instant::now()
-            .checked_add(self.max_block)
-            .unwrap_or_else(std::time::Instant::now);
         loop {
             let can_wait = self.accumulator.buffered_bytes() > 0 || !self.in_flight.is_empty();
-            match self
-                .accumulator
-                .append_for_batch_delivery_with_status_at(record.clone(), now)
-            {
-                Ok(delivery) => return Ok(delivery),
-                Err(ProducerError::Backpressure)
-                    if can_wait && std::time::Instant::now() < deadline =>
-                {
+            if !self.accumulator.has_available_memory_for(&record) {
+                if can_wait && std::time::Instant::now() < deadline {
                     self.poll().await?;
                     self.wait_for_buffer(deadline).await?;
-                },
-                Err(error) => return Err(error),
+                    continue;
+                }
+                return Err(ProducerError::Backpressure);
             }
+            return self
+                .accumulator
+                .append_for_batch_delivery_with_status_at_capacity(record, now, metadata_capacity);
         }
+    }
+
+    fn append_deadline(&self) -> std::time::Instant {
+        std::time::Instant::now()
+            .checked_add(self.max_block)
+            .unwrap_or_else(std::time::Instant::now)
     }
 
     async fn append_untracked_with_max_block(
@@ -1469,6 +1787,42 @@ impl Producer {
         self.interceptors.on_send(record)
     }
 
+    async fn assign_default_partitions_for_batch(
+        &self,
+        topic_plan: &BatchTopicPlan,
+        metadata: &ClusterMetadata,
+        pending: &mut [ProducerRecord],
+    ) -> Result<()> {
+        if self.partitioner.is_some() {
+            return Ok(());
+        }
+        if let [topic] = topic_plan.topics.as_slice() {
+            self.dispatcher
+                .refresh_topic_load_stats_with_metadata(&self.accumulator, metadata, topic.as_ref())
+                .await?;
+            if let StickyTopicSelection::Single(_) = &topic_plan.sticky_topics {
+                self.dispatcher
+                    .assign_sticky_topic_partitions_with_metadata(metadata, topic.as_ref(), pending)
+                    .await
+            } else {
+                self.dispatcher
+                    .assign_topic_partitions_with_metadata(metadata, topic.as_ref(), pending)
+                    .await
+            }
+        } else {
+            self.dispatcher
+                .refresh_partition_load_stats_with_metadata(
+                    &self.accumulator,
+                    metadata,
+                    topic_plan.topics.iter().map(Arc::as_ref),
+                )
+                .await?;
+            self.dispatcher
+                .assign_partitions_with_metadata(metadata, pending)
+                .await
+        }
+    }
+
     fn interceptor_headers(
         &self,
         record: &ProducerRecord,
@@ -1502,12 +1856,164 @@ impl Producer {
         }
         Ok(())
     }
+
+    const fn uses_sticky_partitioner(&self, record: &ProducerRecord) -> bool {
+        !self.partitioner.is_some() && self.dispatcher.uses_sticky_partitioner(record)
+    }
+
+    fn topic_plan_for_batch(&self, records: &[ProducerRecord]) -> BatchTopicPlan {
+        if let Some(first) = records.first() {
+            let first_topic = Arc::clone(&first.topic);
+            let mut has_unassigned_record = false;
+            let mut single_sticky_topic = true;
+            let mut all_same_topic = true;
+
+            for record in records {
+                if !Arc::ptr_eq(&first_topic, &record.topic)
+                    && first_topic.as_ref() != record.topic.as_ref()
+                {
+                    all_same_topic = false;
+                    break;
+                }
+                has_unassigned_record |= !record.has_assigned_partition();
+                single_sticky_topic &= self.uses_sticky_partitioner(record);
+            }
+
+            if all_same_topic {
+                let topics = if has_unassigned_record {
+                    vec![Arc::clone(&first_topic)]
+                } else {
+                    Vec::new()
+                };
+                let sticky_topics = if single_sticky_topic {
+                    StickyTopicSelection::Single(first_topic)
+                } else {
+                    StickyTopicSelection::PerRecord(
+                        records
+                            .iter()
+                            .map(|record| {
+                                self.uses_sticky_partitioner(record)
+                                    .then(|| Arc::clone(&record.topic))
+                            })
+                            .collect(),
+                    )
+                };
+                return BatchTopicPlan {
+                    topics,
+                    sticky_topics,
+                };
+            }
+        }
+
+        let mut seen = AHashSet::new();
+        let mut topics = Vec::new();
+        let mut sticky_topic = None::<Arc<str>>;
+        let mut single_sticky_topic = true;
+
+        for record in records {
+            if !record.has_assigned_partition() && seen.insert(Arc::clone(&record.topic)) {
+                topics.push(Arc::clone(&record.topic));
+            }
+            if !single_sticky_topic {
+                continue;
+            }
+            if !self.uses_sticky_partitioner(record) {
+                single_sticky_topic = false;
+                continue;
+            }
+            if let Some(topic) = &sticky_topic {
+                if topic.as_ref() != record.topic.as_ref() {
+                    single_sticky_topic = false;
+                }
+            } else {
+                sticky_topic = Some(Arc::clone(&record.topic));
+            }
+        }
+
+        let sticky_topics = if single_sticky_topic {
+            sticky_topic.map_or_else(
+                || StickyTopicSelection::PerRecord(Vec::new()),
+                StickyTopicSelection::Single,
+            )
+        } else {
+            StickyTopicSelection::PerRecord(
+                records
+                    .iter()
+                    .map(|record| {
+                        self.uses_sticky_partitioner(record)
+                            .then(|| Arc::clone(&record.topic))
+                    })
+                    .collect(),
+            )
+        };
+
+        BatchTopicPlan {
+            topics,
+            sticky_topics,
+        }
+    }
+
+    async fn assign_partition(&self, record: &mut ProducerRecord) -> Result<()> {
+        if record.has_assigned_partition() {
+            return Ok(());
+        }
+        if !self.partitioner.is_some() {
+            return self.dispatcher.assign_partition(record).await;
+        }
+        let metadata = self
+            .dispatcher
+            .metadata_for_topics([record.topic.as_ref()])
+            .await?;
+        self.assign_partition_with_metadata(&metadata, record).await
+    }
+
+    async fn assign_partition_with_metadata(
+        &self,
+        metadata: &ClusterMetadata,
+        record: &mut ProducerRecord,
+    ) -> Result<()> {
+        if record.has_assigned_partition() {
+            return Ok(());
+        }
+        let Some(partition) = self.partitioner.partition(record, metadata).transpose()? else {
+            return self
+                .dispatcher
+                .assign_partition_with_metadata(metadata, record)
+                .await;
+        };
+        validate_selected_partition(metadata, record, partition)?;
+        record.partition = partition;
+        Ok(())
+    }
 }
 
 impl Drop for Producer {
     fn drop(&mut self) {
         self.interceptors.close();
+        self.partitioner.close();
+        close_metric_reporters(&self.metric_reporters);
     }
+}
+
+fn validate_selected_partition(
+    metadata: &ClusterMetadata,
+    record: &ProducerRecord,
+    partition: i32,
+) -> Result<()> {
+    let topic_metadata = metadata
+        .topic(record.topic.as_ref())
+        .ok_or_else(|| ProducerError::UnknownTopic(record.topic.to_string()))?;
+    if topic_metadata
+        .partitions
+        .iter()
+        .any(|partition_metadata| partition_metadata.partition_index == partition)
+    {
+        return Ok(());
+    }
+    Err(ProducerError::UnknownPartition {
+        topic: record.topic.to_string(),
+        partition,
+    })
 }
 
 const fn is_fatal_telemetry_error(error: ErrorCode) -> bool {
@@ -1646,6 +2152,8 @@ pub struct ProducerBuilder {
     sasl_client_authenticator: Option<SaslClientAuthenticatorHandle>,
     sasl_client_authenticator_factory: Option<SaslClientAuthenticatorFactoryHandle>,
     interceptors: ProducerInterceptors,
+    partitioner: ProducerPartitionerHandle,
+    metric_reporters: Vec<Arc<dyn MetricReporter>>,
 }
 
 impl ProducerBuilder {
@@ -1657,6 +2165,8 @@ impl ProducerBuilder {
             sasl_client_authenticator: None,
             sasl_client_authenticator_factory: None,
             interceptors: ProducerInterceptors::default(),
+            partitioner: ProducerPartitionerHandle::default(),
+            metric_reporters: Vec::new(),
         }
     }
 
@@ -1695,6 +2205,23 @@ impl ProducerBuilder {
         self
     }
 
+    /// Sets a native Rust partitioner for unassigned records.
+    ///
+    /// This replaces `partitioner.class` JVM plugin loading with an explicit
+    /// Rust implementation.
+    #[must_use]
+    pub fn partitioner(mut self, partitioner: impl ProducerPartitioner) -> Self {
+        self.partitioner = ProducerPartitionerHandle::new(partitioner);
+        self
+    }
+
+    /// Adds a native Rust metrics reporter.
+    #[must_use]
+    pub fn metric_reporter(mut self, reporter: impl MetricReporter) -> Self {
+        self.metric_reporters.push(Arc::new(reporter));
+        self
+    }
+
     /// Returns the underlying Java-style client config.
     #[must_use]
     pub const fn client_config(&self) -> &ClientConfig {
@@ -1713,12 +2240,16 @@ impl ProducerBuilder {
             sasl_client_authenticator,
             sasl_client_authenticator_factory,
             interceptors,
+            partitioner,
+            metric_reporters,
         } = self;
         let config = client_config_without_byte_array_serializer_class_configs(&config);
         let config = client_config_without_native_plugin_class_configs(
             &config,
-            false,
-            !interceptors.is_empty(),
+            NativePluginClassStrip::default()
+                .interceptors_if(!interceptors.is_empty())
+                .partitioner_if(partitioner.is_some())
+                .metric_reporters_if(!metric_reporters.is_empty()),
         );
         let config = config
             .producer_config()
@@ -1731,6 +2262,9 @@ impl ProducerBuilder {
         let wire = WireClient::connect_with_brokers(connection, config.client_id, endpoints);
         let mut producer = Producer::from_parts(wire, runtime);
         producer.interceptors = interceptors;
+        producer.partitioner = partitioner;
+        initialize_metric_reporters(&metric_reporters);
+        producer.metric_reporters = metric_reporters;
         Ok(producer)
     }
 
@@ -1756,11 +2290,16 @@ impl ProducerBuilder {
             sasl_client_authenticator,
             sasl_client_authenticator_factory,
             interceptors,
+            partitioner,
+            metric_reporters,
         } = self;
         let config = client_config_without_native_plugin_class_configs(
             &config,
-            true,
-            !interceptors.is_empty(),
+            NativePluginClassStrip::default()
+                .serializers()
+                .interceptors_if(!interceptors.is_empty())
+                .partitioner_if(partitioner.is_some())
+                .metric_reporters_if(!metric_reporters.is_empty()),
         );
         let config = config
             .producer_config()
@@ -1773,6 +2312,9 @@ impl ProducerBuilder {
         let wire = WireClient::connect_with_brokers(connection, config.client_id, endpoints);
         let mut producer = Producer::from_parts(wire, runtime);
         producer.interceptors = interceptors;
+        producer.partitioner = partitioner;
+        initialize_metric_reporters(&metric_reporters);
+        producer.metric_reporters = metric_reporters;
         Ok(Producer::from_parts_with_serializers(
             producer,
             key_serializer,
@@ -1801,6 +2343,8 @@ impl ProducerBuilder {
             sasl_client_authenticator,
             sasl_client_authenticator_factory,
             interceptors,
+            partitioner,
+            metric_reporters,
         } = self;
         validate_configured_serializer_class::<K, KS>(&config, "key.serializer")?;
         validate_configured_serializer_class::<V, VS>(&config, "value.serializer")?;
@@ -1808,8 +2352,11 @@ impl ProducerBuilder {
         let value_serializer = VS::from_client_config(&config, false)?;
         let config = client_config_without_native_plugin_class_configs(
             &config,
-            true,
-            !interceptors.is_empty(),
+            NativePluginClassStrip::default()
+                .serializers()
+                .interceptors_if(!interceptors.is_empty())
+                .partitioner_if(partitioner.is_some())
+                .metric_reporters_if(!metric_reporters.is_empty()),
         );
         let config = config
             .producer_config()
@@ -1822,6 +2369,9 @@ impl ProducerBuilder {
         let wire = WireClient::connect_with_brokers(connection, config.client_id, endpoints);
         let mut producer = Producer::from_parts(wire, runtime);
         producer.interceptors = interceptors;
+        producer.partitioner = partitioner;
+        initialize_metric_reporters(&metric_reporters);
+        producer.metric_reporters = metric_reporters;
         Ok(Producer::from_parts_with_serializers(
             producer,
             key_serializer,
@@ -1852,11 +2402,14 @@ where
 }
 
 fn client_config_without_serializer_class_configs(config: &ClientConfig) -> ClientConfig {
-    client_config_without_native_plugin_class_configs(config, true, false)
+    client_config_without_native_plugin_class_configs(
+        config,
+        NativePluginClassStrip::default().serializers(),
+    )
 }
 
 fn client_config_without_empty_interceptor_class_configs(config: &ClientConfig) -> ClientConfig {
-    client_config_without_native_plugin_class_configs(config, false, false)
+    client_config_without_native_plugin_class_configs(config, NativePluginClassStrip::default())
 }
 
 fn client_config_without_byte_array_serializer_class_configs(
@@ -1875,20 +2428,79 @@ fn client_config_without_byte_array_serializer_class_configs(
 
 fn client_config_without_native_plugin_class_configs(
     config: &ClientConfig,
-    strip_serializers: bool,
-    strip_interceptors: bool,
+    strip: NativePluginClassStrip,
 ) -> ClientConfig {
     let properties: Properties = config
         .properties()
         .iter()
         .filter(|(key, value)| {
             let key = key.as_str();
-            !(strip_serializers && is_serializer_class_config(key)
-                || should_strip_interceptor_class_config(key, value.as_str(), strip_interceptors))
+            !(strip.serializers_enabled() && is_serializer_class_config(key)
+                || should_strip_interceptor_class_config(
+                    key,
+                    value.as_str(),
+                    strip.interceptors_enabled(),
+                )
+                || strip.partitioner_enabled() && is_partitioner_class_config(key)
+                || strip.metric_reporters_enabled() && is_metric_reporters_config(key))
         })
         .map(|(key, value)| (key.as_str().to_owned(), value.as_str().to_owned()))
         .collect();
     ClientConfig::from(properties)
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct NativePluginClassStrip {
+    mask: u8,
+}
+
+impl NativePluginClassStrip {
+    const SERIALIZERS: u8 = 1;
+    const INTERCEPTORS: u8 = 2;
+    const PARTITIONER: u8 = 4;
+    const METRIC_REPORTERS: u8 = 8;
+
+    const fn serializers(mut self) -> Self {
+        self.mask |= Self::SERIALIZERS;
+        self
+    }
+
+    const fn interceptors_if(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.mask |= Self::INTERCEPTORS;
+        }
+        self
+    }
+
+    const fn partitioner_if(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.mask |= Self::PARTITIONER;
+        }
+        self
+    }
+
+    const fn metric_reporters_if(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.mask |= Self::METRIC_REPORTERS;
+        }
+        self
+    }
+
+    const fn serializers_enabled(self) -> bool {
+        self.mask & Self::SERIALIZERS != 0
+    }
+
+    const fn interceptors_enabled(self) -> bool {
+        self.mask & Self::INTERCEPTORS != 0
+    }
+
+    const fn partitioner_enabled(self) -> bool {
+        self.mask & Self::PARTITIONER != 0
+    }
+
+    const fn metric_reporters_enabled(self) -> bool {
+        self.mask & Self::METRIC_REPORTERS != 0
+    }
 }
 
 const fn is_serializer_class_config(key: &str) -> bool {
@@ -1914,6 +2526,35 @@ fn should_strip_interceptor_class_config(key: &str, value: &str, strip_intercept
 
 const fn is_interceptor_class_config(key: &str) -> bool {
     matches!(key.as_bytes(), b"interceptor.classes")
+}
+
+const fn is_partitioner_class_config(key: &str) -> bool {
+    matches!(key.as_bytes(), b"partitioner.class")
+}
+
+const fn is_metric_reporters_config(key: &str) -> bool {
+    matches!(key.as_bytes(), b"metric.reporters")
+}
+
+fn initialize_metric_reporters(reporters: &[Arc<dyn MetricReporter>]) {
+    let metrics: &[KafkaMetric] = &[];
+    for reporter in reporters {
+        reporter.init(metrics);
+    }
+}
+
+fn close_metric_reporters(reporters: &[Arc<dyn MetricReporter>]) {
+    for reporter in reporters {
+        reporter.close();
+    }
+}
+
+fn current_unix_time_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+        })
 }
 
 async fn resolve_bootstrap_brokers(config: &ProducerConfig) -> Result<Vec<BrokerEndpoint>> {
@@ -1996,9 +2637,10 @@ mod tests {
     use crate::{
         config::ClientConfig,
         producer::{
-            AccumulatorConfig, ConsumerGroupMetadata, ProducerError, ProducerIdempotenceConfig,
-            ProducerIdentity, ProducerInterceptor, ProducerMetricSubscription, ProducerMetricValue,
-            ProducerRecord, ProducerRuntimeConfig, RecordMetadata, SendFuture, TopicPartition,
+            AccumulatorConfig, ConsumerGroupMetadata, KafkaMetric, MetricName, MetricReporter,
+            MetricValue, ProducerError, ProducerIdempotenceConfig, ProducerIdentity,
+            ProducerInterceptor, ProducerMetricSubscription, ProducerMetricValue, ProducerRecord,
+            ProducerRuntimeConfig, RecordMetadata, SendFuture, TopicPartition,
             accumulator::AppendStatus,
         },
         wire::{
@@ -2353,6 +2995,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builder_with_native_metric_reporter_ignores_java_metric_reporters() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let producer = ProducerBuilder::new()
+            .set("bootstrap.servers", "127.0.0.1:9092")
+            .set(
+                "metric.reporters",
+                "org.apache.kafka.common.metrics.JmxReporter",
+            )
+            .metric_reporter(RecordingMetricReporter {
+                events: Arc::clone(&events),
+            })
+            .build()
+            .await
+            .expect("native metric reporter should replace Java metric reporter loading");
+
+        assert_eq!(producer.buffered_bytes(), 0);
+        producer.close_now();
+        let events = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(events, vec!["init:0".to_owned(), "close".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn producer_kafka_metric_subscription_notifies_native_reporters_like_java() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut producer = ProducerBuilder::new()
+            .set("bootstrap.servers", "127.0.0.1:9092")
+            .set("enable.metrics.push", "true")
+            .metric_reporter(RecordingMetricReporter {
+                events: Arc::clone(&events),
+            })
+            .build()
+            .await
+            .expect("producer with native metric reporter");
+        assert!(producer.enable_metrics_push);
+        assert_eq!(producer.metric_reporters.len(), 1);
+        let metric_name = MetricName::new("orders.sent", "app")
+            .with_description("application orders sent")
+            .tag("client-id", "orders-producer");
+        let metric = KafkaMetric::from_fn(metric_name.clone(), || MetricValue::Number(42.0));
+
+        producer.register_kafka_metric_for_subscription(metric.clone());
+        assert!(producer.metric_subscriptions.contains("orders.sent"));
+        producer.register_kafka_metric_for_subscription(metric);
+        producer.unregister_kafka_metric_from_subscription(&metric_name);
+        producer.unregister_kafka_metric_from_subscription(&metric_name);
+        producer.register_kafka_metric_for_subscription(KafkaMetric::from_fn(
+            MetricName::new("produce_request_count", "producer-metrics"),
+            || MetricValue::Number(1.0),
+        ));
+        producer.close_now();
+
+        let events = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            events,
+            vec![
+                "init:0".to_owned(),
+                "change:orders.sent".to_owned(),
+                "change:orders.sent".to_owned(),
+                "remove:orders.sent".to_owned(),
+                "close".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn producer_otlp_metrics_data_includes_registered_kafka_metrics_like_java() {
+        let mut producer = producer(1);
+        producer.register_kafka_metric_for_subscription(KafkaMetric::from_fn(
+            MetricName::new("orders.sent", "app")
+                .with_description("application orders sent")
+                .tag("client-id", "orders-producer"),
+            || MetricValue::Number(42.0),
+        ));
+
+        let payload = producer.otlp_metrics_data(42);
+
+        assert!(
+            payload
+                .windows(b"queue_depth_bytes".len())
+                .any(|window| window == b"queue_depth_bytes")
+        );
+        assert!(
+            payload
+                .windows(b"orders.sent".len())
+                .any(|window| window == b"orders.sent")
+        );
+        assert!(
+            payload
+                .windows(b"application orders sent".len())
+                .any(|window| window == b"application orders sent")
+        );
+        assert!(
+            payload
+                .windows(b"client-id".len())
+                .any(|window| window == b"client-id")
+        );
+        assert!(
+            payload
+                .windows(b"orders-producer".len())
+                .any(|window| window == b"orders-producer")
+        );
+    }
+
+    #[tokio::test]
     async fn empty_interceptor_classes_config_is_noop_like_java_default() {
         let producer = Producer::from_map([
             ("bootstrap.servers", "127.0.0.1:9092"),
@@ -2446,7 +3198,7 @@ mod tests {
             .expect("interceptor metadata");
 
         assert!(matches!(error, ProducerError::RecordTooLarge { .. }));
-        assert_eq!(metadata.topic, "orders");
+        assert_eq!(metadata.topic.as_ref(), "orders");
         assert_eq!(metadata.partition, 3);
         assert_eq!(metadata.leader_id, -1);
         assert_eq!(metadata.offset, -1);
@@ -2585,6 +3337,38 @@ mod tests {
         fn on_send(&self, mut record: ProducerRecord) -> crate::producer::Result<ProducerRecord> {
             record.partition = 0;
             Ok(record)
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingMetricReporter {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl MetricReporter for RecordingMetricReporter {
+        fn init(&self, metrics: &[KafkaMetric]) {
+            self.push(format!("init:{}", metrics.len()));
+        }
+
+        fn metric_change(&self, metric: &KafkaMetric) {
+            self.push(format!("change:{}", metric.metric_name().name()));
+        }
+
+        fn metric_removal(&self, metric: &KafkaMetric) {
+            self.push(format!("remove:{}", metric.metric_name().name()));
+        }
+
+        fn close(&self) {
+            self.push("close".to_owned());
+        }
+    }
+
+    impl RecordingMetricReporter {
+        fn push(&self, event: String) {
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event);
         }
     }
 
@@ -2752,7 +3536,7 @@ mod tests {
 
     fn record_metadata(offset: i64) -> RecordMetadata {
         RecordMetadata {
-            topic: "orders".to_owned(),
+            topic: Arc::from("orders"),
             partition: 0,
             leader_id: 7,
             offset,
@@ -3357,7 +4141,7 @@ mod tests {
         }));
 
         sender.send(RecordMetadata {
-            topic: "orders".to_owned(),
+            topic: Arc::from("orders"),
             partition: 0,
             leader_id: 7,
             offset: 0,

@@ -9,6 +9,7 @@ mod dispatcher;
 mod error;
 mod interceptor;
 mod metrics;
+mod partitioner;
 mod record;
 mod response;
 mod routing;
@@ -27,15 +28,23 @@ pub(crate) use self::{
 };
 pub use self::{
     api::{
-        ConsumerGroupMetadata, OffsetAndMetadata, ProducerMetricSubscription,
+        ConsumerGroupMetadata, OffsetAndMetadata, PartitionInfo, ProducerMetricSubscription,
         ProducerPartitionInfo, TopicPartition,
     },
     client::{Producer, ProducerBuilder},
     config::ProducerCompression,
     error::{ProducerError, Result},
     interceptor::ProducerInterceptor,
-    metrics::{ProducerMetricValue, ProducerMetricsSnapshot},
-    record::{BatchSendFuture, DeliveryCallback, ProducerRecord, RecordMetadata, SendFuture},
+    metrics::{
+        KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
+        MetricValue, Metrics, MetricsError, ProducerMetricValue, ProducerMetricsSnapshot, SensorId,
+        SensorRecordingLevel,
+    },
+    partitioner::ProducerPartitioner,
+    record::{
+        BatchSendFuture, Callback, DeliveryCallback, Header, Headers, ProducerRecord, RecordHeader,
+        RecordHeaders, RecordMetadata, SendFuture,
+    },
     serializer::{
         BooleanSerializer, ByteArraySerializer, BytesSerializer, ConfiguredProducerSerializer,
         DoubleSerializer, FloatSerializer, IntegerSerializer, ListInnerSerializer,

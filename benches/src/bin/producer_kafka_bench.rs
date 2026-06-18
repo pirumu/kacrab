@@ -257,21 +257,21 @@ async fn run_callback_tracked_send_loop(
             .scenario
             .batch_messages
             .min(run.scenario.messages.saturating_sub(sent));
-        for index in 0..batch_messages {
-            let record = benchmark_record(
+        let records = (0..batch_messages).map(|index| {
+            benchmark_record(
                 Arc::clone(&topic),
                 sent + index,
                 run.partitions,
                 run.partition_mode,
             )
-            .value(value.clone());
-            let _delivery = producer
-                .send_with_callback(record, |_result| {})
-                .await
-                .expect("benchmark tracked callback send should fit and dispatch");
-            produce_requests = produce_requests.saturating_add(1);
-            pending_since_flush = pending_since_flush.saturating_add(1);
-        }
+            .value(value.clone())
+        });
+        producer
+            .send_batch_with_callback(records, |_result| {})
+            .await
+            .expect("benchmark tracked callback batch should fit and dispatch");
+        produce_requests = produce_requests.saturating_add(1);
+        pending_since_flush = pending_since_flush.saturating_add(batch_messages);
         if pending_since_flush >= run.tracked_delivery_window {
             producer
                 .flush()
@@ -366,19 +366,19 @@ async fn warm_up_producer(producer: &mut Producer, run: &BenchmarkRun<'_>, value
                 .expect("benchmark warmup send should dispatch");
         },
         DeliveryMode::Tracked => {
-            for index in 0..warmup_messages {
-                let record = benchmark_record(
+            let records = (0..warmup_messages).map(|index| {
+                benchmark_record(
                     Arc::clone(&topic),
                     index,
                     run.partitions,
                     run.partition_mode,
                 )
-                .value(value.clone());
-                let _delivery = producer
-                    .send_with_callback(record, |_result| {})
-                    .await
-                    .expect("benchmark tracked warmup send should dispatch");
-            }
+                .value(value.clone())
+            });
+            producer
+                .send_batch_with_callback(records, |_result| {})
+                .await
+                .expect("benchmark tracked warmup send should dispatch");
             producer
                 .flush()
                 .await
@@ -672,7 +672,7 @@ fn display_optional_str(value: Option<&str>) -> String {
 
 fn tracked_delivery_window() -> usize {
     env_usize("KACRAB_TRACKED_DELIVERY_WINDOW")
-        .unwrap_or(262_144)
+        .unwrap_or(usize::MAX)
         .max(1)
 }
 

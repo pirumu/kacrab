@@ -10,6 +10,19 @@ use crate::config::ClientConfig;
 
 /// Converts typed key/value data into Kafka record bytes.
 pub trait ProducerSerializer<T>: Send + Sync + 'static {
+    /// Configure this serializer from Java-style producer config.
+    ///
+    /// The default mirrors Java `Serializer.configure`, which is intentionally
+    /// a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns a producer error when the serializer rejects the supplied config.
+    fn configure(&self, config: &ClientConfig, is_key: bool) -> Result<()> {
+        let _ = (config, is_key);
+        Ok(())
+    }
+
     /// Serialize one key or value.
     ///
     /// Implementations receive mutable headers to match Java serializer
@@ -45,8 +58,9 @@ pub trait ConfiguredProducerSerializer<T>: ProducerSerializer<T> + Default {
     /// Returns a producer error when the configured native serializer cannot be
     /// constructed from the supplied Java-style config.
     fn from_client_config(config: &ClientConfig, is_key: bool) -> Result<Self> {
-        let _ = (config, is_key);
-        Ok(Self::default())
+        let serializer = Self::default();
+        serializer.configure(config, is_key)?;
+        Ok(serializer)
     }
 }
 
@@ -1217,6 +1231,25 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn configured_serializer_from_client_config_invokes_java_configure_shape() {
+        let config: ClientConfig = [
+            ("key.serializer", "ConfiguringSerializer"),
+            ("tag", "key-a"),
+        ]
+        .into_iter()
+        .collect();
+
+        let serializer =
+            <ConfiguringSerializer as ConfiguredProducerSerializer<Bytes>>::from_client_config(
+                &config, true,
+            )
+            .expect("configured serializer");
+
+        assert_eq!(serializer.configured_as_key.load(Ordering::Relaxed), 1);
+        assert_eq!(serializer.configured_tag(), Some("key-a".to_owned()));
+    }
+
     #[tokio::test]
     async fn typed_producer_serializes_key_value_and_allows_header_mutation() {
         let key_seen = Arc::new(AtomicBool::new(false));
@@ -1322,6 +1355,52 @@ mod tests {
                 Bytes::from(bytes)
             }))
         }
+    }
+
+    #[derive(Debug, Default)]
+    struct ConfiguringSerializer {
+        configured_as_key: AtomicUsize,
+        configured_tag: std::sync::Mutex<Option<String>>,
+    }
+
+    impl ConfiguringSerializer {
+        fn configured_tag(&self) -> Option<String> {
+            self.configured_tag
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl ProducerSerializer<Bytes> for ConfiguringSerializer {
+        fn configure(&self, config: &ClientConfig, is_key: bool) -> crate::producer::Result<()> {
+            self.configured_as_key
+                .store(usize::from(is_key), Ordering::Relaxed);
+            {
+                let mut configured_tag = self
+                    .configured_tag
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *configured_tag = config
+                    .get("tag")
+                    .map(crate::config::ConfigValue::as_str)
+                    .map(str::to_owned);
+            }
+            Ok(())
+        }
+
+        fn serialize(
+            &self,
+            _topic: &str,
+            _headers: &mut Vec<RecordHeader>,
+            payload: Option<&Bytes>,
+        ) -> crate::producer::Result<Option<Bytes>> {
+            Ok(payload.cloned())
+        }
+    }
+
+    impl ConfiguredProducerSerializer<Bytes> for ConfiguringSerializer {
+        const JAVA_CLASS_NAMES: &'static [&'static str] = &["ConfiguringSerializer"];
     }
 
     #[derive(Debug)]
