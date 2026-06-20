@@ -79,6 +79,27 @@ pub enum WireError {
     /// Broker returned an error code.
     #[error("kafka API returned {0}")]
     Kafka(ErrorCode),
+    /// Metadata response carried a topic-level error.
+    #[error("metadata for topic {topic} failed: {error}")]
+    MetadataTopic {
+        /// Topic name.
+        topic: String,
+        /// Kafka error code.
+        error: ErrorCode,
+    },
+    /// Metadata response carried a partition-level error.
+    #[error("metadata for {topic}-{partition} failed: {error}")]
+    MetadataPartition {
+        /// Topic name.
+        topic: String,
+        /// Partition index.
+        partition: i32,
+        /// Kafka error code.
+        error: ErrorCode,
+    },
+    /// Secure random bytes could not be generated for jitter/backoff decisions.
+    #[error("random byte generation failed: {0}")]
+    RandomBytes(String),
     /// Broker does not support a mutually compatible API version.
     #[error("no compatible API version for {0:?}")]
     UnsupportedApiVersion(ApiKey),

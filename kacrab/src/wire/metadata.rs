@@ -1,9 +1,14 @@
 //! Metadata API client and normalized cluster metadata types.
 
+pub(crate) mod manager;
+
 use kacrab_protocol::{
     KafkaString, KafkaUuid,
     generated::{ErrorCode, MetadataRequestData, MetadataRequestTopic, MetadataResponseData},
 };
+#[cfg(feature = "producer")]
+pub(crate) use manager::PartitionLeaderChange;
+pub(crate) use manager::{MetadataManager, MetadataRecoveryAction};
 
 use super::error::{Result, WireError};
 
@@ -67,6 +72,22 @@ pub struct TopicMetadata {
     pub partitions: Vec<PartitionMetadata>,
 }
 
+/// Topic metadata status retained separately from usable routing metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MetadataTopicState {
+    pub(crate) topic: String,
+    pub(crate) status: MetadataTopicStatus,
+}
+
+/// Java-style topic bookkeeping buckets from metadata responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetadataTopicStatus {
+    Usable { is_internal: bool },
+    Invalid(ErrorCode),
+    Unauthorized(ErrorCode),
+    Error(ErrorCode),
+}
+
 /// Partition leader and replica metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionMetadata {
@@ -125,16 +146,20 @@ pub(crate) fn map_metadata(response: MetadataResponseData) -> Result<ClusterMeta
     let mut topics = Vec::with_capacity(response.topics.len());
     for topic in response.topics {
         let error = ErrorCode::from(topic.error_code);
-        if error.is_error() {
-            return Err(WireError::Kafka(error));
-        }
         let name = topic.name.unwrap_or_default().to_string();
+        if error.is_error() {
+            return Err(WireError::MetadataTopic { topic: name, error });
+        }
         let topic_id = topic.topic_id;
         let mut partitions = Vec::with_capacity(topic.partitions.len());
         for partition in topic.partitions {
             let error = ErrorCode::from(partition.error_code);
             if error.is_error() {
-                return Err(WireError::Kafka(error));
+                return Err(WireError::MetadataPartition {
+                    topic: name,
+                    partition: partition.partition_index,
+                    error,
+                });
             }
             partitions.push(PartitionMetadata {
                 partition_index: partition.partition_index,
@@ -160,6 +185,32 @@ pub(crate) fn map_metadata(response: MetadataResponseData) -> Result<ClusterMeta
     })
 }
 
+pub(crate) fn metadata_topic_states(response: &MetadataResponseData) -> Vec<MetadataTopicState> {
+    response
+        .topics
+        .iter()
+        .filter_map(|topic| {
+            let topic_name = topic.name.as_ref()?.to_string();
+            let error = ErrorCode::from(topic.error_code);
+            let status = if error == ErrorCode::TopicAuthorizationFailed {
+                MetadataTopicStatus::Unauthorized(error)
+            } else if error == ErrorCode::InvalidTopicException {
+                MetadataTopicStatus::Invalid(error)
+            } else if error.is_error() {
+                MetadataTopicStatus::Error(error)
+            } else {
+                MetadataTopicStatus::Usable {
+                    is_internal: topic.is_internal,
+                }
+            };
+            Some(MetadataTopicState {
+                topic: topic_name,
+                status,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -177,7 +228,7 @@ mod tests {
         },
     };
 
-    use super::{map_metadata, metadata_request};
+    use super::{MetadataTopicStatus, map_metadata, metadata_request, metadata_topic_states};
     use crate::wire::WireError;
 
     #[test]
@@ -236,7 +287,10 @@ mod tests {
                 i16::from(ErrorCode::UnknownTopicOrPartition),
                 0
             )),
-            Err(WireError::Kafka(ErrorCode::UnknownTopicOrPartition))
+            Err(WireError::MetadataTopic {
+                topic,
+                error: ErrorCode::UnknownTopicOrPartition,
+            }) if topic == "orders"
         ));
         assert!(matches!(
             map_metadata(response_with_error_codes(
@@ -244,8 +298,44 @@ mod tests {
                 0,
                 i16::from(ErrorCode::LeaderNotAvailable)
             )),
-            Err(WireError::Kafka(ErrorCode::LeaderNotAvailable))
+            Err(WireError::MetadataPartition {
+                topic,
+                partition: 0,
+                error: ErrorCode::LeaderNotAvailable,
+            }) if topic == "orders"
         ));
+    }
+
+    #[test]
+    fn metadata_topic_states_classify_internal_invalid_and_unauthorized_topics() {
+        let mut response = response_with_error_codes(0, 0, 0);
+        response.topics[0].is_internal = true;
+        response.topics.push(MetadataResponseTopic {
+            error_code: i16::from(ErrorCode::InvalidTopicException),
+            name: Some(KafkaString::from("bad topic".to_owned())),
+            ..MetadataResponseTopic::default()
+        });
+        response.topics.push(MetadataResponseTopic {
+            error_code: i16::from(ErrorCode::TopicAuthorizationFailed),
+            name: Some(KafkaString::from("secret".to_owned())),
+            ..MetadataResponseTopic::default()
+        });
+
+        let states = metadata_topic_states(&response);
+
+        assert!(states.iter().any(|state| {
+            state.topic == "orders"
+                && state.status == MetadataTopicStatus::Usable { is_internal: true }
+        }));
+        assert!(states.iter().any(|state| {
+            state.topic == "bad topic"
+                && state.status == MetadataTopicStatus::Invalid(ErrorCode::InvalidTopicException)
+        }));
+        assert!(states.iter().any(|state| {
+            state.topic == "secret"
+                && state.status
+                    == MetadataTopicStatus::Unauthorized(ErrorCode::TopicAuthorizationFailed)
+        }));
     }
 
     fn response_with_error_codes(

@@ -34,6 +34,7 @@ use super::{
         OAuthTokenCache, ScramExchange, oauthbearer_auth_bytes, plain_auth_bytes,
         validate_sasl_extension_hooks,
     },
+    backoff::{BackoffPolicy, BackoffState},
     buffer::BufferPools,
     capabilities::BrokerCapabilities,
     config::{ConnectionConfig, TransportConfig},
@@ -309,7 +310,7 @@ impl BrokerTask {
     async fn run(mut self) {
         let mut pending = VecDeque::new();
         let mut rx_open = true;
-        let mut backoff = reconnect_backoff_initial(&self.config);
+        let mut backoff = reconnect_backoff_state(&self.config);
         loop {
             if pending.is_empty() && rx_open {
                 match self.rx.recv().await {
@@ -328,7 +329,7 @@ impl BrokerTask {
 
             match self.connect_and_negotiate().await {
                 Ok((stream, capabilities)) => {
-                    backoff = reconnect_backoff_initial(&self.config);
+                    backoff.reset();
                     if matches!(
                         self.serve_connection(stream, capabilities, &mut pending, &mut rx_open)
                             .await,
@@ -350,8 +351,20 @@ impl BrokerTask {
                     if pending.is_empty() && !rx_open {
                         return;
                     }
-                    tokio::time::sleep(backoff).await;
-                    backoff = next_reconnect_backoff(backoff, self.config.reconnect_backoff_max);
+                    let delay = match backoff.next_delay() {
+                        Ok(delay) => delay,
+                        Err(error) => {
+                            let error = error.to_string();
+                            fail_pending_setup_error(&mut pending, || {
+                                WireError::RandomBytes(error.clone())
+                            });
+                            if pending.is_empty() && !rx_open {
+                                return;
+                            }
+                            continue;
+                        },
+                    };
+                    tokio::time::sleep(delay).await;
                 },
             }
         }
@@ -409,9 +422,12 @@ impl BrokerTask {
                     };
                     pipeline.complete_response(response);
                 },
-                _ = timeout_tick.tick() => {
+                _ = timeout_tick.tick(), if !pipeline.is_empty() || !pending.is_empty() => {
                     pipeline.fail_expired();
                     expire_pending_commands(pending, self.config.request_timeout);
+                },
+                () = tokio::time::sleep(self.config.connections_max_idle), if pipeline.is_empty() && pending.is_empty() => {
+                    return ServeOutcome::Disconnected;
                 },
             }
         }
@@ -883,7 +899,7 @@ fn expire_pending_commands(pending: &mut VecDeque<RequestCommand>, request_timeo
 
 fn fail_pending_setup_error(
     pending: &mut VecDeque<RequestCommand>,
-    error_factory: fn() -> WireError,
+    mut error_factory: impl FnMut() -> WireError,
 ) {
     while let Some(command) = pending.pop_front() {
         command.completion.send_error(error_factory());
@@ -916,19 +932,14 @@ fn unsupported_sasl_mechanism_error() -> WireError {
     WireError::UnsupportedSaslMechanism("unsupported SASL mechanism".to_owned())
 }
 
-fn reconnect_backoff_initial(config: &ConnectionConfig) -> Duration {
-    config
-        .reconnect_backoff_initial
-        .max(MIN_TIMEOUT_TICK)
-        .min(reconnect_backoff_max(config))
-}
-
-fn reconnect_backoff_max(config: &ConnectionConfig) -> Duration {
-    config.reconnect_backoff_max.max(MIN_TIMEOUT_TICK)
-}
-
-fn next_reconnect_backoff(current: Duration, max: Duration) -> Duration {
-    current.saturating_mul(2).min(max.max(MIN_TIMEOUT_TICK))
+fn reconnect_backoff_state(config: &ConnectionConfig) -> BackoffState {
+    BackoffState::new(
+        BackoffPolicy::new(
+            config.reconnect_backoff_initial,
+            config.reconnect_backoff_max,
+        )
+        .with_jitter_factor(super::backoff::DEFAULT_JITTER_FACTOR),
+    )
 }
 
 async fn read_response_frames<R>(
@@ -1025,9 +1036,8 @@ mod tests {
     use super::{
         BrokerCapabilities, BrokerEndpoint, BrokerHandle, BrokerStream, BrokerTask, BufferPools,
         EncodableRequest, OAuthTokenCache, OwnedRequest, RequestCommand, RequestCompletion,
-        RequestPipeline, ResponseEnvelope, ServeOutcome, expire_pending_commands,
-        next_reconnect_backoff, read_frame, read_response_frames, reconnect_backoff_initial,
-        reconnect_backoff_max, timeout_tick_duration,
+        RequestPipeline, ResponseEnvelope, ServeOutcome, expire_pending_commands, read_frame,
+        read_response_frames, reconnect_backoff_state, timeout_tick_duration,
     };
     use crate::wire::{
         ConnectionConfig, Result as WireResult, SaslClientAction, SaslClientAuthenticator,
@@ -1213,17 +1223,16 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_backoff_is_clamped_and_doubles_to_max() {
+    fn reconnect_backoff_state_resets_after_successful_connection() {
         let config = ConnectionConfig::default()
-            .reconnect_backoff_initial(Duration::ZERO)
-            .reconnect_backoff_max(Duration::from_millis(3));
+            .reconnect_backoff_initial(Duration::from_millis(5))
+            .reconnect_backoff_max(Duration::from_millis(20));
+        let mut state = reconnect_backoff_state(&config);
 
-        assert_eq!(reconnect_backoff_initial(&config), Duration::from_millis(1));
-        assert_eq!(reconnect_backoff_max(&config), Duration::from_millis(3));
-        assert_eq!(
-            next_reconnect_backoff(Duration::from_millis(2), Duration::from_millis(3)),
-            Duration::from_millis(3)
-        );
+        assert_eq!(state.next_delay_with_sample(0.5), Duration::from_millis(5));
+        assert_eq!(state.next_delay_with_sample(0.5), Duration::from_millis(10));
+        state.reset();
+        assert_eq!(state.next_delay_with_sample(0.5), Duration::from_millis(5));
     }
 
     #[test]

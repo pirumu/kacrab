@@ -94,6 +94,37 @@ pub struct ReadyBatch {
     pub(crate) producer_state: Option<ProducerBatchState>,
 }
 
+impl ReadyBatch {
+    pub(crate) fn split_for_retry(self) -> Option<Vec<Self>> {
+        if self.records.len() <= 1 {
+            return None;
+        }
+        let topic = self.topic;
+        let partition = self.partition;
+        let mut delivery = self.delivery;
+        let first_append_at = self.first_append_at;
+        let producer_state = self.producer_state;
+        let split = self
+            .records
+            .into_iter()
+            .enumerate()
+            .map(|(index, record)| {
+                let bytes = estimate_record_bytes(&record);
+                Self {
+                    topic: topic.clone(),
+                    partition,
+                    records: vec![record],
+                    delivery: if index == 0 { delivery.take() } else { None },
+                    bytes,
+                    first_append_at,
+                    producer_state: split_producer_state(producer_state, index),
+                }
+            })
+            .collect();
+        Some(split)
+    }
+}
+
 /// Per-partition queue sizes used by adaptive sticky partitioning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PartitionQueueLoad {
@@ -451,6 +482,26 @@ impl RecordAccumulator {
             self.buffered_bytes = self.buffered_bytes.saturating_add(batch.bytes);
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn split_and_requeue_front(&mut self, batch: ReadyBatch) -> usize {
+        let Some(split) = batch.split_for_retry() else {
+            return 0;
+        };
+        let count = split.len();
+        self.requeue_front(split);
+        count
+    }
+}
+
+fn split_producer_state(
+    producer_state: Option<ProducerBatchState>,
+    record_index: usize,
+) -> Option<ProducerBatchState> {
+    let mut state = producer_state?;
+    let offset = i32::try_from(record_index).unwrap_or(i32::MAX);
+    state.base_sequence = state.base_sequence.checked_add(offset).unwrap_or(i32::MAX);
+    Some(state)
 }
 
 fn batch_is_ready(
@@ -739,6 +790,46 @@ mod tests {
             .cloned()
             .collect();
 
+        assert_eq!(values, [Bytes::from_static(b"a"), Bytes::from_static(b"b")]);
+    }
+
+    #[test]
+    fn split_and_requeue_front_splits_multi_record_batch_for_retry() {
+        let now = Instant::now();
+        let mut accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(usize::MAX)
+                .linger(Duration::from_secs(1)),
+        );
+        accumulator
+            .append_at(
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+                now,
+            )
+            .expect("append first record");
+        accumulator
+            .append_at(
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")),
+                now,
+            )
+            .expect("append second record");
+        let batch = accumulator
+            .drain_all()
+            .pop()
+            .expect("drained oversized batch");
+
+        let split_count = accumulator.split_and_requeue_front(batch);
+        let split = accumulator.drain_all();
+        let values: Vec<_> = split
+            .iter()
+            .filter_map(|batch| batch.records.first())
+            .filter_map(|record| record.value.as_ref())
+            .cloned()
+            .collect();
+
+        assert_eq!(split_count, 2);
+        assert_eq!(split.len(), 2);
+        assert!(split.iter().all(|batch| batch.records.len() == 1));
         assert_eq!(values, [Bytes::from_static(b"a"), Bytes::from_static(b"b")]);
     }
 

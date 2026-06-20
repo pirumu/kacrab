@@ -83,6 +83,26 @@
       "clients": ["producer", "consumer", "admin"],
       "feature": "socket2",
       "documentation": "Initial reusable in-process read buffer capacity for broker frame reads."
+    },
+    {
+      "key": "broker.queue.capacity",
+      "rust_field": "broker_queue_capacity",
+      "type": "int",
+      "default": {
+        "kind": "null"
+      },
+      "clients": ["producer"],
+      "documentation": "Bounded pending command queue capacity for each broker IO task."
+    },
+    {
+      "key": "buffer.pool.capacity",
+      "rust_field": "buffer_pool_capacity",
+      "type": "int",
+      "default": {
+        "kind": "null"
+      },
+      "clients": ["producer"],
+      "documentation": "Number of reusable wire read/write buffers retained per client."
     }
   ]
 }

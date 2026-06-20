@@ -36,17 +36,24 @@ use super::{
     api::{ConsumerGroupMetadata, OffsetAndMetadata, TopicPartition},
     batch::encode_record_batch_with_producer_state_at_offset,
     config::{
-        ACKS_NONE, DEFAULT_DELIVERY_TIMEOUT, DEFAULT_TIMEOUT_MS, DEFAULT_TRANSACTION_TIMEOUT_MS,
-        ProducerCompression, ProducerIdempotenceConfig, ProducerRuntimeConfig,
+        ACKS_NONE, DEFAULT_DELIVERY_TIMEOUT, DEFAULT_RETRY_BACKOFF, DEFAULT_RETRY_BACKOFF_MAX,
+        DEFAULT_TIMEOUT_MS, DEFAULT_TRANSACTION_TIMEOUT_MS, ProducerCompression,
+        ProducerIdempotenceConfig, ProducerRuntimeConfig,
     },
     error::{ProducerError, Result},
     metrics::{ProducerMetrics, ProducerMetricsSnapshot},
     record::RecordMetadata,
-    response::{ProduceBrokerError, ProduceReceiptError, produce_receipts_with_error_details},
+    response::{
+        ProduceBrokerError, ProduceReceiptError, current_leader_updates, node_endpoint_updates,
+        produce_receipts_with_error_details,
+    },
     routing::{ProduceRoute, murmur2_java, route},
     transaction::{ProducerBatchState, ProducerIdentity, TransactionState},
 };
-use crate::wire::{BrokerEndpoint, RequestMessage, TopicMetadata, WireClient};
+use crate::wire::{
+    BackoffPolicy, BackoffState, BrokerEndpoint, PartitionLeaderChange, RequestMessage,
+    TopicMetadata, WireClient,
+};
 
 /// Dispatcher-only fallback for tests/manual construction. Public producer
 /// configs still default to `acks=all`; this keeps `ProducerDispatcher::new`
@@ -62,6 +69,8 @@ pub struct ProducerDispatcher {
     acks: i16,
     timeout_ms: i32,
     retry_attempts: usize,
+    retry_backoff: Duration,
+    retry_backoff_max: Duration,
     delivery_timeout: Duration,
     compression: ProducerCompression,
     max_request_size: usize,
@@ -88,6 +97,8 @@ impl ProducerDispatcher {
             acks: DEFAULT_DISPATCHER_ACKS,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             retry_attempts: 0,
+            retry_backoff: DEFAULT_RETRY_BACKOFF,
+            retry_backoff_max: DEFAULT_RETRY_BACKOFF_MAX,
             delivery_timeout: DEFAULT_DELIVERY_TIMEOUT,
             compression: ProducerCompression {
                 codec: kacrab_protocol::compression::Compression::None,
@@ -123,6 +134,8 @@ impl ProducerDispatcher {
             acks: config.acks,
             timeout_ms: config.timeout_ms,
             retry_attempts: config.retry_attempts,
+            retry_backoff: config.retry_backoff,
+            retry_backoff_max: config.retry_backoff_max,
             delivery_timeout: config.delivery_timeout,
             compression: config.compression,
             max_request_size: config.max_request_size,
@@ -900,6 +913,7 @@ impl ProducerDispatcher {
             };
             let version = end_txn_version(self.idempotence.transaction_two_phase_commit);
             let mut attempts_remaining = self.retry_attempts;
+            let mut retry_backoff = self.retry_backoff_state();
             loop {
                 let response: EndTxnResponseData = self
                     .wire
@@ -931,12 +945,12 @@ impl ProducerDispatcher {
                 if attempts_remaining > 0 && is_transaction_coordinator_error(error) {
                     attempts_remaining = attempts_remaining.saturating_sub(1);
                     coordinator_id = self.refresh_coordinator_id(transactional_id).await?;
-                    tokio::time::sleep(TRANSACTION_COORDINATOR_RETRY_BACKOFF).await;
+                    self.sleep_retry_backoff(&mut retry_backoff).await?;
                     continue;
                 }
                 if attempts_remaining > 0 && error.is_retriable() {
                     attempts_remaining = attempts_remaining.saturating_sub(1);
-                    tokio::time::sleep(TRANSACTION_COORDINATOR_RETRY_BACKOFF).await;
+                    self.sleep_retry_backoff(&mut retry_backoff).await?;
                     continue;
                 }
 
@@ -995,6 +1009,7 @@ impl ProducerDispatcher {
         }
 
         let mut attempts_remaining = self.retry_attempts;
+        let mut retry_backoff = self.retry_backoff_state();
         loop {
             match self.dispatch_batches(&mut batches).await {
                 Ok(receipts) => return Ok(receipts),
@@ -1003,6 +1018,24 @@ impl ProducerDispatcher {
                         self.metrics.record_requeue();
                     }
                     accumulator.requeue_front(batches);
+                    return Ok(Vec::new());
+                },
+                Err(DispatchError::SplitAndRequeue { topic, partition }) => {
+                    let Some(split) = split_message_too_large_batches(batches, &topic, partition)
+                    else {
+                        if self.metrics_are_enabled() {
+                            self.metrics.record_error();
+                        }
+                        return Err(ProducerError::Broker {
+                            topic,
+                            partition,
+                            error: ErrorCode::MessageTooLarge,
+                        });
+                    };
+                    if self.metrics_are_enabled() {
+                        self.metrics.record_requeue();
+                    }
+                    accumulator.requeue_front(split);
                     return Ok(Vec::new());
                 },
                 Err(DispatchError::RetryableLeadership {
@@ -1029,7 +1062,8 @@ impl ProducerDispatcher {
                     if self.metrics_are_enabled() {
                         self.metrics.record_retry();
                     }
-                    if let Some(error) = self.wait_before_retry(&batches).await {
+                    if let Some(error) = self.wait_before_retry(&batches, &mut retry_backoff).await
+                    {
                         if self.metrics_are_enabled() {
                             self.metrics.record_error();
                         }
@@ -1073,7 +1107,8 @@ impl ProducerDispatcher {
                         )
                         .await?;
                     }
-                    if let Some(error) = self.wait_before_retry(&batches).await {
+                    if let Some(error) = self.wait_before_retry(&batches, &mut retry_backoff).await
+                    {
                         if self.metrics_are_enabled() {
                             self.metrics.record_error();
                         }
@@ -1141,6 +1176,7 @@ impl ProducerDispatcher {
         }
 
         let mut attempts_remaining = self.retry_attempts;
+        let mut retry_backoff = self.retry_backoff_state();
         loop {
             match self.dispatch_batches(&mut batches).await {
                 Ok(receipts) => {
@@ -1149,6 +1185,9 @@ impl ProducerDispatcher {
                         .await;
                 },
                 Err(DispatchError::Requeue) => return DispatchOutcome::Requeue(batches),
+                Err(DispatchError::SplitAndRequeue { topic, partition }) => {
+                    return self.message_too_large_split_outcome(batches, topic, partition);
+                },
                 Err(DispatchError::RetryableLeadership {
                     topic,
                     partition,
@@ -1173,7 +1212,8 @@ impl ProducerDispatcher {
                     if self.metrics_are_enabled() {
                         self.metrics.record_retry();
                     }
-                    if let Some(error) = self.wait_before_retry(&batches).await {
+                    if let Some(error) = self.wait_before_retry(&batches, &mut retry_backoff).await
+                    {
                         if self.metrics_are_enabled() {
                             self.metrics.record_error();
                         }
@@ -1202,6 +1242,7 @@ impl ProducerDispatcher {
                         .handle_drained_idempotent_retry(
                             &mut batches,
                             &mut attempts_remaining,
+                            &mut retry_backoff,
                             &retry,
                         )
                         .await
@@ -1219,6 +1260,25 @@ impl ProducerDispatcher {
         }
     }
 
+    fn message_too_large_split_outcome(
+        &self,
+        batches: Vec<ReadyBatch>,
+        topic: String,
+        partition: i32,
+    ) -> DispatchOutcome {
+        let Some(split) = split_message_too_large_batches(batches, &topic, partition) else {
+            return DispatchOutcome::Delivered(Err(ProducerError::Broker {
+                topic,
+                partition,
+                error: ErrorCode::MessageTooLarge,
+            }));
+        };
+        if self.metrics_are_enabled() {
+            self.metrics.record_requeue();
+        }
+        DispatchOutcome::Requeue(split)
+    }
+
     async fn deliver_successful_batches(
         &self,
         batches: &mut [ReadyBatch],
@@ -1234,6 +1294,7 @@ impl ProducerDispatcher {
         &self,
         batches: &mut [ReadyBatch],
         attempts_remaining: &mut usize,
+        retry_backoff: &mut BackoffState,
         retry: &IdempotentRetry,
     ) -> Option<DispatchOutcome> {
         if *attempts_remaining == 0 {
@@ -1258,7 +1319,7 @@ impl ProducerDispatcher {
         {
             return Some(DispatchOutcome::Delivered(Err(error)));
         }
-        if let Some(error) = self.wait_before_retry(batches).await {
+        if let Some(error) = self.wait_before_retry(batches, retry_backoff).await {
             if self.metrics_are_enabled() {
                 self.metrics.record_error();
             }
@@ -1474,7 +1535,29 @@ impl ProducerDispatcher {
         for (_index, request, response) in completed {
             let request_receipts = match response {
                 ProduceDispatchResponse::Acknowledged(response) => {
-                    produce_receipts_with_error_details(&response, &request.routes)
+                    let endpoints = node_endpoint_updates(&response);
+                    if !endpoints.is_empty()
+                        && let Err(error) = self.wire.upsert_broker_metadata(&endpoints).await
+                    {
+                        Err(ProduceReceiptError::Producer(ProducerError::Wire(error)))
+                    } else {
+                        let updates = current_leader_updates(&response);
+                        for update in updates {
+                            let leader_broker = endpoints
+                                .iter()
+                                .find(|endpoint| endpoint.node_id == update.leader_id);
+                            let _updated =
+                                self.wire
+                                    .apply_partition_leader_update(PartitionLeaderChange {
+                                        topic: &update.topic,
+                                        partition_index: update.partition,
+                                        leader_id: update.leader_id,
+                                        leader_epoch: update.leader_epoch,
+                                        leader_broker,
+                                    });
+                        }
+                        produce_receipts_with_error_details(&response, &request.routes)
+                    }
                 },
                 ProduceDispatchResponse::NoAcknowledgement => Ok(no_ack_receipts(&request.routes)),
             };
@@ -1488,6 +1571,14 @@ impl ProducerDispatcher {
                         topic: error.topic,
                         partition: error.partition,
                         error: error.error,
+                    });
+                },
+                Err(ProduceReceiptError::Broker(error))
+                    if error.error == ErrorCode::MessageTooLarge =>
+                {
+                    return Err(DispatchError::SplitAndRequeue {
+                        topic: error.topic,
+                        partition: error.partition,
                     });
                 },
                 Err(ProduceReceiptError::Broker(error))
@@ -1597,7 +1688,11 @@ impl ProducerDispatcher {
             .find(|batch| now.duration_since(batch.first_append_at) >= self.delivery_timeout)
     }
 
-    async fn wait_before_retry(&self, batches: &[ReadyBatch]) -> Option<ProducerError> {
+    async fn wait_before_retry(
+        &self,
+        batches: &[ReadyBatch],
+        retry_backoff: &mut BackoffState,
+    ) -> Option<ProducerError> {
         let now = Instant::now();
         let earliest = batches
             .iter()
@@ -1614,7 +1709,11 @@ impl ProducerDispatcher {
             });
         }
         let remaining = self.delivery_timeout.saturating_sub(elapsed);
-        tokio::time::sleep(PRODUCE_RETRY_BACKOFF.min(remaining)).await;
+        let delay = match retry_backoff.next_delay() {
+            Ok(delay) => delay,
+            Err(error) => return Some(error.into()),
+        };
+        tokio::time::sleep(delay.min(remaining)).await;
         let now = Instant::now();
         if let Some(batch) = self.expired_batch(batches, now) {
             self.mark_expired_idempotent_batches_unresolved(batches, now)
@@ -1625,6 +1724,19 @@ impl ProducerDispatcher {
             });
         }
         None
+    }
+
+    fn retry_backoff_state(&self) -> BackoffState {
+        BackoffState::new(BackoffPolicy::new(
+            self.retry_backoff,
+            self.retry_backoff_max,
+        ))
+    }
+
+    async fn sleep_retry_backoff(&self, retry_backoff: &mut BackoffState) -> Result<()> {
+        let delay = retry_backoff.next_delay()?;
+        tokio::time::sleep(delay).await;
+        Ok(())
     }
 
     async fn mark_expired_idempotent_batches_unresolved(
@@ -1827,6 +1939,7 @@ impl ProducerDispatcher {
         let request = add_partitions_to_txn_request(transactional_id, identity, route);
         let version = client_api_info(ApiKey::AddPartitionsToTxn).max_version;
         let mut attempts_remaining = self.retry_attempts;
+        let mut retry_backoff = self.retry_backoff_state();
         let mut request_guard = self
             .track_transaction_request(TransactionRequestKind::AddPartitionsOrOffsets)
             .await;
@@ -1850,7 +1963,7 @@ impl ProducerDispatcher {
                 {
                     attempts_remaining = attempts_remaining.saturating_sub(1);
                     coordinator_id = self.refresh_coordinator_id(transactional_id).await?;
-                    tokio::time::sleep(TRANSACTION_COORDINATOR_RETRY_BACKOFF).await;
+                    self.sleep_retry_backoff(&mut retry_backoff).await?;
                 },
                 Err(ProducerError::Transaction {
                     error: transaction_error,
@@ -1859,7 +1972,7 @@ impl ProducerDispatcher {
                     && is_add_partitions_retry_error(transaction_error) =>
                 {
                     attempts_remaining = attempts_remaining.saturating_sub(1);
-                    tokio::time::sleep(TRANSACTION_COORDINATOR_RETRY_BACKOFF).await;
+                    self.sleep_retry_backoff(&mut retry_backoff).await?;
                 },
                 Err(ProducerError::Transaction {
                     operation,
@@ -1938,6 +2051,7 @@ impl ProducerDispatcher {
         };
         let version = client_api_info(ApiKey::AddOffsetsToTxn).max_version;
         let mut attempts_remaining = self.retry_attempts;
+        let mut retry_backoff = self.retry_backoff_state();
         loop {
             let response: AddOffsetsToTxnResponseData = self
                 .wire
@@ -1953,7 +2067,7 @@ impl ProducerDispatcher {
             if attempts_remaining > 0 && is_transaction_coordinator_error(error) {
                 attempts_remaining = attempts_remaining.saturating_sub(1);
                 coordinator_id = self.refresh_coordinator_id(transactional_id).await?;
-                tokio::time::sleep(TRANSACTION_COORDINATOR_RETRY_BACKOFF).await;
+                self.sleep_retry_backoff(&mut retry_backoff).await?;
                 continue;
             }
             if attempts_remaining == 0 || !error.is_retriable() {
@@ -1965,7 +2079,7 @@ impl ProducerDispatcher {
                 });
             }
             attempts_remaining = attempts_remaining.saturating_sub(1);
-            tokio::time::sleep(TRANSACTION_COORDINATOR_RETRY_BACKOFF).await;
+            self.sleep_retry_backoff(&mut retry_backoff).await?;
         }
     }
 
@@ -1995,6 +2109,7 @@ impl ProducerDispatcher {
         };
         let version = txn_offset_commit_version(self.idempotence.transaction_two_phase_commit);
         let mut attempts_remaining = self.retry_attempts;
+        let mut retry_backoff = self.retry_backoff_state();
         loop {
             let response: TxnOffsetCommitResponseData = self
                 .wire
@@ -2014,11 +2129,11 @@ impl ProducerDispatcher {
                         },
                         Err(error) => return Err(error),
                     };
-                    tokio::time::sleep(TRANSACTION_COORDINATOR_RETRY_BACKOFF).await;
+                    self.sleep_retry_backoff(&mut retry_backoff).await?;
                 },
                 Some(error) if attempts_remaining > 0 && error.is_retriable() => {
                     attempts_remaining = attempts_remaining.saturating_sub(1);
-                    tokio::time::sleep(TRANSACTION_COORDINATOR_RETRY_BACKOFF).await;
+                    self.sleep_retry_backoff(&mut retry_backoff).await?;
                 },
                 Some(error) => {
                     let transaction_error = transaction_control_error_for_client(error);
@@ -2165,6 +2280,7 @@ impl ProducerDispatcher {
         };
         let version = init_producer_id_version(self.idempotence.transaction_two_phase_commit);
         let mut attempts_remaining = self.retry_attempts;
+        let mut retry_backoff = self.retry_backoff_state();
         let request_kind = if current.is_some() {
             TransactionRequestKind::EpochBump
         } else {
@@ -2187,7 +2303,7 @@ impl ProducerDispatcher {
             {
                 attempts_remaining = attempts_remaining.saturating_sub(1);
                 broker_id = self.refresh_coordinator_id(transactional_id).await?;
-                tokio::time::sleep(TRANSACTION_COORDINATOR_RETRY_BACKOFF).await;
+                self.sleep_retry_backoff(&mut retry_backoff).await?;
                 continue;
             }
             if attempts_remaining == 0 || !error.is_retriable() {
@@ -2199,7 +2315,7 @@ impl ProducerDispatcher {
                 });
             }
             attempts_remaining = attempts_remaining.saturating_sub(1);
-            tokio::time::sleep(TRANSACTION_COORDINATOR_RETRY_BACKOFF).await;
+            self.sleep_retry_backoff(&mut retry_backoff).await?;
         }
     }
 
@@ -2283,6 +2399,7 @@ impl ProducerDispatcher {
         let broker_id = self.wire.any_broker_id()?;
         let version = client_api_info(ApiKey::FindCoordinator).max_version;
         let mut attempts_remaining = self.retry_attempts;
+        let mut retry_backoff = self.retry_backoff_state();
         let mut request_guard = self
             .track_transaction_request(TransactionRequestKind::FindCoordinator)
             .await;
@@ -2306,7 +2423,7 @@ impl ProducerDispatcher {
                 return Err(ProducerError::Transaction { operation, error });
             }
             attempts_remaining = attempts_remaining.saturating_sub(1);
-            tokio::time::sleep(TRANSACTION_COORDINATOR_RETRY_BACKOFF).await;
+            self.sleep_retry_backoff(&mut retry_backoff).await?;
         };
         let port = u16::try_from(coordinator.port).map_err(|_error| {
             ProducerError::InvalidTransactionState("transaction coordinator returned invalid port")
@@ -3883,6 +4000,10 @@ pub(crate) enum DispatchOutcome {
 enum DispatchError {
     Producer(ProducerError),
     Requeue,
+    SplitAndRequeue {
+        topic: String,
+        partition: i32,
+    },
     RetryableLeadership {
         topic: String,
         partition: i32,
@@ -4333,6 +4454,25 @@ fn unique_topics(batches: &[ReadyBatch]) -> Vec<String> {
     topics
 }
 
+fn split_message_too_large_batches(
+    batches: Vec<ReadyBatch>,
+    topic: &str,
+    partition: i32,
+) -> Option<Vec<ReadyBatch>> {
+    let mut split_batches = Vec::with_capacity(batches.len());
+    let mut split_found = false;
+    for batch in batches {
+        if !split_found && batch.topic == topic && batch.partition == partition {
+            let split = batch.split_for_retry()?;
+            split_batches.extend(split);
+            split_found = true;
+        } else {
+            split_batches.push(batch);
+        }
+    }
+    split_found.then_some(split_batches)
+}
+
 fn unique_unassigned_record_topics(records: &[super::ProducerRecord]) -> Vec<String> {
     let mut topics = Vec::new();
     for record in records {
@@ -4388,12 +4528,6 @@ const fn is_idempotent_retry_error(error: ErrorCode) -> bool {
     )
 }
 
-/// Retry delay for coordinator discovery and producer-id initialization. Kafka
-/// uses retry.backoff.ms defaults in public config; this private dispatcher
-/// fallback is short so transactional smoke tests do not stall when the public
-/// config path is not used.
-const TRANSACTION_COORDINATOR_RETRY_BACKOFF: Duration = Duration::from_millis(50);
-const PRODUCE_RETRY_BACKOFF: Duration = Duration::from_millis(1);
 /// Kafka 4.3 closes `InitProducerId` v6 when two-phase commit is disabled, so
 /// non-2PC producers cap negotiation at v5 until the broker-side behavior changes.
 const NON_2PC_INIT_PRODUCER_ID_MAX_VERSION: i16 = 5;
@@ -4584,6 +4718,23 @@ mod tests {
 
         assert_eq!(idempotent.broker_dispatch_in_flight_limit(), 5);
         assert_eq!(non_idempotent.broker_dispatch_in_flight_limit(), 5);
+    }
+
+    #[test]
+    fn dispatcher_retry_delay_doubles_to_runtime_max() {
+        let dispatcher = ProducerDispatcher::with_config(
+            test_wire(),
+            ProducerRuntimeConfig {
+                retry_backoff: Duration::from_millis(25),
+                retry_backoff_max: Duration::from_millis(80),
+                ..ProducerRuntimeConfig::default()
+            },
+        );
+        let mut retry = dispatcher.retry_backoff_state();
+
+        assert_eq!(retry.next_delay_with_sample(0.5), Duration::from_millis(25));
+        assert_eq!(retry.next_delay_with_sample(0.5), Duration::from_millis(50));
+        assert_eq!(retry.next_delay_with_sample(0.5), Duration::from_millis(80));
     }
 
     #[test]
@@ -5315,9 +5466,10 @@ mod tests {
             )
             .expect("append record");
         let batches = accumulator.drain_ready(now);
+        let mut retry_backoff = dispatcher.retry_backoff_state();
 
         let error = dispatcher
-            .wait_before_retry(&batches)
+            .wait_before_retry(&batches, &mut retry_backoff)
             .await
             .expect("retry wait should expire delivery timeout");
 

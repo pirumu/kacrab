@@ -85,6 +85,10 @@ impl RequestPipeline {
         self.len < self.slots.len()
     }
 
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub(crate) fn complete_response(&mut self, bytes: Bytes) {
         self.trim_empty_head();
         if self.len == 0 {
@@ -255,6 +259,7 @@ mod tests {
         let response = rx.await.expect("sender").expect("response");
 
         assert_eq!(response.api_version, 3);
+        assert!(pipeline.is_empty());
         assert!(pipeline.has_capacity());
     }
 

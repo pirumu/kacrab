@@ -114,6 +114,8 @@ fn producer_config_maps_delivery_batching_and_compression_to_runtime_config() {
             acks: -1,
             timeout_ms: 9_000,
             retry_attempts: 7,
+            retry_backoff: core::time::Duration::from_millis(100),
+            retry_backoff_max: core::time::Duration::from_secs(1),
             delivery_timeout: core::time::Duration::from_secs(45),
             max_block: core::time::Duration::from_mins(1),
             max_in_flight_requests_per_connection: 3,

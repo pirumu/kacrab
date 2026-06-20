@@ -15,6 +15,8 @@ use tokio::sync::Mutex;
 
 #[cfg(feature = "producer")]
 use super::broker::PendingBrokerResponse;
+#[cfg(feature = "producer")]
+use super::metadata::PartitionLeaderChange;
 use super::{
     auth::OAuthTokenCache,
     broker::{BrokerEndpoint, BrokerHandle},
@@ -22,7 +24,10 @@ use super::{
     config::ConnectionConfig,
     error::{Result, WireError},
     message::{RequestMessage, ResponseMessage},
-    metadata::{ClusterMetadata, map_metadata, metadata_request},
+    metadata::{
+        BrokerMetadata, ClusterMetadata, MetadataManager, MetadataRecoveryAction, map_metadata,
+        metadata_request, metadata_topic_states,
+    },
 };
 
 /// Cloneable wire facade that routes requests to broker-owned tasks.
@@ -37,16 +42,10 @@ struct WireClientInner {
     client_id: String,
     endpoints: RwLock<HashMap<i32, BrokerEndpoint>>,
     handles: RwLock<HashMap<i32, BrokerHandle>>,
-    metadata: RwLock<Option<MetadataSnapshot>>,
+    metadata: RwLock<MetadataManager>,
     metadata_refresh: Mutex<()>,
     oauth_token_cache: Arc<Mutex<OAuthTokenCache>>,
     buffers: Arc<BufferPools>,
-}
-
-#[derive(Debug, Clone)]
-struct MetadataSnapshot {
-    metadata: Arc<ClusterMetadata>,
-    updated_at: Instant,
 }
 
 impl WireClient {
@@ -57,18 +56,20 @@ impl WireClient {
         client_id: impl Into<String>,
         brokers: impl IntoIterator<Item = BrokerEndpoint>,
     ) -> Self {
-        let endpoints = brokers
-            .into_iter()
+        let endpoints = brokers.into_iter().collect::<Vec<_>>();
+        let endpoint_registry = endpoints
+            .iter()
+            .cloned()
             .map(|endpoint| (endpoint.node_id, endpoint))
             .collect();
         Self {
             inner: Arc::new(WireClientInner {
                 buffers: Arc::new(BufferPools::new(config.buffer_pool_capacity)),
+                metadata: RwLock::new(MetadataManager::new(config.clone(), endpoints)),
                 config,
                 client_id: client_id.into(),
-                endpoints: RwLock::new(endpoints),
+                endpoints: RwLock::new(endpoint_registry),
                 handles: RwLock::new(HashMap::new()),
-                metadata: RwLock::new(None),
                 metadata_refresh: Mutex::new(()),
                 oauth_token_cache: Arc::new(Mutex::new(OAuthTokenCache::default())),
             }),
@@ -160,34 +161,72 @@ impl WireClient {
         if let Some(metadata) = self.cached_metadata_for(&topics) {
             return Ok(metadata);
         }
+        self.request_metadata_update_for_missing_topics(&topics);
+        if let Some((topic, error)) = self.persistent_topic_error_for(&topics) {
+            return Err(WireError::MetadataTopic { topic, error });
+        }
 
         let _refresh_guard = self.inner.metadata_refresh.lock().await;
         if let Some(metadata) = self.cached_metadata_for(&topics) {
             return Ok(metadata);
         }
+        self.request_metadata_update_for_missing_topics(&topics);
+        if let Some((topic, error)) = self.persistent_topic_error_for(&topics) {
+            return Err(WireError::MetadataTopic { topic, error });
+        }
 
-        let broker_id = self.refresh_broker_id()?;
-        let request = metadata_request(&topics);
-        let version = client_api_info(ApiKey::Metadata).max_version;
-        let response: MetadataResponseData = self
-            .send_to_broker(broker_id, ApiKey::Metadata, version, &request)
-            .await?;
-        let metadata = Arc::new(map_metadata(response)?);
+        self.wait_for_metadata_refresh_slot().await;
+        self.record_metadata_refresh_attempt();
+
+        let response = match self.fetch_metadata_response(&topics).await {
+            Ok(response) => response,
+            Err(error) => {
+                self.record_metadata_refresh_failure()?;
+                if self.record_no_usable_metadata() == MetadataRecoveryAction::Rebootstrap {
+                    self.restore_bootstrap_endpoints();
+                    self.wait_for_metadata_refresh_slot().await;
+                    self.record_metadata_refresh_attempt();
+                    self.fetch_metadata_response(&topics).await?
+                } else {
+                    return Err(error);
+                }
+            },
+        };
+        self.record_metadata_topic_states(&response);
+        let metadata = Arc::new(match map_metadata(response) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                self.record_metadata_refresh_failure()?;
+                return Err(error);
+            },
+        });
         self.update_broker_registry(&metadata).await?;
-        self.store_metadata(Arc::clone(&metadata));
+        self.store_metadata(Arc::clone(&metadata))?;
+        self.mark_topics_used(&topics);
         Ok(metadata)
     }
 
     /// Invalidate cached metadata when a topic-partition leadership error is observed.
     pub fn invalidate_topic_partition(&self, _topic: &str, _partition: i32) {
-        let mut guard = self
-            .inner
+        self.inner
             .metadata
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if guard.is_some() {
-            *guard = None;
-        }
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .invalidate_all();
+    }
+
+    #[cfg(feature = "producer")]
+    pub(crate) async fn upsert_broker_metadata(&self, brokers: &[BrokerMetadata]) -> Result<()> {
+        self.update_broker_registry_from_brokers(brokers).await
+    }
+
+    #[cfg(feature = "producer")]
+    pub(crate) fn apply_partition_leader_update(&self, change: PartitionLeaderChange<'_>) -> bool {
+        self.inner
+            .metadata
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .apply_partition_leader_update(change)
     }
 
     fn handle_for(&self, broker_id: i32) -> Result<BrokerHandle> {
@@ -237,21 +276,15 @@ impl WireClient {
     }
 
     fn cached_metadata_for(&self, topics: &[String]) -> Option<Arc<ClusterMetadata>> {
-        let snapshot = {
-            let metadata = self
-                .inner
-                .metadata
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            metadata.clone()
-        }?;
-        if snapshot.updated_at.elapsed() > self.inner.config.metadata_max_age {
-            return None;
-        }
-        topics
-            .iter()
-            .all(|topic| snapshot.metadata.topic(topic).is_some())
-            .then_some(snapshot.metadata)
+        let mut manager = self
+            .inner
+            .metadata
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let metadata = manager.cached_for(topics, Instant::now())?;
+        manager.mark_topics_used(topics, Instant::now());
+        drop(manager);
+        Some(metadata)
     }
 
     fn refresh_broker_id(&self) -> Result<i32> {
@@ -280,30 +313,12 @@ impl WireClient {
     }
 
     async fn update_broker_registry(&self, metadata: &ClusterMetadata) -> Result<()> {
-        let mut endpoints = Vec::with_capacity(metadata.brokers.len());
-        for broker in &metadata.brokers {
-            let port =
-                u16::try_from(broker.port).map_err(|_| WireError::InvalidBrokerEndpoint {
-                    node_id: broker.node_id,
-                    host: broker.host.clone(),
-                    port: broker.port,
-                })?;
-            let addresses = tokio::net::lookup_host((broker.host.as_str(), port)).await?;
-            let Some(addr) = choose_broker_addr(addresses) else {
-                return Err(WireError::InvalidBrokerEndpoint {
-                    node_id: broker.node_id,
-                    host: broker.host.clone(),
-                    port: broker.port,
-                });
-            };
-            endpoints.push(BrokerEndpoint::from_resolved(
-                broker.node_id,
-                broker.host.clone(),
-                port,
-                addr,
-            ));
-        }
+        self.update_broker_registry_from_brokers(&metadata.brokers)
+            .await
+    }
 
+    async fn update_broker_registry_from_brokers(&self, brokers: &[BrokerMetadata]) -> Result<()> {
+        let endpoints = resolve_broker_endpoints(brokers).await?;
         {
             let mut guard = self
                 .inner
@@ -317,17 +332,153 @@ impl WireClient {
         Ok(())
     }
 
-    fn store_metadata(&self, metadata: Arc<ClusterMetadata>) {
-        let mut guard = self
+    fn store_metadata(&self, metadata: Arc<ClusterMetadata>) -> Result<()> {
+        self.inner
+            .metadata
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .store(metadata, Instant::now())?;
+        Ok(())
+    }
+
+    async fn fetch_metadata_response(&self, topics: &[String]) -> Result<MetadataResponseData> {
+        let broker_id = self.refresh_broker_id()?;
+        let request = metadata_request(topics);
+        let version = client_api_info(ApiKey::Metadata).max_version;
+        self.send_to_broker(broker_id, ApiKey::Metadata, version, &request)
+            .await
+    }
+
+    fn mark_topics_used(&self, topics: &[String]) {
+        self.inner
+            .metadata
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mark_topics_used(topics, Instant::now());
+    }
+
+    fn record_no_usable_metadata(&self) -> MetadataRecoveryAction {
+        self.inner
+            .metadata
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_no_usable_metadata(Instant::now())
+    }
+
+    async fn wait_for_metadata_refresh_slot(&self) {
+        loop {
+            let delay = self
+                .inner
+                .metadata
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .refresh_delay(Instant::now());
+            if delay.is_zero() {
+                return;
+            }
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    fn record_metadata_refresh_attempt(&self) {
+        self.inner
+            .metadata
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_refresh_attempt(Instant::now());
+    }
+
+    fn record_metadata_refresh_failure(&self) -> Result<()> {
+        let _delay = self
             .inner
             .metadata
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = Some(MetadataSnapshot {
-            metadata,
-            updated_at: Instant::now(),
-        });
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_refresh_failure(Instant::now())?;
+        Ok(())
     }
+
+    fn record_metadata_topic_states(&self, response: &MetadataResponseData) {
+        self.inner
+            .metadata
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_topic_states(metadata_topic_states(response));
+    }
+
+    fn request_metadata_update_for_missing_topics(&self, topics: &[String]) {
+        self.inner
+            .metadata
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .request_update_for_missing_topics(topics);
+    }
+
+    fn persistent_topic_error_for(
+        &self,
+        topics: &[String],
+    ) -> Option<(String, kacrab_protocol::generated::ErrorCode)> {
+        let manager = self
+            .inner
+            .metadata
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        topics.iter().find_map(|topic| {
+            if manager.is_invalid_topic(topic) || manager.is_unauthorized_topic(topic) {
+                manager
+                    .topic_error(topic)
+                    .map(|error| (topic.clone(), error))
+            } else {
+                None
+            }
+        })
+    }
+
+    fn restore_bootstrap_endpoints(&self) {
+        let endpoints = self
+            .inner
+            .metadata
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bootstrap_endpoints()
+            .map(|endpoint| (endpoint.node_id, endpoint))
+            .collect::<HashMap<_, _>>();
+        if endpoints.is_empty() {
+            return;
+        }
+        let mut guard = self
+            .inner
+            .endpoints
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = endpoints;
+    }
+}
+
+async fn resolve_broker_endpoints(brokers: &[BrokerMetadata]) -> Result<Vec<BrokerEndpoint>> {
+    let mut endpoints = Vec::with_capacity(brokers.len());
+    for broker in brokers {
+        let port = u16::try_from(broker.port).map_err(|_| WireError::InvalidBrokerEndpoint {
+            node_id: broker.node_id,
+            host: broker.host.clone(),
+            port: broker.port,
+        })?;
+        let addresses = tokio::net::lookup_host((broker.host.as_str(), port)).await?;
+        let Some(addr) = choose_broker_addr(addresses) else {
+            return Err(WireError::InvalidBrokerEndpoint {
+                node_id: broker.node_id,
+                host: broker.host.clone(),
+                port: broker.port,
+            });
+        };
+        endpoints.push(BrokerEndpoint::from_resolved(
+            broker.node_id,
+            broker.host.clone(),
+            port,
+            addr,
+        ));
+    }
+    Ok(endpoints)
 }
 
 fn choose_broker_addr(addresses: impl IntoIterator<Item = SocketAddr>) -> Option<SocketAddr> {
@@ -358,7 +509,10 @@ mod tests {
         time::Duration,
     };
 
-    use kacrab_protocol::KafkaUuid;
+    use kacrab_protocol::{
+        KafkaString, KafkaUuid,
+        generated::{ErrorCode, MetadataResponseData, MetadataResponseTopic},
+    };
 
     use super::{BrokerEndpoint, ClusterMetadata, WireClient, choose_broker_addr};
     use crate::wire::{
@@ -413,17 +567,57 @@ mod tests {
             }],
         });
 
-        client.store_metadata(Arc::clone(&metadata));
+        client.store_metadata(Arc::clone(&metadata)).unwrap();
 
         assert!(client.cached_metadata_for(&["orders".to_owned()]).is_none());
 
         let client = WireClient::connect_with_brokers(ConnectionConfig::default(), "client-a", []);
-        client.store_metadata(metadata);
+        client.store_metadata(metadata).unwrap();
         assert!(
             client
                 .cached_metadata_for(&["payments".to_owned()])
                 .is_none()
         );
+    }
+
+    #[test]
+    fn cached_metadata_rejects_idle_topic_snapshots() {
+        let client = WireClient::connect_with_brokers(
+            ConnectionConfig::default()
+                .metadata_max_age(Duration::from_mins(1))
+                .metadata_max_idle(Duration::ZERO),
+            "client-a",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("socket address"),
+            )],
+        );
+        client
+            .store_metadata(Arc::new(ClusterMetadata {
+                cluster_id: Some("cluster-a".to_owned()),
+                controller_id: 7,
+                brokers: vec![BrokerMetadata {
+                    node_id: 7,
+                    host: "localhost".to_owned(),
+                    port: 9092,
+                    rack: None,
+                }],
+                topics: vec![TopicMetadata {
+                    name: "orders".to_owned(),
+                    topic_id: KafkaUuid::ZERO,
+                    partitions: vec![PartitionMetadata {
+                        partition_index: 0,
+                        leader_id: 7,
+                        leader_epoch: 1,
+                        replica_nodes: vec![7],
+                        isr_nodes: vec![7],
+                        offline_replicas: Vec::new(),
+                    }],
+                }],
+            }))
+            .unwrap();
+
+        assert!(client.cached_metadata_for(&["orders".to_owned()]).is_none());
     }
 
     #[test]
@@ -489,5 +683,60 @@ mod tests {
         assert_eq!(endpoint.host(), "localhost");
         assert_eq!(endpoint.port(), 9092);
         assert_eq!(endpoint.addr.port(), 9092);
+    }
+
+    #[tokio::test]
+    async fn update_broker_registry_accepts_produce_response_endpoint_metadata() {
+        let client = WireClient::connect_with_brokers(ConnectionConfig::default(), "client-a", []);
+        client
+            .update_broker_registry_from_brokers(&[BrokerMetadata {
+                node_id: 9,
+                host: "localhost".to_owned(),
+                port: 19_092,
+                rack: Some("rack-a".to_owned()),
+            }])
+            .await
+            .unwrap();
+
+        let endpoint = client
+            .inner
+            .endpoints
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&9)
+            .expect("broker endpoint")
+            .clone();
+        assert_eq!(endpoint.host(), "localhost");
+        assert_eq!(endpoint.port(), 19_092);
+    }
+
+    #[test]
+    fn persistent_topic_error_returns_invalid_and_unauthorized_bookkeeping() {
+        let client = WireClient::connect_with_brokers(ConnectionConfig::default(), "client-a", []);
+        let response = MetadataResponseData {
+            topics: vec![
+                MetadataResponseTopic {
+                    error_code: i16::from(ErrorCode::InvalidTopicException),
+                    name: Some(KafkaString::from("bad topic".to_owned())),
+                    ..MetadataResponseTopic::default()
+                },
+                MetadataResponseTopic {
+                    error_code: i16::from(ErrorCode::TopicAuthorizationFailed),
+                    name: Some(KafkaString::from("secret".to_owned())),
+                    ..MetadataResponseTopic::default()
+                },
+            ],
+            ..MetadataResponseData::default()
+        };
+        client.record_metadata_topic_states(&response);
+
+        assert_eq!(
+            client.persistent_topic_error_for(&["bad topic".to_owned()]),
+            Some(("bad topic".to_owned(), ErrorCode::InvalidTopicException))
+        );
+        assert_eq!(
+            client.persistent_topic_error_for(&["secret".to_owned()]),
+            Some(("secret".to_owned(), ErrorCode::TopicAuthorizationFailed))
+        );
     }
 }

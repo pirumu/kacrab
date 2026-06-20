@@ -124,6 +124,8 @@ async fn kafka_producer_send_buffers_until_flush() {
             acks: 1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -202,6 +204,8 @@ async fn kafka_producer_background_sender_dispatches_after_linger_without_flush(
             acks: 1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_secs(1),
             max_block: Duration::from_secs(1),
             partitioner_ignore_keys: false,
@@ -281,6 +285,8 @@ async fn kafka_producer_background_sender_dispatches_ready_batch_without_linger_
             acks: 1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_secs(1),
             max_block: Duration::from_secs(1),
             partitioner_ignore_keys: false,
@@ -353,6 +359,8 @@ async fn kafka_producer_send_with_callback_invokes_callback_and_returns_delivery
             acks: 1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -1034,6 +1042,8 @@ async fn kafka_producer_send_auto_batches_per_record_sends_until_flush() {
             acks: 1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -1142,6 +1152,8 @@ async fn kafka_producer_send_with_callback_auto_batches_until_flush() {
             acks: 1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -1220,6 +1232,8 @@ async fn kafka_producer_pipelines_ready_batches_until_flush() {
             acks: 1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -1316,6 +1330,8 @@ async fn kafka_producer_single_send_budget_coalesces_ready_partitions() {
             acks: 1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -1423,6 +1439,8 @@ async fn kafka_producer_10kib_records_keep_observed_requests_under_max_request_s
             acks: 1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -1532,6 +1550,8 @@ async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() 
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -1613,6 +1633,8 @@ async fn kafka_producer_requeues_in_flight_batch_when_metadata_is_missing() {
             acks: 1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -1682,6 +1704,8 @@ async fn kafka_producer_metrics_snapshot_reports_queue_and_dispatch_counters() {
             acks: 1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -1836,6 +1860,8 @@ async fn kafka_producer_commits_transactional_send() {
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -1959,6 +1985,8 @@ async fn kafka_producer_commit_timeout_can_retry_same_operation_like_java() {
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_millis(30),
             partitioner_ignore_keys: false,
@@ -2091,6 +2119,8 @@ async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_millis(30),
             partitioner_ignore_keys: false,
@@ -2236,6 +2266,8 @@ async fn kafka_producer_abort_holds_end_txn_until_in_flight_batches_drain_like_j
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_secs(1),
             partitioner_ignore_keys: false,
@@ -3287,6 +3319,8 @@ async fn kafka_producer_sends_offsets_to_transaction_before_commit() {
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -3515,6 +3549,8 @@ async fn kafka_producer_send_offsets_to_transaction_reports_commit_error() {
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -3637,6 +3673,8 @@ async fn kafka_producer_send_offsets_timeout_can_retry_same_operation_like_java(
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_millis(30),
             partitioner_ignore_keys: false,
@@ -4692,6 +4730,8 @@ async fn kafka_producer_init_transactions_retries_retriable_coordinator_lookup()
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 1,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -4758,6 +4798,8 @@ async fn kafka_producer_init_transactions_timeout_can_retry_same_operation_like_
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_millis(30),
             partitioner_ignore_keys: false,
@@ -4844,6 +4886,8 @@ async fn kafka_producer_commit_transaction_reports_end_txn_broker_error() {
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -4944,6 +4988,8 @@ async fn kafka_producer_abort_transaction_abortable_error_becomes_fatal_like_jav
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -5222,6 +5268,8 @@ async fn kafka_producer_init_transactions_reports_unretriable_init_producer_erro
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -5326,6 +5374,8 @@ async fn kafka_producer_init_transactions_reports_unretriable_find_coordinator_e
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -5416,6 +5466,8 @@ async fn kafka_producer_init_transactions_rejects_invalid_coordinator_port() {
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -5647,6 +5699,8 @@ async fn dispatcher_initializes_idempotent_producer_and_sequences_partition_batc
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -5677,6 +5731,190 @@ async fn dispatcher_initializes_idempotent_producer_and_sequences_partition_batc
 
     assert_eq!(first[0].offset, 40);
     assert_eq!(second[0].offset, 41);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 4);
+}
+
+#[tokio::test]
+async fn dispatcher_completes_duplicate_sequence_number_as_success_like_java() {
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::InitProducerId as i16);
+            let init = InitProducerIdRequestData::read(&mut request, 5).expect("init producer id");
+            assert_eq!(init.producer_id, -1);
+            assert_eq!(init.producer_epoch, -1);
+            init_producer_id_response_frame(header.correlation_id, 42, 3)
+        }),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            let mut records = produce.topic_data[0].partition_data[0]
+                .records
+                .clone()
+                .expect("records");
+            let batch = RecordBatch::decode(&mut records).expect("record batch");
+            assert_eq!(batch.producer_id, 42);
+            assert_eq!(batch.producer_epoch, 3);
+            assert_eq!(batch.base_sequence, 0);
+            produce_error_response_frame_for_request(&header, 0, ErrorCode::DuplicateSequenceNumber)
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response([(7, leader_7)]);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let dispatcher = ProducerDispatcher::with_config(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default(),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
+            delivery_timeout: Duration::from_mins(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 1,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: None,
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+    let now = Instant::now();
+
+    let receipts = dispatcher
+        .dispatch_ready_batches(ready_batches_for_value(b"a", now), now)
+        .await
+        .unwrap();
+
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].offset, -1);
+    assert_eq!(receipts[0].timestamp_ms, -1);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 3);
+}
+
+#[tokio::test]
+async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_like_java() {
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            let mut records = produce.topic_data[0].partition_data[0]
+                .records
+                .clone()
+                .expect("records");
+            let batch = RecordBatch::decode(&mut records).expect("record batch");
+            assert_eq!(batch.records.len(), 2);
+            produce_error_response_frame_for_request(&header, 0, ErrorCode::MessageTooLarge)
+        }),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            let mut records = produce.topic_data[0].partition_data[0]
+                .records
+                .clone()
+                .expect("records");
+            let batch = RecordBatch::decode(&mut records).expect("record batch");
+            assert_eq!(batch.records.len(), 1);
+            produce_response_frame_for_request(&header, 0, 40)
+        }),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            let mut records = produce.topic_data[0].partition_data[0]
+                .records
+                .clone()
+                .expect("records");
+            let batch = RecordBatch::decode(&mut records).expect("record batch");
+            assert_eq!(batch.records.len(), 1);
+            produce_response_frame_for_request(&header, 0, 41)
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response([(7, leader_7)]);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let dispatcher = ProducerDispatcher::new(wire);
+    let now = Instant::now();
+    let mut accumulator = RecordAccumulator::new(
+        AccumulatorConfig::default()
+            .batch_size(usize::MAX)
+            .linger(Duration::ZERO)
+            .buffer_memory(16 * 1024),
+    );
+    for value in [b"a".as_slice(), b"b".as_slice()] {
+        accumulator
+            .append_at(
+                ProducerRecord::new("orders", 0).value(Bytes::copy_from_slice(value)),
+                now,
+            )
+            .expect("append record");
+    }
+
+    let first = dispatcher
+        .dispatch_ready(&mut accumulator, now)
+        .await
+        .unwrap();
+    let second = dispatcher
+        .dispatch_ready(&mut accumulator, now)
+        .await
+        .unwrap();
+
+    assert!(first.is_empty());
+    assert_eq!(second.len(), 2);
+    assert_eq!(second[0].offset, 40);
+    assert_eq!(second[1].offset, 41);
     assert_eq!(bootstrap.join().await, 2);
     assert_eq!(leader_7.join().await, 4);
 }
@@ -5768,6 +6006,8 @@ async fn dispatcher_bumps_epoch_and_retries_unknown_producer_id() {
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 1,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -5872,6 +6112,8 @@ async fn dispatcher_retries_unknown_producer_id_without_epoch_bump_when_log_star
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 1,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -5980,6 +6222,8 @@ async fn dispatcher_releases_sequence_after_leadership_retry_timeout_like_java()
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 1,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_millis(1),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -6106,6 +6350,8 @@ async fn dispatcher_recovers_unknown_producer_id_timeout_with_unknown_log_start_
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 1,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_millis(1),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -6197,6 +6443,8 @@ async fn dispatcher_sends_compressed_record_batches_from_runtime_config() {
             acks: 1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -7605,6 +7853,8 @@ fn transactional_test_producer_with_retries_batch_size_and_linger(
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
@@ -7634,6 +7884,8 @@ fn transaction_v2_test_producer(wire: WireClient) -> Producer {
             acks: -1,
             timeout_ms: 30_000,
             retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,

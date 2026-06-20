@@ -1,4 +1,9 @@
 //! Public typed Kafka client configurations.
+#![expect(
+    clippy::large_stack_arrays,
+    reason = "kafka_config! emits static config metadata arrays; they are not producer hot-path \
+              data"
+)]
 
 extern crate alloc;
 
@@ -154,6 +159,42 @@ kafka_config! {
         #[source("https://kafka.apache.org/43/configuration/producer-configs/#producerconfigs_max.request.size")]
         #[comment("Maximum producer request size in bytes.")]
         max_request_size: ByteSize,
+
+        #[key("reconnect.backoff.ms")]
+        #[default(DurationMs::from_millis(50))]
+        #[kafka_type("long")]
+        #[kafka_default("50")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/producer-configs/#producerconfigs_reconnect.backoff.ms")]
+        #[comment("Initial reconnect backoff for broker TCP connections.")]
+        reconnect_backoff_ms: DurationMs,
+
+        #[key("reconnect.backoff.max.ms")]
+        #[default(DurationMs::from_millis(1_000))]
+        #[kafka_type("long")]
+        #[kafka_default("1000")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/producer-configs/#producerconfigs_reconnect.backoff.max.ms")]
+        #[comment("Maximum reconnect backoff for broker TCP connections.")]
+        reconnect_backoff_max_ms: DurationMs,
+
+        #[key("retry.backoff.ms")]
+        #[default(DurationMs::from_millis(100))]
+        #[kafka_type("long")]
+        #[kafka_default("100")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/producer-configs/#producerconfigs_retry.backoff.ms")]
+        #[comment("Initial producer retry backoff for retriable produce and transaction-control errors.")]
+        retry_backoff_ms: DurationMs,
+
+        #[key("retry.backoff.max.ms")]
+        #[default(DurationMs::from_millis(1_000))]
+        #[kafka_type("long")]
+        #[kafka_default("1000")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/producer-configs/#producerconfigs_retry.backoff.max.ms")]
+        #[comment("Maximum producer retry backoff for retriable produce and transaction-control errors.")]
+        retry_backoff_max_ms: DurationMs,
 
         #[key("partitioner.ignore.keys")]
         #[default(false)]
@@ -898,6 +939,14 @@ impl ProducerConfig {
             receive_buffer_bytes: self.receive_buffer_bytes,
             request_timeout_ms: self.request_timeout_ms,
             metadata_max_age_ms: self.metadata_max_age_ms,
+            metadata_max_idle_ms: self.metadata_max_idle_ms,
+            metadata_recovery_strategy: self.metadata_recovery_strategy.clone(),
+            metadata_recovery_rebootstrap_trigger_ms: self.metadata_recovery_rebootstrap_trigger_ms,
+            connections_max_idle_ms: self.connections_max_idle_ms,
+            reconnect_backoff_ms: Some(self.reconnect_backoff_ms),
+            reconnect_backoff_max_ms: Some(self.reconnect_backoff_max_ms),
+            retry_backoff_ms: Some(self.retry_backoff_ms),
+            retry_backoff_max_ms: Some(self.retry_backoff_max_ms),
             socket_connection_setup_timeout_ms: self.socket_connection_setup_timeout_ms,
             socket_connection_setup_timeout_max_ms: self.socket_connection_setup_timeout_max_ms,
             socket_tcp_nodelay: self.socket_tcp_nodelay,
@@ -993,6 +1042,14 @@ impl ConsumerConfig {
             receive_buffer_bytes: self.receive_buffer_bytes,
             request_timeout_ms: self.request_timeout_ms,
             metadata_max_age_ms: self.metadata_max_age_ms,
+            metadata_max_idle_ms: DurationMs::from_millis(300_000),
+            metadata_recovery_strategy: self.metadata_recovery_strategy.clone(),
+            metadata_recovery_rebootstrap_trigger_ms: self.metadata_recovery_rebootstrap_trigger_ms,
+            connections_max_idle_ms: self.connections_max_idle_ms,
+            reconnect_backoff_ms: None,
+            reconnect_backoff_max_ms: None,
+            retry_backoff_ms: None,
+            retry_backoff_max_ms: None,
             socket_connection_setup_timeout_ms: self.socket_connection_setup_timeout_ms,
             socket_connection_setup_timeout_max_ms: self.socket_connection_setup_timeout_max_ms,
             socket_tcp_nodelay: self.socket_tcp_nodelay,
@@ -1080,6 +1137,14 @@ impl AdminConfig {
             receive_buffer_bytes: self.receive_buffer_bytes,
             request_timeout_ms: self.request_timeout_ms,
             metadata_max_age_ms: self.metadata_max_age_ms,
+            metadata_max_idle_ms: DurationMs::from_millis(300_000),
+            metadata_recovery_strategy: self.metadata_recovery_strategy.clone(),
+            metadata_recovery_rebootstrap_trigger_ms: self.metadata_recovery_rebootstrap_trigger_ms,
+            connections_max_idle_ms: self.connections_max_idle_ms,
+            reconnect_backoff_ms: None,
+            reconnect_backoff_max_ms: None,
+            retry_backoff_ms: None,
+            retry_backoff_max_ms: None,
             socket_connection_setup_timeout_ms: self.socket_connection_setup_timeout_ms,
             socket_connection_setup_timeout_max_ms: self.socket_connection_setup_timeout_max_ms,
             socket_tcp_nodelay: self.socket_tcp_nodelay,
@@ -1164,6 +1229,14 @@ struct ConnectionConfigFields {
     receive_buffer_bytes: i32,
     request_timeout_ms: DurationMs,
     metadata_max_age_ms: DurationMs,
+    metadata_max_idle_ms: DurationMs,
+    metadata_recovery_strategy: String,
+    metadata_recovery_rebootstrap_trigger_ms: DurationMs,
+    connections_max_idle_ms: DurationMs,
+    reconnect_backoff_ms: Option<DurationMs>,
+    reconnect_backoff_max_ms: Option<DurationMs>,
+    retry_backoff_ms: Option<DurationMs>,
+    retry_backoff_max_ms: Option<DurationMs>,
     socket_connection_setup_timeout_ms: DurationMs,
     socket_connection_setup_timeout_max_ms: DurationMs,
     socket_tcp_nodelay: bool,
@@ -1244,6 +1317,17 @@ fn connection_config_from_fields(fields: &ConnectionConfigFields) -> crate::wire
         transport: crate::wire::TransportConfig::Plaintext,
         request_timeout: fields.request_timeout_ms.duration(),
         metadata_max_age: fields.metadata_max_age_ms.duration(),
+        metadata_max_idle: fields.metadata_max_idle_ms.duration(),
+        metadata_recovery_strategy: metadata_recovery_strategy(&fields.metadata_recovery_strategy),
+        metadata_rebootstrap_trigger: fields.metadata_recovery_rebootstrap_trigger_ms.duration(),
+        metadata_refresh_backoff_initial: fields.retry_backoff_ms.map_or(
+            default.metadata_refresh_backoff_initial,
+            DurationMs::duration,
+        ),
+        metadata_refresh_backoff_max: fields
+            .retry_backoff_max_ms
+            .map_or(default.metadata_refresh_backoff_max, DurationMs::duration),
+        connections_max_idle: fields.connections_max_idle_ms.duration(),
         socket_connection_setup_timeout: fields.socket_connection_setup_timeout_ms.duration(),
         socket_connection_setup_timeout_max: fields
             .socket_connection_setup_timeout_max_ms
@@ -1257,8 +1341,12 @@ fn connection_config_from_fields(fields: &ConnectionConfigFields) -> crate::wire
             .broker_queue_capacity
             .filter(|capacity| *capacity > 0)
             .unwrap_or(default.broker_queue_capacity),
-        reconnect_backoff_initial: default.reconnect_backoff_initial,
-        reconnect_backoff_max: default.reconnect_backoff_max,
+        reconnect_backoff_initial: fields
+            .reconnect_backoff_ms
+            .map_or(default.reconnect_backoff_initial, DurationMs::duration),
+        reconnect_backoff_max: fields
+            .reconnect_backoff_max_ms
+            .map_or(default.reconnect_backoff_max, DurationMs::duration),
         buffer_pool_capacity: fields
             .buffer_pool_capacity
             .unwrap_or(default.buffer_pool_capacity),
@@ -1276,6 +1364,13 @@ fn socket_config_from_fields(fields: &ConnectionConfigFields) -> crate::wire::So
         tcp_user_timeout_ms: fields.socket_tcp_user_timeout_ms.map(DurationMs::duration),
         tcp_congestion: fields.socket_tcp_congestion.map(to_wire_congestion),
         reuse_address: fields.socket_reuse_address,
+    }
+}
+
+fn metadata_recovery_strategy(value: &str) -> crate::wire::MetadataRecoveryStrategy {
+    match value {
+        "none" => crate::wire::MetadataRecoveryStrategy::None,
+        _ => crate::wire::MetadataRecoveryStrategy::Rebootstrap,
     }
 }
 
@@ -1388,7 +1483,7 @@ mod tests {
         reason = "Unit test fixtures fail fastest with contextual expect calls."
     )]
 
-    use super::{AdminConfig, ConsumerConfig, DurationMs, TcpCongestionControl};
+    use super::{AdminConfig, ConsumerConfig, DurationMs, ProducerConfig, TcpCongestionControl};
     use crate::wire;
 
     #[test]
@@ -1498,6 +1593,61 @@ mod tests {
         );
         assert!(config.socket.reuse_address);
         assert_eq!(config.read_buffer_capacity, Some(32_768));
+    }
+
+    #[test]
+    fn producer_connection_config_maps_java_backoff_and_idle_fields() {
+        let config = ProducerConfig::builder()
+            .bootstrap_servers("localhost:9092")
+            .connections_max_idle_ms(DurationMs::from_millis(11_000))
+            .reconnect_backoff_ms(DurationMs::from_millis(17))
+            .reconnect_backoff_max_ms(DurationMs::from_millis(71))
+            .build()
+            .expect("producer config")
+            .to_connection_config();
+
+        assert_eq!(
+            config.connections_max_idle,
+            core::time::Duration::from_secs(11)
+        );
+        assert_eq!(
+            config.reconnect_backoff_initial,
+            core::time::Duration::from_millis(17)
+        );
+        assert_eq!(
+            config.reconnect_backoff_max,
+            core::time::Duration::from_millis(71)
+        );
+    }
+
+    #[test]
+    fn producer_connection_config_maps_metadata_recovery_fields() {
+        let config = ProducerConfig::builder()
+            .bootstrap_servers("localhost:9092")
+            .metadata_max_age_ms(DurationMs::from_millis(31))
+            .metadata_max_idle_ms(DurationMs::from_millis(37))
+            .metadata_recovery_strategy("none")
+            .metadata_recovery_rebootstrap_trigger_ms(DurationMs::from_millis(41))
+            .build()
+            .expect("producer config")
+            .to_connection_config();
+
+        assert_eq!(
+            config.metadata_max_age,
+            core::time::Duration::from_millis(31)
+        );
+        assert_eq!(
+            config.metadata_max_idle,
+            core::time::Duration::from_millis(37)
+        );
+        assert_eq!(
+            config.metadata_recovery_strategy,
+            wire::MetadataRecoveryStrategy::None
+        );
+        assert_eq!(
+            config.metadata_rebootstrap_trigger,
+            core::time::Duration::from_millis(41)
+        );
     }
 
     #[test]
