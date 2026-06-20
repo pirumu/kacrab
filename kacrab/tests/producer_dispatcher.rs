@@ -11,7 +11,7 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -45,7 +45,7 @@ use kacrab_protocol::{
         TopicProduceResponse, TxnOffsetCommitRequestData, TxnOffsetCommitResponseData,
         TxnOffsetCommitResponsePartition, TxnOffsetCommitResponseTopic,
     },
-    record::RecordBatch,
+    record::{RecordBatch, decode_batches},
     version::response_header_version,
 };
 use tokio::{
@@ -54,6 +54,28 @@ use tokio::{
 };
 
 const TOPIC_ID: KafkaUuid = KafkaUuid::from_parts(0x1111_2222_3333_4444, 0x5555_6666_7777_8888);
+
+fn assert_partition_base_offsets(produce: &ProduceRequestData, expected: &[i64]) {
+    let topic = produce.topic_data.first().expect("topic data");
+    let partition = topic.partition_data.first().expect("partition data");
+    let mut records = partition.records.clone().expect("records");
+    let batches = decode_batches(&mut records).expect("record batches");
+    let base_offsets: Vec<_> = batches.iter().map(|batch| batch.base_offset).collect();
+    assert_eq!(base_offsets, expected);
+}
+
+async fn wait_for_buffered_bytes(producer: &Producer) -> usize {
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(250))
+        .unwrap_or_else(Instant::now);
+    loop {
+        let buffered = producer.buffered_bytes();
+        if buffered > 0 || Instant::now() >= deadline {
+            return buffered;
+        }
+        tokio::task::yield_now().await;
+    }
+}
 
 #[tokio::test]
 async fn kafka_producer_send_buffers_until_flush() {
@@ -68,6 +90,7 @@ async fn kafka_producer_send_buffers_until_flush() {
             assert_eq!(produce.topic_data[0].topic_id, TOPIC_ID);
             assert_eq!(produce.topic_data[0].partition_data.len(), 1);
             assert_eq!(produce.topic_data[0].partition_data[0].index, 0);
+            assert_partition_base_offsets(&produce, &[0]);
             produce_response_frame_for_request(&header, 0, 40)
         }),
     ])
@@ -119,13 +142,171 @@ async fn kafka_producer_send_buffers_until_flush() {
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
         .await
         .unwrap();
-    assert!(producer.buffered_bytes() > 0);
+    assert!(wait_for_buffered_bytes(&producer).await > 0);
 
     producer.flush().await.unwrap();
     let receipt = delivery.await.unwrap();
 
     assert_eq!(receipt.partition, 0);
     assert_eq!(receipt.leader_id, 7);
+    assert_eq!(receipt.offset, 40);
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 2);
+}
+
+#[tokio::test]
+async fn kafka_producer_background_sender_dispatches_after_linger_without_flush() {
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            assert_eq!(produce.topic_data.len(), 1);
+            assert_eq!(produce.topic_data[0].topic_id, TOPIC_ID);
+            assert_eq!(produce.topic_data[0].partition_data.len(), 1);
+            assert_eq!(produce.topic_data[0].partition_data[0].index, 0);
+            assert_partition_base_offsets(&produce, &[0]);
+            produce_response_frame_for_request(&header, 0, 40)
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response([(7, leader_7)]);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(16 * 1024)
+                .linger(Duration::from_millis(10))
+                .buffer_memory(16 * 1024),
+            acks: 1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            delivery_timeout: Duration::from_secs(1),
+            max_block: Duration::from_secs(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 5,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: idempotence_disabled(),
+        },
+    );
+
+    let delivery = producer
+        .send_with_callback(
+            ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+    let receipt = tokio::time::timeout(Duration::from_millis(250), delivery)
+        .await
+        .expect("background sender should dispatch after linger without flush")
+        .expect("delivery should succeed");
+
+    assert_eq!(receipt.offset, 40);
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 2);
+}
+
+#[tokio::test]
+async fn kafka_producer_background_sender_dispatches_ready_batch_without_linger_or_flush() {
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            assert_eq!(produce.topic_data.len(), 1);
+            assert_eq!(produce.topic_data[0].topic_id, TOPIC_ID);
+            assert_eq!(produce.topic_data[0].partition_data.len(), 1);
+            assert_eq!(produce.topic_data[0].partition_data[0].index, 0);
+            assert_partition_base_offsets(&produce, &[0]);
+            produce_response_frame_for_request(&header, 0, 40)
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response([(7, leader_7)]);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .linger(Duration::ZERO)
+                .buffer_memory(16 * 1024),
+            acks: 1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            delivery_timeout: Duration::from_secs(1),
+            max_block: Duration::from_secs(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 5,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: idempotence_disabled(),
+        },
+    );
+
+    let delivery = producer
+        .send_with_callback(
+            ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+    let receipt = tokio::time::timeout(Duration::from_millis(250), delivery)
+        .await
+        .expect("background sender should dispatch ready batches without flush")
+        .expect("delivery should succeed");
+
     assert_eq!(receipt.offset, 40);
     assert_eq!(producer.buffered_bytes(), 0);
     assert_eq!(bootstrap.join().await, 2);
@@ -210,87 +391,6 @@ async fn kafka_producer_send_with_callback_invokes_callback_and_returns_delivery
     assert_eq!(receipt.offset, 40);
     assert_eq!(callback_receipts.len(), 1);
     assert_eq!(callback_receipts[0], receipt);
-    assert_eq!(bootstrap.join().await, 2);
-    assert_eq!(leader_7.join().await, 2);
-}
-
-#[tokio::test]
-async fn kafka_producer_send_with_java_callback_uses_metadata_exception_shape() {
-    let leader_7 = MockBroker::serve_many(vec![
-        Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-            produce_response_frame_for_request(&header, 0, 40)
-        }),
-    ])
-    .await;
-    let bootstrap = MockBroker::serve_many(vec![
-        Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
-    ])
-    .await;
-
-    let wire = WireClient::connect_with_brokers(
-        ConnectionConfig::default(),
-        "kacrab-test",
-        [BrokerEndpoint::new(1, bootstrap.addr())],
-    );
-    let mut producer = Producer::from_parts(
-        wire,
-        ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default()
-                .batch_size(16 * 1024)
-                .linger(Duration::from_mins(1))
-                .buffer_memory(16 * 1024),
-            acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: idempotence_disabled(),
-        },
-    );
-    let callback_receipts = Arc::new(Mutex::new(Vec::new()));
-    let callback_sink = Arc::clone(&callback_receipts);
-
-    let delivery = producer
-        .send_with_java_callback(
-            ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
-            move |metadata: RecordMetadata, exception: Option<&kacrab::producer::ProducerError>| {
-                callback_sink
-                    .lock()
-                    .expect("callback receipts")
-                    .push((metadata, exception.is_some()));
-            },
-        )
-        .await
-        .unwrap();
-
-    producer.flush().await.unwrap();
-    let receipt = delivery.await.unwrap();
-    let callback_receipts = {
-        let callback_receipts = callback_receipts.lock().expect("callback receipts");
-        callback_receipts.clone()
-    };
-
-    assert_eq!(receipt.offset, 40);
-    assert_eq!(callback_receipts, vec![(receipt, false)]);
     assert_eq!(bootstrap.join().await, 2);
     assert_eq!(leader_7.join().await, 2);
 }
@@ -881,7 +981,7 @@ async fn kafka_producer_builder_uses_native_partitioner_instead_of_jvm_class_loa
 }
 
 #[tokio::test]
-async fn kafka_producer_send_batch_returns_delivery_handles() {
+async fn kafka_producer_send_auto_batches_per_record_sends_until_flush() {
     let leader_7 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new(|mut request| {
@@ -893,18 +993,15 @@ async fn kafka_producer_send_batch_returns_delivery_handles() {
             assert_eq!(produce.topic_data[0].topic_id, TOPIC_ID);
             assert_eq!(produce.topic_data[0].partition_data.len(), 1);
             assert_eq!(produce.topic_data[0].partition_data[0].index, 0);
+            assert_partition_base_offsets(&produce, &[0]);
+            let mut records = produce.topic_data[0].partition_data[0]
+                .records
+                .clone()
+                .expect("records");
+            let batches = decode_batches(&mut records).expect("record batches");
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].records.len(), 2);
             produce_response_frame_for_request(&header, 0, 40)
-        }),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                .expect("produce request");
-            assert_eq!(produce.topic_data.len(), 1);
-            assert_eq!(produce.topic_data[0].topic_id, TOPIC_ID);
-            assert_eq!(produce.topic_data[0].partition_data.len(), 1);
-            assert_eq!(produce.topic_data[0].partition_data[0].index, 0);
-            produce_response_frame_for_request(&header, 0, 41)
         }),
     ])
     .await;
@@ -931,7 +1028,8 @@ async fn kafka_producer_send_batch_returns_delivery_handles() {
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
-                .batch_size(1)
+                .batch_size(16 * 1024)
+                .linger(Duration::from_mins(1))
                 .buffer_memory(16 * 1024),
             acks: 1,
             timeout_ms: 30_000,
@@ -949,23 +1047,24 @@ async fn kafka_producer_send_batch_returns_delivery_handles() {
         },
     );
 
-    let delivery = producer
-        .send_batch([
-            ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
-            ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")),
-        ])
+    let first = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .await
+        .unwrap();
+    let second = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
         .await
         .unwrap();
 
     producer.flush().await.unwrap();
 
-    let receipts = delivery.await.unwrap();
-    assert_eq!(receipts.len(), 2);
-    assert_eq!(receipts[0].offset, 40);
-    assert_eq!(receipts[1].offset, 41);
+    let first = first.await.unwrap();
+    let second = second.await.unwrap();
+    assert_eq!(first.offset, 40);
+    assert_eq!(second.offset, 41);
     assert_eq!(producer.buffered_bytes(), 0);
     assert_eq!(bootstrap.join().await, 2);
-    assert_eq!(leader_7.join().await, 3);
+    assert_eq!(leader_7.join().await, 2);
 }
 
 #[derive(Debug)]
@@ -990,7 +1089,7 @@ impl ProducerPartitioner for FixedNativePartitioner {
 }
 
 #[tokio::test]
-async fn kafka_producer_send_batch_untracked_skips_delivery_handles() {
+async fn kafka_producer_send_with_callback_auto_batches_until_flush() {
     let leader_7 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new(|mut request| {
@@ -1002,18 +1101,15 @@ async fn kafka_producer_send_batch_untracked_skips_delivery_handles() {
             assert_eq!(produce.topic_data[0].topic_id, TOPIC_ID);
             assert_eq!(produce.topic_data[0].partition_data.len(), 1);
             assert_eq!(produce.topic_data[0].partition_data[0].index, 0);
+            assert_partition_base_offsets(&produce, &[0]);
+            let mut records = produce.topic_data[0].partition_data[0]
+                .records
+                .clone()
+                .expect("records");
+            let batches = decode_batches(&mut records).expect("record batches");
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].records.len(), 2);
             produce_response_frame_for_request(&header, 0, 40)
-        }),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                .expect("produce request");
-            assert_eq!(produce.topic_data.len(), 1);
-            assert_eq!(produce.topic_data[0].topic_id, TOPIC_ID);
-            assert_eq!(produce.topic_data[0].partition_data.len(), 1);
-            assert_eq!(produce.topic_data[0].partition_data[0].index, 0);
-            produce_response_frame_for_request(&header, 0, 41)
         }),
     ])
     .await;
@@ -1040,7 +1136,8 @@ async fn kafka_producer_send_batch_untracked_skips_delivery_handles() {
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
-                .batch_size(1)
+                .batch_size(16 * 1024)
+                .linger(Duration::from_mins(1))
                 .buffer_memory(16 * 1024),
             acks: 1,
             timeout_ms: 30_000,
@@ -1058,18 +1155,35 @@ async fn kafka_producer_send_batch_untracked_skips_delivery_handles() {
         },
     );
 
-    producer
-        .send_batch_untracked([
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let first_delivered = Arc::clone(&delivered);
+    let _first_delivery = producer
+        .send_with_callback(
             ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+            move |result| {
+                assert!(result.is_ok());
+                let _previous = first_delivered.fetch_add(1, Ordering::Relaxed);
+            },
+        )
+        .await
+        .unwrap();
+    let second_delivered = Arc::clone(&delivered);
+    let _second_delivery = producer
+        .send_with_callback(
             ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")),
-        ])
+            move |result| {
+                assert!(result.is_ok());
+                let _previous = second_delivered.fetch_add(1, Ordering::Relaxed);
+            },
+        )
         .await
         .unwrap();
     producer.flush().await.unwrap();
 
+    assert_eq!(delivered.load(Ordering::Relaxed), 2);
     assert_eq!(producer.buffered_bytes(), 0);
     assert_eq!(bootstrap.join().await, 2);
-    assert_eq!(leader_7.join().await, 3);
+    assert_eq!(leader_7.join().await, 2);
 }
 
 #[tokio::test]
@@ -1145,6 +1259,241 @@ async fn kafka_producer_pipelines_ready_batches_until_flush() {
     assert_eq!(receipts[0].offset, 40);
     assert_eq!(receipts[1].offset, 41);
     assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 3);
+}
+
+#[tokio::test]
+async fn kafka_producer_single_send_budget_coalesces_ready_partitions() {
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            assert_eq!(produce.topic_data.len(), 1);
+            let topic = produce.topic_data.first().expect("topic produce data");
+            let mut partitions = topic
+                .partition_data
+                .iter()
+                .map(|partition| partition.index)
+                .collect::<Vec<_>>();
+            partitions.sort_unstable();
+            assert_eq!(partitions, vec![0, 1]);
+            produce_response_frame_for_partitions(&header, &[(0, 40), (1, 41)])
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response_same_leader(7, leader_7);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default()
+            .max_in_flight_requests_per_connection(2)
+            .broker_queue_capacity(2)
+            .request_timeout(Duration::from_secs(1)),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: 1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            delivery_timeout: Duration::from_mins(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 2,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: idempotence_disabled(),
+        },
+    );
+    producer.enable_metrics();
+
+    let first_delivery = producer
+        .send_with_callback(
+            ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(producer.metrics().produce_request_count, 0);
+
+    let second_delivery = producer
+        .send_with_callback(
+            ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")),
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+    producer.flush().await.unwrap();
+    let mut receipts = [
+        first_delivery.await.unwrap(),
+        second_delivery.await.unwrap(),
+    ];
+    receipts.sort_by_key(|receipt| receipt.partition);
+
+    assert_eq!(receipts[0].partition, 0);
+    assert_eq!(receipts[0].offset, 40);
+    assert_eq!(receipts[1].partition, 1);
+    assert_eq!(receipts[1].offset, 41);
+    let metrics = producer.metrics();
+    assert_eq!(metrics.produce_request_count, 1);
+    assert_eq!(metrics.produce_batch_count, 2);
+    assert_eq!(metrics.produce_record_count, 2);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 2);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Observable max.request.size proof needs mock broker, metadata, producer, and \
+              assertion setup in one integration scenario."
+)]
+async fn kafka_producer_10kib_records_keep_observed_requests_under_max_request_size() {
+    const PARTITIONS: usize = 120;
+    const MAX_REQUEST_SIZE: usize = 1_048_576;
+    const VALUE_SIZE: usize = 10 * 1024;
+
+    let observed_request_lengths = Arc::new(Mutex::new(Vec::new()));
+    let observed_partition_groups = Arc::new(Mutex::new(Vec::new()));
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        capture_produce_request(
+            Arc::clone(&observed_request_lengths),
+            Arc::clone(&observed_partition_groups),
+        ),
+        capture_produce_request(
+            Arc::clone(&observed_request_lengths),
+            Arc::clone(&observed_partition_groups),
+        ),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response_same_leader_partitions(7, leader_7, PARTITIONS);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default()
+            .max_in_flight_requests_per_connection(5)
+            .broker_queue_capacity(5)
+            .request_timeout(Duration::from_secs(1)),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(usize::MAX)
+                .linger(Duration::from_mins(1))
+                .buffer_memory(2 * MAX_REQUEST_SIZE),
+            acks: 1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            delivery_timeout: Duration::from_mins(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 5,
+            max_request_size: MAX_REQUEST_SIZE,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: idempotence_disabled(),
+        },
+    );
+    producer.enable_metrics();
+
+    let value = Bytes::from(vec![b'x'; VALUE_SIZE]);
+    let mut deliveries = Vec::with_capacity(PARTITIONS);
+    for partition in 0..PARTITIONS {
+        let partition = i32::try_from(partition).expect("partition id should fit i32");
+        let delivery = producer
+            .send(ProducerRecord::new("orders", partition).value(value.clone()))
+            .await
+            .expect("send 10KiB record");
+        deliveries.push(delivery);
+    }
+
+    producer.flush().await.expect("flush 10KiB partition batch");
+    let mut receipts = Vec::with_capacity(deliveries.len());
+    for delivery in deliveries {
+        receipts.push(delivery.await.expect("delivery receipt"));
+    }
+
+    let observed_request_lengths = observed_request_lengths
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let observed_partition_groups = observed_partition_groups
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+
+    assert_eq!(receipts.len(), PARTITIONS);
+    assert_eq!(observed_request_lengths.len(), 2);
+    assert!(
+        observed_request_lengths
+            .iter()
+            .all(|length| *length <= MAX_REQUEST_SIZE)
+    );
+    assert_eq!(
+        observed_partition_groups
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>(),
+        PARTITIONS
+    );
+    let mut observed_partitions = observed_partition_groups
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    observed_partitions.sort_unstable();
+    assert_eq!(
+        observed_partitions,
+        (0..PARTITIONS)
+            .map(|partition| i32::try_from(partition).expect("partition id should fit i32"))
+            .collect::<Vec<_>>()
+    );
+    let metrics = producer.metrics();
+    assert_eq!(metrics.produce_request_count, 2);
+    assert_eq!(metrics.produce_request_split_count, 1);
+    assert_eq!(metrics.produce_retry_count, 0);
+    assert_eq!(metrics.produce_error_count, 0);
     assert_eq!(bootstrap.join().await, 2);
     assert_eq!(leader_7.join().await, 3);
 }
@@ -1289,7 +1638,7 @@ async fn kafka_producer_requeues_in_flight_batch_when_metadata_is_missing() {
         error,
         kacrab::producer::ProducerError::FlushIncomplete
     ));
-    assert!(producer.buffered_bytes() > 0);
+    assert!(wait_for_buffered_bytes(&producer).await > 0);
     assert_eq!(bootstrap.join().await, 2);
 }
 
@@ -6011,7 +6360,7 @@ async fn dispatcher_retries_leadership_error_after_metadata_refresh() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut dispatcher = ProducerDispatcher::new(wire).retry_attempts(1);
+    let dispatcher = ProducerDispatcher::new(wire).retry_attempts(1);
     dispatcher.enable_metrics();
     let mut accumulator = RecordAccumulator::new(
         AccumulatorConfig::default()
@@ -6060,7 +6409,7 @@ async fn dispatcher_requeues_batch_when_metadata_is_missing() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut dispatcher = ProducerDispatcher::new(wire);
+    let dispatcher = ProducerDispatcher::new(wire);
     dispatcher.enable_metrics();
     let mut accumulator = RecordAccumulator::new(
         AccumulatorConfig::default()
@@ -6421,6 +6770,45 @@ fn metadata_response_same_leader(
     }
 }
 
+fn metadata_response_same_leader_partitions(
+    leader_id: i32,
+    leader_addr: std::net::SocketAddr,
+    partition_count: usize,
+) -> MetadataResponseData {
+    MetadataResponseData {
+        brokers: vec![MetadataResponseBroker {
+            node_id: leader_id,
+            host: KafkaString::from(leader_addr.ip().to_string()),
+            port: i32::from(leader_addr.port()),
+            rack: None,
+            _unknown_tagged_fields: Vec::new(),
+        }],
+        topics: vec![MetadataResponseTopic {
+            error_code: 0,
+            name: Some(KafkaString::from("orders".to_owned())),
+            topic_id: TOPIC_ID,
+            partitions: (0..partition_count)
+                .map(|partition| {
+                    let partition =
+                        i32::try_from(partition).expect("partition index should fit i32");
+                    MetadataResponsePartition {
+                        error_code: 0,
+                        partition_index: partition,
+                        leader_id,
+                        leader_epoch: 3,
+                        replica_nodes: vec![leader_id],
+                        isr_nodes: vec![leader_id],
+                        offline_replicas: Vec::new(),
+                        _unknown_tagged_fields: Vec::new(),
+                    }
+                })
+                .collect(),
+            ..MetadataResponseTopic::default()
+        }],
+        ..MetadataResponseData::default()
+    }
+}
+
 fn moved_metadata_response(
     leader_id: i32,
     leader_addr: std::net::SocketAddr,
@@ -6492,6 +6880,43 @@ fn ready_batches_for_value(
     accumulator.drain_ready(now)
 }
 
+fn produce_request_partitions(produce: &ProduceRequestData) -> Vec<i32> {
+    let mut partitions = produce
+        .topic_data
+        .iter()
+        .flat_map(|topic| topic.partition_data.iter())
+        .map(|partition| partition.index)
+        .collect::<Vec<_>>();
+    partitions.sort_unstable();
+    partitions
+}
+
+fn capture_produce_request(
+    observed_request_lengths: Arc<Mutex<Vec<usize>>>,
+    observed_partition_groups: Arc<Mutex<Vec<Vec<i32>>>>,
+) -> Box<dyn FnOnce(Bytes) -> BytesMut + Send> {
+    Box::new(move |mut request| {
+        observed_request_lengths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.len());
+        let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+        assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+        let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+            .expect("produce request");
+        let partitions = produce_request_partitions(&produce);
+        observed_partition_groups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(partitions.clone());
+        let offsets = partitions
+            .into_iter()
+            .map(|partition| (partition, i64::from(partition)))
+            .collect::<Vec<_>>();
+        produce_response_frame_for_partitions(&header, &offsets)
+    })
+}
+
 fn produce_response_frame(correlation_id: i32, partition: i32, base_offset: i64) -> BytesMut {
     produce_response_frame_for_version(13, correlation_id, partition, base_offset)
 }
@@ -6506,6 +6931,40 @@ fn produce_response_frame_for_request(
         header.correlation_id,
         partition,
         base_offset,
+    )
+}
+
+fn produce_response_frame_for_partitions(
+    header: &RequestHeaderData,
+    partitions: &[(i32, i64)],
+) -> BytesMut {
+    let mut topic = TopicProduceResponse::default();
+    if header.request_api_version >= 13 {
+        topic.topic_id = TOPIC_ID;
+    } else {
+        topic.name = KafkaString::from("orders".to_owned());
+    }
+    topic.partition_responses = partitions
+        .iter()
+        .copied()
+        .map(|(partition, base_offset)| PartitionProduceResponse {
+            index: partition,
+            error_code: 0,
+            base_offset,
+            log_append_time_ms: -1,
+            log_start_offset: base_offset,
+            ..PartitionProduceResponse::default()
+        })
+        .collect();
+    let response = ProduceResponseData {
+        responses: vec![topic],
+        ..ProduceResponseData::default()
+    };
+    response_frame(
+        ApiKey::Produce,
+        header.request_api_version,
+        header.correlation_id,
+        &response,
     )
 }
 

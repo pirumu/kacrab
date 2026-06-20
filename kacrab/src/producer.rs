@@ -13,6 +13,7 @@ mod partitioner;
 mod record;
 mod response;
 mod routing;
+mod sender;
 mod serializer;
 mod transaction;
 
@@ -42,8 +43,8 @@ pub use self::{
     },
     partitioner::ProducerPartitioner,
     record::{
-        BatchSendFuture, Callback, DeliveryCallback, Header, Headers, ProducerRecord, RecordHeader,
-        RecordHeaders, RecordMetadata, SendFuture,
+        DeliveryCallback, Header, Headers, ProducerRecord, RecordHeader, RecordHeaders,
+        RecordMetadata, SendFuture,
     },
     serializer::{
         BooleanSerializer, ByteArraySerializer, BytesSerializer, ConfiguredProducerSerializer,

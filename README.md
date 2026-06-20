@@ -161,10 +161,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `send` returns a per-record `SendFuture`. `send_with_callback` mirrors Java
 producer's `send(record, callback)` shape by returning a `SendFuture` while also
-invoking the callback on acknowledgement. `send_batch` is a Rust extension that
-returns one batch-level receipt future for the API call, and
-`send_batch_untracked` skips delivery handles entirely and relies on `flush` or
-`close` to wait for broker acknowledgement.
+invoking the callback on acknowledgement. Batching is automatic inside the
+producer accumulator/sender based on `batch.size`, `linger.ms`, buffer memory,
+partition routing, and flush/close boundaries; there is no separate public batch
+send API.
 
 Transactions use the same producer:
 
@@ -349,14 +349,11 @@ to measure the baseline hot path. Current tracked mode ports Kafka Java
 `ProducerPerformance.Stats` callback-completion accounting and total-line
 format; the saved table above predates that tracked measurement.
 
-The table above is the untracked producer path:
-`Producer::send_batch_untracked` plus a final `flush`. To measure delivery
-tracking overhead, run the same binary with `KACRAB_DELIVERY_MODE=tracked` or
-`KACRAB_DELIVERY_MODE=both`; this uses `send_with_callback` once per record and
-measures latency from immediately before send to callback completion, matching
-Kafka Java producer-perf tracking semantics. `KACRAB_DELIVERY_MODE=batch`
-measures the Rust batch-receipt extension separately from the untracked
-throughput baseline.
+The producer benchmark now uses the Java-style public path: one
+`send_with_callback` call per record, with batching handled internally before
+Produce requests are dispatched. Callback latency is measured from immediately
+before send to callback completion, matching Kafka Java producer-perf tracking
+semantics.
 
 Internal hot-path checks:
 

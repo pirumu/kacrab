@@ -90,7 +90,7 @@ async fn run_scenario(scenario: Scenario) {
         "kacrab-producer-mock-bench",
         [BrokerEndpoint::new(1, broker.addr())],
     );
-    let mut dispatcher = ProducerDispatcher::new(wire);
+    let dispatcher = ProducerDispatcher::new(wire);
     dispatcher.enable_metrics();
     let value = Bytes::from(vec![b'x'; scenario.value_size]);
     let started = Instant::now();

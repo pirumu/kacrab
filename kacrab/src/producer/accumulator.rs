@@ -107,6 +107,7 @@ pub(crate) struct PartitionQueueLoad {
 pub(crate) struct AppendStatus {
     pub(crate) batch_ready: bool,
     pub(crate) ready_batch_records: usize,
+    pub(crate) starts_new_batch: bool,
 }
 
 /// Bounded producer record accumulator keyed by topic-partition.
@@ -227,6 +228,7 @@ impl RecordAccumulator {
     }
 
     /// Append a record at a supplied timestamp and report whether a batch became ready.
+    #[cfg(test)]
     pub(crate) fn append_with_status_at(
         &mut self,
         record: ProducerRecord,
@@ -237,8 +239,7 @@ impl RecordAccumulator {
 
     /// Append a record and return a delivery handle for its eventual broker ack.
     pub fn append_for_delivery(&mut self, record: ProducerRecord) -> Result<SendFuture> {
-        let (delivery, _status) =
-            self.append_internal_for_delivery(record, Instant::now(), true, 1)?;
+        let (delivery, _status) = self.append_internal_for_delivery(record, Instant::now(), 1)?;
         delivery.ok_or(ProducerError::DeliveryDropped)
     }
 
@@ -247,29 +248,11 @@ impl RecordAccumulator {
         record: ProducerRecord,
         now: Instant,
     ) -> Result<(SendFuture, AppendStatus)> {
-        let (delivery, status) = self.append_internal_for_delivery(record, now, true, 1)?;
+        let (delivery, status) = self.append_internal_for_delivery(record, now, 1)?;
         let Some(delivery) = delivery else {
             return Err(ProducerError::DeliveryDropped);
         };
         Ok((delivery, status))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn append_for_batch_delivery_with_status_at(
-        &mut self,
-        record: ProducerRecord,
-        now: Instant,
-    ) -> Result<(Option<SendFuture>, AppendStatus)> {
-        self.append_for_batch_delivery_with_status_at_capacity(record, now, 1)
-    }
-
-    pub(crate) fn append_for_batch_delivery_with_status_at_capacity(
-        &mut self,
-        record: ProducerRecord,
-        now: Instant,
-        metadata_capacity: usize,
-    ) -> Result<(Option<SendFuture>, AppendStatus)> {
-        self.append_internal_for_delivery(record, now, false, metadata_capacity)
     }
 
     fn append_internal(&mut self, record: ProducerRecord, now: Instant) -> Result<AppendStatus> {
@@ -293,7 +276,7 @@ impl RecordAccumulator {
                 batches: VecDeque::new(),
             });
         let batch_size = self.config.batch_size.max(1);
-        let (sealed_previous_records, record_batch_bytes) =
+        let (sealed_previous_records, record_batch_bytes, starts_new_batch) =
             ensure_append_target(queue, &record, now, batch_size);
         let Some(batch) = queue.batches.back_mut() else {
             return Err(ProducerError::Backpressure);
@@ -308,6 +291,7 @@ impl RecordAccumulator {
             sealed_previous_records,
             current_batch_ready,
             current_batch_records,
+            starts_new_batch,
         ))
     }
 
@@ -315,7 +299,6 @@ impl RecordAccumulator {
         &mut self,
         record: ProducerRecord,
         now: Instant,
-        per_record_delivery: bool,
         metadata_capacity: usize,
     ) -> Result<(Option<SendFuture>, AppendStatus)> {
         let buffer_bytes = estimate_record_bytes(&record);
@@ -338,7 +321,7 @@ impl RecordAccumulator {
                 batches: VecDeque::new(),
             });
         let batch_size = self.config.batch_size.max(1);
-        let (sealed_previous_records, record_batch_bytes) =
+        let (sealed_previous_records, record_batch_bytes, starts_new_batch) =
             ensure_append_target(queue, &record, now, batch_size);
         let Some(batch) = queue.batches.back_mut() else {
             return Err(ProducerError::Backpressure);
@@ -346,12 +329,7 @@ impl RecordAccumulator {
         batch.buffer_bytes = batch.buffer_bytes.saturating_add(buffer_bytes);
         batch.batch_bytes = batch.batch_bytes.saturating_add(record_batch_bytes);
         let delivery = if let Some(sender) = &mut batch.delivery {
-            if per_record_delivery {
-                Some(sender.delivery_for_record(&record))
-            } else {
-                sender.record_for_batch_callback(&record);
-                None
-            }
+            Some(sender.delivery_for_record(&record))
         } else {
             let (sender, delivery) =
                 SendFuture::channel_for_record_with_metadata_capacity(&record, metadata_capacity);
@@ -368,6 +346,7 @@ impl RecordAccumulator {
                 sealed_previous_records,
                 current_batch_ready,
                 current_batch_records,
+                starts_new_batch,
             ),
         ))
     }
@@ -412,6 +391,17 @@ impl RecordAccumulator {
             }
         }
         ready
+    }
+
+    /// Return the next time any buffered batch should be considered ready.
+    pub fn next_ready_at(&self, now: Instant) -> Option<Instant> {
+        let batch_size = self.config.batch_size;
+        let linger = self.config.linger;
+        self.partitions
+            .values()
+            .filter_map(|queue| queue.batches.front())
+            .map(|batch| batch_next_ready_at(batch, now, batch_size, linger))
+            .min()
     }
 
     /// Drain every buffered topic-partition batch regardless of size or linger.
@@ -474,6 +464,21 @@ fn batch_is_ready(
         || now.duration_since(batch.first_append_at) >= linger
 }
 
+fn batch_next_ready_at(
+    batch: &PartitionBatch,
+    now: Instant,
+    batch_size: usize,
+    linger: Duration,
+) -> Instant {
+    if batch.sealed || batch.batch_bytes >= batch_size {
+        return now;
+    }
+    let Some(deadline) = batch.first_append_at.checked_add(linger) else {
+        return now;
+    };
+    if deadline <= now { now } else { deadline }
+}
+
 pub(crate) fn estimate_record_bytes(record: &ProducerRecord) -> usize {
     let key_bytes = record.key.as_ref().map_or(0, bytes::Bytes::len);
     let value_bytes = record.value.as_ref().map_or(0, bytes::Bytes::len);
@@ -494,6 +499,7 @@ const fn append_status(
     sealed_previous_records: usize,
     current_batch_ready: bool,
     current_batch_records: usize,
+    starts_new_batch: bool,
 ) -> AppendStatus {
     let ready_batch_records = if sealed_previous_records > 0 {
         sealed_previous_records
@@ -505,6 +511,7 @@ const fn append_status(
     AppendStatus {
         batch_ready: ready_batch_records > 0,
         ready_batch_records,
+        starts_new_batch,
     }
 }
 
@@ -513,14 +520,14 @@ fn ensure_append_target(
     record: &ProducerRecord,
     now: Instant,
     batch_size: usize,
-) -> (usize, usize) {
+) -> (usize, usize, bool) {
     let should_open = match queue.batches.back_mut() {
         None => {
             let record_batch_bytes = estimate_record_batch_bytes_at_offset(record, 0);
             queue
                 .batches
                 .push_back(new_partition_batch(now, batch_size, record_batch_bytes));
-            return (0, record_batch_bytes);
+            return (0, record_batch_bytes, true);
         },
         Some(batch) => {
             let next_record_bytes =
@@ -533,7 +540,7 @@ fn ensure_append_target(
             if cannot_fit {
                 batch.records.len()
             } else {
-                return (0, next_record_bytes);
+                return (0, next_record_bytes, false);
             }
         },
     };
@@ -543,7 +550,7 @@ fn ensure_append_target(
             .batches
             .push_back(new_partition_batch(now, batch_size, record_batch_bytes));
     }
-    (should_open, record_batch_bytes)
+    (should_open, record_batch_bytes, should_open > 0)
 }
 
 fn new_partition_batch(
@@ -643,15 +650,12 @@ mod tests {
         reason = "Unit test fixtures fail fastest with contextual unwrap/expect calls."
     )]
 
-    use std::{
-        sync::{Arc, Mutex},
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
 
     use bytes::Bytes;
 
     use super::{AccumulatorConfig, ProducerError, RecordAccumulator};
-    use crate::producer::{ProducerRecord, RecordMetadata};
+    use crate::producer::ProducerRecord;
 
     #[test]
     fn config_builder_clamps_zero_batch_size() {
@@ -674,64 +678,6 @@ mod tests {
             .expect_err("small buffer should apply backpressure");
 
         assert!(matches!(error, ProducerError::Backpressure));
-    }
-
-    #[test]
-    fn batch_delivery_callback_tracks_every_record_in_accumulated_batch() {
-        let now = Instant::now();
-        let mut accumulator = RecordAccumulator::new(
-            AccumulatorConfig::default()
-                .batch_size(16 * 1024)
-                .linger(Duration::from_secs(1)),
-        );
-        let offsets = Arc::new(Mutex::new(Vec::new()));
-        let callback_offsets = Arc::clone(&offsets);
-        let (delivery, _status) = accumulator
-            .append_for_batch_delivery_with_status_at(
-                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
-                now,
-            )
-            .expect("first append");
-        let delivery = delivery.expect("first append creates delivery");
-        delivery.register_batch_callback(Arc::new(move |result| {
-            callback_offsets
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(result.expect("callback receipt").offset);
-        }));
-
-        let (delivery, _status) = accumulator
-            .append_for_batch_delivery_with_status_at(
-                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")),
-                now,
-            )
-            .expect("second append");
-        assert!(delivery.is_none());
-        let (delivery, _status) = accumulator
-            .append_for_batch_delivery_with_status_at(
-                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"c")),
-                now,
-            )
-            .expect("third append");
-        assert!(delivery.is_none());
-
-        let mut batches = accumulator.drain_all();
-        let sender = batches[0].delivery.take().expect("delivery sender");
-        sender.send(RecordMetadata {
-            topic: Arc::from("orders"),
-            partition: 0,
-            leader_id: 7,
-            offset: 40,
-            timestamp_ms: -1,
-            serialized_key_size: -1,
-            serialized_value_size: -1,
-        });
-
-        let offsets = offsets
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        assert_eq!(offsets, [40, 41, 42]);
     }
 
     #[test]
@@ -822,5 +768,74 @@ mod tests {
             .expect("append record");
 
         assert!(status.batch_ready);
+    }
+
+    #[test]
+    fn append_status_reports_new_batch_for_linger_wakeup_policy() {
+        let now = Instant::now();
+        let mut accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(128)
+                .linger(Duration::from_secs(1)),
+        );
+
+        let first = accumulator
+            .append_with_status_at(
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+                now,
+            )
+            .expect("append first record");
+        let second = accumulator
+            .append_with_status_at(
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")),
+                now,
+            )
+            .expect("append second record");
+
+        assert!(first.starts_new_batch);
+        assert!(!second.starts_new_batch);
+    }
+
+    #[test]
+    fn next_ready_at_reports_earliest_linger_deadline() {
+        let base = Instant::now();
+        let later_append = base
+            .checked_add(Duration::from_millis(5))
+            .expect("later append instant");
+        let first_deadline = base
+            .checked_add(Duration::from_millis(10))
+            .expect("first linger deadline");
+        let before_deadline = base
+            .checked_add(Duration::from_millis(6))
+            .expect("before linger deadline");
+        let after_deadline = base
+            .checked_add(Duration::from_millis(11))
+            .expect("after linger deadline");
+        let mut accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(usize::MAX)
+                .linger(Duration::from_millis(10)),
+        );
+        accumulator
+            .append_at(
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+                base,
+            )
+            .expect("append first partition");
+        accumulator
+            .append_at(
+                ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")),
+                later_append,
+            )
+            .expect("append second partition");
+
+        assert_eq!(
+            accumulator.next_ready_at(before_deadline),
+            Some(first_deadline)
+        );
+        assert_eq!(
+            accumulator.next_ready_at(after_deadline),
+            Some(after_deadline)
+        );
     }
 }

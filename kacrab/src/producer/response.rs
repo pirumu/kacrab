@@ -86,7 +86,9 @@ fn produce_receipt(
         topic: Arc::from(route.topic.as_str()),
         partition: route.partition,
         leader_id: route.leader_id,
-        offset: partition_response.base_offset,
+        offset: partition_response
+            .base_offset
+            .saturating_add(route.request_offset_delta),
         timestamp_ms: partition_response.log_append_time_ms,
         serialized_key_size: -1,
         serialized_value_size: -1,
@@ -231,6 +233,36 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn produce_receipts_offsets_duplicate_partition_routes_by_request_delta() {
+        let response = ProduceResponseData {
+            responses: vec![TopicProduceResponse {
+                name: KafkaString::from("orders".to_owned()),
+                topic_id: TOPIC_ID,
+                partition_responses: vec![PartitionProduceResponse {
+                    index: 0,
+                    error_code: 0,
+                    base_offset: 40,
+                    log_append_time_ms: -1,
+                    ..PartitionProduceResponse::default()
+                }],
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            ..ProduceResponseData::default()
+        };
+        let mut first_route = route("orders", 0);
+        first_route.record_count = 2;
+        let mut second_route = route("orders", 0);
+        second_route.request_offset_delta = 2;
+        second_route.record_count = 1;
+
+        let receipts = produce_receipts(&response, &[first_route, second_route]).expect("receipts");
+
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].offset, 40);
+        assert_eq!(receipts[1].offset, 42);
+    }
+
     fn route(topic: &str, partition: i32) -> ProduceRoute {
         ProduceRoute {
             topic: topic.to_owned(),
@@ -238,6 +270,8 @@ mod tests {
             topic_id: TOPIC_ID,
             leader_id: 7,
             base_sequence: None,
+            request_offset_delta: 0,
+            record_count: 0,
         }
     }
 }

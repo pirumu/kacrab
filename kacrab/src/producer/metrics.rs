@@ -37,6 +37,16 @@ pub struct ProducerMetricsSnapshot {
     pub records_appended: u64,
     /// Produce requests sent to brokers.
     pub produce_request_count: u64,
+    /// Encoded produce request bytes sent to brokers.
+    pub produce_request_bytes: u64,
+    /// Serialized record batches sent in produce requests.
+    pub produce_batch_count: u64,
+    /// Encoded record batch bytes sent in produce requests.
+    pub produce_batch_bytes: u64,
+    /// Encoded record batch payload bytes grouped into produce requests.
+    pub produce_request_payload_bytes: u64,
+    /// Produce request grouping splits forced by the max request size limit.
+    pub produce_request_split_count: u64,
     /// Records included in produce requests sent to brokers.
     pub produce_record_count: u64,
     /// Retry attempts after retryable produce failures.
@@ -45,6 +55,8 @@ pub struct ProducerMetricsSnapshot {
     pub produce_error_count: u64,
     /// Batches requeued because metadata/routing was not yet complete.
     pub requeue_count: u64,
+    /// Backpressure stalls while enqueueing produce requests to broker sessions.
+    pub in_flight_stall_count: u64,
     /// Bytes currently buffered in the accumulator.
     pub queue_depth_bytes: usize,
     /// Records currently buffered in the accumulator.
@@ -90,10 +102,20 @@ impl ProducerMetricsSnapshot {
         match name {
             "records_appended" => Some(ProducerMetricValue::Count(self.records_appended)),
             "produce_request_count" => Some(ProducerMetricValue::Count(self.produce_request_count)),
+            "produce_request_bytes" => Some(ProducerMetricValue::Count(self.produce_request_bytes)),
+            "produce_batch_count" => Some(ProducerMetricValue::Count(self.produce_batch_count)),
+            "produce_batch_bytes" => Some(ProducerMetricValue::Count(self.produce_batch_bytes)),
+            "produce_request_payload_bytes" => Some(ProducerMetricValue::Count(
+                self.produce_request_payload_bytes,
+            )),
+            "produce_request_split_count" => {
+                Some(ProducerMetricValue::Count(self.produce_request_split_count))
+            },
             "produce_record_count" => Some(ProducerMetricValue::Count(self.produce_record_count)),
             "produce_retry_count" => Some(ProducerMetricValue::Count(self.produce_retry_count)),
             "produce_error_count" => Some(ProducerMetricValue::Count(self.produce_error_count)),
             "requeue_count" => Some(ProducerMetricValue::Count(self.requeue_count)),
+            "in_flight_stall_count" => Some(ProducerMetricValue::Count(self.in_flight_stall_count)),
             "queue_depth_bytes" => Some(ProducerMetricValue::Gauge(self.queue_depth_bytes)),
             "queue_depth_records" => Some(ProducerMetricValue::Gauge(self.queue_depth_records)),
             "in_flight_dispatches" => Some(ProducerMetricValue::Gauge(self.in_flight_dispatches)),
@@ -146,10 +168,16 @@ impl ProducerMetricsSnapshot {
         [
             "records_appended",
             "produce_request_count",
+            "produce_request_bytes",
+            "produce_batch_count",
+            "produce_batch_bytes",
+            "produce_request_payload_bytes",
+            "produce_request_split_count",
             "produce_record_count",
             "produce_retry_count",
             "produce_error_count",
             "requeue_count",
+            "in_flight_stall_count",
             "queue_depth_bytes",
             "queue_depth_records",
             "in_flight_dispatches",
@@ -179,10 +207,16 @@ impl ProducerMetricsSnapshot {
             name,
             "records_appended"
                 | "produce_request_count"
+                | "produce_request_bytes"
+                | "produce_batch_count"
+                | "produce_batch_bytes"
+                | "produce_request_payload_bytes"
+                | "produce_request_split_count"
                 | "produce_record_count"
                 | "produce_retry_count"
                 | "produce_error_count"
                 | "requeue_count"
+                | "in_flight_stall_count"
                 | "queue_depth_bytes"
                 | "queue_depth_records"
                 | "in_flight_dispatches"
@@ -312,10 +346,20 @@ fn producer_metric_description(name: &str) -> &'static str {
     match name {
         "records_appended" => "records accepted into the producer accumulator",
         "produce_request_count" => "produce requests sent to brokers",
+        "produce_request_bytes" => "encoded produce request bytes sent to brokers",
+        "produce_batch_count" => "record batches sent in produce requests",
+        "produce_batch_bytes" => "encoded record batch bytes sent in produce requests",
+        "produce_request_payload_bytes" => {
+            "encoded record batch payload bytes grouped into produce requests"
+        },
+        "produce_request_split_count" => {
+            "produce request grouping splits forced by max request size"
+        },
         "produce_record_count" => "records included in produce requests",
         "produce_retry_count" => "retry attempts after retryable produce failures",
         "produce_error_count" => "produce responses or dispatches that reported an error",
         "requeue_count" => "batches requeued because routing was incomplete",
+        "in_flight_stall_count" => "backpressure stalls while enqueueing produce requests",
         "queue_depth_bytes" => "bytes currently buffered in the accumulator",
         "queue_depth_records" => "records currently buffered in the accumulator",
         "in_flight_dispatches" => "producer dispatch tasks currently in flight",
@@ -479,10 +523,16 @@ pub(crate) struct ProducerMetrics {
 #[derive(Debug, Default)]
 struct ProducerMetricsInner {
     produce_request_count: AtomicU64,
+    produce_request_bytes: AtomicU64,
+    produce_batch_count: AtomicU64,
+    produce_batch_bytes: AtomicU64,
+    produce_request_payload_bytes: AtomicU64,
+    produce_request_split_count: AtomicU64,
     produce_record_count: AtomicU64,
     produce_retry_count: AtomicU64,
     produce_error_count: AtomicU64,
     requeue_count: AtomicU64,
+    in_flight_stall_count: AtomicU64,
     batch_fill_per_mille_sum: AtomicU64,
     batch_fill_samples: AtomicU64,
     flush_count: AtomicU64,
@@ -502,11 +552,21 @@ struct ProducerMetricsInner {
 }
 
 impl ProducerMetrics {
-    pub(crate) fn record_produce_request(&self) {
+    pub(crate) fn record_produce_request(&self, request_bytes: usize, payload_bytes: usize) {
         let _previous = self
             .inner
             .produce_request_count
             .fetch_add(1, Ordering::Relaxed);
+        let request_bytes = u64::try_from(request_bytes).unwrap_or(u64::MAX);
+        let _previous = self
+            .inner
+            .produce_request_bytes
+            .fetch_add(request_bytes, Ordering::Relaxed);
+        let payload_bytes = u64::try_from(payload_bytes).unwrap_or(u64::MAX);
+        let _previous = self
+            .inner
+            .produce_request_payload_bytes
+            .fetch_add(payload_bytes, Ordering::Relaxed);
     }
 
     pub(crate) fn record_produce_batch(
@@ -520,14 +580,22 @@ impl ProducerMetrics {
             .inner
             .produce_record_count
             .fetch_add(records, Ordering::Relaxed);
+        let _previous = self
+            .inner
+            .produce_batch_count
+            .fetch_add(1, Ordering::Relaxed);
+        let batch_bytes = u64::try_from(batch_bytes).unwrap_or(u64::MAX);
+        let _previous = self
+            .inner
+            .produce_batch_bytes
+            .fetch_add(batch_bytes, Ordering::Relaxed);
 
-        let batch_size = batch_size.max(1);
+        let batch_size = u64::try_from(batch_size.max(1)).unwrap_or(u64::MAX);
         let scaled = batch_bytes
             .saturating_mul(1_000)
             .checked_div(batch_size)
             .unwrap_or(0)
             .min(1_000);
-        let scaled = u64::try_from(scaled).unwrap_or(1_000);
         let _previous = self
             .inner
             .batch_fill_per_mille_sum
@@ -554,6 +622,20 @@ impl ProducerMetrics {
 
     pub(crate) fn record_requeue(&self) {
         let _previous = self.inner.requeue_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_in_flight_stall(&self) {
+        let _previous = self
+            .inner
+            .in_flight_stall_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_request_split(&self) {
+        let _previous = self
+            .inner
+            .produce_request_split_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_flush(&self, latency: Duration) {
@@ -675,10 +757,22 @@ impl ProducerMetrics {
         ProducerMetricsSnapshot {
             records_appended: produce_record_count.saturating_add(queued_records),
             produce_request_count: self.inner.produce_request_count.load(Ordering::Relaxed),
+            produce_request_bytes: self.inner.produce_request_bytes.load(Ordering::Relaxed),
+            produce_batch_count: self.inner.produce_batch_count.load(Ordering::Relaxed),
+            produce_batch_bytes: self.inner.produce_batch_bytes.load(Ordering::Relaxed),
+            produce_request_payload_bytes: self
+                .inner
+                .produce_request_payload_bytes
+                .load(Ordering::Relaxed),
+            produce_request_split_count: self
+                .inner
+                .produce_request_split_count
+                .load(Ordering::Relaxed),
             produce_record_count,
             produce_retry_count: self.inner.produce_retry_count.load(Ordering::Relaxed),
             produce_error_count: self.inner.produce_error_count.load(Ordering::Relaxed),
             requeue_count: self.inner.requeue_count.load(Ordering::Relaxed),
+            in_flight_stall_count: self.inner.in_flight_stall_count.load(Ordering::Relaxed),
             queue_depth_bytes,
             queue_depth_records,
             in_flight_dispatches,
@@ -1571,10 +1665,16 @@ mod tests {
         let snapshot = ProducerMetricsSnapshot {
             records_appended: 3,
             produce_request_count: 2,
+            produce_request_bytes: 300,
+            produce_batch_count: 2,
+            produce_batch_bytes: 256,
+            produce_request_payload_bytes: 256,
+            produce_request_split_count: 1,
             produce_record_count: 3,
             produce_retry_count: 1,
             produce_error_count: 0,
             requeue_count: 0,
+            in_flight_stall_count: 0,
             queue_depth_bytes: 128,
             queue_depth_records: 4,
             in_flight_dispatches: 1,

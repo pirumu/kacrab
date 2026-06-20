@@ -42,7 +42,6 @@ cargo run -p kacrab-benches --release --bin producer_mock_bench
 KACRAB_BENCH_SMOKE=1 cargo run -p kacrab-benches --release --bin producer_kafka_bench
 cargo run -p kacrab-benches --release --bin producer_kafka_bench
 KACRAB_ONLY_10KIB=1 cargo run -p kacrab-benches --release --bin producer_kafka_bench
-KACRAB_DELIVERY_MODE=both cargo run -p kacrab-benches --release --bin producer_kafka_bench
 ```
 
 `producer_mock_bench` runs two single-shot mock-broker scenarios: 5M messages ×
@@ -72,13 +71,44 @@ The compose file exposes Kafka on `localhost:9092` and creates
 when set, defaulting to `127.0.0.1:9092` and `kacrab-bench`. It uses the
 public `Producer::builder().set(...).build()` API, warms up metadata, the
 broker session, and one outer API chunk outside the measured window, then sends
-scenario-sized batches through the selected delivery path. The default delivery path is
-`Producer::send_batch_untracked`; set `KACRAB_DELIVERY_MODE=tracked` or
-`KACRAB_DELIVERY_MODE=both` to run the Java producer-perf style path:
-one `send_with_callback` call per record, with callback-completion latency
-reported with the same `ProducerPerformance.Stats` window and total line shape
-as Kafka Java. `KACRAB_DELIVERY_MODE=batch` measures the Rust batch-receipt
-extension path.
+records through the Java-style public producer path. The benchmark calls
+`send_with_callback` once per record, while the producer accumulator/sender
+automatically groups records into Produce requests. Callback-completion latency
+is reported with the same `ProducerPerformance.Stats` window and total line
+shape as Kafka Java.
+
+Current Java-parity audit runs should use the root Makefile targets instead of
+the older exploratory env matrix:
+
+```bash
+make kafka-topic-recreate
+make bench-kafka
+make bench-kafka-java-default
+make kafka-topic-delete
+make kafka-stop
+make kafka-topic-prune-delete-dirs
+```
+
+`bench-kafka` and `bench-kafka-java-default` both create
+`KACRAB_BENCH_TOPIC` if it is missing, with `KACRAB_PARTITIONS=3` and
+`KACRAB_REPLICATION_FACTOR=1` by default. Use `make kafka-topic-recreate` for a
+fresh topic before a comparison run. After large benchmark passes, delete the
+topic and stop Kafka before pruning topic `*-delete` directories; this keeps
+local broker data from silently growing across parity runs.
+
+The current parity target fixes two scenarios, runs 5 times per scenario, and
+prints effective config snapshots before each measured run. Rust prints the
+Java producer-perf style throughput/latency line for every run, then prints a
+five-run `rust average counters` line using the same compact counter schema as
+the per-run output. The Java wrapper also parses
+`kafka-producer-perf-test.sh --print-metrics` into per-run and five-run average
+compact counter lines, including `request_size_avg` from Java
+`request-size-avg` and Rust generated ProduceRequest encoded length. Java
+`batch_splits` comes from producer-perf's `batch-split-total`; Rust currently
+reports `batch_splits=not_tracked` and exposes ProduceRequest grouping splits
+separately as `request_splits`. Java producer-perf public metrics do not expose
+exact record-batch count or records-per-batch count, so those fields are
+labeled `not_exposed_by_producer_perf`; do not treat them as parity proof.
 
 The default benchmark profile is `kafka-default`: the binary sets only
 `bootstrap.servers` and `client.id`, then relies on the producer's normal
@@ -120,17 +150,13 @@ Useful real-Kafka knobs:
   output. The default keeps this disabled so throughput-only runs do not pay
   for latency accounting. In `tracked` mode, Java-style callback latency is
   always collected because it is part of the tracked benchmark semantics.
-- `KACRAB_DELIVERY_MODE=untracked|tracked|batch|both|all` selects the public
-  producer path. `untracked` is the baseline path used by the local summary
-  table. `tracked` uses `send_with_callback` once per record and measures
-  callback latency from immediately before send to callback completion, matching
-  Kafka Java producer-perf tracking semantics. `batch` uses the Rust
-  `send_batch` batch-receipt extension. `both` runs `untracked` and `tracked`.
-  `all` runs every mode.
+- `KACRAB_BENCH_API` is accepted for old scripts, but all values resolve to the
+  Java-style per-record public API. The benchmark uses `send_with_callback` once
+  per record and measures callback latency from immediately before send to
+  callback completion, matching Kafka Java producer-perf tracking semantics.
 - `KACRAB_TRACKED_DELIVERY_WINDOW` bounds how many callback-tracked records are
-  sent before the benchmark forces a `flush`. In `batch` mode it bounds how
-  many batch receipts are retained before flushing and awaiting them. The
-  default is unbounded unless set explicitly.
+  sent before the benchmark forces a `flush`. The default is unbounded unless
+  set explicitly.
 - `KACRAB_REPORTING_INTERVAL_MS` controls tracked-mode progress output. The
   default is `5000`, matching Kafka Java producer-perf
   `--reporting-interval`.
@@ -342,9 +368,9 @@ append/drain benchmark uses `BatchSize::LargeInput` so the per-iteration
 
 Producer mock broker executable:
 
-- `producer_mock_bench` now reports both outer public API chunks and actual
-  mock broker Produce requests, because dispatcher-side batch splitting can
-  issue more broker requests than `send_batch_untracked` calls.
+- `producer_mock_bench` reports both outer public API chunks and actual mock
+  broker Produce requests, because dispatcher-side batch splitting can issue
+  more broker requests than public per-record send loops.
 
 Wire pipeline:
 
@@ -366,18 +392,15 @@ Wire pipeline:
 - Kacrab throughput prints payload MiB/sec. Kafka's Java perf tool prints
   decimal MB/sec, so MiB/sec and MB/sec values should not be compared as the
   same unit.
-- The executable Rust bench reports `dispatch_latency_*` for untracked/batch
-  diagnostic runs. In tracked mode it ports Kafka Java
-  `ProducerPerformance.Stats` sampling, window reporting, total summary, and
-  callback-success-only accounting. It still does not collect CPU profiles,
-  allocator profiles, broker disk metrics, or end-to-end replicated durability
-  latency.
+- The executable Rust bench ports Kafka Java `ProducerPerformance.Stats`
+  sampling, window reporting, total summary, and callback-success-only
+  accounting. It still does not collect CPU profiles, allocator profiles,
+  broker disk metrics, or end-to-end replicated durability latency.
 - Mock broker and Criterion numbers are useful for client hot-path regression
   checks, but they do not include real broker storage, replication, fetch, or
   network effects.
-- The default `producer_kafka_bench` path uses `send_batch_untracked`, so it
-  does not measure delivery tracking overhead unless
-  `KACRAB_DELIVERY_MODE=tracked`, `batch`, `both`, or `all` is set.
+- The default `producer_kafka_bench` path uses Java-style per-record
+  `send_with_callback`; batching is internal to the producer.
 
 ## Author
 

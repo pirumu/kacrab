@@ -23,11 +23,18 @@ use std::{
 };
 
 use bytes::Bytes;
-use kacrab::producer::{BatchSendFuture, Producer, ProducerMetricsSnapshot, ProducerRecord};
+use kacrab::{
+    config::{ClientConfig, ProducerConfig},
+    producer::{Producer, ProducerMetricsSnapshot, ProducerRecord, RecordMetadata},
+};
 use tokio::runtime::Builder;
 
-const PARTITIONS: usize = 3;
-const DEFAULT_PIPELINED_IN_FLIGHT: usize = 5;
+const BENCH_MESSAGES: usize = 5_000_000;
+const LARGE_BENCH_MESSAGES: usize = 100_000;
+const SMALL_VALUE_SIZE: usize = 10;
+const LARGE_VALUE_SIZE: usize = 10 * 1024;
+const TRACKED_API_CHUNK_RECORDS: usize = 16_384;
+const BENCH_RUNS: usize = 5;
 
 fn main() {
     let runtime = Builder::new_current_thread()
@@ -39,44 +46,35 @@ fn main() {
         let bootstrap = bootstrap_addr();
         let topic = topic();
         let scenarios = scenarios();
-        let partitions = partitions();
-        let profile = bench_profile();
-        let in_flight = in_flight_override();
-        let acks = acks_override();
-        let batch_size = batch_size_override();
-        let partition_mode = partition_mode();
-        let delivery_modes = delivery_modes();
-        let tracked_delivery_window = tracked_delivery_window();
+        let delivery_mode = benchmark_api();
         let reporting_interval = reporting_interval();
         println!(
-            "real Kafka benchmark: bootstrap={bootstrap}, topic={topic}, partitions={partitions}, \
-             profile={profile}, in_flight={}, acks={}, batch_size={}, \
-             partition_mode={partition_mode}, delivery_modes={}, \
-             tracked_delivery_window={tracked_delivery_window}, reporting_interval_ms={}",
-            display_optional_usize(in_flight),
-            display_optional_str(acks.as_deref()),
-            display_optional_usize(batch_size),
-            display_delivery_modes(&delivery_modes),
+            "real Kafka benchmark: bootstrap={bootstrap}, topic={topic}, \
+             producer_config=kafka-defaults, delivery_mode={delivery_mode}, \
+             reporting_interval_ms={}",
             reporting_interval.as_millis()
         );
         for scenario in scenarios {
-            for delivery_mode in delivery_modes.iter().copied() {
-                run_scenario(BenchmarkRun {
+            let mut summaries = Vec::with_capacity(BENCH_RUNS);
+            let mut metrics = Vec::with_capacity(BENCH_RUNS);
+            for run_index in 1..=BENCH_RUNS {
+                println!(
+                    "scenario=\"{}\", run={run_index}/{BENCH_RUNS}",
+                    scenario.name
+                );
+                let summary = run_scenario(BenchmarkRun {
                     bootstrap,
                     topic: &topic,
                     scenario: scenario.clone(),
-                    partitions,
-                    profile,
-                    in_flight,
-                    acks: acks.clone(),
-                    batch_size,
-                    partition_mode,
                     delivery_mode,
-                    tracked_delivery_window,
                     reporting_interval,
                 })
                 .await;
+                summaries.push(summary.java_perf);
+                metrics.push(summary.metrics);
             }
+            print_average_result(&scenario, &summaries);
+            print_average_counters(&metrics);
         }
     });
 }
@@ -94,103 +92,99 @@ struct BenchmarkRun<'a> {
     bootstrap: SocketAddr,
     scenario: Scenario,
     topic: &'a str,
-    partitions: usize,
-    profile: BenchProfile,
-    in_flight: Option<usize>,
-    acks: Option<String>,
-    batch_size: Option<usize>,
-    partition_mode: PartitionMode,
     delivery_mode: DeliveryMode,
-    tracked_delivery_window: usize,
     reporting_interval: Duration,
 }
 
-async fn run_scenario(run: BenchmarkRun<'_>) {
+#[derive(Debug, Clone, Copy)]
+struct BenchmarkRunSummary {
+    java_perf: ProducerPerformanceSummary,
+    metrics: ProducerMetricsSnapshot,
+}
+
+async fn run_scenario(run: BenchmarkRun<'_>) -> BenchmarkRunSummary {
     let value = payload_value(run.scenario.value_size);
     let value_size = value.len();
-    let metrics_enabled = metrics_enabled();
-    let latency_enabled = latency_enabled();
-    let mut producer = build_producer(&run, value_size, metrics_enabled, latency_enabled).await;
+    let producer_config = benchmark_producer_config(run.bootstrap);
+    println!("{}", format_effective_config_snapshot(&producer_config));
+    let mut producer = build_producer(&producer_config).await;
+    producer.enable_metrics();
     warm_up_producer(&mut producer, &run, value.clone()).await;
-    let _warmup_latencies = producer.take_dispatch_latency_samples();
     let warmup_metrics = producer.metrics();
-    let send = run_send_loop(&mut producer, &run, value).await;
-    let latency = latency_summary(producer.take_dispatch_latency_samples());
-    let metrics = metrics_delta(producer.metrics(), warmup_metrics);
+    let send = run_per_record_tracked_send_loop(&mut producer, &run, value).await;
+    let current_metrics = producer.metrics();
+    let metrics = metrics_delta(&current_metrics, &warmup_metrics);
+    let java_perf = send
+        .java_perf
+        .expect("tracked benchmark should produce Java-style stats");
     print_result(&BenchmarkResult {
         scenario: &run.scenario,
         value_size,
         elapsed: send.elapsed,
         outer_chunks: send.outer_chunks,
-        latency,
-        java_perf: send.java_perf,
+        latency: None,
+        java_perf: Some(java_perf),
         metrics,
-        metrics_enabled,
+        metrics_enabled: true,
         delivery_mode: run.delivery_mode,
     });
+    BenchmarkRunSummary { java_perf, metrics }
 }
 
-async fn build_producer(
-    run: &BenchmarkRun<'_>,
-    value_size: usize,
-    metrics_enabled: bool,
-    latency_enabled: bool,
-) -> Producer {
-    let mut producer = Producer::builder()
-        .set("bootstrap.servers", run.bootstrap.to_string())
-        .set("client.id", "kacrab-producer-kafka-bench");
-    if run.profile == BenchProfile::Relaxed {
-        let in_flight = run.in_flight.unwrap_or(DEFAULT_PIPELINED_IN_FLIGHT);
-        producer = producer
-            .set("enable.idempotence", "false")
-            .set("acks", run.acks.as_deref().unwrap_or("1"))
-            .set("compression.type", "none")
-            .set("retries", "0")
-            .set("request.timeout.ms", "30000")
-            .set("delivery.timeout.ms", "120000")
-            .set("batch.size", run.batch_size.unwrap_or(16_384).to_string())
-            .set(
-                "buffer.memory",
-                batch_buffer_memory(run.scenario.batch_messages, value_size).to_string(),
-            )
-            .set(
-                "max.in.flight.requests.per.connection",
-                in_flight.to_string(),
-            )
-            .set(
-                "socket.read.buffer.capacity.bytes",
-                (1024 * 1024).to_string(),
-            )
-            .set(
-                "broker.queue.capacity",
-                in_flight.saturating_mul(2).to_string(),
-            )
-            .set("buffer.pool.capacity", "128");
-    } else {
-        if let Some(acks) = &run.acks {
-            producer = producer.set("acks", acks.as_str());
-        }
-        if let Some(batch_size) = run.batch_size {
-            producer = producer.set("batch.size", batch_size.to_string());
-        }
-        if let Some(in_flight) = run.in_flight {
-            producer = producer.set(
-                "max.in.flight.requests.per.connection",
-                in_flight.to_string(),
-            );
-        }
-    }
-    let mut producer = producer
+fn benchmark_client_config(bootstrap: SocketAddr) -> ClientConfig {
+    ClientConfig::new()
+        .set("bootstrap.servers", bootstrap.to_string())
+        .set("client.id", "kacrab-producer-kafka-bench")
+}
+
+fn benchmark_producer_config(bootstrap: SocketAddr) -> ProducerConfig {
+    benchmark_client_config(bootstrap)
+        .producer_config()
+        .expect("benchmark producer config should parse")
+}
+
+async fn build_producer(config: &ProducerConfig) -> Producer {
+    Producer::builder()
+        .set(
+            "bootstrap.servers",
+            config.bootstrap_servers.as_slice().join(","),
+        )
+        .set("client.id", config.client_id.as_str())
         .build()
         .await
-        .expect("benchmark producer config should build");
-    if latency_enabled {
-        producer.enable_dispatch_latency_metrics();
-    }
-    if metrics_enabled {
-        producer.enable_metrics();
-    }
-    producer
+        .expect("benchmark producer config should build")
+}
+
+fn format_effective_config_snapshot(config: &ProducerConfig) -> String {
+    let bootstrap = config.bootstrap_servers.as_slice().join(",");
+    format!(
+        "effective producer config: bootstrap.servers={bootstrap}, client.id={}, acks={}, \
+         enable.idempotence={}, retries={}, max.in.flight.requests.per.connection={}, \
+         batch.size={}, linger.ms={}, buffer.memory={}, compression.type={}, \
+         delivery.timeout.ms={}, request.timeout.ms={}, max.block.ms={}, max.request.size={}, \
+         send.buffer.bytes={}, receive.buffer.bytes={}, metadata.max.age.ms={}, \
+         partitioner.adaptive.partitioning.enable={}, partitioner.availability.timeout.ms={}, \
+         enable.metrics.push={}",
+        config.client_id,
+        config.acks,
+        config.enable_idempotence,
+        config.retries,
+        config.max_in_flight_requests_per_connection,
+        config.batch_size.get(),
+        config.linger_ms.as_millis(),
+        config.buffer_memory.get(),
+        config.compression_type,
+        config.delivery_timeout_ms.as_millis(),
+        config.request_timeout_ms.as_millis(),
+        config.max_block_ms.as_millis(),
+        config.max_request_size.get(),
+        config.send_buffer_bytes,
+        config.receive_buffer_bytes,
+        config.metadata_max_age_ms.as_millis(),
+        config.partitioner_adaptive_partitioning_enable,
+        config.partitioner_availability_timeout_ms.as_millis(),
+        config.enable_metrics_push
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -200,60 +194,7 @@ struct SendLoopResult {
     java_perf: Option<ProducerPerformanceSummary>,
 }
 
-async fn run_send_loop(
-    producer: &mut Producer,
-    run: &BenchmarkRun<'_>,
-    value: Bytes,
-) -> SendLoopResult {
-    match run.delivery_mode {
-        DeliveryMode::Untracked => run_untracked_send_loop(producer, run, value).await,
-        DeliveryMode::Tracked => run_callback_tracked_send_loop(producer, run, value).await,
-        DeliveryMode::Batch => run_batch_receipt_send_loop(producer, run, value).await,
-    }
-}
-
-async fn run_untracked_send_loop(
-    producer: &mut Producer,
-    run: &BenchmarkRun<'_>,
-    value: Bytes,
-) -> SendLoopResult {
-    let topic = Arc::<str>::from(run.topic);
-    let started = Instant::now();
-    let mut sent = 0usize;
-    let mut produce_requests = 0usize;
-    while sent < run.scenario.messages {
-        let batch_messages = run
-            .scenario
-            .batch_messages
-            .min(run.scenario.messages.saturating_sub(sent));
-        let records = (0..batch_messages).map(|index| {
-            benchmark_record(
-                Arc::clone(&topic),
-                sent + index,
-                run.partitions,
-                run.partition_mode,
-            )
-            .value(value.clone())
-        });
-        producer
-            .send_batch_untracked(records)
-            .await
-            .expect("benchmark send should fit and dispatch");
-        sent = sent.saturating_add(batch_messages);
-        produce_requests = produce_requests.saturating_add(1);
-    }
-    producer
-        .flush()
-        .await
-        .expect("benchmark flush should succeed");
-    SendLoopResult {
-        outer_chunks: produce_requests,
-        elapsed: started.elapsed(),
-        java_perf: None,
-    }
-}
-
-async fn run_callback_tracked_send_loop(
+async fn run_per_record_tracked_send_loop(
     producer: &mut Producer,
     run: &BenchmarkRun<'_>,
     value: Bytes,
@@ -266,43 +207,37 @@ async fn run_callback_tracked_send_loop(
         false,
     ));
     let mut sent = 0usize;
-    let mut pending_since_flush = 0usize;
     while sent < run.scenario.messages {
         let send_started = Instant::now();
         let stats = java_perf.clone();
         let value_size = value.len();
         let _delivery = producer
             .send_with_callback(
-                benchmark_record(Arc::clone(&topic), sent, run.partitions, run.partition_mode)
-                    .value(value.clone()),
+                benchmark_record(Arc::clone(&topic), sent).value(value.clone()),
                 move |result| {
-                    if result.is_ok() {
-                        if let Some(line) =
-                            stats.record_completion(send_started, Instant::now(), value_size)
-                        {
-                            println!("{line}");
-                        }
-                    } else {
+                    let completed = Instant::now();
+                    if let Some(line) = record_tracked_callback_completion(
+                        &result,
+                        TrackedCompletionStart::Single(send_started),
+                        &stats,
+                        completed,
+                        value_size,
+                    ) {
+                        println!("{line}");
+                    }
+                    if result.is_err() {
                         eprintln!("producer callback reported delivery error: {result:?}");
                     }
                 },
             )
             .await
-            .expect("benchmark tracked callback send should fit and dispatch");
-        pending_since_flush = pending_since_flush.saturating_add(1);
-        if pending_since_flush >= run.tracked_delivery_window {
-            producer
-                .flush()
-                .await
-                .expect("benchmark tracked flush should succeed");
-            pending_since_flush = 0;
-        }
+            .expect("benchmark per-record callback send should fit and dispatch");
         sent = sent.saturating_add(1);
     }
     producer
         .flush()
         .await
-        .expect("benchmark tracked final flush should succeed");
+        .expect("benchmark per-record final flush should succeed");
     let elapsed = started.elapsed();
     let java_perf = java_perf.summary(elapsed);
     SendLoopResult {
@@ -312,126 +247,44 @@ async fn run_callback_tracked_send_loop(
     }
 }
 
-async fn run_batch_receipt_send_loop(
-    producer: &mut Producer,
-    run: &BenchmarkRun<'_>,
-    value: Bytes,
-) -> SendLoopResult {
-    let topic = Arc::<str>::from(run.topic);
-    let mut deliveries = Vec::with_capacity(
-        run.tracked_delivery_window
-            .min(run.scenario.messages)
-            .min(run.scenario.batch_messages),
-    );
-    let started = Instant::now();
-    let mut sent = 0usize;
-    let mut produce_requests = 0usize;
-    while sent < run.scenario.messages {
-        let batch_messages = run
-            .scenario
-            .batch_messages
-            .min(run.scenario.messages.saturating_sub(sent));
-        let records = (0..batch_messages).map(|index| {
-            benchmark_record(
-                Arc::clone(&topic),
-                sent + index,
-                run.partitions,
-                run.partition_mode,
-            )
-            .value(value.clone())
-        });
-        deliveries.push(
-            producer
-                .send_batch(records)
-                .await
-                .expect("benchmark batch receipt send should fit and dispatch"),
-        );
-        if deliveries.len() >= run.tracked_delivery_window {
-            producer
-                .flush()
-                .await
-                .expect("benchmark batch receipt flush should succeed");
-            await_deliveries(&mut deliveries).await;
+#[derive(Debug, Clone, Copy)]
+enum TrackedCompletionStart {
+    Single(Instant),
+}
+
+impl TrackedCompletionStart {
+    const fn next(self) -> Instant {
+        match self {
+            Self::Single(started) => started,
         }
-        sent = sent.saturating_add(batch_messages);
-        produce_requests = produce_requests.saturating_add(1);
     }
-    producer
-        .flush()
-        .await
-        .expect("benchmark batch receipt final flush should succeed");
-    await_deliveries(&mut deliveries).await;
-    SendLoopResult {
-        outer_chunks: produce_requests,
-        elapsed: started.elapsed(),
-        java_perf: None,
+}
+
+fn record_tracked_callback_completion(
+    result: &kacrab::producer::Result<RecordMetadata>,
+    completion_start: TrackedCompletionStart,
+    performance_stats: &ProducerPerformanceStatsHandle,
+    completed: Instant,
+    value_size: usize,
+) -> Option<String> {
+    if result.is_err() {
+        return None;
     }
+    let started = completion_start.next();
+    performance_stats.record_completion(started, completed, value_size)
 }
 
 async fn warm_up_producer(producer: &mut Producer, run: &BenchmarkRun<'_>, value: Bytes) {
     let topic = Arc::<str>::from(run.topic);
     let warmup_messages = warmup_record_count(run);
-    match run.delivery_mode {
-        DeliveryMode::Untracked => {
-            let records = (0..warmup_messages).map(|index| {
-                benchmark_record(
-                    Arc::clone(&topic),
-                    index,
-                    run.partitions,
-                    run.partition_mode,
-                )
-                .value(value.clone())
-            });
-            producer
-                .send_batch_untracked(records)
-                .await
-                .expect("benchmark warmup send should dispatch");
-        },
-        DeliveryMode::Tracked => {
-            for index in 0..warmup_messages {
-                let _delivery = producer
-                    .send_with_callback(
-                        benchmark_record(
-                            Arc::clone(&topic),
-                            index,
-                            run.partitions,
-                            run.partition_mode,
-                        )
-                        .value(value.clone()),
-                        |_result| {},
-                    )
-                    .await
-                    .expect("benchmark tracked warmup send should dispatch");
-            }
-            producer
-                .flush()
-                .await
-                .expect("benchmark tracked warmup flush should succeed");
-            return;
-        },
-        DeliveryMode::Batch => {
-            let records = (0..warmup_messages).map(|index| {
-                benchmark_record(
-                    Arc::clone(&topic),
-                    index,
-                    run.partitions,
-                    run.partition_mode,
-                )
-                .value(value.clone())
-            });
-            let delivery = producer
-                .send_batch(records)
-                .await
-                .expect("benchmark batch receipt warmup send should dispatch");
-            producer
-                .flush()
-                .await
-                .expect("benchmark batch receipt warmup flush should succeed");
-            let _receipts = delivery
-                .await
-                .expect("benchmark batch receipt warmup delivery should succeed");
-            return;
-        },
+    for index in 0..warmup_messages {
+        let _delivery = producer
+            .send_with_callback(
+                benchmark_record(Arc::clone(&topic), index).value(value.clone()),
+                |_result| {},
+            )
+            .await
+            .expect("benchmark per-record warmup send should dispatch");
     }
     producer
         .flush()
@@ -446,268 +299,56 @@ fn warmup_record_count(run: &BenchmarkRun<'_>) -> usize {
         .clamp(1, 16_384)
 }
 
-async fn await_deliveries(deliveries: &mut Vec<BatchSendFuture>) {
-    for delivery in deliveries.drain(..) {
-        let _receipts = delivery.await.expect("benchmark delivery should succeed");
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum PartitionMode {
-    Unassigned,
-    ManualRoundRobin,
-}
-
-impl std::fmt::Display for PartitionMode {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unassigned => formatter.write_str("unassigned"),
-            Self::ManualRoundRobin => formatter.write_str("manual-round-robin"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BenchProfile {
-    KafkaDefault,
-    Relaxed,
-}
-
-impl std::fmt::Display for BenchProfile {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::KafkaDefault => formatter.write_str("kafka-default"),
-            Self::Relaxed => formatter.write_str("relaxed"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryMode {
-    Untracked,
-    Tracked,
-    Batch,
+    PerRecord,
 }
 
 impl std::fmt::Display for DeliveryMode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Untracked => formatter.write_str("untracked"),
-            Self::Tracked => formatter.write_str("tracked"),
-            Self::Batch => formatter.write_str("batch"),
+            Self::PerRecord => formatter.write_str("per-record"),
         }
     }
 }
 
-fn benchmark_record(
-    topic: Arc<str>,
-    index: usize,
-    partitions: usize,
-    partition_mode: PartitionMode,
-) -> ProducerRecord {
-    match partition_mode {
-        PartitionMode::Unassigned => ProducerRecord::unassigned(topic),
-        PartitionMode::ManualRoundRobin => {
-            let partition = i32::try_from(index % partitions).unwrap_or_default();
-            ProducerRecord::new(topic, partition)
-        },
-    }
+fn benchmark_api() -> DeliveryMode {
+    benchmark_api_for(env::var("KACRAB_BENCH_API").ok().as_deref())
+}
+
+const fn benchmark_api_for(value: Option<&str>) -> DeliveryMode {
+    let _ = value;
+    DeliveryMode::PerRecord
+}
+
+fn benchmark_record(topic: Arc<str>, _index: usize) -> ProducerRecord {
+    ProducerRecord::unassigned(topic)
 }
 
 fn scenarios() -> Vec<Scenario> {
-    let selection = ScenarioSelection {
-        only_10b: env::var("KACRAB_ONLY_10B").ok().as_deref() == Some("1"),
-        only_10kib: env::var("KACRAB_ONLY_10KIB").ok().as_deref() == Some("1"),
-        smoke: env::var("KACRAB_BENCH_SMOKE").ok().as_deref() == Some("1"),
-        custom_messages: env_usize("KACRAB_CUSTOM_MESSAGES"),
-        custom_value_size: env_usize("KACRAB_CUSTOM_VALUE_SIZE"),
-        custom_batch_messages: env_usize("KACRAB_CUSTOM_BATCH_MESSAGES"),
-        payload_file_size: payload_file_size(),
-        batch_messages_10b: env_usize("KACRAB_BATCH_MESSAGES_10B"),
-        batch_messages_10kib: env_usize("KACRAB_BATCH_MESSAGES_10KIB"),
-    };
-    scenarios_for_selection(selection)
+    vec![small_payload_scenario(), large_payload_scenario()]
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ScenarioSelection {
-    only_10b: bool,
-    only_10kib: bool,
-    smoke: bool,
-    custom_messages: Option<usize>,
-    custom_value_size: Option<usize>,
-    custom_batch_messages: Option<usize>,
-    payload_file_size: Option<usize>,
-    batch_messages_10b: Option<usize>,
-    batch_messages_10kib: Option<usize>,
+const fn reporting_interval() -> Duration {
+    Duration::from_secs(5)
 }
 
-fn scenarios_for_selection(selection: ScenarioSelection) -> Vec<Scenario> {
-    if let Some(scenario) = custom_payload_scenario(selection) {
-        return vec![scenario];
-    }
-    if selection.only_10b {
-        return vec![small_payload_scenario(selection.batch_messages_10b)];
-    }
-    if selection.only_10kib {
-        return vec![large_payload_scenario(selection.batch_messages_10kib)];
-    }
-    if selection.smoke {
-        return vec![
-            Scenario {
-                name: "smoke: 10,000 messages x 10 bytes".to_owned(),
-                messages: 10_000,
-                value_size: 10,
-                batch_messages: 1024,
-            },
-            Scenario {
-                name: "smoke: 1,000 messages x 10 KiB".to_owned(),
-                messages: 1_000,
-                value_size: 10 * 1024,
-                batch_messages: 96,
-            },
-        ];
-    }
-    vec![
-        small_payload_scenario(selection.batch_messages_10b),
-        large_payload_scenario(selection.batch_messages_10kib),
-    ]
-}
-
-fn small_payload_scenario(batch_messages: Option<usize>) -> Scenario {
+fn small_payload_scenario() -> Scenario {
     Scenario {
         name: "5,000,000 messages x 10 bytes".to_owned(),
-        messages: 5_000_000,
-        value_size: 10,
-        batch_messages: batch_messages.unwrap_or(16_384),
+        messages: BENCH_MESSAGES,
+        value_size: SMALL_VALUE_SIZE,
+        batch_messages: TRACKED_API_CHUNK_RECORDS,
     }
 }
 
-fn large_payload_scenario(batch_messages: Option<usize>) -> Scenario {
+fn large_payload_scenario() -> Scenario {
     Scenario {
         name: "100,000 messages x 10 KiB".to_owned(),
-        messages: 100_000,
-        value_size: 10 * 1024,
-        batch_messages: batch_messages.unwrap_or(96),
+        messages: LARGE_BENCH_MESSAGES,
+        value_size: LARGE_VALUE_SIZE,
+        batch_messages: TRACKED_API_CHUNK_RECORDS.min(96),
     }
-}
-
-fn custom_payload_scenario(selection: ScenarioSelection) -> Option<Scenario> {
-    let value_size = selection
-        .custom_value_size
-        .or(selection.payload_file_size)?;
-    let messages = match selection.custom_messages {
-        Some(messages) => messages,
-        None if selection.payload_file_size.is_some() => 100_000,
-        None => return None,
-    };
-    let batch_messages = selection
-        .custom_batch_messages
-        .unwrap_or(if value_size >= 1024 { 96 } else { 16_384 });
-    Some(Scenario {
-        name: format!(
-            "custom: {} messages x {} bytes",
-            format_count(messages),
-            value_size
-        ),
-        messages,
-        value_size,
-        batch_messages,
-    })
-}
-
-fn partitions() -> usize {
-    env_usize("KACRAB_PARTITIONS").unwrap_or(PARTITIONS)
-}
-
-fn bench_profile() -> BenchProfile {
-    bench_profile_for(env::var("KACRAB_BENCH_PROFILE").ok().as_deref())
-}
-
-fn bench_profile_for(value: Option<&str>) -> BenchProfile {
-    match value {
-        Some("relaxed" | "throughput" | "throughput-relaxed") => BenchProfile::Relaxed,
-        _ => BenchProfile::KafkaDefault,
-    }
-}
-
-fn in_flight_override() -> Option<usize> {
-    env_usize("KACRAB_IN_FLIGHT")
-}
-
-fn acks_override() -> Option<String> {
-    env::var("KACRAB_ACKS").ok()
-}
-
-fn batch_size_override() -> Option<usize> {
-    env_usize("KACRAB_BATCH_SIZE")
-}
-
-fn partition_mode() -> PartitionMode {
-    match env::var("KACRAB_PARTITION_MODE")
-        .unwrap_or_else(|_error| "unassigned".to_owned())
-        .as_str()
-    {
-        "manual" | "manual-round-robin" | "round-robin" => PartitionMode::ManualRoundRobin,
-        _ => PartitionMode::Unassigned,
-    }
-}
-
-fn metrics_enabled() -> bool {
-    env::var("KACRAB_ENABLE_METRICS").ok().as_deref() == Some("1")
-}
-
-fn latency_enabled() -> bool {
-    env::var("KACRAB_ENABLE_LATENCY").ok().as_deref() == Some("1")
-}
-
-fn delivery_modes() -> Vec<DeliveryMode> {
-    match env::var("KACRAB_DELIVERY_MODE")
-        .unwrap_or_else(|_error| "untracked".to_owned())
-        .as_str()
-    {
-        "tracked" | "callback" => vec![DeliveryMode::Tracked],
-        "batch" | "batch-tracked" => vec![DeliveryMode::Batch],
-        "both" => vec![DeliveryMode::Untracked, DeliveryMode::Tracked],
-        "all" => vec![
-            DeliveryMode::Untracked,
-            DeliveryMode::Tracked,
-            DeliveryMode::Batch,
-        ],
-        _ => vec![DeliveryMode::Untracked],
-    }
-}
-
-fn display_delivery_modes(modes: &[DeliveryMode]) -> String {
-    modes
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn display_optional_usize(value: Option<usize>) -> String {
-    value.map_or_else(|| "kafka-default".to_owned(), |value| value.to_string())
-}
-
-fn display_optional_str(value: Option<&str>) -> String {
-    value.map_or_else(|| "kafka-default".to_owned(), ToOwned::to_owned)
-}
-
-fn tracked_delivery_window() -> usize {
-    env_usize("KACRAB_TRACKED_DELIVERY_WINDOW")
-        .unwrap_or(usize::MAX)
-        .max(1)
-}
-
-fn reporting_interval() -> Duration {
-    Duration::from_millis(env_usize("KACRAB_REPORTING_INTERVAL_MS").unwrap_or(5_000) as u64)
-}
-
-fn env_usize(name: &str) -> Option<usize> {
-    env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
 }
 
 fn bootstrap_addr() -> SocketAddr {
@@ -721,38 +362,8 @@ fn topic() -> String {
     env::var("KACRAB_BENCH_TOPIC").unwrap_or_else(|_error| "kacrab-bench".to_owned())
 }
 
-fn payload_file_size() -> Option<usize> {
-    let path = env::var("KACRAB_PAYLOAD_FILE").ok()?;
-    let bytes = std::fs::metadata(path).ok()?.len();
-    usize::try_from(bytes).ok().filter(|bytes| *bytes > 0)
-}
-
 fn payload_value(default_size: usize) -> Bytes {
-    if let Ok(path) = env::var("KACRAB_PAYLOAD_FILE") {
-        let bytes = std::fs::read(path).expect("KACRAB_PAYLOAD_FILE must be readable");
-        assert!(!bytes.is_empty(), "KACRAB_PAYLOAD_FILE must not be empty");
-        return Bytes::from(bytes);
-    }
     Bytes::from(vec![b'x'; default_size])
-}
-
-fn format_count(value: usize) -> String {
-    let digits = value.to_string();
-    let mut formatted = String::with_capacity(digits.len().saturating_add(digits.len() / 3));
-    for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).checked_rem(3).unwrap_or(0) == 0 {
-            formatted.push(',');
-        }
-        formatted.push(ch);
-    }
-    formatted
-}
-
-fn batch_buffer_memory(batch_messages: usize, value_size: usize) -> usize {
-    batch_messages
-        .checked_mul(value_size.saturating_add(128))
-        .and_then(|bytes| bytes.checked_add(1024 * 1024))
-        .expect("scenario buffer memory should not overflow")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -766,6 +377,7 @@ struct LatencySummary {
     max_ms: f64,
 }
 
+#[cfg(test)]
 fn latency_summary<I>(samples: I) -> Option<LatencySummary>
 where
     I: IntoIterator<Item = Duration>,
@@ -790,6 +402,7 @@ where
     })
 }
 
+#[cfg(test)]
 fn percentile_ms(samples: &[Duration], per_mille: usize) -> f64 {
     let len = samples.len();
     let rank = per_mille
@@ -800,6 +413,7 @@ fn percentile_ms(samples: &[Duration], per_mille: usize) -> f64 {
     duration_ms(samples[index])
 }
 
+#[cfg(test)]
 fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
@@ -1073,7 +687,9 @@ fn f64_from_usize(value: usize) -> f64 {
 }
 
 fn f64_from_u64(value: u64) -> f64 {
-    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+    let high = u32::try_from(value >> 32).unwrap_or(u32::MAX);
+    let low = u32::try_from(value & u64::from(u32::MAX)).unwrap_or(u32::MAX);
+    f64::from(high) * 4_294_967_296.0 + f64::from(low)
 }
 
 fn f64_from_i64(value: i64) -> f64 {
@@ -1087,8 +703,8 @@ fn f64_from_i64(value: i64) -> f64 {
 }
 
 const fn metrics_delta(
-    current: ProducerMetricsSnapshot,
-    baseline: ProducerMetricsSnapshot,
+    current: &ProducerMetricsSnapshot,
+    baseline: &ProducerMetricsSnapshot,
 ) -> ProducerMetricsSnapshot {
     ProducerMetricsSnapshot {
         records_appended: current
@@ -1097,6 +713,21 @@ const fn metrics_delta(
         produce_request_count: current
             .produce_request_count
             .saturating_sub(baseline.produce_request_count),
+        produce_request_bytes: current
+            .produce_request_bytes
+            .saturating_sub(baseline.produce_request_bytes),
+        produce_batch_count: current
+            .produce_batch_count
+            .saturating_sub(baseline.produce_batch_count),
+        produce_batch_bytes: current
+            .produce_batch_bytes
+            .saturating_sub(baseline.produce_batch_bytes),
+        produce_request_payload_bytes: current
+            .produce_request_payload_bytes
+            .saturating_sub(baseline.produce_request_payload_bytes),
+        produce_request_split_count: current
+            .produce_request_split_count
+            .saturating_sub(baseline.produce_request_split_count),
         produce_record_count: current
             .produce_record_count
             .saturating_sub(baseline.produce_record_count),
@@ -1107,6 +738,9 @@ const fn metrics_delta(
             .produce_error_count
             .saturating_sub(baseline.produce_error_count),
         requeue_count: current.requeue_count.saturating_sub(baseline.requeue_count),
+        in_flight_stall_count: current
+            .in_flight_stall_count
+            .saturating_sub(baseline.in_flight_stall_count),
         queue_depth_bytes: current.queue_depth_bytes,
         queue_depth_records: current.queue_depth_records,
         in_flight_dispatches: current.in_flight_dispatches,
@@ -1171,6 +805,42 @@ fn print_result(result: &BenchmarkResult<'_>) {
     println!("{}", format_result_line(result));
 }
 
+fn print_average_result(scenario: &Scenario, summaries: &[ProducerPerformanceSummary]) {
+    println!("{}", format_average_result_line(scenario, summaries));
+}
+
+fn print_average_counters(metrics: &[ProducerMetricsSnapshot]) {
+    println!("{}", format_average_counter_line(metrics));
+}
+
+fn format_average_result_line(
+    scenario: &Scenario,
+    summaries: &[ProducerPerformanceSummary],
+) -> String {
+    let runs = summaries.len().max(1);
+    let runs_f64 = f64::from(u32::try_from(runs).expect("benchmark run count should fit in u32"));
+    let records_per_second = summaries
+        .iter()
+        .map(|summary| summary.records_per_second)
+        .sum::<f64>()
+        / runs_f64;
+    let mebibytes_per_second = summaries
+        .iter()
+        .map(|summary| summary.mebibytes_per_second)
+        .sum::<f64>()
+        / runs_f64;
+    format!(
+        "{}: {:.0} messages/s, {:.3} MB/s (average over {} runs)",
+        scenario.name, records_per_second, mebibytes_per_second, runs
+    )
+}
+
+fn format_average_counter_line(metrics: &[ProducerMetricsSnapshot]) -> String {
+    let mut line = String::from("rust average counters: ");
+    append_average_metrics(&mut line, metrics);
+    line
+}
+
 fn format_result_line(result: &BenchmarkResult<'_>) -> String {
     if let Some(java_perf) = result.java_perf {
         return format_java_perf_result_line(result, java_perf);
@@ -1221,7 +891,7 @@ fn format_java_perf_result_line(
     );
     if result.metrics_enabled {
         line.push_str(" (");
-        append_metrics(&mut line, result.metrics);
+        append_metrics(&mut line, &result.metrics);
         line.push(')');
     }
     line
@@ -1234,13 +904,12 @@ fn format_dispatch_latency_result_line(
     megabytes_per_second: f64,
 ) -> String {
     if result.metrics_enabled {
-        return format!(
+        let mut line = format!(
             "{} [{}]: {:.0} messages/s, {:.3} MiB/s ({:.3}s, api_chunks={}, \
              dispatch_latency_samples={}, dispatch_latency_avg={:.2} ms, \
              dispatch_latency_p50={:.2} ms, dispatch_latency_p95={:.2} ms, \
              dispatch_latency_p99={:.2} ms, dispatch_latency_p999={:.2} ms, \
-             dispatch_latency_max={:.2} ms, broker_requests={}, records={}, retries={}, \
-             errors={}, requeues={}, batch_fill={:.3})",
+             dispatch_latency_max={:.2} ms, ",
             result.scenario.name,
             result.delivery_mode,
             messages_per_second,
@@ -1253,14 +922,11 @@ fn format_dispatch_latency_result_line(
             latency.p95_ms,
             latency.p99_ms,
             latency.p999_ms,
-            latency.max_ms,
-            result.metrics.produce_request_count,
-            result.metrics.produce_record_count,
-            result.metrics.produce_retry_count,
-            result.metrics.produce_error_count,
-            result.metrics.requeue_count,
-            result.metrics.average_batch_fill_ratio
+            latency.max_ms
         );
+        append_metrics(&mut line, &result.metrics);
+        line.push(')');
+        return line;
     }
     format!(
         "{} [{}]: {:.0} messages/s, {:.3} MiB/s ({:.3}s, api_chunks={}, \
@@ -1289,22 +955,18 @@ fn format_throughput_result_line(
     megabytes_per_second: f64,
 ) -> String {
     if result.metrics_enabled {
-        return format!(
-            "{} [{}]: {:.0} messages/s, {:.3} MiB/s ({:.3}s, api_chunks={}, broker_requests={}, \
-             records={}, retries={}, errors={}, requeues={}, batch_fill={:.3})",
+        let mut line = format!(
+            "{} [{}]: {:.0} messages/s, {:.3} MiB/s ({:.3}s, api_chunks={}, ",
             result.scenario.name,
             result.delivery_mode,
             messages_per_second,
             megabytes_per_second,
             result.elapsed.as_secs_f64(),
-            result.outer_chunks,
-            result.metrics.produce_request_count,
-            result.metrics.produce_record_count,
-            result.metrics.produce_retry_count,
-            result.metrics.produce_error_count,
-            result.metrics.requeue_count,
-            result.metrics.average_batch_fill_ratio
+            result.outer_chunks
         );
+        append_metrics(&mut line, &result.metrics);
+        line.push(')');
+        return line;
     }
     format!(
         "{} [{}]: {:.0} messages/s, {:.3} MiB/s ({:.3}s, api_chunks={})",
@@ -1317,102 +979,239 @@ fn format_throughput_result_line(
     )
 }
 
-fn append_metrics(line: &mut String, metrics: ProducerMetricsSnapshot) {
+fn append_metrics(line: &mut String, metrics: &ProducerMetricsSnapshot) {
+    let records_per_batch_avg =
+        average_counter(metrics.produce_record_count, metrics.produce_batch_count);
+    let records_per_request_avg =
+        average_counter(metrics.produce_record_count, metrics.produce_request_count);
+    let request_size_avg =
+        average_counter(metrics.produce_request_bytes, metrics.produce_request_count);
+    let batch_payload_bytes_per_request_avg = average_counter(
+        metrics.produce_request_payload_bytes,
+        metrics.produce_request_count,
+    );
     let _result = write!(
         line,
-        "broker_requests={}, records={}, retries={}, errors={}, requeues={}, batch_fill={:.3}",
+        "produce_requests={}, record_batches={}, records_per_batch_avg={:.3}, \
+         records_per_request_avg={:.3}, request_size_avg={:.3}, \
+         record_batch_payload_bytes_per_request_avg={:.3}, retries={}, errors={}, \
+         in_flight_stalls={}, batch_splits=not_tracked, request_splits={}, requeues={}, \
+         batch_fill={:.3}",
         metrics.produce_request_count,
-        metrics.produce_record_count,
+        metrics.produce_batch_count,
+        records_per_batch_avg,
+        records_per_request_avg,
+        request_size_avg,
+        batch_payload_bytes_per_request_avg,
         metrics.produce_retry_count,
         metrics.produce_error_count,
+        metrics.in_flight_stall_count,
+        metrics.produce_request_split_count,
         metrics.requeue_count,
         metrics.average_batch_fill_ratio
     );
 }
 
+fn append_average_metrics(line: &mut String, metrics: &[ProducerMetricsSnapshot]) {
+    let runs = f64_from_usize(metrics.len().max(1));
+    let produce_requests = metrics
+        .iter()
+        .map(|snapshot| snapshot.produce_request_count)
+        .sum::<u64>();
+    let record_batches = metrics
+        .iter()
+        .map(|snapshot| snapshot.produce_batch_count)
+        .sum::<u64>();
+    let records = metrics
+        .iter()
+        .map(|snapshot| snapshot.produce_record_count)
+        .sum::<u64>();
+    let request_bytes = metrics
+        .iter()
+        .map(|snapshot| snapshot.produce_request_bytes)
+        .sum::<u64>();
+    let request_payload_bytes = metrics
+        .iter()
+        .map(|snapshot| snapshot.produce_request_payload_bytes)
+        .sum::<u64>();
+    let retries = metrics
+        .iter()
+        .map(|snapshot| snapshot.produce_retry_count)
+        .sum::<u64>();
+    let errors = metrics
+        .iter()
+        .map(|snapshot| snapshot.produce_error_count)
+        .sum::<u64>();
+    let in_flight_stalls = metrics
+        .iter()
+        .map(|snapshot| snapshot.in_flight_stall_count)
+        .sum::<u64>();
+    let request_splits = metrics
+        .iter()
+        .map(|snapshot| snapshot.produce_request_split_count)
+        .sum::<u64>();
+    let requeues = metrics
+        .iter()
+        .map(|snapshot| snapshot.requeue_count)
+        .sum::<u64>();
+    let batch_fill = metrics
+        .iter()
+        .map(|snapshot| snapshot.average_batch_fill_ratio)
+        .sum::<f64>()
+        / runs;
+
+    let _result = write!(
+        line,
+        "produce_requests={:.3}, record_batches={:.3}, records_per_batch_avg={:.3}, \
+         records_per_request_avg={:.3}, request_size_avg={:.3}, \
+         record_batch_payload_bytes_per_request_avg={:.3}, retries={:.3}, errors={:.3}, \
+         in_flight_stalls={:.3}, batch_splits=not_tracked, request_splits={:.3}, requeues={:.3}, \
+         batch_fill={:.3}",
+        f64_from_u64(produce_requests) / runs,
+        f64_from_u64(record_batches) / runs,
+        average_counter(records, record_batches),
+        average_counter(records, produce_requests),
+        average_counter(request_bytes, produce_requests),
+        average_counter(request_payload_bytes, produce_requests),
+        f64_from_u64(retries) / runs,
+        f64_from_u64(errors) / runs,
+        f64_from_u64(in_flight_stalls) / runs,
+        f64_from_u64(request_splits) / runs,
+        f64_from_u64(requeues) / runs,
+        batch_fill
+    );
+}
+
+fn average_counter(total: u64, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        f64_from_u64(total) / f64_from_u64(count)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    use kacrab::producer::{ProducerError, RecordMetadata};
 
     use super::{
-        BenchProfile, BenchmarkResult, DeliveryMode, LatencySummary, ProducerMetricsSnapshot,
-        ProducerPerformanceStats, Scenario, ScenarioSelection, bench_profile_for,
-        format_result_line, latency_summary, scenarios_for_selection,
+        BENCH_RUNS, BenchmarkResult, DeliveryMode, LatencySummary, ProducerMetricsSnapshot,
+        ProducerPerformanceStats, ProducerPerformanceStatsHandle, Scenario, TrackedCompletionStart,
+        benchmark_api_for, benchmark_producer_config, format_average_counter_line,
+        format_effective_config_snapshot, format_result_line, latency_summary,
+        record_tracked_callback_completion, scenarios,
     };
 
     #[test]
-    fn scenario_selection_can_run_large_payload_only() {
-        let scenarios = scenarios_for_selection(ScenarioSelection {
-            only_10b: false,
-            only_10kib: true,
-            smoke: false,
-            custom_messages: None,
-            custom_value_size: None,
-            custom_batch_messages: None,
-            payload_file_size: None,
-            batch_messages_10b: None,
-            batch_messages_10kib: Some(192),
-        });
+    fn scenarios_are_fixed_five_million_record_payloads() {
+        let scenarios = scenarios();
 
-        assert_eq!(scenarios.len(), 1);
-        assert_eq!(scenarios[0].name, "100,000 messages x 10 KiB");
-        assert_eq!(scenarios[0].messages, 100_000);
-        assert_eq!(scenarios[0].value_size, 10 * 1024);
-        assert_eq!(scenarios[0].batch_messages, 192);
+        assert_eq!(scenarios.len(), 2);
+        assert_eq!(scenarios[0].messages, 5_000_000);
+        assert_eq!(scenarios[0].value_size, 10);
+        assert_eq!(scenarios[1].messages, 100_000);
+        assert_eq!(scenarios[1].value_size, 10 * 1024);
     }
 
     #[test]
-    fn scenario_selection_defaults_large_payload_to_baseline_outer_chunks() {
-        let scenarios = scenarios_for_selection(ScenarioSelection {
-            only_10b: false,
-            only_10kib: true,
-            smoke: false,
-            custom_messages: None,
-            custom_value_size: None,
-            custom_batch_messages: None,
-            payload_file_size: None,
-            batch_messages_10b: None,
-            batch_messages_10kib: None,
-        });
-
-        assert_eq!(scenarios.len(), 1);
-        assert_eq!(scenarios[0].batch_messages, 96);
+    fn benchmark_averages_over_five_runs() {
+        assert_eq!(BENCH_RUNS, 5);
     }
 
     #[test]
-    fn scenario_selection_can_run_custom_payload_profile() {
-        let scenarios = scenarios_for_selection(ScenarioSelection {
-            only_10b: false,
-            only_10kib: false,
-            smoke: false,
-            custom_messages: Some(250_000),
-            custom_value_size: Some(512),
-            custom_batch_messages: Some(2048),
-            payload_file_size: None,
-            batch_messages_10b: None,
-            batch_messages_10kib: None,
-        });
-
-        assert_eq!(scenarios.len(), 1);
-        assert_eq!(scenarios[0].name, "custom: 250,000 messages x 512 bytes");
-        assert_eq!(scenarios[0].messages, 250_000);
-        assert_eq!(scenarios[0].value_size, 512);
-        assert_eq!(scenarios[0].batch_messages, 2048);
+    fn benchmark_api_defaults_to_per_record_java_parity() {
+        assert_eq!(benchmark_api_for(None), DeliveryMode::PerRecord);
+        assert_eq!(DeliveryMode::PerRecord.to_string(), "per-record");
     }
 
     #[test]
-    fn bench_profile_defaults_to_kafka_defaults() {
-        assert_eq!(bench_profile_for(None), BenchProfile::KafkaDefault);
+    fn benchmark_api_ignores_removed_batched_public_api() {
+        assert_eq!(benchmark_api_for(Some("batched")), DeliveryMode::PerRecord);
         assert_eq!(
-            bench_profile_for(Some("unknown")),
-            BenchProfile::KafkaDefault
+            benchmark_api_for(Some("send-batch")),
+            DeliveryMode::PerRecord
         );
     }
 
     #[test]
-    fn bench_profile_relaxed_is_explicit_opt_in() {
-        assert_eq!(bench_profile_for(Some("relaxed")), BenchProfile::Relaxed);
-        assert_eq!(bench_profile_for(Some("throughput")), BenchProfile::Relaxed);
+    fn effective_config_snapshot_reports_java_default_parity_keys() {
+        let bootstrap = "127.0.0.1:9092".parse().expect("socket address");
+        let config = benchmark_producer_config(bootstrap);
+        let snapshot = format_effective_config_snapshot(&config);
+
+        assert!(snapshot.starts_with("effective producer config: "));
+        assert!(snapshot.contains("bootstrap.servers=127.0.0.1:9092"));
+        assert!(snapshot.contains("client.id=kacrab-producer-kafka-bench"));
+        assert!(snapshot.contains("acks=all"));
+        assert!(snapshot.contains("enable.idempotence=true"));
+        assert!(snapshot.contains("retries=2147483647"));
+        assert!(snapshot.contains("max.in.flight.requests.per.connection=5"));
+        assert!(snapshot.contains("batch.size=16384"));
+        assert!(snapshot.contains("linger.ms=5"));
+        assert!(snapshot.contains("buffer.memory=33554432"));
+        assert!(snapshot.contains("compression.type=none"));
+        assert!(snapshot.contains("delivery.timeout.ms=120000"));
+        assert!(snapshot.contains("request.timeout.ms=30000"));
+        assert!(snapshot.contains("max.block.ms=60000"));
+        assert!(snapshot.contains("max.request.size=1048576"));
+        assert!(snapshot.contains("send.buffer.bytes=131072"));
+        assert!(snapshot.contains("receive.buffer.bytes=32768"));
+        assert!(snapshot.contains("metadata.max.age.ms=300000"));
+        assert!(snapshot.contains("partitioner.adaptive.partitioning.enable=true"));
+        assert!(snapshot.contains("partitioner.availability.timeout.ms=0"));
+        assert!(snapshot.contains("enable.metrics.push=true"));
+    }
+
+    #[test]
+    fn tracked_callback_accounting_counts_successes_and_skips_failures() {
+        let started = Instant::now();
+        let performance_stats = ProducerPerformanceStatsHandle::new(ProducerPerformanceStats::new(
+            1,
+            Duration::from_secs(5),
+            false,
+        ));
+        let failure = Err(ProducerError::InvalidRecord {
+            field: "value",
+            message: "forced failure",
+        });
+
+        let failed_line = record_tracked_callback_completion(
+            &failure,
+            TrackedCompletionStart::Single(started),
+            &performance_stats,
+            started,
+            10,
+        );
+
+        assert_eq!(failed_line, None);
+
+        let success = Ok(RecordMetadata {
+            topic: Arc::from("bench"),
+            partition: 0,
+            leader_id: 0,
+            offset: 0,
+            timestamp_ms: -1,
+            serialized_key_size: -1,
+            serialized_value_size: 10,
+        });
+
+        let first_success_line = record_tracked_callback_completion(
+            &success,
+            TrackedCompletionStart::Single(started),
+            &performance_stats,
+            started + Duration::from_millis(5),
+            10,
+        );
+        let summary = performance_stats.summary(Duration::from_secs(1));
+
+        assert_eq!(first_success_line, None);
+        assert_eq!(summary.records, 1);
+        assert_float_eq(summary.avg_ms, 5.0);
     }
 
     #[test]
@@ -1459,7 +1258,7 @@ mod tests {
             java_perf: None,
             metrics: empty_metrics(),
             metrics_enabled: false,
-            delivery_mode: DeliveryMode::Untracked,
+            delivery_mode: DeliveryMode::PerRecord,
             elapsed: Duration::from_secs(1),
         });
 
@@ -1489,7 +1288,7 @@ mod tests {
             java_perf: Some(stats.summary(Duration::from_secs(1))),
             metrics: empty_metrics(),
             metrics_enabled: false,
-            delivery_mode: DeliveryMode::Tracked,
+            delivery_mode: DeliveryMode::PerRecord,
             elapsed: Duration::from_secs(1),
         });
 
@@ -1503,14 +1302,130 @@ mod tests {
         assert!(!line.contains("dispatch_latency"));
     }
 
+    #[test]
+    fn tracked_result_metrics_use_parity_counter_schema() {
+        let scenario = Scenario {
+            name: "tracked scenario".to_owned(),
+            messages: 1_000,
+            value_size: 10,
+            batch_messages: 100,
+        };
+        let stats = ProducerPerformanceStats::new(1_000, Duration::from_secs(5), false);
+        let started = Instant::now();
+        let _report = stats.record_completion(started, started + Duration::from_millis(5), 10);
+        let mut metrics = empty_metrics();
+        metrics.produce_request_count = 2;
+        metrics.produce_request_bytes = 2_000;
+        metrics.produce_batch_count = 4;
+        metrics.produce_request_payload_bytes = 2_000;
+        metrics.produce_request_split_count = 0;
+        metrics.produce_record_count = 1_000;
+        metrics.produce_retry_count = 1;
+        metrics.produce_error_count = 0;
+        metrics.in_flight_stall_count = 3;
+        metrics.requeue_count = 1;
+        metrics.average_batch_fill_ratio = 0.5;
+
+        let line = format_result_line(&BenchmarkResult {
+            scenario: &scenario,
+            value_size: 10,
+            outer_chunks: 1_000,
+            latency: None,
+            java_perf: Some(stats.summary(Duration::from_secs(1))),
+            metrics,
+            metrics_enabled: true,
+            delivery_mode: DeliveryMode::PerRecord,
+            elapsed: Duration::from_secs(1),
+        });
+
+        assert!(line.contains("produce_requests=2"));
+        assert!(line.contains("record_batches=4"));
+        assert!(line.contains("records_per_batch_avg=250.000"));
+        assert!(line.contains("records_per_request_avg=500.000"));
+        assert!(line.contains("request_size_avg=1000.000"));
+        assert!(line.contains("record_batch_payload_bytes_per_request_avg=1000.000"));
+        assert!(line.contains("retries=1"));
+        assert!(line.contains("errors=0"));
+        assert!(line.contains("in_flight_stalls=3"));
+        assert!(line.contains("batch_splits=not_tracked"));
+        assert!(line.contains("request_splits=0"));
+    }
+
+    #[test]
+    fn average_counter_line_reports_run_averaged_parity_schema() {
+        let mut first = empty_metrics();
+        first.produce_request_count = 2;
+        first.produce_request_bytes = 2_000;
+        first.produce_batch_count = 4;
+        first.produce_request_payload_bytes = 1_800;
+        first.produce_record_count = 1_000;
+        first.produce_retry_count = 1;
+        first.produce_error_count = 0;
+        first.in_flight_stall_count = 2;
+        first.produce_request_split_count = 0;
+        first.requeue_count = 1;
+        first.average_batch_fill_ratio = 0.5;
+
+        let mut second = empty_metrics();
+        second.produce_request_count = 4;
+        second.produce_request_bytes = 4_400;
+        second.produce_batch_count = 6;
+        second.produce_request_payload_bytes = 3_900;
+        second.produce_record_count = 1_000;
+        second.produce_retry_count = 3;
+        second.produce_error_count = 2;
+        second.in_flight_stall_count = 4;
+        second.produce_request_split_count = 2;
+        second.requeue_count = 3;
+        second.average_batch_fill_ratio = 0.7;
+
+        let line = format_average_counter_line(&[first, second]);
+
+        assert!(line.starts_with("rust average counters: "));
+        assert!(line.contains("produce_requests=3.000"));
+        assert!(line.contains("record_batches=5.000"));
+        assert!(line.contains("records_per_batch_avg=200.000"));
+        assert!(line.contains("records_per_request_avg=333.333"));
+        assert!(line.contains("request_size_avg=1066.667"));
+        assert!(line.contains("record_batch_payload_bytes_per_request_avg=950.000"));
+        assert!(line.contains("retries=2.000"));
+        assert!(line.contains("errors=1.000"));
+        assert!(line.contains("in_flight_stalls=3.000"));
+        assert!(line.contains("batch_splits=not_tracked"));
+        assert!(line.contains("request_splits=1.000"));
+        assert!(line.contains("requeues=2.000"));
+        assert!(line.contains("batch_fill=0.600"));
+    }
+
+    #[test]
+    fn average_counter_line_does_not_saturate_large_request_bytes() {
+        let mut metrics = empty_metrics();
+        metrics.produce_request_count = 200_000;
+        metrics.produce_request_bytes = 6_000_000_000;
+        metrics.produce_request_payload_bytes = 5_800_000_000;
+        metrics.produce_batch_count = 200_000;
+        metrics.produce_record_count = 200_000;
+
+        let line = format_average_counter_line(&[metrics]);
+
+        assert!(line.contains("request_size_avg=30000.000"));
+        assert!(line.contains("record_batch_payload_bytes_per_request_avg=29000.000"));
+    }
+
     const fn empty_metrics() -> ProducerMetricsSnapshot {
         ProducerMetricsSnapshot {
             records_appended: 0,
             produce_request_count: 0,
+            produce_request_bytes: 0,
+            produce_batch_count: 0,
+            produce_batch_bytes: 0,
+            produce_request_payload_bytes: 0,
+            produce_request_split_count: 0,
             produce_record_count: 0,
             produce_retry_count: 0,
             produce_error_count: 0,
             requeue_count: 0,
+            in_flight_stall_count: 0,
             queue_depth_bytes: 0,
             queue_depth_records: 0,
             in_flight_dispatches: 0,

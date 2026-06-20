@@ -118,21 +118,18 @@ async fn write_records(
         .await?;
     deliveries.push(callback_delivery);
 
-    let tracked_records = (1..=args.messages)
-        .map(|sequence| record(&args.topic, args.partition, sequence, "tracked-send-batch"));
-    let tracked_batch = producer.send_batch(tracked_records).await?;
+    for sequence in 1..=args.messages {
+        let delivery = producer
+            .send(record(
+                &args.topic,
+                args.partition,
+                sequence,
+                "tracked-send",
+            ))
+            .await?;
+        deliveries.push(delivery);
+    }
     producer.flush().await?;
-    let _batch_receipts = tracked_batch.await?;
-
-    let untracked_records = (0..2).map(|sequence| {
-        record(
-            &args.topic,
-            args.partition,
-            sequence,
-            "untracked-send-batch",
-        )
-    });
-    producer.send_batch_untracked(untracked_records).await?;
 
     Ok(deliveries)
 }

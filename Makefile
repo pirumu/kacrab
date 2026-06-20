@@ -1,12 +1,11 @@
-.PHONY: help check build release run test test-codegen test-protocol \
+.PHONY: help check build release run test test-bench-scripts test-codegen test-protocol \
         test-protocol-java test-protocol-java-matrix test-protocol-full \
         clippy fmt fmt-check doc clean audit deny udeps machete outdated \
         install-hooks commit-lint \
         kafka-start kafka-stop kafka-data-du kafka-topic-prune-delete-dirs \
         kafka-tools-check kafka-topic-describe kafka-topic-create \
-        kafka-topic-delete kafka-topic-recreate \
-        bench-kafka bench-kafka-tracked bench-kafka-tracked-manual \
-        bench-kafka-java-default bench-kafka-matrix \
+        kafka-topic-delete kafka-topic-recreate bench-kafka-topic \
+        bench-kafka bench-kafka-java-default \
         ci ci-strict tools
 
 KAFKA_BIN ?= $(HOME)/.local/share/kacrab-kafka/current/bin
@@ -19,13 +18,9 @@ KAFKA_SERVER_PROPERTIES ?= $(KAFKA_ROOT)/server.properties
 KAFKA_DATA_DIR ?= $(KAFKA_ROOT)/data
 KACRAB_BOOTSTRAP ?= 127.0.0.1:9092
 KACRAB_BENCH_TOPIC ?= kacrab-bench
+KACRAB_BENCH_API ?= per-record
 KACRAB_PARTITIONS ?= 3
 KACRAB_REPLICATION_FACTOR ?= 1
-KACRAB_BENCH_MESSAGES ?= 5000000
-KACRAB_BENCH_VALUE_SIZE ?= 10
-KACRAB_BENCH_BATCH_MESSAGES ?= 16384
-KACRAB_DELIVERY_MODE ?= untracked
-KACRAB_PARTITION_MODE ?= unassigned
 
 help:
 	@echo "Common:"
@@ -33,7 +28,8 @@ help:
 	@echo "  build       - cargo build --all-targets"
 	@echo "  release     - cargo build --release"
 	@echo "  run         - cargo run"
-	@echo "  test        - cargo test --workspace --all-features"
+	@echo "  test        - bench script tests + cargo test --workspace --all-features"
+	@echo "  test-bench-scripts - python unit tests for benchmark helper scripts"
 	@echo "  test-codegen - cargo test -p kacrab-codegen --all-features"
 	@echo "  test-protocol - cargo test -p kacrab-protocol --all-features"
 	@echo "  test-protocol-java - compile ignored Java interop tests"
@@ -68,11 +64,10 @@ help:
 	@echo "  kafka-topic-delete    - delete KACRAB_BENCH_TOPIC"
 	@echo "  kafka-topic-recreate  - delete, wait, and recreate KACRAB_BENCH_TOPIC"
 	@echo "  kafka-topic-prune-delete-dirs - rm stale KACRAB_BENCH_TOPIC *-delete dirs; stop Kafka first"
-	@echo "  bench-kafka           - run Rust real-Kafka bench with current env defaults"
-	@echo "  bench-kafka-tracked   - run Rust tracked 10B default-partitioner bench"
-	@echo "  bench-kafka-tracked-manual - run Rust tracked 10B manual-partition bench"
-	@echo "  bench-kafka-java-default - run Java kafka-producer-perf-test default 10B"
-	@echo "  bench-kafka-matrix    - run benches/scripts/producer_default_matrix.sh"
+	@echo "  bench-kafka-topic     - alias for kafka-topic-create"
+	@echo "  bench-kafka           - run Rust real-Kafka bench with fixed default scenarios"
+	@echo "                          uses Java-style per-record public producer send"
+	@echo "  bench-kafka-java-default - run Java default scenarios 5x with effective config snapshots"
 
 check:
 	cargo check --workspace --all-targets --all-features
@@ -86,8 +81,11 @@ release:
 run:
 	cargo run
 
-test:
+test: test-bench-scripts
 	cargo test --workspace --all-features
+
+test-bench-scripts:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest benches/scripts/test_producer_counter_metrics.py
 
 test-codegen:
 	cargo test -p kacrab-codegen --all-features
@@ -166,20 +164,13 @@ kafka-topic-recreate: kafka-tools-check
 	"$(KAFKA_TOPICS)" --bootstrap-server "$(KACRAB_BOOTSTRAP)" --create --if-not-exists --topic "$(KACRAB_BENCH_TOPIC)" --partitions "$(KACRAB_PARTITIONS)" --replication-factor "$(KACRAB_REPLICATION_FACTOR)"
 	"$(KAFKA_TOPICS)" --bootstrap-server "$(KACRAB_BOOTSTRAP)" --describe --topic "$(KACRAB_BENCH_TOPIC)"
 
-bench-kafka:
-	KACRAB_BOOTSTRAP="$(KACRAB_BOOTSTRAP)" KACRAB_BENCH_TOPIC="$(KACRAB_BENCH_TOPIC)" KACRAB_DELIVERY_MODE="$(KACRAB_DELIVERY_MODE)" KACRAB_PARTITION_MODE="$(KACRAB_PARTITION_MODE)" KACRAB_CUSTOM_MESSAGES="$(KACRAB_BENCH_MESSAGES)" KACRAB_CUSTOM_VALUE_SIZE="$(KACRAB_BENCH_VALUE_SIZE)" KACRAB_CUSTOM_BATCH_MESSAGES="$(KACRAB_BENCH_BATCH_MESSAGES)" cargo run -p kacrab-benches --bin producer_kafka_bench --release
+bench-kafka-topic: kafka-topic-create
 
-bench-kafka-tracked:
-	$(MAKE) bench-kafka KACRAB_DELIVERY_MODE=tracked KACRAB_PARTITION_MODE=unassigned KACRAB_BENCH_VALUE_SIZE=10
+bench-kafka: kafka-topic-create
+	KACRAB_BOOTSTRAP="$(KACRAB_BOOTSTRAP)" KACRAB_BENCH_TOPIC="$(KACRAB_BENCH_TOPIC)" KACRAB_BENCH_API="$(KACRAB_BENCH_API)" cargo run -p kacrab-benches --bin producer_kafka_bench --release
 
-bench-kafka-tracked-manual:
-	$(MAKE) bench-kafka KACRAB_DELIVERY_MODE=tracked KACRAB_PARTITION_MODE=manual KACRAB_BENCH_VALUE_SIZE=10
-
-bench-kafka-java-default: kafka-tools-check
-	"$(KAFKA_PRODUCER_PERF)" --bootstrap-server "$(KACRAB_BOOTSTRAP)" --topic "$(KACRAB_BENCH_TOPIC)" --num-records "$(KACRAB_BENCH_MESSAGES)" --record-size "$(KACRAB_BENCH_VALUE_SIZE)" --throughput -1 --command-property "client.id=java-default-$(KACRAB_BENCH_VALUE_SIZE)b"
-
-bench-kafka-matrix: kafka-tools-check
-	KAFKA_BIN="$(KAFKA_BIN)" KACRAB_BOOTSTRAP="$(KACRAB_BOOTSTRAP)" KACRAB_BENCH_TOPIC="$(KACRAB_BENCH_TOPIC)" KACRAB_PARTITIONS="$(KACRAB_PARTITIONS)" benches/scripts/producer_default_matrix.sh
+bench-kafka-java-default: kafka-tools-check kafka-topic-create
+	KAFKA_BIN="$(KAFKA_BIN)" KAFKA_ROOT="$(KAFKA_ROOT)" KAFKA_PRODUCER_PERF="$(KAFKA_PRODUCER_PERF)" KACRAB_BOOTSTRAP="$(KACRAB_BOOTSTRAP)" KACRAB_BENCH_TOPIC="$(KACRAB_BENCH_TOPIC)" benches/scripts/producer_default_matrix.sh
 
 audit:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "cargo-audit not installed. Run: make tools"; exit 1; }
