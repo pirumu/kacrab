@@ -117,6 +117,12 @@ impl BrokerEndpoint {
 #[derive(Debug, Clone)]
 pub(crate) struct BrokerHandle {
     tx: mpsc::Sender<RequestCommand>,
+    /// Latest `ApiVersions` capabilities negotiated by the broker task, shared so
+    /// the control plane can read the broker's advertised version for an API
+    /// (for example, gating client-side epoch bumps on the coordinator's
+    /// `InitProducerId` support). `None` until the first connection negotiates.
+    #[cfg_attr(not(feature = "producer"), allow(dead_code))]
+    capabilities: Arc<std::sync::RwLock<Option<BrokerCapabilities>>>,
 }
 
 pub(crate) struct PendingBrokerResponse<Resp> {
@@ -210,6 +216,7 @@ impl BrokerHandle {
         let (tx, rx) = mpsc::channel(config.broker_queue_capacity);
         #[cfg(feature = "gssapi")]
         let kerberos_login = KerberosLoginManager::new(&config.sasl);
+        let capabilities = Arc::new(std::sync::RwLock::new(None));
         let task = BrokerTask {
             endpoint,
             client_id,
@@ -217,11 +224,23 @@ impl BrokerHandle {
             buffers,
             oauth_token_cache,
             rx,
+            capabilities: Arc::clone(&capabilities),
             #[cfg(feature = "gssapi")]
             kerberos_login,
         };
         let _task = tokio::spawn(task.run());
-        Self { tx }
+        Self { tx, capabilities }
+    }
+
+    /// Highest mutually-supported version the broker advertised for `api_key`,
+    /// or `None` until the connection has completed `ApiVersions` negotiation.
+    #[cfg(feature = "producer")]
+    pub(crate) fn negotiated_version(&self, api_key: ApiKey) -> Option<i16> {
+        self.capabilities
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()?
+            .version_for(api_key)
     }
 
     pub(crate) async fn send<Req, Resp>(
@@ -302,6 +321,7 @@ struct BrokerTask {
     buffers: Arc<BufferPools>,
     oauth_token_cache: Arc<tokio::sync::Mutex<OAuthTokenCache>>,
     rx: mpsc::Receiver<RequestCommand>,
+    capabilities: Arc<std::sync::RwLock<Option<BrokerCapabilities>>>,
     #[cfg(feature = "gssapi")]
     kerberos_login: KerberosLoginManager,
 }
@@ -330,6 +350,11 @@ impl BrokerTask {
             match self.connect_and_negotiate().await {
                 Ok((stream, capabilities)) => {
                     backoff.reset();
+                    *self
+                        .capabilities
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(capabilities.clone());
                     if matches!(
                         self.serve_connection(stream, capabilities, &mut pending, &mut rx_open)
                             .await,
@@ -1216,6 +1241,7 @@ mod tests {
             buffers: Arc::new(BufferPools::new(1)),
             oauth_token_cache: Arc::new(tokio::sync::Mutex::new(OAuthTokenCache::default())),
             rx,
+            capabilities: Arc::new(std::sync::RwLock::new(None)),
             #[cfg(feature = "gssapi")]
             kerberos_login,
         };
@@ -1275,7 +1301,10 @@ mod tests {
     async fn broker_handle_reports_full_and_closed_queue() {
         let (tx, mut rx) = mpsc::channel(1);
         tx.try_send(request_command()).expect("prefill queue");
-        let full = BrokerHandle { tx };
+        let full = BrokerHandle {
+            tx,
+            capabilities: Arc::new(std::sync::RwLock::new(None)),
+        };
 
         assert!(matches!(
             full.send::<_, ApiVersionsResponseData>(
@@ -1290,7 +1319,10 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
-        let closed = BrokerHandle { tx };
+        let closed = BrokerHandle {
+            tx,
+            capabilities: Arc::new(std::sync::RwLock::new(None)),
+        };
         assert!(matches!(
             closed
                 .send::<_, ApiVersionsResponseData>(ApiKey::ApiVersions, 3, &api_versions_request())
@@ -1311,6 +1343,7 @@ mod tests {
             buffers: Arc::new(BufferPools::new(1)),
             oauth_token_cache: Arc::new(tokio::sync::Mutex::new(OAuthTokenCache::default())),
             rx: mpsc::channel(1).1,
+            capabilities: Arc::new(std::sync::RwLock::new(None)),
             #[cfg(feature = "gssapi")]
             kerberos_login,
         };

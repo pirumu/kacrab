@@ -2554,6 +2554,22 @@ impl ProducerDispatcher {
         }
     }
 
+    /// Record whether the transaction coordinator can bump the producer epoch,
+    /// derived from the `InitProducerId` version it advertised (Java's
+    /// `handleCoordinatorReady` / `coordinatorSupportsBumpingEpoch`). Only flips
+    /// the flag when a concrete coordinator version is known, so a transient
+    /// missing-capability read never falsely escalates errors to fatal.
+    async fn record_coordinator_epoch_bump_support(&self, coordinator_id: i32) {
+        if let Some(max_version) = self
+            .wire
+            .negotiated_version(coordinator_id, ApiKey::InitProducerId)
+        {
+            let mut state = self.producer_state.lock().await;
+            state.coordinator_lacks_epoch_bump_support =
+                max_version < COORDINATOR_EPOCH_BUMP_MIN_INIT_PRODUCER_ID_VERSION;
+        }
+    }
+
     async fn record_transaction_error(&self, error: ErrorCode) {
         let error = transaction_control_error_for_client(error);
         let mut state = self.producer_state.lock().await;
@@ -2564,7 +2580,16 @@ impl ProducerDispatcher {
             state.abortable_error = Some(error);
             state.transaction_state = TransactionState::AbortableError;
             if matches!(error, ErrorCode::UnknownProducerId) {
-                state.epoch_bump_required = true;
+                if state.coordinator_lacks_epoch_bump_support {
+                    // Coordinator cannot bump the epoch, so this abortable error
+                    // is unrecoverable and must escalate to fatal (Java
+                    // canHandleAbortableError() == false).
+                    state.abortable_error = None;
+                    state.fatal_error = Some(error);
+                    state.transaction_state = TransactionState::FatalError;
+                } else {
+                    state.epoch_bump_required = true;
+                }
             }
         }
     }
@@ -2586,6 +2611,13 @@ impl ProducerDispatcher {
         let mut state = self.producer_state.lock().await;
         if state.in_transaction {
             if is_fatal_transactional_produce_error(error) {
+                state.abortable_error = None;
+                state.fatal_error = Some(error);
+                state.transaction_state = TransactionState::FatalError;
+            } else if state.coordinator_lacks_epoch_bump_support {
+                // Recovering this abortable error needs a client-side epoch
+                // bump the coordinator cannot perform, so escalate to fatal
+                // (Java canHandleAbortableError() == false).
                 state.abortable_error = None;
                 state.fatal_error = Some(error);
                 state.transaction_state = TransactionState::FatalError;
@@ -2696,6 +2728,7 @@ impl ProducerDispatcher {
                 .await?;
             let error = ErrorCode::from(response.error_code);
             if !error.is_error() {
+                self.record_coordinator_epoch_bump_support(broker_id).await;
                 request_guard.clear().await;
                 return Ok(response);
             }
@@ -2876,6 +2909,13 @@ struct ProducerIdempotenceState {
     abortable_error: Option<ErrorCode>,
     fatal_error: Option<ErrorCode>,
     epoch_bump_required: bool,
+    /// Set once the transaction coordinator is observed to advertise an
+    /// `InitProducerId` version below v3, meaning it cannot bump the producer
+    /// epoch. Java's `coordinatorSupportsBumpingEpoch` (the inverse) gates
+    /// whether an abortable error that needs an epoch bump can be recovered or
+    /// must escalate to a fatal error. Defaults to `false` (assume supported),
+    /// matching modern brokers; flipped only when an old coordinator is seen.
+    coordinator_lacks_epoch_bump_support: bool,
     pending_operation: Option<TransactionOperation>,
     pending_result: Option<TransactionalRequestResult>,
     pending_operation_status: PendingTransactionOperationStatus,
@@ -5383,6 +5423,9 @@ const fn is_idempotent_retry_error(error: ErrorCode) -> bool {
 /// Kafka 4.3 closes `InitProducerId` v6 when two-phase commit is disabled, so
 /// non-2PC producers cap negotiation at v5 until the broker-side behavior changes.
 const NON_2PC_INIT_PRODUCER_ID_MAX_VERSION: i16 = 5;
+/// Lowest coordinator `InitProducerId` version that supports bumping the
+/// producer epoch from the client (Java `coordinatorSupportsBumpingEpoch`).
+const COORDINATOR_EPOCH_BUMP_MIN_INIT_PRODUCER_ID_VERSION: i16 = 3;
 /// Kafka 4.3 marks Produce v12+ as transaction V2.
 const TRANSACTION_V1_PRODUCE_MAX_VERSION: i16 = 11;
 /// Kafka 4.3 marks `TxnOffsetCommit` v5+ as transaction V2.
@@ -7294,6 +7337,83 @@ mod tests {
                 "init_transactions must only run once"
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn transactional_produce_error_escalates_to_fatal_when_coordinator_cannot_bump_epoch() {
+        use super::super::transaction::TransactionState;
+        // A bump-capable coordinator keeps UnknownProducerId abortable and
+        // requests a client-side epoch bump (Java needToTriggerEpochBumpFromClient).
+        let can_bump = transactional_dispatcher();
+        {
+            let mut state = can_bump.producer_state.lock().await;
+            state.in_transaction = true;
+            // Default coordinator_lacks_epoch_bump_support == false (assume supported).
+        }
+        can_bump
+            .record_transactional_produce_error(ErrorCode::UnknownProducerId, "orders", 0)
+            .await;
+        {
+            let state = can_bump.producer_state.lock().await;
+            assert_eq!(state.transaction_state, TransactionState::AbortableError);
+            assert!(state.epoch_bump_required);
+        }
+
+        // A coordinator that cannot bump the epoch (InitProducerId < v3) turns the
+        // same error fatal (Java canHandleAbortableError() == false).
+        let cannot_bump = transactional_dispatcher();
+        {
+            let mut state = cannot_bump.producer_state.lock().await;
+            state.in_transaction = true;
+            state.coordinator_lacks_epoch_bump_support = true;
+        }
+        cannot_bump
+            .record_transactional_produce_error(ErrorCode::UnknownProducerId, "orders", 0)
+            .await;
+        {
+            let state = cannot_bump.producer_state.lock().await;
+            assert_eq!(state.transaction_state, TransactionState::FatalError);
+            assert_eq!(state.fatal_error, Some(ErrorCode::UnknownProducerId));
+            assert!(!state.epoch_bump_required);
+            assert!(state.abortable_error.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn transaction_control_error_escalates_to_fatal_when_coordinator_cannot_bump_epoch() {
+        use super::super::transaction::TransactionState;
+        // Control-plane UnknownProducerId stays abortable + epoch bump when the
+        // coordinator supports bumping, and goes fatal when it does not.
+        let can_bump = transactional_dispatcher();
+        {
+            let mut state = can_bump.producer_state.lock().await;
+            state.in_transaction = true;
+        }
+        can_bump
+            .record_transaction_error(ErrorCode::UnknownProducerId)
+            .await;
+        {
+            let state = can_bump.producer_state.lock().await;
+            assert_eq!(state.transaction_state, TransactionState::AbortableError);
+            assert!(state.epoch_bump_required);
+        }
+
+        let cannot_bump = transactional_dispatcher();
+        {
+            let mut state = cannot_bump.producer_state.lock().await;
+            state.in_transaction = true;
+            state.coordinator_lacks_epoch_bump_support = true;
+        }
+        cannot_bump
+            .record_transaction_error(ErrorCode::UnknownProducerId)
+            .await;
+        {
+            let state = cannot_bump.producer_state.lock().await;
+            assert_eq!(state.transaction_state, TransactionState::FatalError);
+            assert_eq!(state.fatal_error, Some(ErrorCode::UnknownProducerId));
+            assert!(!state.epoch_bump_required);
+            assert!(state.abortable_error.is_none());
+        }
     }
 
     #[tokio::test]
