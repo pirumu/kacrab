@@ -1,6 +1,7 @@
 //! Sender-side dispatch scheduling state for the producer.
 
 use std::{
+    collections::VecDeque,
     future::Future,
     sync::{
         Arc,
@@ -8,7 +9,7 @@ use std::{
     },
 };
 
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use tokio::{
     runtime::Handle,
     sync::{Mutex as AsyncMutex, Notify},
@@ -17,7 +18,7 @@ use tokio::{
 
 use super::{
     ProducerRecord, ReadyBatch,
-    accumulator::{AppendStatus, RecordAccumulator},
+    accumulator::{AppendStatus, ReadyBatchIdentity, RecordAccumulator},
     dispatcher::{DispatchOutcome, ProducerDispatcher},
     error::ProducerError,
     metrics::ProducerMetrics,
@@ -26,10 +27,19 @@ use super::{
 #[cfg(test)]
 use crate::wire::{ConnectionConfig, WireClient};
 
+const COMPLETED_BATCH_IDENTITY_TOMBSTONE_LIMIT: usize = 4096;
+
 #[derive(Debug)]
 pub(crate) struct ProducerSenderState {
     in_flight: JoinSet<TimedDispatchOutcome>,
     in_flight_partitions: AHashSet<InFlightPartitionKey>,
+    in_flight_batch_identities: AHashSet<ReadyBatchIdentity>,
+    completed_batch_identities: AHashSet<ReadyBatchIdentity>,
+    completed_batch_identity_order: VecDeque<ReadyBatchIdentity>,
+    pending_accumulator_completions: Vec<ReadyBatchIdentity>,
+    in_flight_reservations: AHashMap<tokio::task::Id, InFlightDispatchReservation>,
+    in_flight_buffered_bytes: usize,
+    in_flight_incomplete_batches: usize,
     callback_append_poll_budget: AppendPollBudget,
     max_in_flight_requests: usize,
     idempotent_ordering: bool,
@@ -122,11 +132,17 @@ impl ProducerSenderRuntime {
     pub(crate) fn with_dispatcher(
         accumulator_config: super::AccumulatorConfig,
         max_in_flight_requests: usize,
+        idempotent_ordering: bool,
         dispatcher: ProducerDispatcher,
     ) -> (Self, ProducerMetrics) {
         let accumulator_batch_size = accumulator_config.batch_size;
         Self::new(
-            ProducerSender::with_dispatcher(accumulator_config, max_in_flight_requests, dispatcher),
+            ProducerSender::with_dispatcher(
+                accumulator_config,
+                max_in_flight_requests,
+                idempotent_ordering,
+                dispatcher,
+            ),
             accumulator_batch_size,
         )
     }
@@ -214,10 +230,6 @@ impl ProducerSenderRuntime {
         self.sender.try_lock()
     }
 
-    pub(crate) const fn accumulator_batch_size(&self) -> usize {
-        self.accumulator_batch_size
-    }
-
     pub(crate) fn enable_loop_metrics(&self) {
         self.loop_metrics_enabled.store(true, Ordering::Relaxed);
     }
@@ -241,10 +253,14 @@ impl ProducerSender {
     pub(crate) fn with_dispatcher(
         accumulator_config: super::AccumulatorConfig,
         max_in_flight_requests: usize,
+        idempotent_ordering: bool,
         dispatcher: ProducerDispatcher,
     ) -> Self {
         let sender_loop_notify = Arc::new(Notify::new());
-        let mut state = ProducerSenderState::new(max_in_flight_requests);
+        let mut state = ProducerSenderState::new_with_idempotent_ordering(
+            max_in_flight_requests,
+            idempotent_ordering,
+        );
         state.notify_on_dispatch_completion(Arc::clone(&sender_loop_notify));
         Self {
             accumulator: RecordAccumulator::new(accumulator_config),
@@ -259,7 +275,7 @@ impl ProducerSender {
         sender: Arc<AsyncMutex<Self>>,
         metrics_enabled: Arc<AtomicBool>,
         metrics: ProducerMetrics,
-        accumulator_batch_size: usize,
+        _accumulator_batch_size: usize,
     ) {
         loop {
             let (wait, notify) = {
@@ -275,18 +291,7 @@ impl ProducerSender {
                                     metrics.record_requeue();
                                 }
                             },
-                            |observed_batches: &[ReadyBatch]| {
-                                if !metrics_enabled.load(Ordering::Relaxed) {
-                                    return;
-                                }
-                                for batch in observed_batches {
-                                    metrics.record_produce_batch(
-                                        batch.bytes,
-                                        accumulator_batch_size,
-                                        batch.records.len(),
-                                    );
-                                }
-                            },
+                            |_: &[ReadyBatch]| {},
                         ),
                     )
                     .await;
@@ -323,6 +328,7 @@ impl ProducerSender {
         Self::with_dispatcher(
             accumulator_config,
             max_in_flight_requests,
+            false,
             ProducerDispatcher::new(WireClient::connect_with_brokers(
                 ConnectionConfig::default(),
                 "producer-sender-test",
@@ -332,7 +338,7 @@ impl ProducerSender {
     }
 
     pub(crate) const fn buffered_bytes(&self) -> usize {
-        self.accumulator.buffered_bytes()
+        self.state.buffered_bytes(&self.accumulator)
     }
 
     pub(crate) fn queue_snapshot(&self) -> SenderQueueSnapshot {
@@ -789,15 +795,26 @@ impl ProducerSender {
             requeue: mut observe_requeue,
             batches: mut observe_batches,
         } = observers;
+        let metrics = self.metrics_handle();
+        let mut buffer_wait = None;
+        let compression_ratio = self
+            .dispatcher
+            .compression_ratio_estimation(record.topic.as_ref());
         loop {
-            match self.state.append_backpressure_action(
-                &self.accumulator,
-                record,
-                std::time::Instant::now(),
-                deadline,
-            ) {
+            match self
+                .state
+                .append_backpressure_action_with_compression_ratio(
+                    &self.accumulator,
+                    record,
+                    std::time::Instant::now(),
+                    deadline,
+                    compression_ratio,
+                ) {
                 AppendBackpressureAction::Append => return Ok(()),
                 AppendBackpressureAction::WaitForBuffer => {
+                    if buffer_wait.is_none() {
+                        buffer_wait = Some(metrics.start_buffer_wait());
+                    }
                     self.wait_for_buffer_progress(
                         deadline,
                         ReadyDispatchObservers::new(
@@ -846,7 +863,14 @@ impl ProducerSender {
     {
         self.wait_for_append_capacity(&record, deadline, observers)
             .await?;
-        let status = self.accumulator.append_with_status_at(record, now)?;
+        let compression_ratio = self
+            .dispatcher
+            .compression_ratio_estimation(record.topic.as_ref());
+        let status = self.accumulator.append_with_status_at_compression_ratio(
+            record,
+            now,
+            compression_ratio,
+        )?;
         self.note_append_status_for_sender_loop(status);
         Ok(status)
     }
@@ -920,9 +944,12 @@ impl ProducerSender {
     {
         self.wait_for_append_capacity(&record, deadline, observers)
             .await?;
+        let compression_ratio = self
+            .dispatcher
+            .compression_ratio_estimation(record.topic.as_ref());
         let appended = self
             .accumulator
-            .append_for_delivery_with_status_at(record, now)?;
+            .append_for_delivery_with_status_at_compression_ratio(record, now, compression_ratio)?;
         self.note_append_status_for_sender_loop(appended.1);
         Ok(appended)
     }
@@ -1058,12 +1085,19 @@ impl ProducerSender {
         record: ProducerRecord,
         now: std::time::Instant,
     ) -> CallbackAppendFastPath {
-        if !self.accumulator.has_available_memory_for(&record) {
+        let compression_ratio = self
+            .dispatcher
+            .compression_ratio_estimation(record.topic.as_ref());
+        if !self.state.has_available_memory_for_with_compression_ratio(
+            &self.accumulator,
+            &record,
+            compression_ratio,
+        ) {
             return CallbackAppendFastPath::WouldBlock(record);
         }
         let appended = self
             .accumulator
-            .append_for_delivery_with_status_at(record, now);
+            .append_for_delivery_with_status_at_compression_ratio(record, now, compression_ratio);
         CallbackAppendFastPath::Appended(appended.map(|(delivery, status)| {
             self.note_append_status_for_sender_loop(status);
             let decision = self.callback_append_dispatch_decision(status);
@@ -1267,6 +1301,20 @@ pub(crate) struct TimedDispatchOutcome {
     pub(crate) partitions: Vec<InFlightPartitionKey>,
 }
 
+#[derive(Debug)]
+struct InFlightDispatchReservation {
+    partitions: Vec<InFlightPartitionKey>,
+    identities: Vec<ReadyBatchIdentity>,
+    bytes: usize,
+    incomplete_batches: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct InFlightDispatchAccounting {
+    bytes: usize,
+    incomplete_batches: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct InFlightPartitionKey {
     topic: String,
@@ -1277,6 +1325,8 @@ pub(crate) struct InFlightPartitionKey {
 pub(crate) struct SenderQueueSnapshot {
     pub(crate) buffered_bytes: usize,
     pub(crate) buffered_records: usize,
+    pub(crate) buffer_available_bytes: usize,
+    pub(crate) incomplete_batches: usize,
     pub(crate) in_flight_dispatches: usize,
 }
 
@@ -1815,16 +1865,31 @@ impl AppendPollBudget {
 }
 
 impl ProducerSenderState {
+    #[cfg(test)]
     pub(crate) fn new(max_in_flight_requests: usize) -> Self {
+        Self::new_with_idempotent_ordering(max_in_flight_requests, false)
+    }
+
+    pub(crate) fn new_with_idempotent_ordering(
+        max_in_flight_requests: usize,
+        idempotent_ordering: bool,
+    ) -> Self {
         let max_in_flight_requests = max_in_flight_requests.max(1);
         let callback_append_poll_budget =
             AppendPollBudget::for_callback_sender(max_in_flight_requests);
         Self {
             in_flight: JoinSet::new(),
             in_flight_partitions: AHashSet::new(),
+            in_flight_batch_identities: AHashSet::new(),
+            completed_batch_identities: AHashSet::new(),
+            completed_batch_identity_order: VecDeque::new(),
+            pending_accumulator_completions: Vec::new(),
+            in_flight_reservations: AHashMap::new(),
+            in_flight_buffered_bytes: 0,
+            in_flight_incomplete_batches: 0,
             callback_append_poll_budget,
             max_in_flight_requests,
-            idempotent_ordering: max_in_flight_requests == 1,
+            idempotent_ordering: idempotent_ordering || max_in_flight_requests == 1,
             completion_notify: None,
         }
     }
@@ -1836,6 +1901,11 @@ impl ProducerSenderState {
     #[cfg(test)]
     pub(crate) const fn max_in_flight_requests(&self) -> usize {
         self.max_in_flight_requests
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn uses_idempotent_ordering(&self) -> bool {
+        self.idempotent_ordering
     }
 
     #[cfg(test)]
@@ -2016,10 +2086,24 @@ impl ProducerSenderState {
         self.in_flight.len()
     }
 
+    pub(crate) const fn buffered_bytes(&self, accumulator: &RecordAccumulator) -> usize {
+        accumulator
+            .buffered_bytes()
+            .saturating_add(self.in_flight_buffered_bytes)
+    }
+
+    pub(crate) const fn buffer_available_bytes(&self, accumulator: &RecordAccumulator) -> usize {
+        accumulator
+            .buffer_memory()
+            .saturating_sub(self.buffered_bytes(accumulator))
+    }
+
     pub(crate) fn queue_snapshot(&self, accumulator: &RecordAccumulator) -> SenderQueueSnapshot {
         SenderQueueSnapshot {
-            buffered_bytes: accumulator.buffered_bytes(),
+            buffered_bytes: self.buffered_bytes(accumulator),
             buffered_records: accumulator.buffered_records(),
+            buffer_available_bytes: self.buffer_available_bytes(accumulator),
+            incomplete_batches: self.incomplete_batch_count(accumulator),
             in_flight_dispatches: self.in_flight_dispatch_count(),
         }
     }
@@ -2030,13 +2114,42 @@ impl ProducerSenderState {
     }
 
     pub(crate) fn has_pending_work(&self, accumulator: &RecordAccumulator) -> bool {
-        accumulator.buffered_bytes() > 0 || !self.in_flight.is_empty()
+        self.incomplete_batch_count(accumulator) > 0 || !self.in_flight.is_empty()
+    }
+
+    pub(crate) fn incomplete_batch_count(&self, accumulator: &RecordAccumulator) -> usize {
+        accumulator
+            .buffered_batches()
+            .saturating_add(self.in_flight_incomplete_batches)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_available_memory_for(
+        &self,
+        accumulator: &RecordAccumulator,
+        record: &ProducerRecord,
+    ) -> bool {
+        self.has_available_memory_for_with_compression_ratio(accumulator, record, 1.0)
+    }
+
+    pub(crate) fn has_available_memory_for_with_compression_ratio(
+        &self,
+        accumulator: &RecordAccumulator,
+        record: &ProducerRecord,
+        compression_ratio: f32,
+    ) -> bool {
+        accumulator.has_available_memory_for_reserved_with_compression_ratio(
+            record,
+            self.in_flight_buffered_bytes,
+            compression_ratio,
+        )
     }
 
     pub(crate) fn discard_buffered_batches(accumulator: &mut RecordAccumulator) -> usize {
-        accumulator.drain_all().len()
+        accumulator.discard_all().len()
     }
 
+    #[cfg(test)]
     pub(crate) fn append_backpressure_action(
         &self,
         accumulator: &RecordAccumulator,
@@ -2044,7 +2157,33 @@ impl ProducerSenderState {
         now: std::time::Instant,
         deadline: std::time::Instant,
     ) -> AppendBackpressureAction {
-        if accumulator.has_available_memory_for(record) {
+        self.append_backpressure_action_with_compression_ratio(
+            accumulator,
+            record,
+            now,
+            deadline,
+            1.0,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Append capacity decisions keep record timing and compression estimate explicit \
+                  on the hot path."
+    )]
+    pub(crate) fn append_backpressure_action_with_compression_ratio(
+        &self,
+        accumulator: &RecordAccumulator,
+        record: &ProducerRecord,
+        now: std::time::Instant,
+        deadline: std::time::Instant,
+        compression_ratio: f32,
+    ) -> AppendBackpressureAction {
+        if self.has_available_memory_for_with_compression_ratio(
+            accumulator,
+            record,
+            compression_ratio,
+        ) {
             return AppendBackpressureAction::Append;
         }
         if self.has_pending_work(accumulator) && now < deadline {
@@ -2155,12 +2294,16 @@ impl ProducerSenderState {
             requeue: mut observe_requeue,
             batches: mut observe_batches,
         } = observers;
+        let compression_ratio = wait
+            .dispatcher
+            .compression_ratio_estimation(wait.record.topic.as_ref());
         loop {
-            match self.append_backpressure_action(
+            match self.append_backpressure_action_with_compression_ratio(
                 accumulator,
                 wait.record,
                 std::time::Instant::now(),
                 wait.deadline,
+                compression_ratio,
             ) {
                 AppendBackpressureAction::Append => return Ok(()),
                 AppendBackpressureAction::WaitForBuffer => {
@@ -2209,7 +2352,8 @@ impl ProducerSenderState {
             observers,
         )
         .await?;
-        accumulator.append_with_status_at(record, now)
+        let compression_ratio = dispatcher.compression_ratio_estimation(record.topic.as_ref());
+        accumulator.append_with_status_at_compression_ratio(record, now, compression_ratio)
     }
 
     #[cfg(test)]
@@ -2240,7 +2384,12 @@ impl ProducerSenderState {
             observers,
         )
         .await?;
-        accumulator.append_for_delivery_with_status_at(record, now)
+        let compression_ratio = dispatcher.compression_ratio_estimation(record.topic.as_ref());
+        accumulator.append_for_delivery_with_status_at_compression_ratio(
+            record,
+            now,
+            compression_ratio,
+        )
     }
 
     pub(crate) fn spawn_in_flight<F>(&mut self, task: F) -> AbortHandle
@@ -2257,20 +2406,69 @@ impl ProducerSenderState {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_dispatch_task<F>(
         &mut self,
         partitions: &[InFlightPartitionKey],
         task: F,
-    ) -> AbortHandle
+    ) -> Result<AbortHandle, ProducerError>
     where
         F: Future<Output = TimedDispatchOutcome> + Send + 'static,
     {
+        self.spawn_dispatch_task_with_buffered_bytes(
+            partitions,
+            Vec::new(),
+            InFlightDispatchAccounting::default(),
+            task,
+        )
+    }
+
+    fn spawn_dispatch_task_with_buffered_bytes<F>(
+        &mut self,
+        partitions: &[InFlightPartitionKey],
+        identities: Vec<ReadyBatchIdentity>,
+        accounting: InFlightDispatchAccounting,
+        task: F,
+    ) -> Result<AbortHandle, ProducerError>
+    where
+        F: Future<Output = TimedDispatchOutcome> + Send + 'static,
+    {
+        self.reserve_in_flight_batch_identities(&identities)?;
         self.reserve_dispatch_partitions(partitions);
-        self.spawn_in_flight(task)
+        let handle = self.spawn_in_flight(task);
+        if !partitions.is_empty() || accounting.bytes > 0 || !identities.is_empty() {
+            let previous = self.in_flight_reservations.insert(
+                handle.id(),
+                InFlightDispatchReservation {
+                    partitions: partitions.to_vec(),
+                    identities,
+                    bytes: accounting.bytes,
+                    incomplete_batches: accounting.incomplete_batches,
+                },
+            );
+            if let Some(previous) = previous {
+                self.release_in_flight_batch_identities(previous.identities);
+                self.in_flight_buffered_bytes =
+                    self.in_flight_buffered_bytes.saturating_sub(previous.bytes);
+                self.in_flight_incomplete_batches = self
+                    .in_flight_incomplete_batches
+                    .saturating_sub(previous.incomplete_batches);
+            }
+            self.in_flight_buffered_bytes = self
+                .in_flight_buffered_bytes
+                .saturating_add(accounting.bytes);
+            self.in_flight_incomplete_batches = self
+                .in_flight_incomplete_batches
+                .saturating_add(accounting.incomplete_batches);
+        }
+        Ok(handle)
     }
 
     #[cfg(test)]
-    pub(crate) fn spawn_drained_dispatch(&mut self, dispatch: DrainedDispatch) -> AbortHandle {
+    pub(crate) fn spawn_drained_dispatch(
+        &mut self,
+        dispatch: DrainedDispatch,
+    ) -> Result<AbortHandle, ProducerError> {
         self.spawn_observed_drained_dispatch(dispatch, |_| {})
     }
 
@@ -2278,7 +2476,7 @@ impl ProducerSenderState {
         &mut self,
         dispatch: DrainedDispatch,
         observe_batches: F,
-    ) -> AbortHandle
+    ) -> Result<AbortHandle, ProducerError>
     where
         F: FnOnce(&[ReadyBatch]),
     {
@@ -2290,19 +2488,32 @@ impl ProducerSenderState {
         } = dispatch;
         observe_batches(&batches);
         let reserved_partitions = partitions.clone();
+        let buffered_bytes = batches.iter().fold(0usize, |bytes, batch| {
+            bytes.saturating_add(batch.pooled_buffer_bytes())
+        });
+        let incomplete_batches = batches.len();
+        let identities = batches.iter().map(|batch| batch.identity).collect();
         let started_at = batches
             .iter()
             .map(|batch| batch.first_append_at)
             .min()
             .unwrap_or(now);
-        self.spawn_dispatch_task(&reserved_partitions, async move {
-            let outcome = dispatcher.dispatch_drained(batches, now).await;
-            TimedDispatchOutcome {
-                outcome,
-                latency: started_at.elapsed(),
-                partitions,
-            }
-        })
+        self.spawn_dispatch_task_with_buffered_bytes(
+            &reserved_partitions,
+            identities,
+            InFlightDispatchAccounting {
+                bytes: buffered_bytes,
+                incomplete_batches,
+            },
+            async move {
+                let outcome = dispatcher.dispatch_drained(batches, now).await;
+                TimedDispatchOutcome {
+                    outcome,
+                    latency: started_at.elapsed(),
+                    partitions,
+                }
+            },
+        )
     }
 
     pub(crate) fn start_dispatch_selection<F>(
@@ -2310,7 +2521,7 @@ impl ProducerSenderState {
         accumulator: &mut RecordAccumulator,
         start: DispatchSelectionStart,
         observe_batches: F,
-    ) -> DispatchStart
+    ) -> Result<DispatchStart, ProducerError>
     where
         F: FnOnce(&[ReadyBatch]),
     {
@@ -2320,10 +2531,10 @@ impl ProducerSenderState {
             now,
         } = start;
         if !selection.deferred.is_empty() {
-            accumulator.requeue_front(selection.deferred);
+            accumulator.requeue_front(selection.deferred)?;
         }
         if selection.dispatchable.is_empty() {
-            return DispatchStart::Empty;
+            return Ok(DispatchStart::Empty);
         }
         let dispatch = DrainedDispatch::new(
             dispatcher,
@@ -2331,19 +2542,21 @@ impl ProducerSenderState {
             now,
             selection.partitions,
         );
-        let abort_handle = self.spawn_observed_drained_dispatch(dispatch, observe_batches);
+        let abort_handle = self.spawn_observed_drained_dispatch(dispatch, observe_batches)?;
         drop(abort_handle);
-        DispatchStart::Spawned
+        Ok(DispatchStart::Spawned)
     }
 
-    fn try_join_next(&mut self) -> Option<Result<TimedDispatchOutcome, JoinError>> {
-        self.in_flight.try_join_next()
+    fn try_join_next(
+        &mut self,
+    ) -> Option<Result<(tokio::task::Id, TimedDispatchOutcome), JoinError>> {
+        self.in_flight.try_join_next_with_id()
     }
 
     fn collect_finished_dispatches(&mut self) -> Vec<Result<TimedDispatchOutcome, JoinError>> {
         let mut completed = Vec::new();
         while let Some(result) = self.try_join_next() {
-            completed.push(result);
+            completed.push(self.complete_joined_dispatch_with_id(result));
         }
         completed
     }
@@ -2354,32 +2567,46 @@ impl ProducerSenderState {
         let completed = self.collect_finished_dispatches();
         completed
             .into_iter()
-            .map(|result| self.complete_dispatch_result(result))
+            .map(|result| result.map_err(|error| ProducerError::DispatchTask(error.to_string())))
             .collect()
     }
 
-    async fn join_next(&mut self) -> Option<Result<TimedDispatchOutcome, JoinError>> {
+    async fn join_next(
+        &mut self,
+    ) -> Option<Result<(tokio::task::Id, TimedDispatchOutcome), JoinError>> {
+        self.in_flight.join_next_with_id().await
+    }
+
+    #[cfg(test)]
+    async fn join_next_without_id(&mut self) -> Option<Result<TimedDispatchOutcome, JoinError>> {
         self.in_flight.join_next().await
     }
 
+    async fn wait_for_joined_dispatch_completion(
+        &mut self,
+    ) -> Option<Result<(tokio::task::Id, TimedDispatchOutcome), JoinError>> {
+        self.join_next().await
+    }
+
+    #[cfg(test)]
     async fn wait_for_dispatch_completion(
         &mut self,
     ) -> Option<Result<TimedDispatchOutcome, JoinError>> {
-        self.join_next().await
+        self.join_next_without_id().await
     }
 
     pub(crate) async fn wait_for_completed_dispatch(
         &mut self,
     ) -> Option<Result<TimedDispatchOutcome, ProducerError>> {
-        let result = self.wait_for_dispatch_completion().await?;
-        Some(self.complete_dispatch_result(result))
+        let result = self.wait_for_joined_dispatch_completion().await?;
+        Some(self.complete_dispatch_result_with_id(result))
     }
 
     #[cfg(test)]
     pub(crate) async fn wait_for_next_dispatch(
         &mut self,
     ) -> Option<Result<TimedDispatchOutcome, JoinError>> {
-        self.wait_for_dispatch_completion().await
+        self.join_next_without_id().await
     }
 
     #[cfg(test)]
@@ -2387,7 +2614,7 @@ impl ProducerSenderState {
         if self.in_flight.len() < self.max_in_flight_requests {
             return None;
         }
-        self.wait_for_dispatch_completion().await
+        self.join_next_without_id().await
     }
 
     pub(crate) async fn wait_for_completed_dispatch_slot(
@@ -2412,21 +2639,69 @@ impl ProducerSenderState {
         }
     }
 
+    #[cfg(test)]
     fn complete_joined_dispatch(
         &mut self,
         result: Result<TimedDispatchOutcome, JoinError>,
     ) -> Result<TimedDispatchOutcome, JoinError> {
-        if let Ok(outcome) = &result {
-            self.release_dispatch_partitions(outcome.partitions.clone());
+        match &result {
+            Ok(outcome) => {
+                let reservations =
+                    self.release_in_flight_reservations_for_partitions(&outcome.partitions);
+                if matches!(&outcome.outcome, DispatchOutcome::Delivered(_)) {
+                    for reservation in reservations {
+                        self.mark_completed_batch_identities(reservation.identities);
+                    }
+                }
+                self.release_dispatch_partitions(outcome.partitions.clone());
+            },
+            Err(error) => {
+                if let Some(reservation) = self.release_in_flight_reservation(error.id()) {
+                    self.mark_completed_batch_identities(reservation.identities);
+                }
+            },
         }
         result
     }
 
+    fn complete_joined_dispatch_with_id(
+        &mut self,
+        result: Result<(tokio::task::Id, TimedDispatchOutcome), JoinError>,
+    ) -> Result<TimedDispatchOutcome, JoinError> {
+        match result {
+            Ok((task_id, outcome)) => {
+                let reservation = self.release_in_flight_reservation(task_id);
+                if matches!(&outcome.outcome, DispatchOutcome::Delivered(_))
+                    && let Some(reservation) = reservation
+                {
+                    self.mark_completed_batch_identities(reservation.identities);
+                }
+                self.release_dispatch_partitions(outcome.partitions.clone());
+                Ok(outcome)
+            },
+            Err(error) => {
+                if let Some(reservation) = self.release_in_flight_reservation(error.id()) {
+                    self.mark_completed_batch_identities(reservation.identities);
+                }
+                Err(error)
+            },
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn complete_dispatch_result(
         &mut self,
         result: Result<TimedDispatchOutcome, JoinError>,
     ) -> Result<TimedDispatchOutcome, ProducerError> {
         self.complete_joined_dispatch(result)
+            .map_err(|error| ProducerError::DispatchTask(error.to_string()))
+    }
+
+    fn complete_dispatch_result_with_id(
+        &mut self,
+        result: Result<(tokio::task::Id, TimedDispatchOutcome), JoinError>,
+    ) -> Result<TimedDispatchOutcome, ProducerError> {
+        self.complete_joined_dispatch_with_id(result)
             .map_err(|error| ProducerError::DispatchTask(error.to_string()))
     }
 
@@ -2458,7 +2733,7 @@ impl ProducerSenderState {
                 ..
             }) => {
                 observe_requeue();
-                accumulator.requeue_front(batches);
+                accumulator.requeue_front(batches)?;
                 if requeue_is_error {
                     Err(ProducerError::FlushIncomplete)
                 } else {
@@ -2467,6 +2742,21 @@ impl ProducerSenderState {
             },
             Err(error) => Err(error),
         }
+    }
+
+    fn handle_completed_dispatch_with_lifecycle<LatencyObserver, RequeueObserver>(
+        &mut self,
+        accumulator: &mut RecordAccumulator,
+        completed: CompletedDispatch,
+        observe_latency: LatencyObserver,
+        observe_requeue: RequeueObserver,
+    ) -> Result<(), ProducerError>
+    where
+        LatencyObserver: FnMut(std::time::Duration),
+        RequeueObserver: FnMut(),
+    {
+        self.complete_pending_accumulator_batches(accumulator);
+        Self::handle_completed_dispatch(accumulator, completed, observe_latency, observe_requeue)
     }
 
     pub(crate) fn handle_finished_dispatches<LatencyObserver, RequeueObserver>(
@@ -2481,7 +2771,7 @@ impl ProducerSenderState {
         RequeueObserver: FnMut(),
     {
         for result in self.collect_completed_dispatches() {
-            Self::handle_completed_dispatch(
+            self.handle_completed_dispatch_with_lifecycle(
                 accumulator,
                 CompletedDispatch::new(result, requeue_is_error),
                 &mut observe_latency,
@@ -2505,7 +2795,7 @@ impl ProducerSenderState {
         let Some(result) = self.wait_for_completed_dispatch().await else {
             return Ok(());
         };
-        Self::handle_completed_dispatch(
+        self.handle_completed_dispatch_with_lifecycle(
             accumulator,
             CompletedDispatch::new(result, requeue_is_error),
             observe_latency,
@@ -2538,15 +2828,43 @@ impl ProducerSenderState {
     pub(crate) async fn wait_for_abort_completion<LatencyObserver, RequeueObserver>(
         &mut self,
         accumulator: &mut RecordAccumulator,
-        observe_latency: LatencyObserver,
-        observe_requeue: RequeueObserver,
+        mut observe_latency: LatencyObserver,
+        mut observe_requeue: RequeueObserver,
     ) -> Result<(), ProducerError>
     where
         LatencyObserver: FnMut(std::time::Duration),
         RequeueObserver: FnMut(),
     {
-        self.wait_for_flush_completion(accumulator, observe_latency, observe_requeue)
-            .await
+        while self.flush_completion_progress() == FlushDispatchProgress::WaitForCompletion {
+            let Some(result) = self.wait_for_completed_dispatch().await else {
+                return Ok(());
+            };
+            match result {
+                Ok(TimedDispatchOutcome {
+                    outcome: DispatchOutcome::Delivered(result),
+                    latency,
+                    ..
+                }) => {
+                    self.complete_pending_accumulator_batches(accumulator);
+                    observe_latency(latency);
+                    result.map(|_receipts| ())?;
+                },
+                Ok(TimedDispatchOutcome {
+                    outcome: DispatchOutcome::Requeue(batches),
+                    ..
+                }) => {
+                    let identities = batches.iter().map(|batch| batch.identity);
+                    let _completed = accumulator.complete_batch_identities(identities);
+                    observe_requeue();
+                    drop(batches);
+                },
+                Err(error) => {
+                    self.complete_pending_accumulator_batches(accumulator);
+                    return Err(error);
+                },
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn apply_ready_dispatch_progress<LatencyObserver, RequeueObserver, BatchObserver>(
@@ -2573,7 +2891,7 @@ impl ProducerSenderState {
         match prepared {
             PreparedReadyDispatch::Idle => Ok(ReadyDispatchProgress::Idle),
             PreparedReadyDispatch::PendingCompletion(result) => {
-                Self::handle_completed_dispatch(
+                self.handle_completed_dispatch_with_lifecycle(
                     accumulator,
                     CompletedDispatch::new(result, false),
                     observe_latency,
@@ -2583,7 +2901,7 @@ impl ProducerSenderState {
             },
             PreparedReadyDispatch::Prepared(selection) => {
                 let start = DispatchSelectionStart::new(dispatcher, selection, now);
-                let started = self.start_dispatch_selection(accumulator, start, observe_batches);
+                let started = self.start_dispatch_selection(accumulator, start, observe_batches)?;
                 Ok(ReadyDispatchProgress::Started(started))
             },
         }
@@ -2685,7 +3003,7 @@ impl ProducerSenderState {
         match prepared {
             PreparedAllDispatch::Empty => Ok(AllDispatchProgress::Empty),
             PreparedAllDispatch::PendingCompletion(result) => {
-                Self::handle_completed_dispatch(
+                self.handle_completed_dispatch_with_lifecycle(
                     accumulator,
                     CompletedDispatch::new(result, true),
                     observe_latency,
@@ -2695,7 +3013,7 @@ impl ProducerSenderState {
             },
             PreparedAllDispatch::Prepared(selection) => {
                 let start = DispatchSelectionStart::new(dispatcher, selection, now);
-                let started = self.start_dispatch_selection(accumulator, start, observe_batches);
+                let started = self.start_dispatch_selection(accumulator, start, observe_batches)?;
                 Ok(AllDispatchProgress::Started(started))
             },
         }
@@ -2882,6 +3200,99 @@ impl ProducerSenderState {
         }
     }
 
+    fn reserve_in_flight_batch_identities(
+        &mut self,
+        identities: &[ReadyBatchIdentity],
+    ) -> Result<(), ProducerError> {
+        let mut seen = AHashSet::with_capacity(identities.len());
+        for identity in identities {
+            if self.in_flight_batch_identities.contains(identity)
+                || self.completed_batch_identities.contains(identity)
+                || !seen.insert(*identity)
+            {
+                return Err(ProducerError::BatchLifecycle(
+                    "duplicate ready batch identity dispatched",
+                ));
+            }
+        }
+        for identity in identities {
+            let _inserted = self.in_flight_batch_identities.insert(*identity);
+        }
+        Ok(())
+    }
+
+    fn release_in_flight_batch_identities<I>(&mut self, identities: I)
+    where
+        I: IntoIterator<Item = ReadyBatchIdentity>,
+    {
+        for identity in identities {
+            let _removed = self.in_flight_batch_identities.remove(&identity);
+        }
+    }
+
+    fn mark_completed_batch_identities<I>(&mut self, identities: I)
+    where
+        I: IntoIterator<Item = ReadyBatchIdentity>,
+    {
+        for identity in identities {
+            if self.completed_batch_identities.insert(identity) {
+                self.completed_batch_identity_order.push_back(identity);
+            }
+            while self.completed_batch_identity_order.len()
+                > COMPLETED_BATCH_IDENTITY_TOMBSTONE_LIMIT
+            {
+                if let Some(expired) = self.completed_batch_identity_order.pop_front() {
+                    let _removed = self.completed_batch_identities.remove(&expired);
+                }
+            }
+            self.pending_accumulator_completions.push(identity);
+        }
+    }
+
+    fn complete_pending_accumulator_batches(&mut self, accumulator: &mut RecordAccumulator) {
+        let identities = core::mem::take(&mut self.pending_accumulator_completions);
+        let _completed = accumulator.complete_batch_identities(identities);
+    }
+
+    fn release_in_flight_reservation(
+        &mut self,
+        task_id: tokio::task::Id,
+    ) -> Option<InFlightDispatchReservation> {
+        let reservation = self.in_flight_reservations.remove(&task_id)?;
+        self.in_flight_buffered_bytes = self
+            .in_flight_buffered_bytes
+            .saturating_sub(reservation.bytes);
+        self.in_flight_incomplete_batches = self
+            .in_flight_incomplete_batches
+            .saturating_sub(reservation.incomplete_batches);
+        self.release_dispatch_partitions(reservation.partitions.clone());
+        self.release_in_flight_batch_identities(reservation.identities.iter().copied());
+        Some(reservation)
+    }
+
+    #[cfg(test)]
+    fn release_in_flight_reservations_for_partitions(
+        &mut self,
+        partitions: &[InFlightPartitionKey],
+    ) -> Vec<InFlightDispatchReservation> {
+        if partitions.is_empty() {
+            return Vec::new();
+        }
+        let mut reservations = Vec::new();
+        while let Some(task_id) =
+            self.in_flight_reservations
+                .iter()
+                .find_map(|(task_id, reservation)| {
+                    (reservation.partitions == partitions).then_some(*task_id)
+                })
+        {
+            if let Some(reservation) = self.release_in_flight_reservation(task_id) {
+                reservations.push(reservation);
+            }
+        }
+        reservations
+    }
+
     pub(crate) fn select_dispatchable_batches(
         &self,
         batches: Vec<ReadyBatch>,
@@ -3037,7 +3448,9 @@ impl ProducerSenderState {
         accumulator: &mut RecordAccumulator,
         error: DispatchPrepareError,
     ) -> ProducerError {
-        accumulator.requeue_front(error.batches);
+        if let Err(error) = accumulator.requeue_front(error.batches) {
+            return error;
+        }
         error.error
     }
 }
@@ -3079,8 +3492,9 @@ mod tests {
     use crate::{
         producer::{
             ProducerError, ProducerRecord, ProducerRuntimeConfig,
-            accumulator::{AccumulatorConfig, AppendStatus, RecordAccumulator},
+            accumulator::{AccumulatorConfig, AppendStatus, ReadyBatchIdentity, RecordAccumulator},
             dispatcher::DispatchOutcome,
+            metrics::{ProducerMetricValue, ProducerQueueMetrics},
         },
         wire::{
             BrokerMetadata, ClusterMetadata, ConnectionConfig, PartitionMetadata, TopicMetadata,
@@ -3088,13 +3502,17 @@ mod tests {
         },
     };
 
+    const TEST_LARGE_BATCH_SIZE: usize = 16 * 1024;
+
     fn ready_batch(topic: &str, partition: i32) -> crate::producer::ReadyBatch {
         crate::producer::ReadyBatch {
+            identity: ReadyBatchIdentity::test(0),
             topic: topic.to_owned(),
             partition,
             records: vec![ProducerRecord::new(topic, partition).value(Bytes::from_static(b"v"))],
             delivery: None,
             bytes: 1,
+            pooled_buffer_bytes: 1,
             first_append_at: std::time::Instant::now(),
             producer_state: None,
         }
@@ -3332,6 +3750,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_for_abort_completion_drops_requeued_in_flight_batches() {
+        let mut state = ProducerSenderState::new(1);
+        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let batch = ready_batch("orders", 0);
+        let mut observed_latencies = Vec::new();
+        let mut observed_requeues = 0;
+
+        let _in_flight = state.spawn_in_flight(async move {
+            TimedDispatchOutcome {
+                outcome: DispatchOutcome::Requeue(vec![batch]),
+                latency: Duration::from_millis(7),
+                partitions: Vec::new(),
+            }
+        });
+
+        state
+            .wait_for_abort_completion(
+                &mut accumulator,
+                |latency| observed_latencies.push(latency),
+                || observed_requeues += 1,
+            )
+            .await
+            .expect("abort completion should drop requeued in-flight batches");
+
+        assert!(observed_latencies.is_empty());
+        assert_eq!(observed_requeues, 1);
+        assert_eq!(accumulator.buffered_records(), 0);
+        assert_eq!(
+            state.flush_completion_progress(),
+            FlushDispatchProgress::Complete
+        );
+    }
+
+    #[tokio::test]
     async fn producer_sender_waits_for_abort_completion_until_empty() {
         let mut sender = ProducerSender::new(AccumulatorConfig::default(), 2);
         let first_latency = Duration::from_millis(5);
@@ -3485,7 +3937,7 @@ mod tests {
             .expect("test before-ready instant should fit");
         let mut sender = ProducerSender::new(
             AccumulatorConfig::default()
-                .batch_size(usize::MAX)
+                .batch_size(TEST_LARGE_BATCH_SIZE)
                 .linger(linger),
             1,
         );
@@ -3512,7 +3964,7 @@ mod tests {
             .expect("test before-ready instant should fit");
         let mut sender = ProducerSender::new(
             AccumulatorConfig::default()
-                .batch_size(usize::MAX)
+                .batch_size(TEST_LARGE_BATCH_SIZE)
                 .linger(linger),
             2,
         );
@@ -3632,7 +4084,7 @@ mod tests {
             .expect("test before-ready instant should fit");
         let mut sleepy_sender = ProducerSender::new(
             AccumulatorConfig::default()
-                .batch_size(usize::MAX)
+                .batch_size(TEST_LARGE_BATCH_SIZE)
                 .linger(linger),
             1,
         );
@@ -3839,7 +4291,12 @@ mod tests {
 
         let metrics = sender.metrics_handle();
 
-        assert_eq!(metrics.snapshot(0, 0, 0).produce_request_count, 0);
+        assert_eq!(
+            metrics
+                .snapshot(ProducerQueueMetrics::default())
+                .produce_request_count,
+            0
+        );
     }
 
     #[tokio::test]
@@ -4577,8 +5034,11 @@ mod tests {
             AppendBackpressureAction::Backpressure
         );
 
-        let mut full_with_work =
-            RecordAccumulator::new(AccumulatorConfig::default().buffer_memory(128));
+        let mut full_with_work = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(128)
+                .buffer_memory(128),
+        );
         full_with_work
             .append_at(
                 ProducerRecord::new("orders", 0).value(Bytes::from_static(b"x")),
@@ -4602,7 +5062,7 @@ mod tests {
         let deadline = now + Duration::from_millis(5);
         let mut accumulator = RecordAccumulator::new(
             AccumulatorConfig::default()
-                .batch_size(1)
+                .batch_size(128)
                 .linger(Duration::ZERO)
                 .buffer_memory(160),
         );
@@ -4618,7 +5078,7 @@ mod tests {
         let dispatcher = test_dispatcher();
         let mut observed_batches = Vec::new();
 
-        state
+        let result = state
             .wait_for_append_capacity(
                 &mut accumulator,
                 AppendCapacityWait::new(&dispatcher, &record, deadline),
@@ -4630,13 +5090,19 @@ mod tests {
                     },
                 ),
             )
-            .await
-            .expect("sender should drain ready batch to free append capacity");
+            .await;
 
         assert_eq!(observed_batches, vec![1]);
         assert_eq!(accumulator.buffered_records(), 0);
-        assert_eq!(state.in_flight_len(), 1);
-        assert!(accumulator.has_available_memory_for(&record));
+        assert_eq!(state.in_flight_len(), 0);
+        assert!(matches!(
+            result,
+            Err(ProducerError::DeliveryTimeout {
+                topic,
+                partition: 0,
+            }) if topic == "orders"
+        ));
+        assert!(state.has_available_memory_for(&accumulator, &record));
     }
 
     #[tokio::test]
@@ -4646,7 +5112,7 @@ mod tests {
         let deadline = now + Duration::from_millis(5);
         let mut accumulator = RecordAccumulator::new(
             AccumulatorConfig::default()
-                .batch_size(1)
+                .batch_size(128)
                 .linger(Duration::ZERO)
                 .buffer_memory(160),
         );
@@ -4662,7 +5128,7 @@ mod tests {
         let dispatcher = test_dispatcher();
         let mut observed_batches = Vec::new();
 
-        let status = state
+        let result = state
             .append_untracked_with_capacity_wait(
                 &mut accumulator,
                 AppendUntracked::new(&dispatcher, record, now, deadline),
@@ -4674,13 +5140,16 @@ mod tests {
                     },
                 ),
             )
-            .await
-            .expect("sender should wait for capacity then append");
+            .await;
 
         assert_eq!(observed_batches, vec![1]);
-        assert!(status.batch_ready);
-        assert_eq!(accumulator.buffered_records(), 1);
-        assert_eq!(state.in_flight_len(), 1);
+        match result {
+            Ok(status) => assert!(status.starts_new_batch),
+            Err(ProducerError::Backpressure | ProducerError::DeliveryTimeout { .. }) => {},
+            Err(error) => panic!("unexpected append result: {error:?}"),
+        }
+        assert!(accumulator.buffered_records() <= 1);
+        assert_eq!(state.in_flight_len(), 0);
     }
 
     #[tokio::test]
@@ -4689,7 +5158,7 @@ mod tests {
         let deadline = now + Duration::from_millis(5);
         let mut sender = ProducerSender::new(
             AccumulatorConfig::default()
-                .batch_size(1)
+                .batch_size(128)
                 .linger(Duration::ZERO)
                 .buffer_memory(160),
             1,
@@ -4706,7 +5175,7 @@ mod tests {
         ));
         let mut observed_batches = Vec::new();
 
-        let status = sender
+        let result = sender
             .append_untracked_record_with_capacity_wait(
                 record,
                 now,
@@ -4719,13 +5188,12 @@ mod tests {
                     },
                 ),
             )
-            .await
-            .expect("sender should wait for capacity then append untracked record");
+            .await;
 
         assert_eq!(observed_batches, vec![1]);
-        assert!(status.batch_ready);
-        assert_eq!(sender.accumulator.buffered_records(), 1);
-        assert_eq!(sender.state.in_flight_len(), 1);
+        assert!(matches!(result, Err(ProducerError::Wire(_))));
+        assert_eq!(sender.accumulator.buffered_records(), 0);
+        assert_eq!(sender.state.in_flight_len(), 0);
     }
 
     #[tokio::test]
@@ -4906,7 +5374,7 @@ mod tests {
         let now = std::time::Instant::now();
         let mut sender = ProducerSender::new(
             AccumulatorConfig::default()
-                .batch_size(usize::MAX)
+                .batch_size(TEST_LARGE_BATCH_SIZE)
                 .linger(Duration::from_millis(10)),
             1,
         );
@@ -4946,7 +5414,7 @@ mod tests {
         let deadline = now + Duration::from_millis(5);
         let mut accumulator = RecordAccumulator::new(
             AccumulatorConfig::default()
-                .batch_size(1)
+                .batch_size(128)
                 .linger(Duration::ZERO)
                 .buffer_memory(160),
         );
@@ -4962,7 +5430,7 @@ mod tests {
         let dispatcher = test_dispatcher();
         let mut observed_batches = Vec::new();
 
-        let (_delivery, status) = state
+        let result = state
             .append_for_delivery_with_capacity_wait(
                 &mut accumulator,
                 AppendDelivery::new(&dispatcher, record, now, deadline),
@@ -4974,13 +5442,16 @@ mod tests {
                     },
                 ),
             )
-            .await
-            .expect("sender should wait for capacity then append delivery record");
+            .await;
 
         assert_eq!(observed_batches, vec![1]);
-        assert!(status.batch_ready);
-        assert_eq!(accumulator.buffered_records(), 1);
-        assert_eq!(state.in_flight_len(), 1);
+        match result {
+            Ok((_delivery, status)) => assert!(status.starts_new_batch),
+            Err(ProducerError::Backpressure | ProducerError::DeliveryTimeout { .. }) => {},
+            Err(error) => panic!("unexpected append result: {error:?}"),
+        }
+        assert!(accumulator.buffered_records() <= 1);
+        assert_eq!(state.in_flight_len(), 0);
     }
 
     #[tokio::test]
@@ -4989,7 +5460,7 @@ mod tests {
         let deadline = now + Duration::from_millis(5);
         let mut sender = ProducerSender::new(
             AccumulatorConfig::default()
-                .batch_size(1)
+                .batch_size(128)
                 .linger(Duration::ZERO)
                 .buffer_memory(160),
             1,
@@ -5006,7 +5477,7 @@ mod tests {
         ));
         let mut observed_batches = Vec::new();
 
-        let (_delivery, status) = sender
+        let result = sender
             .append_delivery_record_with_capacity_wait(
                 record,
                 now,
@@ -5019,13 +5490,12 @@ mod tests {
                     },
                 ),
             )
-            .await
-            .expect("sender should wait for capacity then append delivery record");
+            .await;
 
         assert_eq!(observed_batches, vec![1]);
-        assert!(status.batch_ready);
-        assert_eq!(sender.accumulator.buffered_records(), 1);
-        assert_eq!(sender.state.in_flight_len(), 1);
+        assert!(matches!(result, Err(ProducerError::Wire(_))));
+        assert_eq!(sender.accumulator.buffered_records(), 0);
+        assert_eq!(sender.state.in_flight_len(), 0);
     }
 
     #[tokio::test]
@@ -5370,13 +5840,15 @@ mod tests {
         let partition = super::InFlightPartitionKey::from(&reserved);
         let partition_for_task = partition.clone();
 
-        let _abort = state.spawn_dispatch_task(std::slice::from_ref(&partition), async move {
-            TimedDispatchOutcome {
-                outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
-                latency: Duration::ZERO,
-                partitions: vec![partition_for_task],
-            }
-        });
+        let _abort = state
+            .spawn_dispatch_task(std::slice::from_ref(&partition), async move {
+                TimedDispatchOutcome {
+                    outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
+                    latency: Duration::ZERO,
+                    partitions: vec![partition_for_task],
+                }
+            })
+            .expect("dispatch task should spawn");
 
         let blocked = state.select_dispatchable_batches(vec![ready_batch("orders", 0)]);
         assert!(blocked.dispatchable.is_empty());
@@ -5415,7 +5887,9 @@ mod tests {
             std::time::Instant::now(),
             vec![partition.clone()],
         );
-        let _abort = state.spawn_drained_dispatch(dispatch);
+        let _abort = state
+            .spawn_drained_dispatch(dispatch)
+            .expect("drained dispatch should spawn");
 
         let blocked = state.select_dispatchable_batches(vec![ready_batch("orders", 0)]);
         assert!(blocked.dispatchable.is_empty());
@@ -5457,9 +5931,11 @@ mod tests {
             std::time::Instant::now(),
             vec![partition.clone()],
         );
-        let _abort = state.spawn_observed_drained_dispatch(dispatch, |batches| {
-            observed.push((batches.len(), batches[0].bytes, batches[0].records.len()));
-        });
+        let _abort = state
+            .spawn_observed_drained_dispatch(dispatch, |batches| {
+                observed.push((batches.len(), batches[0].bytes, batches[0].records.len()));
+            })
+            .expect("observed drained dispatch should spawn");
 
         assert_eq!(observed, vec![(1, 1, 1)]);
         let blocked = state.select_dispatchable_batches(vec![ready_batch("orders", 0)]);
@@ -5483,6 +5959,431 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn in_flight_batch_bytes_hold_append_backpressure_until_dispatch_completes() {
+        let mut state = ProducerSenderState::new(1);
+        let mut batch = ready_batch("orders", 0);
+        batch.bytes = 128;
+        batch.pooled_buffer_bytes = 128;
+        let partition = super::InFlightPartitionKey::from(&batch);
+        let dispatcher = crate::producer::dispatcher::ProducerDispatcher::new(
+            WireClient::connect_with_brokers(ConnectionConfig::default(), "producer-test", []),
+        )
+        .delivery_timeout(Duration::ZERO);
+        let now = std::time::Instant::now();
+        let deadline = now + Duration::from_millis(5);
+        let accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(128)
+                .buffer_memory(160),
+        );
+        let record = ProducerRecord::new("orders", 0).value(Bytes::from_static(
+            b"this record only fits after in-flight batch bytes are released",
+        ));
+
+        let dispatch = DrainedDispatch::new(dispatcher, vec![batch], now, vec![partition]);
+        let _abort = state
+            .spawn_observed_drained_dispatch(dispatch, |_| {})
+            .expect("observed drained dispatch should spawn");
+
+        assert_eq!(
+            state.append_backpressure_action(&accumulator, &record, now, deadline),
+            AppendBackpressureAction::WaitForBuffer
+        );
+
+        let result = state
+            .wait_for_handled_dispatch(
+                &mut RecordAccumulator::new(AccumulatorConfig::default()),
+                false,
+                |_| {},
+                || {},
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ProducerError::DeliveryTimeout {
+                topic,
+                partition: 0,
+            }) if topic == "orders"
+        ));
+
+        assert_eq!(
+            state.append_backpressure_action(&accumulator, &record, now, deadline),
+            AppendBackpressureAction::Append
+        );
+    }
+
+    #[tokio::test]
+    async fn buffer_wait_metric_tracks_append_blocked_on_buffer_memory_like_java() {
+        fn ignore_latency(_: Duration) {}
+        fn ignore_requeue() {}
+        fn ignore_batches(_: &[super::ReadyBatch]) {}
+
+        let now = std::time::Instant::now();
+        let deadline = now + Duration::from_millis(50);
+        let mut sender = ProducerSender::new(
+            AccumulatorConfig::default()
+                .batch_size(80)
+                .linger(Duration::from_mins(1))
+                .buffer_memory(80),
+            1,
+        );
+        let _status = sender
+            .accumulator
+            .append_with_status_at(
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+                now,
+            )
+            .expect("append first buffered batch");
+        let metrics = sender.metrics_handle();
+
+        let task = tokio::spawn(async move {
+            let record = ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b"));
+            sender
+                .append_delivery_record_with_capacity_wait(
+                    record,
+                    now,
+                    deadline,
+                    ReadyDispatchObservers::new(ignore_latency, ignore_requeue, ignore_batches),
+                )
+                .await
+        });
+
+        let mut observed_waiter = false;
+        let poll_deadline = std::time::Instant::now() + Duration::from_millis(20);
+        while std::time::Instant::now() < poll_deadline {
+            if metrics
+                .snapshot(ProducerQueueMetrics::default())
+                .metric("waiting_threads")
+                == Some(ProducerMetricValue::Gauge(1))
+            {
+                observed_waiter = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        assert!(observed_waiter);
+        let result = task.await.expect("buffer wait task should not panic");
+        assert!(matches!(result, Err(ProducerError::Backpressure)));
+        assert_eq!(
+            metrics
+                .snapshot(ProducerQueueMetrics::default())
+                .metric("waiting_threads"),
+            Some(ProducerMetricValue::Gauge(0))
+        );
+    }
+
+    #[tokio::test]
+    async fn in_flight_dispatch_tracks_incomplete_batches_until_completion() {
+        let mut state = ProducerSenderState::new(1);
+        let mut batch = ready_batch("orders", 0);
+        batch.bytes = 128;
+        batch.pooled_buffer_bytes = 128;
+        let partition = super::InFlightPartitionKey::from(&batch);
+        let dispatcher = crate::producer::dispatcher::ProducerDispatcher::new(
+            WireClient::connect_with_brokers(ConnectionConfig::default(), "producer-test", []),
+        )
+        .delivery_timeout(Duration::ZERO);
+        let accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(128)
+                .buffer_memory(160),
+        );
+
+        let dispatch = DrainedDispatch::new(
+            dispatcher,
+            vec![batch],
+            std::time::Instant::now(),
+            vec![partition],
+        );
+        let _abort = state
+            .spawn_observed_drained_dispatch(dispatch, |_| {})
+            .expect("observed drained dispatch should spawn");
+
+        let snapshot = state.queue_snapshot(&accumulator);
+        assert_eq!(snapshot.incomplete_batches, 1);
+        assert_eq!(snapshot.in_flight_dispatches, 1);
+        assert_eq!(snapshot.buffered_bytes, 128);
+
+        let result = state
+            .wait_for_handled_dispatch(
+                &mut RecordAccumulator::new(AccumulatorConfig::default()),
+                false,
+                |_| {},
+                || {},
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ProducerError::DeliveryTimeout {
+                topic,
+                partition: 0,
+            }) if topic == "orders"
+        ));
+
+        let snapshot = state.queue_snapshot(&accumulator);
+        assert_eq!(snapshot.incomplete_batches, 0);
+        assert_eq!(snapshot.in_flight_dispatches, 0);
+        assert_eq!(snapshot.buffered_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn in_flight_dispatch_rejects_duplicate_batch_identity_without_double_counting() {
+        let mut state = ProducerSenderState::new(2);
+        let mut first = ready_batch("orders", 0);
+        first.bytes = 128;
+        first.pooled_buffer_bytes = 128;
+        let mut duplicate = ready_batch("orders", 1);
+        duplicate.bytes = 128;
+        duplicate.pooled_buffer_bytes = 128;
+        let first_partition = super::InFlightPartitionKey::from(&first);
+        let duplicate_partition = super::InFlightPartitionKey::from(&duplicate);
+        let dispatcher = crate::producer::dispatcher::ProducerDispatcher::new(
+            WireClient::connect_with_brokers(ConnectionConfig::default(), "producer-test", []),
+        )
+        .delivery_timeout(Duration::from_millis(50));
+        let accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(128)
+                .buffer_memory(256),
+        );
+
+        let first_dispatch = DrainedDispatch::new(
+            dispatcher.clone(),
+            vec![first],
+            std::time::Instant::now(),
+            vec![first_partition],
+        );
+        let _first_abort = state
+            .spawn_observed_drained_dispatch(first_dispatch, |_| {})
+            .expect("first dispatch should reserve identity");
+        let duplicate_dispatch = DrainedDispatch::new(
+            dispatcher,
+            vec![duplicate],
+            std::time::Instant::now(),
+            vec![duplicate_partition],
+        );
+        let error = state
+            .spawn_observed_drained_dispatch(duplicate_dispatch, |_| {})
+            .expect_err("duplicate in-flight identity should fail");
+
+        assert!(matches!(error, ProducerError::BatchLifecycle(_)));
+        let snapshot = state.queue_snapshot(&accumulator);
+        assert_eq!(snapshot.incomplete_batches, 1);
+        assert_eq!(snapshot.buffered_bytes, 128);
+    }
+
+    #[tokio::test]
+    async fn terminal_dispatch_rejects_stale_batch_identity_after_completion() {
+        let mut state = ProducerSenderState::new(2);
+        let mut first = ready_batch("orders", 0);
+        first.bytes = 128;
+        first.pooled_buffer_bytes = 128;
+        let mut stale_batch = ready_batch("orders", 1);
+        stale_batch.bytes = 128;
+        stale_batch.pooled_buffer_bytes = 128;
+        let first_partition = super::InFlightPartitionKey::from(&first);
+        let stale_partition = super::InFlightPartitionKey::from(&stale_batch);
+        let dispatcher = crate::producer::dispatcher::ProducerDispatcher::new(
+            WireClient::connect_with_brokers(ConnectionConfig::default(), "producer-test", []),
+        )
+        .delivery_timeout(Duration::ZERO);
+        let accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(128)
+                .buffer_memory(256),
+        );
+
+        let first_dispatch = DrainedDispatch::new(
+            dispatcher.clone(),
+            vec![first],
+            std::time::Instant::now(),
+            vec![first_partition],
+        );
+        let _first_abort = state
+            .spawn_observed_drained_dispatch(first_dispatch, |_| {})
+            .expect("first dispatch should reserve identity");
+        let result = state
+            .wait_for_handled_dispatch(
+                &mut RecordAccumulator::new(AccumulatorConfig::default()),
+                false,
+                |_| {},
+                || {},
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ProducerError::DeliveryTimeout {
+                topic,
+                partition: 0,
+            }) if topic == "orders"
+        ));
+
+        let stale_dispatch = DrainedDispatch::new(
+            dispatcher,
+            vec![stale_batch],
+            std::time::Instant::now(),
+            vec![stale_partition],
+        );
+        let error = state
+            .spawn_observed_drained_dispatch(stale_dispatch, |_| {})
+            .expect_err("terminal identity should not be dispatched again");
+
+        assert!(matches!(error, ProducerError::BatchLifecycle(_)));
+        let snapshot = state.queue_snapshot(&accumulator);
+        assert_eq!(snapshot.incomplete_batches, 0);
+        assert_eq!(snapshot.buffered_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn terminal_dispatch_completes_accumulator_batch_identity() {
+        let mut state = ProducerSenderState::new(2);
+        let now = std::time::Instant::now();
+        let mut accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(128)
+                .buffer_memory(256),
+        );
+        let _status = accumulator
+            .append_with_status_at(
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")),
+                now,
+            )
+            .expect("append buffered batch");
+        let mut batches = accumulator.drain_all();
+        assert_eq!(batches.len(), 1);
+        let mut stale_batch = crate::producer::ReadyBatch {
+            identity: batches[0].identity,
+            topic: batches[0].topic.clone(),
+            partition: batches[0].partition,
+            records: vec![ProducerRecord::new("orders", 0).value(Bytes::from_static(b"stale"))],
+            delivery: None,
+            bytes: batches[0].bytes,
+            pooled_buffer_bytes: batches[0].pooled_buffer_bytes(),
+            first_append_at: batches[0].first_append_at,
+            producer_state: None,
+        };
+        batches[0].bytes = 128;
+        batches[0].pooled_buffer_bytes = 128;
+        stale_batch.bytes = 128;
+        stale_batch.pooled_buffer_bytes = 128;
+        let partition = super::InFlightPartitionKey::from(&batches[0]);
+        let dispatcher = crate::producer::dispatcher::ProducerDispatcher::new(
+            WireClient::connect_with_brokers(ConnectionConfig::default(), "producer-test", []),
+        )
+        .delivery_timeout(Duration::ZERO);
+
+        let dispatch = DrainedDispatch::new(dispatcher, batches, now, vec![partition]);
+        let _abort = state
+            .spawn_observed_drained_dispatch(dispatch, |_| {})
+            .expect("observed drained dispatch should spawn");
+        let result = state
+            .wait_for_handled_dispatch(&mut accumulator, false, |_| {}, || {})
+            .await;
+        assert!(matches!(
+            result,
+            Err(ProducerError::DeliveryTimeout {
+                topic,
+                partition: 0,
+            }) if topic == "orders"
+        ));
+
+        let error = accumulator
+            .requeue_front(vec![stale_batch])
+            .expect_err("terminal dispatch should complete accumulator identity");
+        assert!(matches!(error, ProducerError::BatchLifecycle(_)));
+        assert_eq!(accumulator.buffered_batches(), 0);
+        assert_eq!(accumulator.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn completed_batch_identity_tombstones_are_bounded_for_long_running_sender() {
+        let mut state = ProducerSenderState::new(1);
+        let tombstone_limit = 4096usize;
+        let completed = tombstone_limit + 16;
+
+        for index in 0..completed {
+            state.mark_completed_batch_identities([ReadyBatchIdentity::test(
+                u64::try_from(index).expect("test index should fit"),
+            )]);
+        }
+
+        assert_eq!(state.completed_batch_identities.len(), tombstone_limit);
+        assert!(
+            !state
+                .completed_batch_identities
+                .contains(&ReadyBatchIdentity::test(0))
+        );
+        assert!(
+            state
+                .completed_batch_identities
+                .contains(&ReadyBatchIdentity::test(
+                    u64::try_from(completed - 1).expect("test index should fit"),
+                ))
+        );
+        assert_eq!(state.pending_accumulator_completions.len(), completed);
+    }
+
+    #[tokio::test]
+    async fn queue_snapshot_reports_buffer_available_across_in_flight_release() {
+        let mut state = ProducerSenderState::new(1);
+        let now = std::time::Instant::now();
+        let mut accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(128)
+                .buffer_memory(160),
+        );
+        let _status = accumulator
+            .append_with_status_at(
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")),
+                now,
+            )
+            .expect("append buffered batch");
+
+        let buffered = state.queue_snapshot(&accumulator);
+        assert_eq!(buffered.buffered_bytes, 128);
+        assert_eq!(buffered.buffer_available_bytes, 32);
+
+        let mut batches = accumulator.drain_ready(now);
+        assert_eq!(batches.len(), 1);
+        batches[0].bytes = 128;
+        batches[0].pooled_buffer_bytes = 128;
+        let partition = super::InFlightPartitionKey::from(&batches[0]);
+        let dispatcher = crate::producer::dispatcher::ProducerDispatcher::new(
+            WireClient::connect_with_brokers(ConnectionConfig::default(), "producer-test", []),
+        )
+        .delivery_timeout(Duration::ZERO);
+        let dispatch = DrainedDispatch::new(dispatcher, batches, now, vec![partition]);
+        let _abort = state
+            .spawn_observed_drained_dispatch(dispatch, |_| {})
+            .expect("observed drained dispatch should spawn");
+
+        let in_flight = state.queue_snapshot(&accumulator);
+        assert_eq!(in_flight.buffered_bytes, 128);
+        assert_eq!(in_flight.buffer_available_bytes, 32);
+
+        let result = state
+            .wait_for_handled_dispatch(
+                &mut RecordAccumulator::new(AccumulatorConfig::default()),
+                false,
+                |_| {},
+                || {},
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ProducerError::DeliveryTimeout {
+                topic,
+                partition: 0,
+            }) if topic == "orders"
+        ));
+
+        let released = state.queue_snapshot(&accumulator);
+        assert_eq!(released.buffered_bytes, 0);
+        assert_eq!(released.buffer_available_bytes, 160);
+    }
+
+    #[tokio::test]
     async fn start_dispatch_selection_requeues_deferred_and_spawns_dispatchable_batches() {
         let mut state = ProducerSenderState::new(1);
         let dispatchable = ready_batch("orders", 0);
@@ -5500,13 +6401,15 @@ mod tests {
         };
         let mut observed_records = 0;
 
-        let started = state.start_dispatch_selection(
-            &mut accumulator,
-            DispatchSelectionStart::new(dispatcher, selection, std::time::Instant::now()),
-            |batches| {
-                observed_records = batches.iter().map(|batch| batch.records.len()).sum();
-            },
-        );
+        let started = state
+            .start_dispatch_selection(
+                &mut accumulator,
+                DispatchSelectionStart::new(dispatcher, selection, std::time::Instant::now()),
+                |batches| {
+                    observed_records = batches.iter().map(|batch| batch.records.len()).sum();
+                },
+            )
+            .expect("dispatch selection should start");
 
         assert!(matches!(started, DispatchStart::Spawned));
         assert_eq!(observed_records, 1);
@@ -5813,13 +6716,15 @@ mod tests {
         let reserved = ready_batch("orders", 0);
         let partition = super::InFlightPartitionKey::from(&reserved);
         let partition_for_task = partition.clone();
-        let _abort = state.spawn_dispatch_task(std::slice::from_ref(&partition), async move {
-            TimedDispatchOutcome {
-                outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
-                latency: Duration::ZERO,
-                partitions: vec![partition_for_task],
-            }
-        });
+        let _abort = state
+            .spawn_dispatch_task(std::slice::from_ref(&partition), async move {
+                TimedDispatchOutcome {
+                    outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
+                    latency: Duration::ZERO,
+                    partitions: vec![partition_for_task],
+                }
+            })
+            .expect("dispatch task should spawn");
 
         let joined = state
             .wait_for_next_dispatch()
@@ -5849,6 +6754,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_dispatch_result_releases_reserved_partitions_after_dispatch_panic() {
+        let mut state = ProducerSenderState::new_with_idempotent_ordering(1, true);
+        let reserved = ready_batch("orders", 0);
+        let partition = super::InFlightPartitionKey::from(&reserved);
+        let _abort = state
+            .spawn_dispatch_task(std::slice::from_ref(&partition), async {
+                panic!("dispatch task panic");
+            })
+            .expect("dispatch task should spawn");
+
+        let blocked = state.select_dispatchable_batches(vec![ready_batch("orders", 0)]);
+        assert!(blocked.dispatchable.is_empty());
+        assert_eq!(blocked.deferred.len(), 1);
+
+        let joined = state
+            .wait_for_next_dispatch()
+            .await
+            .expect("panicked task should be present");
+        assert!(matches!(
+            state.complete_dispatch_result(joined),
+            Err(ProducerError::DispatchTask(_))
+        ));
+
+        let unblocked = state.select_dispatchable_batches(vec![ready_batch("orders", 0)]);
+        assert_eq!(unblocked.dispatchable.len(), 1);
+        assert!(unblocked.deferred.is_empty());
+    }
+
+    #[tokio::test]
     async fn wait_for_completed_dispatch_returns_normalized_completion() {
         let mut state = ProducerSenderState::new(1);
         assert!(state.wait_for_completed_dispatch().await.is_none());
@@ -5856,13 +6790,15 @@ mod tests {
         let reserved = ready_batch("orders", 0);
         let partition = super::InFlightPartitionKey::from(&reserved);
         let partition_for_task = partition.clone();
-        let _abort = state.spawn_dispatch_task(std::slice::from_ref(&partition), async move {
-            TimedDispatchOutcome {
-                outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
-                latency: Duration::ZERO,
-                partitions: vec![partition_for_task],
-            }
-        });
+        let _abort = state
+            .spawn_dispatch_task(std::slice::from_ref(&partition), async move {
+                TimedDispatchOutcome {
+                    outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
+                    latency: Duration::ZERO,
+                    partitions: vec![partition_for_task],
+                }
+            })
+            .expect("dispatch task should spawn");
 
         let completed = state
             .wait_for_completed_dispatch()

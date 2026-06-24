@@ -13,6 +13,7 @@ use crate::wire::BrokerMetadata;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PartitionLeaderUpdate {
     pub(crate) topic: String,
+    pub(crate) topic_id: KafkaUuid,
     pub(crate) partition: i32,
     pub(crate) leader_id: i32,
     pub(crate) leader_epoch: i32,
@@ -34,6 +35,7 @@ pub(crate) fn current_leader_updates(response: &ProduceResponseData) -> Vec<Part
             if leader.leader_id >= 0 && leader.leader_epoch >= 0 {
                 updates.push(PartitionLeaderUpdate {
                     topic: topic.to_owned(),
+                    topic_id: topic_response.topic_id,
                     partition: partition_response.index,
                     leader_id: leader.leader_id,
                     leader_epoch: leader.leader_epoch,
@@ -70,9 +72,10 @@ pub(crate) fn produce_receipts_with_error_details(
     response: &ProduceResponseData,
     routes: &[ProduceRoute],
 ) -> Result<Vec<RecordMetadata>, ProduceReceiptError> {
-    let mut receipts = Vec::with_capacity(routes.len());
+    let mut receipts =
+        Vec::with_capacity(routes.iter().map(|route| route.record_count.max(1)).sum());
     for route in routes {
-        receipts.push(produce_receipt(response, route)?);
+        receipts.extend(produce_receipts_for_route(response, route)?);
     }
     Ok(receipts)
 }
@@ -110,10 +113,10 @@ impl From<ProduceReceiptError> for ProducerError {
     }
 }
 
-fn produce_receipt(
+fn produce_receipts_for_route(
     response: &ProduceResponseData,
     route: &ProduceRoute,
-) -> Result<RecordMetadata, ProduceReceiptError> {
+) -> Result<Vec<RecordMetadata>, ProduceReceiptError> {
     let topic_response = response
         .responses
         .iter()
@@ -131,17 +134,38 @@ fn produce_receipt(
             partition: route.partition,
         })?;
     check_partition_error(partition_response, route)?;
-    Ok(RecordMetadata {
-        topic: Arc::from(route.topic.as_str()),
-        partition: route.partition,
-        leader_id: route.leader_id,
-        offset: partition_response
-            .base_offset
-            .saturating_add(route.request_offset_delta),
-        timestamp_ms: partition_response.log_append_time_ms,
-        serialized_key_size: -1,
-        serialized_value_size: -1,
-    })
+    let record_count = route.record_count.max(1);
+    Ok((0..record_count)
+        .map(|record_index| {
+            let record_offset_delta = i64::try_from(record_index).unwrap_or(i64::MAX);
+            RecordMetadata {
+                topic: Arc::from(route.topic.as_str()),
+                partition: route.partition,
+                leader_id: route.leader_id,
+                offset: response_record_offset(
+                    partition_response.base_offset,
+                    route.request_offset_delta,
+                    record_offset_delta,
+                ),
+                timestamp_ms: partition_response.log_append_time_ms,
+                serialized_key_size: -1,
+                serialized_value_size: -1,
+            }
+        })
+        .collect())
+}
+
+const fn response_record_offset(
+    base_offset: i64,
+    request_offset_delta: i64,
+    record_offset_delta: i64,
+) -> i64 {
+    if base_offset < 0 {
+        return base_offset;
+    }
+    base_offset
+        .saturating_add(request_offset_delta)
+        .saturating_add(record_offset_delta)
 }
 
 fn check_partition_error(
@@ -251,6 +275,7 @@ mod tests {
 
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].topic, "orders");
+        assert_eq!(updates[0].topic_id, TOPIC_ID);
         assert_eq!(updates[0].partition, 0);
         assert_eq!(updates[0].leader_id, 9);
         assert_eq!(updates[0].leader_epoch, 4);
@@ -420,9 +445,37 @@ mod tests {
 
         let receipts = produce_receipts(&response, &[first_route, second_route]).expect("receipts");
 
-        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts.len(), 3);
         assert_eq!(receipts[0].offset, 40);
-        assert_eq!(receipts[1].offset, 42);
+        assert_eq!(receipts[1].offset, 41);
+        assert_eq!(receipts[2].offset, 42);
+    }
+
+    #[test]
+    fn produce_receipts_preserves_invalid_base_offset_for_multi_record_duplicate_sequence() {
+        let response = ProduceResponseData {
+            responses: vec![TopicProduceResponse {
+                name: KafkaString::from("orders".to_owned()),
+                topic_id: TOPIC_ID,
+                partition_responses: vec![PartitionProduceResponse {
+                    index: 0,
+                    error_code: i16::from(ErrorCode::DuplicateSequenceNumber),
+                    base_offset: -1,
+                    log_append_time_ms: -1,
+                    ..PartitionProduceResponse::default()
+                }],
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            ..ProduceResponseData::default()
+        };
+        let mut route = route("orders", 0);
+        route.record_count = 2;
+
+        let receipts = produce_receipts(&response, &[route]).expect("receipts");
+
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts.iter().all(|receipt| receipt.offset == -1));
+        assert!(receipts.iter().all(|receipt| receipt.timestamp_ms == -1));
     }
 
     fn route(topic: &str, partition: i32) -> ProduceRoute {

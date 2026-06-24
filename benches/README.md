@@ -106,7 +106,8 @@ compact counter lines, including `request_size_avg` from Java
 `request-size-avg` and Rust generated ProduceRequest encoded length. Java
 `batch_splits` comes from producer-perf's `batch-split-total`; Rust currently
 reports `batch_splits=not_tracked` and exposes ProduceRequest grouping splits
-separately as `request_splits`. Java producer-perf public metrics do not expose
+separately as `request_splits`. Rust also reports `compression_ratio` from
+actual dispatcher-encoded record batches. Java producer-perf public metrics do not expose
 exact record-batch count or records-per-batch count, so those fields are
 labeled `not_exposed_by_producer_perf`; do not treat them as parity proof.
 

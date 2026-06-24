@@ -1454,6 +1454,8 @@ mod tests {
     }
 
     fn byte_producer() -> Producer {
+        const TEST_LARGE_BATCH_SIZE: usize = 16 * 1024;
+
         let wire = WireClient::connect_with_brokers(
             ConnectionConfig::default(),
             "typed-producer-test",
@@ -1466,8 +1468,9 @@ mod tests {
             wire,
             ProducerRuntimeConfig {
                 accumulator: AccumulatorConfig::default()
-                    .batch_size(usize::MAX)
-                    .linger(Duration::from_mins(1)),
+                    .batch_size(TEST_LARGE_BATCH_SIZE)
+                    .linger(Duration::from_mins(1))
+                    .buffer_memory(TEST_LARGE_BATCH_SIZE * 4),
                 idempotence: ProducerIdempotenceConfig {
                     enabled: false,
                     ..ProducerIdempotenceConfig::default()

@@ -34,7 +34,7 @@ use super::{
     interceptor::{ProducerInterceptor, ProducerInterceptors},
     metrics::{
         KafkaMetric, MetricName, MetricReporter, ProducerMetricValue, ProducerMetrics,
-        ProducerMetricsSnapshot,
+        ProducerMetricsSnapshot, ProducerQueueMetrics,
     },
     partitioner::{ProducerPartitioner, ProducerPartitionerHandle},
     record::{ProducerRecord, RecordMetadata, SendFuture},
@@ -91,11 +91,13 @@ impl Producer {
         let enable_metrics_push = config.enable_metrics_push;
         let accumulator_config = config.accumulator;
         let max_in_flight_requests = config.max_in_flight_requests_per_connection;
+        let idempotent_ordering = config.idempotence.enabled;
         let partitioner_ignore_keys = config.partitioner_ignore_keys;
         let dispatcher = ProducerDispatcher::with_config(wire, config);
         let (sender, metrics) = ProducerSenderRuntime::with_dispatcher(
             accumulator_config,
             max_in_flight_requests,
+            idempotent_ordering,
             dispatcher.clone(),
         );
         Self {
@@ -751,11 +753,13 @@ impl Producer {
             |_| SenderQueueSnapshot::default(),
             |sender| sender.queue_snapshot(),
         );
-        self.metrics.snapshot(
-            queue.buffered_bytes,
-            queue.buffered_records,
-            queue.in_flight_dispatches,
-        )
+        self.metrics.snapshot(ProducerQueueMetrics {
+            queue_depth_bytes: queue.buffered_bytes,
+            queue_depth_records: queue.buffered_records,
+            buffer_available_bytes: queue.buffer_available_bytes,
+            incomplete_batches: queue.incomplete_batches,
+            in_flight_dispatches: queue.in_flight_dispatches,
+        })
     }
 
     /// Point-in-time named producer metrics, similar to Java's metrics map.
@@ -1224,7 +1228,6 @@ impl Producer {
         let dispatch_latency_samples = &mut self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
-        let accumulator_batch_size = self.sender.accumulator_batch_size();
         self.sender
             .lock()
             .await
@@ -1239,18 +1242,7 @@ impl Producer {
                         metrics.record_requeue();
                     }
                 },
-                |observed_batches: &[super::ReadyBatch]| {
-                    if !metrics_enabled {
-                        return;
-                    }
-                    for batch in observed_batches {
-                        metrics.record_produce_batch(
-                            batch.bytes,
-                            accumulator_batch_size,
-                            batch.records.len(),
-                        );
-                    }
-                },
+                |_: &[super::ReadyBatch]| {},
             ))
             .await
     }
@@ -1272,7 +1264,6 @@ impl Producer {
         let dispatch_latency_samples = &mut self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
-        let accumulator_batch_size = self.sender.accumulator_batch_size();
         self.sender
             .append_delivery_record_then_apply_dispatch(
                 AppendDeliveryRecord::new(record, now, deadline, sticky_topic),
@@ -1288,18 +1279,7 @@ impl Producer {
                             metrics.record_requeue();
                         }
                     },
-                    |observed_batches: &[super::ReadyBatch]| {
-                        if !metrics_enabled {
-                            return;
-                        }
-                        for batch in observed_batches {
-                            metrics.record_produce_batch(
-                                batch.bytes,
-                                accumulator_batch_size,
-                                batch.records.len(),
-                            );
-                        }
-                    },
+                    |_: &[super::ReadyBatch]| {},
                 ),
             )
             .await
@@ -1322,7 +1302,6 @@ impl Producer {
         let dispatch_latency_samples = &mut self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
-        let accumulator_batch_size = self.sender.accumulator_batch_size();
         self.sender
             .append_callback_delivery_record_then_apply_dispatch(
                 AppendCallbackDeliveryRecord::new(record, now, deadline, sticky_topic),
@@ -1338,18 +1317,7 @@ impl Producer {
                             metrics.record_requeue();
                         }
                     },
-                    |observed_batches: &[super::ReadyBatch]| {
-                        if !metrics_enabled {
-                            return;
-                        }
-                        for batch in observed_batches {
-                            metrics.record_produce_batch(
-                                batch.bytes,
-                                accumulator_batch_size,
-                                batch.records.len(),
-                            );
-                        }
-                    },
+                    |_: &[super::ReadyBatch]| {},
                 ),
             )
             .await
@@ -1580,6 +1548,7 @@ fn producer_error_for_callback(error: &ProducerError) -> Option<ProducerError> {
             max_request_size: *max_request_size,
         }),
         ProducerError::FlushIncomplete => Some(ProducerError::FlushIncomplete),
+        ProducerError::BatchLifecycle(message) => Some(ProducerError::BatchLifecycle(message)),
         ProducerError::CallbackOperation { operation } => {
             Some(ProducerError::CallbackOperation { operation })
         },
@@ -2169,7 +2138,8 @@ mod tests {
             AccumulatorConfig, ConsumerGroupMetadata, KafkaMetric, MetricName, MetricReporter,
             MetricValue, ProducerError, ProducerIdempotenceConfig, ProducerIdentity,
             ProducerInterceptor, ProducerMetricSubscription, ProducerMetricValue, ProducerRecord,
-            ProducerRuntimeConfig, RecordMetadata, SendFuture, TopicPartition,
+            ProducerRuntimeConfig, ReadyBatch, RecordMetadata, SendFuture, TopicPartition,
+            accumulator::ReadyBatchIdentity,
         },
         wire::{
             BrokerEndpoint, ConnectionConfig, SaslClientAction, SaslClientAuthenticator,
@@ -2206,10 +2176,12 @@ mod tests {
     }
 
     fn runtime_config(max_in_flight: usize) -> ProducerRuntimeConfig {
+        const TEST_LARGE_BATCH_SIZE: usize = 16 * 1024;
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
-                .batch_size(usize::MAX)
-                .linger(Duration::from_mins(1)),
+                .batch_size(TEST_LARGE_BATCH_SIZE)
+                .linger(Duration::from_mins(1))
+                .buffer_memory(TEST_LARGE_BATCH_SIZE * 4),
             max_in_flight_requests_per_connection: max_in_flight,
             idempotence: ProducerIdempotenceConfig {
                 enabled: false,
@@ -2655,11 +2627,43 @@ mod tests {
             },
         );
 
-        let max_in_flight_requests = {
-            let sender = producer.sender.try_lock().expect("sender");
-            sender.state.max_in_flight_requests()
+        let (max_in_flight_requests, uses_idempotent_ordering, deferred_same_partition) = {
+            let mut sender = producer.sender.try_lock().expect("sender");
+            let in_flight = ReadyBatch {
+                identity: ReadyBatchIdentity::test(0),
+                topic: "orders".to_owned(),
+                partition: 0,
+                records: vec![ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a"))],
+                delivery: None,
+                bytes: 1,
+                pooled_buffer_bytes: 1,
+                first_append_at: Instant::now(),
+                producer_state: None,
+            };
+            let ready = ReadyBatch {
+                identity: ReadyBatchIdentity::test(1),
+                topic: "orders".to_owned(),
+                partition: 0,
+                records: vec![ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b"))],
+                delivery: None,
+                bytes: 1,
+                pooled_buffer_bytes: 1,
+                first_append_at: Instant::now(),
+                producer_state: None,
+            };
+            sender
+                .state
+                .reserve_partitions_for_dispatch(std::slice::from_ref(&in_flight));
+            let selection = sender.state.select_dispatchable_batches(vec![ready]);
+            (
+                sender.state.max_in_flight_requests(),
+                sender.state.uses_idempotent_ordering(),
+                selection.dispatchable.is_empty() && selection.deferred.len() == 1,
+            )
         };
         assert_eq!(max_in_flight_requests, 5);
+        assert!(uses_idempotent_ordering);
+        assert!(deferred_same_partition);
     }
 
     #[test]
@@ -3200,7 +3204,7 @@ mod tests {
             .and_then(|batch| batch.delivery.take())
             .expect("delivery sender");
 
-        sender.send(record_metadata(40));
+        sender.send(&record_metadata(40));
 
         assert_eq!(order.load(Ordering::Relaxed), 2);
     }
@@ -3291,7 +3295,7 @@ mod tests {
             .and_then(|batch| batch.delivery.take())
             .expect("delivery sender");
 
-        sender.send(record_metadata(40));
+        sender.send(&record_metadata(40));
 
         assert_eq!(ack_count.load(Ordering::Relaxed), 1);
     }
@@ -3470,11 +3474,7 @@ mod tests {
         }
     }
 
-    fn ready_batch() -> super::super::ReadyBatch {
-        ready_batch_for_partition("orders", 0)
-    }
-
-    fn ready_batch_for_partition(topic: &str, partition: i32) -> super::super::ReadyBatch {
+    fn ready_batch_for_partition(topic: &str, partition: i32) -> ReadyBatch {
         let mut accumulator = crate::producer::RecordAccumulator::new(
             AccumulatorConfig::default()
                 .batch_size(1)
@@ -3538,7 +3538,7 @@ mod tests {
     }
 
     #[test]
-    fn idempotent_selection_allows_same_partition_in_flight_when_pipeline_depth_exceeds_one() {
+    fn idempotent_selection_defers_same_partition_at_pipeline_depth_above_one() {
         let mut config = runtime_config(5);
         config.idempotence = ProducerIdempotenceConfig {
             enabled: true,
@@ -3556,8 +3556,10 @@ mod tests {
             ])
         };
 
-        assert_eq!(selection.dispatchable.len(), 2);
-        assert!(selection.deferred.is_empty());
+        assert_eq!(selection.dispatchable.len(), 1);
+        assert_eq!(selection.dispatchable[0].partition, 1);
+        assert_eq!(selection.deferred.len(), 1);
+        assert_eq!(selection.deferred[0].partition, 0);
     }
 
     #[test]
@@ -3704,7 +3706,21 @@ mod tests {
     #[test]
     fn dispatch_task_result_requeues_batches_or_errors_for_flush() {
         let mut producer = producer(1);
-        let batch = ready_batch();
+        let batch = {
+            let mut sender = producer.sender.try_lock().expect("sender");
+            sender
+                .accumulator
+                .append_at(
+                    ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")),
+                    Instant::now(),
+                )
+                .expect("append producer-owned batch");
+            sender
+                .accumulator
+                .drain_all()
+                .pop()
+                .expect("producer-owned drained batch")
+        };
 
         producer
             .dispatch_task_result(Ok(timed(DispatchOutcome::Requeue(vec![batch]))), false)
@@ -4008,6 +4024,18 @@ mod tests {
             registry.get("queue_depth_records"),
             Some(&ProducerMetricValue::Gauge(1))
         );
+        assert_eq!(
+            registry.get("incomplete_batches"),
+            Some(&ProducerMetricValue::Gauge(1))
+        );
+        assert!(matches!(
+            registry.get("buffer_available_bytes"),
+            Some(ProducerMetricValue::Gauge(available)) if *available > 0
+        ));
+        assert_eq!(
+            registry.get("waiting_threads"),
+            Some(&ProducerMetricValue::Gauge(0))
+        );
         assert!(matches!(
             registry.get("flush_total_latency"),
             Some(ProducerMetricValue::Duration(_))
@@ -4069,7 +4097,7 @@ mod tests {
             );
         }));
 
-        sender.send(RecordMetadata {
+        sender.send(&RecordMetadata {
             topic: Arc::from("orders"),
             partition: 0,
             leader_id: 7,
@@ -4105,7 +4133,7 @@ mod tests {
             callback_forced_close.store(result.is_ok(), Ordering::Relaxed);
         }));
 
-        sender.send(record_metadata(0));
+        sender.send(&record_metadata(0));
 
         assert!(forced_close.load(Ordering::Relaxed));
         assert!(
@@ -4140,7 +4168,7 @@ mod tests {
             callback_forced_close.store(result.is_ok(), Ordering::Relaxed);
         }));
 
-        sender.send(record_metadata(0));
+        sender.send(&record_metadata(0));
 
         assert!(forced_close.load(Ordering::Relaxed));
         assert!(
@@ -4331,7 +4359,7 @@ mod tests {
     async fn send_waits_until_max_block_before_reporting_buffer_backpressure() {
         let mut config = runtime_config(1);
         config.accumulator = AccumulatorConfig::default()
-            .batch_size(usize::MAX)
+            .batch_size(80)
             .linger(Duration::from_mins(1))
             .buffer_memory(80);
         config.max_block = Duration::from_millis(10);
@@ -4342,7 +4370,7 @@ mod tests {
             .await;
         let started = Instant::now();
         let second = producer
-            .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
+            .send(ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")))
             .await;
 
         assert!(first.is_ok());

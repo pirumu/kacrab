@@ -58,6 +58,43 @@ pub(crate) fn encode_record_batch_with_producer_state_at_offset(
     )
 }
 
+#[cfg(test)]
+pub(crate) fn encode_record_batch_with_producer_state_at_offset_into(
+    records: &[ProducerRecord],
+    compression: ProducerCompression,
+    producer_state: Option<ProducerBatchState>,
+    base_offset: i64,
+    bytes: &mut BytesMut,
+) -> Result<Bytes> {
+    let (records, timestamp_base) = producer_records(records);
+    let batch = record_batch(
+        records,
+        compression,
+        producer_state,
+        base_offset,
+        timestamp_base,
+    );
+    encode_record_batch_into(&batch, compression, bytes)
+}
+
+pub(crate) fn encode_record_batch_with_producer_state_at_offset_into_buffer(
+    records: &[ProducerRecord],
+    compression: ProducerCompression,
+    producer_state: Option<ProducerBatchState>,
+    base_offset: i64,
+    bytes: &mut BytesMut,
+) -> Result<()> {
+    let (records, timestamp_base) = producer_records(records);
+    let batch = record_batch(
+        records,
+        compression,
+        producer_state,
+        base_offset,
+        timestamp_base,
+    );
+    encode_record_batch_into_buffer(&batch, compression, bytes)
+}
+
 fn encode_records(
     records: Vec<Record>,
     compression: ProducerCompression,
@@ -65,6 +102,24 @@ fn encode_records(
     base_offset: i64,
     timestamp_base: RecordBatchTimestamps,
 ) -> Result<Bytes> {
+    let mut bytes = BytesMut::new();
+    let batch = record_batch(
+        records,
+        compression,
+        producer_state,
+        base_offset,
+        timestamp_base,
+    );
+    encode_record_batch_into(&batch, compression, &mut bytes)
+}
+
+fn record_batch(
+    records: Vec<Record>,
+    compression: ProducerCompression,
+    producer_state: Option<ProducerBatchState>,
+    base_offset: i64,
+    timestamp_base: RecordBatchTimestamps,
+) -> RecordBatch {
     let (producer_id, producer_epoch, base_sequence) = producer_state.map_or_else(
         || {
             (
@@ -81,7 +136,7 @@ fn encode_records(
             )
         },
     );
-    let batch = RecordBatch {
+    RecordBatch {
         base_offset,
         partition_leader_epoch: UNKNOWN_PARTITION_LEADER_EPOCH,
         magic: RECORD_BATCH_MAGIC_V2,
@@ -93,10 +148,27 @@ fn encode_records(
         producer_epoch,
         base_sequence,
         records,
-    };
-    let mut bytes = BytesMut::with_capacity(batch.uncompressed_encoded_len()?);
-    batch.encode_with_compression_level(&mut bytes, compression.level)?;
-    Ok(bytes.freeze())
+    }
+}
+
+fn encode_record_batch_into(
+    batch: &RecordBatch,
+    compression: ProducerCompression,
+    bytes: &mut BytesMut,
+) -> Result<Bytes> {
+    encode_record_batch_into_buffer(batch, compression, bytes)?;
+    Ok(bytes.split_to(bytes.len()).freeze())
+}
+
+fn encode_record_batch_into_buffer(
+    batch: &RecordBatch,
+    compression: ProducerCompression,
+    bytes: &mut BytesMut,
+) -> Result<()> {
+    bytes.clear();
+    bytes.reserve(batch.uncompressed_encoded_len()?);
+    batch.encode_with_compression_level(bytes, compression.level)?;
+    Ok(())
 }
 
 fn producer_records(records: &[ProducerRecord]) -> (Vec<Record>, RecordBatchTimestamps) {
@@ -147,7 +219,7 @@ struct RecordBatchTimestamps {
     max_timestamp: i64,
 }
 
-fn current_time_ms() -> i64 {
+pub(crate) fn current_time_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| {
@@ -164,14 +236,18 @@ mod tests {
         reason = "Unit test fixtures fail fastest with contextual unwrap/expect calls."
     )]
 
-    use bytes::Bytes;
+    use std::time::{Duration, Instant};
+
+    use bytes::{Bytes, BytesMut};
     use kacrab_protocol::record::RecordBatch;
 
     use super::{
         REQUEST_RECORD_BATCH_BASE_OFFSET, encode_record_batch_with_producer_state_at_offset,
+        encode_record_batch_with_producer_state_at_offset_into,
     };
     use crate::producer::{
-        ProducerBatchState, ProducerCompression, ProducerIdentity, ProducerRecord,
+        AccumulatorConfig, ProducerBatchState, ProducerCompression, ProducerIdentity,
+        ProducerRecord, RecordAccumulator,
     };
 
     #[test]
@@ -213,6 +289,35 @@ mod tests {
     }
 
     #[test]
+    fn record_batch_encoder_can_write_into_reusable_buffer() {
+        let records = [ProducerRecord::new("orders", 0)
+            .try_timestamp_ms(1_000)
+            .expect("timestamp")
+            .value(Bytes::from_static(b"value"))];
+        let expected = encode_record_batch_with_producer_state_at_offset(
+            &records,
+            ProducerCompression::default(),
+            None,
+            REQUEST_RECORD_BATCH_BASE_OFFSET,
+        )
+        .expect("batch should encode");
+        let mut buffer = BytesMut::with_capacity(4 * 1024);
+        buffer.extend_from_slice(b"stale");
+
+        let encoded = encode_record_batch_with_producer_state_at_offset_into(
+            &records,
+            ProducerCompression::default(),
+            None,
+            REQUEST_RECORD_BATCH_BASE_OFFSET,
+            &mut buffer,
+        )
+        .expect("batch should encode into caller buffer");
+
+        assert_eq!(encoded, expected);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
     fn record_batch_sets_create_time_timestamp_from_clock() {
         let before = super::current_time_ms();
         let encoded = encode_record_batch_with_producer_state_at_offset(
@@ -233,6 +338,40 @@ mod tests {
             decoded.records.first().expect("one record").timestamp_delta,
             0
         );
+    }
+
+    #[test]
+    fn accumulator_append_freezes_create_time_before_later_encode_like_java() {
+        let mut accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(1024)
+                .linger(Duration::from_secs(1)),
+        );
+        let before_append = super::current_time_ms();
+        accumulator
+            .append_at(
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")),
+                Instant::now(),
+            )
+            .expect("append record without user timestamp");
+        let after_append = super::current_time_ms();
+
+        std::thread::sleep(Duration::from_millis(15));
+        let drained = accumulator.drain_all();
+        let encoded = encode_record_batch_with_producer_state_at_offset(
+            &drained[0].records,
+            ProducerCompression::default(),
+            None,
+            REQUEST_RECORD_BATCH_BASE_OFFSET,
+        )
+        .expect("batch should encode");
+        let mut encoded = encoded;
+        let decoded = RecordBatch::decode(&mut encoded).expect("record batch");
+
+        assert!(decoded.first_timestamp >= before_append);
+        assert!(decoded.first_timestamp <= after_append);
+        assert_eq!(decoded.max_timestamp, decoded.first_timestamp);
     }
 
     #[test]

@@ -743,8 +743,12 @@ const fn metrics_delta(
             .saturating_sub(baseline.in_flight_stall_count),
         queue_depth_bytes: current.queue_depth_bytes,
         queue_depth_records: current.queue_depth_records,
+        buffer_available_bytes: current.buffer_available_bytes,
+        waiting_threads: current.waiting_threads,
+        incomplete_batches: current.incomplete_batches,
         in_flight_dispatches: current.in_flight_dispatches,
         average_batch_fill_ratio: current.average_batch_fill_ratio,
+        average_compression_ratio: current.average_compression_ratio,
         flush_count: current.flush_count.saturating_sub(baseline.flush_count),
         flush_total_latency: current
             .flush_total_latency
@@ -996,7 +1000,7 @@ fn append_metrics(line: &mut String, metrics: &ProducerMetricsSnapshot) {
          records_per_request_avg={:.3}, request_size_avg={:.3}, \
          record_batch_payload_bytes_per_request_avg={:.3}, retries={}, errors={}, \
          in_flight_stalls={}, batch_splits=not_tracked, request_splits={}, requeues={}, \
-         batch_fill={:.3}",
+         batch_fill={:.3}, compression_ratio={:.3}",
         metrics.produce_request_count,
         metrics.produce_batch_count,
         records_per_batch_avg,
@@ -1008,7 +1012,8 @@ fn append_metrics(line: &mut String, metrics: &ProducerMetricsSnapshot) {
         metrics.in_flight_stall_count,
         metrics.produce_request_split_count,
         metrics.requeue_count,
-        metrics.average_batch_fill_ratio
+        metrics.average_batch_fill_ratio,
+        metrics.average_compression_ratio
     );
 }
 
@@ -1059,6 +1064,11 @@ fn append_average_metrics(line: &mut String, metrics: &[ProducerMetricsSnapshot]
         .map(|snapshot| snapshot.average_batch_fill_ratio)
         .sum::<f64>()
         / runs;
+    let compression_ratio = metrics
+        .iter()
+        .map(|snapshot| snapshot.average_compression_ratio)
+        .sum::<f64>()
+        / runs;
 
     let _result = write!(
         line,
@@ -1066,7 +1076,7 @@ fn append_average_metrics(line: &mut String, metrics: &[ProducerMetricsSnapshot]
          records_per_request_avg={:.3}, request_size_avg={:.3}, \
          record_batch_payload_bytes_per_request_avg={:.3}, retries={:.3}, errors={:.3}, \
          in_flight_stalls={:.3}, batch_splits=not_tracked, request_splits={:.3}, requeues={:.3}, \
-         batch_fill={:.3}",
+         batch_fill={:.3}, compression_ratio={:.3}",
         f64_from_u64(produce_requests) / runs,
         f64_from_u64(record_batches) / runs,
         average_counter(records, record_batches),
@@ -1078,7 +1088,8 @@ fn append_average_metrics(line: &mut String, metrics: &[ProducerMetricsSnapshot]
         f64_from_u64(in_flight_stalls) / runs,
         f64_from_u64(request_splits) / runs,
         f64_from_u64(requeues) / runs,
-        batch_fill
+        batch_fill,
+        compression_ratio
     );
 }
 
@@ -1325,6 +1336,7 @@ mod tests {
         metrics.in_flight_stall_count = 3;
         metrics.requeue_count = 1;
         metrics.average_batch_fill_ratio = 0.5;
+        metrics.average_compression_ratio = 0.75;
 
         let line = format_result_line(&BenchmarkResult {
             scenario: &scenario,
@@ -1349,6 +1361,7 @@ mod tests {
         assert!(line.contains("in_flight_stalls=3"));
         assert!(line.contains("batch_splits=not_tracked"));
         assert!(line.contains("request_splits=0"));
+        assert!(line.contains("compression_ratio=0.750"));
     }
 
     #[test]
@@ -1365,6 +1378,7 @@ mod tests {
         first.produce_request_split_count = 0;
         first.requeue_count = 1;
         first.average_batch_fill_ratio = 0.5;
+        first.average_compression_ratio = 0.5;
 
         let mut second = empty_metrics();
         second.produce_request_count = 4;
@@ -1378,6 +1392,7 @@ mod tests {
         second.produce_request_split_count = 2;
         second.requeue_count = 3;
         second.average_batch_fill_ratio = 0.7;
+        second.average_compression_ratio = 0.9;
 
         let line = format_average_counter_line(&[first, second]);
 
@@ -1395,6 +1410,7 @@ mod tests {
         assert!(line.contains("request_splits=1.000"));
         assert!(line.contains("requeues=2.000"));
         assert!(line.contains("batch_fill=0.600"));
+        assert!(line.contains("compression_ratio=0.700"));
     }
 
     #[test]
@@ -1428,8 +1444,12 @@ mod tests {
             in_flight_stall_count: 0,
             queue_depth_bytes: 0,
             queue_depth_records: 0,
+            buffer_available_bytes: 0,
+            waiting_threads: 0,
+            incomplete_batches: 0,
             in_flight_dispatches: 0,
             average_batch_fill_ratio: 0.0,
+            average_compression_ratio: 0.0,
             flush_count: 0,
             flush_total_latency: Duration::ZERO,
             metadata_wait_count: 0,

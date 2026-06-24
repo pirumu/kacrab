@@ -7,6 +7,8 @@ use std::{
     time::Instant,
 };
 
+#[cfg(feature = "producer")]
+use bytes::BytesMut;
 use kacrab_protocol::{
     generated::{ApiKey, MetadataResponseData},
     version::client_api_info,
@@ -96,6 +98,16 @@ impl WireClient {
     #[must_use]
     pub fn buffer_pool_stats(&self) -> BufferPoolStats {
         self.inner.buffers.stats()
+    }
+
+    #[cfg(feature = "producer")]
+    pub(crate) fn acquire_write_buffer(&self, capacity: usize) -> BytesMut {
+        self.inner.buffers.acquire_write(capacity)
+    }
+
+    #[cfg(feature = "producer")]
+    pub(crate) fn release_write_buffer(&self, buffer: BytesMut) {
+        self.inner.buffers.release_write(buffer);
     }
 
     /// Send a generated request to a specific broker id.

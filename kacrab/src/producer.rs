@@ -4,6 +4,7 @@ mod accumulator;
 mod api;
 mod batch;
 mod client;
+mod compression_ratio;
 mod config;
 mod dispatcher;
 mod error;

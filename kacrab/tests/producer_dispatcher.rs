@@ -44,6 +44,9 @@ use kacrab_protocol::{
         PushTelemetryRequestData, PushTelemetryResponseData, RequestHeaderData, ResponseHeaderData,
         TopicProduceResponse, TxnOffsetCommitRequestData, TxnOffsetCommitResponseData,
         TxnOffsetCommitResponsePartition, TxnOffsetCommitResponseTopic,
+        produce_response::{
+            LeaderIdAndEpoch as ProduceLeaderIdAndEpoch, NodeEndpoint as ProduceNodeEndpoint,
+        },
     },
     record::{RecordBatch, decode_batches},
     version::response_header_version,
@@ -62,6 +65,28 @@ fn assert_partition_base_offsets(produce: &ProduceRequestData, expected: &[i64])
     let batches = decode_batches(&mut records).expect("record batches");
     let base_offsets: Vec<_> = batches.iter().map(|batch| batch.base_offset).collect();
     assert_eq!(base_offsets, expected);
+}
+
+fn assert_single_idempotent_produce(
+    produce: &ProduceRequestData,
+    expected_partition: i32,
+    expected_base_sequence: i32,
+) {
+    assert_eq!(produce.acks, -1);
+    assert_eq!(produce.topic_data.len(), 1);
+    let topic_data = produce.topic_data.first().expect("topic produce data");
+    assert_eq!(topic_data.topic_id, TOPIC_ID);
+    assert_eq!(topic_data.partition_data.len(), 1);
+    let partition_data = topic_data
+        .partition_data
+        .first()
+        .expect("partition produce data");
+    assert_eq!(partition_data.index, expected_partition);
+    let mut records = partition_data.records.clone().expect("records");
+    let batch = RecordBatch::decode(&mut records).expect("record batch");
+    assert_eq!(batch.producer_id, 42);
+    assert_eq!(batch.producer_epoch, 3);
+    assert_eq!(batch.base_sequence, expected_base_sequence);
 }
 
 async fn wait_for_buffered_bytes(producer: &Producer) -> usize {
@@ -1433,7 +1458,7 @@ async fn kafka_producer_10kib_records_keep_observed_requests_under_max_request_s
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
-                .batch_size(usize::MAX)
+                .batch_size(16 * 1024)
                 .linger(Duration::from_mins(1))
                 .buffer_memory(2 * MAX_REQUEST_SIZE),
             acks: 1,
@@ -1604,6 +1629,334 @@ async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() 
 }
 
 #[tokio::test]
+async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correlation() {
+    let leader_7 = MockBroker::serve_pipelined_idempotent_produce_reversed(vec![0, 1]).await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response_same_leader(7, leader_7);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default()
+            .max_in_flight_requests_per_connection(2)
+            .broker_queue_capacity(2)
+            .request_timeout(Duration::from_secs(1)),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
+            delivery_timeout: Duration::from_mins(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 2,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: None,
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+    let partitions = producer.partitions_for("orders").await.unwrap();
+    assert_eq!(partitions.len(), 2);
+
+    let first_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .await
+        .unwrap();
+    let second_delivery = producer
+        .send(ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")))
+        .await
+        .unwrap();
+
+    producer.flush().await.unwrap();
+    let first = first_delivery.await.unwrap();
+    let second = second_delivery.await.unwrap();
+
+    assert_eq!(first.partition, 0);
+    assert_eq!(first.offset, 40);
+    assert_eq!(second.partition, 1);
+    assert_eq!(second.offset, 41);
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 4);
+}
+
+#[tokio::test]
+async fn idempotent_kafka_producer_retries_disconnected_in_flight_batch_with_same_sequence() {
+    let leader_7 = MockBroker::serve_idempotent_disconnect_then_retry().await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response_same_leader(7, leader_7);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default()
+            .max_in_flight_requests_per_connection(1)
+            .broker_queue_capacity(2)
+            .request_timeout(Duration::from_millis(100)),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 1,
+            retry_backoff: Duration::from_millis(1),
+            retry_backoff_max: Duration::from_millis(1),
+            delivery_timeout: Duration::from_secs(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 1,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: None,
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+
+    let delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .await
+        .unwrap();
+
+    producer.flush().await.unwrap();
+    let receipt = delivery.await.unwrap();
+
+    assert_eq!(receipt.partition, 0);
+    assert_eq!(receipt.offset, 40);
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 5);
+}
+
+#[tokio::test]
+async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_timeout_like_java() {
+    let leader_7 = MockBroker::serve_idempotent_timeout_then_epoch_bump_recovery().await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response_same_leader(7, leader_7);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default()
+            .max_in_flight_requests_per_connection(1)
+            .broker_queue_capacity(2)
+            .request_timeout(Duration::from_millis(10)),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 1,
+            retry_backoff: Duration::from_millis(1),
+            retry_backoff_max: Duration::from_millis(1),
+            delivery_timeout: Duration::from_millis(1),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 1,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: None,
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+
+    let first_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .await
+        .unwrap();
+    let first_error = producer
+        .flush()
+        .await
+        .expect_err("first sent batch should hit delivery timeout");
+    assert!(matches!(
+        first_error,
+        kacrab::producer::ProducerError::DeliveryTimeout { .. }
+    ));
+    assert!(first_delivery.await.is_err());
+
+    let second_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
+        .await
+        .unwrap();
+    producer.flush().await.unwrap();
+    let receipt = second_delivery.await.unwrap();
+
+    assert_eq!(receipt.partition, 0);
+    assert_eq!(receipt.offset, 41);
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 6);
+}
+
+#[tokio::test]
+async fn idempotent_kafka_producer_retries_leadership_error_with_current_leader_same_sequence() {
+    let leader_8 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            assert_single_idempotent_produce(&produce, 0, 0);
+            produce_response_frame_for_request(&header, 0, 88)
+        }),
+    ])
+    .await;
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::InitProducerId as i16);
+            init_producer_id_response_frame(header.correlation_id, 42, 3)
+        }),
+        Box::new({
+            let leader_8 = leader_8.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                    .expect("produce request");
+                assert_single_idempotent_produce(&produce, 0, 0);
+                produce_leader_change_error_response_frame_for_request(&header, 0, 8, 4, leader_8)
+            }
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response([(7, leader_7)]);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default()
+            .max_in_flight_requests_per_connection(1)
+            .broker_queue_capacity(2)
+            .request_timeout(Duration::from_millis(100)),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 1,
+            retry_backoff: Duration::from_millis(1),
+            retry_backoff_max: Duration::from_millis(1),
+            delivery_timeout: Duration::from_secs(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 1,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: None,
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+
+    let delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .await
+        .unwrap();
+
+    producer.flush().await.unwrap();
+    let receipt = delivery.await.unwrap();
+
+    assert_eq!(receipt.partition, 0);
+    assert_eq!(receipt.leader_id, 8);
+    assert_eq!(receipt.offset, 88);
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 3);
+    assert_eq!(leader_8.join().await, 2);
+}
+
+#[tokio::test]
 async fn kafka_producer_requeues_in_flight_batch_when_metadata_is_missing() {
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -1727,6 +2080,7 @@ async fn kafka_producer_metrics_snapshot_reports_queue_and_dispatch_counters() {
     let queued = producer.metrics();
     assert_eq!(queued.records_appended, 1);
     assert_eq!(queued.queue_depth_records, 1);
+    assert_eq!(queued.incomplete_batches, 1);
     assert!(queued.queue_depth_bytes > 0);
     assert_eq!(queued.produce_request_count, 0);
 
@@ -1734,10 +2088,82 @@ async fn kafka_producer_metrics_snapshot_reports_queue_and_dispatch_counters() {
     let flushed = producer.metrics();
     assert_eq!(flushed.queue_depth_records, 0);
     assert_eq!(flushed.queue_depth_bytes, 0);
+    assert_eq!(flushed.incomplete_batches, 0);
     assert_eq!(flushed.produce_request_count, 1);
     assert_eq!(flushed.produce_record_count, 1);
     assert!(flushed.average_batch_fill_ratio > 0.0);
     assert_eq!(flushed.in_flight_dispatches, 0);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 2);
+}
+
+#[tokio::test]
+async fn dispatcher_records_batch_metrics_after_request_build_with_actual_encoded_bytes() {
+    let encoded_records_len = Arc::new(AtomicUsize::new(0));
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let encoded_records_len = Arc::clone(&encoded_records_len);
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                    .expect("produce request");
+                let records = produce.topic_data[0].partition_data[0]
+                    .records
+                    .clone()
+                    .expect("records");
+                encoded_records_len.store(records.len(), Ordering::SeqCst);
+                produce_response_frame_for_request(&header, 0, 40)
+            }
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response([(7, leader_7)]);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let dispatcher = ProducerDispatcher::with_config(
+        wire,
+        ProducerRuntimeConfig {
+            idempotence: idempotence_disabled(),
+            ..ProducerRuntimeConfig::default()
+        },
+    );
+    dispatcher.enable_metrics();
+
+    let receipts = dispatcher
+        .dispatch_ready_batches(
+            ready_batches_for_value(b"value", Instant::now()),
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(receipts[0].offset, 40);
+    let metrics = dispatcher.metrics();
+    assert_eq!(metrics.produce_request_count, 1);
+    assert_eq!(metrics.produce_batch_count, 1);
+    assert_eq!(metrics.produce_record_count, 1);
+    assert_eq!(
+        metrics.produce_batch_bytes,
+        u64::try_from(encoded_records_len.load(Ordering::SeqCst)).unwrap()
+    );
+    assert!((metrics.average_compression_ratio - 1.0).abs() < f64::EPSILON);
     assert_eq!(bootstrap.join().await, 2);
     assert_eq!(leader_7.join().await, 2);
 }
@@ -5543,11 +5969,11 @@ async fn dispatcher_drains_ready_batches_by_leader_broker() {
     .await;
 
     let wire = WireClient::connect_with_brokers(
-        ConnectionConfig::default(),
+        ConnectionConfig::default().buffer_pool_capacity(16),
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let dispatcher = ProducerDispatcher::new(wire);
+    let dispatcher = ProducerDispatcher::new(wire.clone());
     let mut accumulator = RecordAccumulator::new(
         AccumulatorConfig::default()
             .batch_size(1)
@@ -5560,6 +5986,7 @@ async fn dispatcher_drains_ready_batches_by_leader_broker() {
         .append(ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")))
         .unwrap();
 
+    let before_dispatch = wire.buffer_pool_stats();
     let mut receipts = dispatcher
         .dispatch_ready(&mut accumulator, Instant::now())
         .await
@@ -5577,6 +6004,21 @@ async fn dispatcher_drains_ready_batches_by_leader_broker() {
     assert_eq!(bootstrap.join().await, 2);
     assert_eq!(leader_7.join().await, 2);
     assert_eq!(leader_8.join().await, 2);
+    let stats = wire.buffer_pool_stats();
+    assert!(
+        stats.write_acquired >= before_dispatch.write_acquired + 2,
+        "expected dispatch to acquire at least two encoded record buffers; stats: {stats:?}, \
+         before: {before_dispatch:?}"
+    );
+    assert!(
+        stats.write_released >= before_dispatch.write_released + 2,
+        "expected dispatch to release at least two encoded record buffers; stats: {stats:?}, \
+         before: {before_dispatch:?}"
+    );
+    assert!(
+        stats.write_released >= stats.write_acquired,
+        "expected all acquired write buffers to be released after dispatch; stats: {stats:?}"
+    );
 }
 
 #[tokio::test]
@@ -5823,6 +6265,204 @@ async fn dispatcher_completes_duplicate_sequence_number_as_success_like_java() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Idempotent local-failure sequence recovery fixture keeps broker handlers inline."
+)]
+async fn dispatcher_does_not_consume_sequence_after_local_record_too_large_error_like_java() {
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::InitProducerId as i16);
+            let init = InitProducerIdRequestData::read(&mut request, 5).expect("init producer id");
+            assert_eq!(init.producer_id, -1);
+            assert_eq!(init.producer_epoch, -1);
+            init_producer_id_response_frame(header.correlation_id, 42, 3)
+        }),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            let mut records = produce.topic_data[0].partition_data[0]
+                .records
+                .clone()
+                .expect("records");
+            let batch = RecordBatch::decode(&mut records).expect("record batch");
+            assert_eq!(batch.producer_id, 42);
+            assert_eq!(batch.producer_epoch, 3);
+            assert_eq!(batch.base_sequence, 0);
+            produce_response_frame_for_request(&header, 0, 40)
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response([(7, leader_7)]);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let dispatcher = ProducerDispatcher::with_config(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default(),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
+            delivery_timeout: Duration::from_mins(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 1,
+            max_request_size: 220,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: None,
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+    let now = Instant::now();
+    let mut accumulator = RecordAccumulator::new(
+        AccumulatorConfig::default()
+            .batch_size(1)
+            .buffer_memory(16 * 1024),
+    );
+    accumulator
+        .append_at(
+            ProducerRecord::new("orders", 0).value(Bytes::from(vec![b'a'; 1024])),
+            now,
+        )
+        .expect("append oversize local batch");
+
+    let first_error = dispatcher
+        .dispatch_ready_batches(accumulator.drain_ready(now), now)
+        .await
+        .expect_err("oversize batch should fail before produce send");
+    assert!(matches!(
+        first_error,
+        kacrab::producer::ProducerError::RecordTooLarge { .. }
+    ));
+
+    let receipts = dispatcher
+        .dispatch_ready_batches(
+            ready_batches_for_value(b"b", Instant::now()),
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(receipts[0].offset, 40);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 3);
+}
+
+#[tokio::test]
+async fn dispatcher_releases_encoded_buffers_after_later_local_record_too_large_error() {
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+            let leader: std::net::SocketAddr = "127.0.0.1:9".parse().expect("leader addr");
+            let response = metadata_response([(7, leader)]);
+            response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default().buffer_pool_capacity(8),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let dispatcher = ProducerDispatcher::with_config(
+        wire.clone(),
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default(),
+            acks: 1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
+            delivery_timeout: Duration::from_mins(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 1,
+            max_request_size: 220,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: false,
+                transactional_id: None,
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+    let now = Instant::now();
+    let mut accumulator = RecordAccumulator::new(
+        AccumulatorConfig::default()
+            .batch_size(1)
+            .buffer_memory(16 * 1024),
+    );
+    accumulator
+        .append_at(
+            ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+            now,
+        )
+        .expect("append first batch");
+    accumulator
+        .append_at(
+            ProducerRecord::new("orders", 0).value(Bytes::from(vec![b'b'; 1024])),
+            now,
+        )
+        .expect("append oversize second batch");
+    let before_dispatch = wire.buffer_pool_stats();
+
+    let error = dispatcher
+        .dispatch_ready_batches(accumulator.drain_ready(now), now)
+        .await
+        .expect_err("second batch should fail before any Produce request is sent");
+
+    assert!(matches!(
+        error,
+        kacrab::producer::ProducerError::RecordTooLarge { .. }
+    ));
+    let after_dispatch = wire.buffer_pool_stats();
+    assert!(
+        after_dispatch.write_acquired >= before_dispatch.write_acquired + 2,
+        "expected both batches to be encoded before local sizing failure; before: \
+         {before_dispatch:?}, after: {after_dispatch:?}"
+    );
+    assert_eq!(
+        after_dispatch.write_released, after_dispatch.write_acquired,
+        "encoded buffers must be returned to the write pool after local dispatch failure"
+    );
+    assert_eq!(bootstrap.join().await, 2);
+}
+
+#[tokio::test]
 async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_like_java() {
     let leader_7 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -5849,21 +6489,8 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_lik
                 .clone()
                 .expect("records");
             let batch = RecordBatch::decode(&mut records).expect("record batch");
-            assert_eq!(batch.records.len(), 1);
+            assert_eq!(batch.records.len(), 2);
             produce_response_frame_for_request(&header, 0, 40)
-        }),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                .expect("produce request");
-            let mut records = produce.topic_data[0].partition_data[0]
-                .records
-                .clone()
-                .expect("records");
-            let batch = RecordBatch::decode(&mut records).expect("record batch");
-            assert_eq!(batch.records.len(), 1);
-            produce_response_frame_for_request(&header, 0, 41)
         }),
     ])
     .await;
@@ -5889,7 +6516,7 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_lik
     let now = Instant::now();
     let mut accumulator = RecordAccumulator::new(
         AccumulatorConfig::default()
-            .batch_size(usize::MAX)
+            .batch_size(16 * 1024)
             .linger(Duration::ZERO)
             .buffer_memory(16 * 1024),
     );
@@ -5916,7 +6543,7 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_lik
     assert_eq!(second[0].offset, 40);
     assert_eq!(second[1].offset, 41);
     assert_eq!(bootstrap.join().await, 2);
-    assert_eq!(leader_7.join().await, 4);
+    assert_eq!(leader_7.join().await, 3);
 }
 
 #[tokio::test]
@@ -6741,7 +7368,7 @@ async fn dispatcher_dispatch_all_requeues_and_reports_flush_incomplete() {
     let dispatcher = ProducerDispatcher::new(wire);
     let mut accumulator = RecordAccumulator::new(
         AccumulatorConfig::default()
-            .batch_size(usize::MAX)
+            .batch_size(16 * 1024)
             .buffer_memory(16 * 1024),
     );
     accumulator
@@ -6756,6 +7383,267 @@ async fn dispatcher_dispatch_all_requeues_and_reports_flush_incomplete() {
     ));
     assert!(accumulator.buffered_bytes() > 0);
     assert_eq!(bootstrap.join().await, 2);
+}
+
+#[tokio::test]
+async fn kafka_producer_delivery_future_receives_terminal_broker_error_like_java() {
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            produce_error_response_frame_for_request(&header, 0, ErrorCode::NotLeaderOrFollower)
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response([(7, leader_7)]);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: 1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
+            delivery_timeout: Duration::from_mins(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 1,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: idempotence_disabled(),
+        },
+    );
+
+    let delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .await
+        .expect("send should append before broker response");
+    let flush_error = producer
+        .flush()
+        .await
+        .expect_err("broker error should fail flush");
+    let delivery_error = delivery
+        .await
+        .expect_err("delivery should receive the broker error, not DeliveryDropped");
+
+    assert!(matches!(
+        flush_error,
+        kacrab::producer::ProducerError::Broker {
+            topic,
+            partition: 0,
+            error: ErrorCode::NotLeaderOrFollower,
+        } if topic == "orders"
+    ));
+    assert!(matches!(
+        delivery_error,
+        kacrab::producer::ProducerError::Broker {
+            topic,
+            partition: 0,
+            error: ErrorCode::NotLeaderOrFollower,
+        } if topic == "orders"
+    ));
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 2);
+}
+
+#[tokio::test]
+async fn kafka_producer_send_with_callback_receives_terminal_broker_error_like_java() {
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            produce_error_response_frame_for_request(&header, 0, ErrorCode::NotLeaderOrFollower)
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response([(7, leader_7)]);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: 1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
+            delivery_timeout: Duration::from_mins(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 1,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: idempotence_disabled(),
+        },
+    );
+    let callback_errors = Arc::new(Mutex::new(Vec::new()));
+    let callback_sink = Arc::clone(&callback_errors);
+
+    let delivery = producer
+        .send_with_callback(
+            ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+            move |result| match result {
+                Err(kacrab::producer::ProducerError::Broker {
+                    topic,
+                    partition: 0,
+                    error: ErrorCode::NotLeaderOrFollower,
+                }) if topic == "orders" => callback_sink
+                    .lock()
+                    .expect("callback errors")
+                    .push(ErrorCode::NotLeaderOrFollower),
+                other => panic!("callback should receive broker error, got {other:?}"),
+            },
+        )
+        .await
+        .expect("send should append before broker response");
+    let flush_error = producer
+        .flush()
+        .await
+        .expect_err("broker error should fail flush");
+    let delivery_error = delivery
+        .await
+        .expect_err("delivery should receive the broker error, not DeliveryDropped");
+    let callback_errors = callback_errors.lock().expect("callback errors").clone();
+
+    assert!(matches!(
+        flush_error,
+        kacrab::producer::ProducerError::Broker {
+            topic,
+            partition: 0,
+            error: ErrorCode::NotLeaderOrFollower,
+        } if topic == "orders"
+    ));
+    assert!(matches!(
+        delivery_error,
+        kacrab::producer::ProducerError::Broker {
+            topic,
+            partition: 0,
+            error: ErrorCode::NotLeaderOrFollower,
+        } if topic == "orders"
+    ));
+    assert_eq!(callback_errors, vec![ErrorCode::NotLeaderOrFollower]);
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 2);
+}
+
+#[tokio::test]
+async fn kafka_producer_delivery_future_preserves_terminal_wire_connection_closed_error() {
+    let leader_7 = MockBroker::serve_many(vec![Box::new(api_versions_response_frame)]).await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response([(7, leader_7)]);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default()
+            .request_timeout(Duration::from_millis(100))
+            .reconnect_backoff_initial(Duration::from_secs(30)),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: 1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
+            delivery_timeout: Duration::from_secs(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 1,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: idempotence_disabled(),
+        },
+    );
+
+    let delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .await
+        .expect("send should append before produce dispatch");
+    let flush_error = producer
+        .flush()
+        .await
+        .expect_err("wire backpressure should fail flush");
+    let delivery_error = delivery
+        .await
+        .expect_err("delivery should preserve terminal wire error");
+
+    assert!(matches!(
+        flush_error,
+        kacrab::producer::ProducerError::Wire(kacrab::wire::WireError::ConnectionClosed)
+    ));
+    assert!(matches!(
+        delivery_error,
+        kacrab::producer::ProducerError::Wire(kacrab::wire::WireError::ConnectionClosed)
+    ));
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 1);
 }
 
 #[tokio::test]
@@ -7255,6 +8143,48 @@ fn produce_error_response_frame_with_log_start_offset_for_request(
         partition,
         error,
         log_start_offset,
+    )
+}
+
+fn produce_leader_change_error_response_frame_for_request(
+    header: &RequestHeaderData,
+    partition: i32,
+    leader_id: i32,
+    leader_epoch: i32,
+    leader_addr: std::net::SocketAddr,
+) -> BytesMut {
+    let mut topic = topic_produce_response(
+        header.request_api_version,
+        partition,
+        ErrorCode::NotLeaderOrFollower.code(),
+        -1,
+        -1,
+    );
+    topic
+        .partition_responses
+        .first_mut()
+        .expect("partition response")
+        .current_leader = ProduceLeaderIdAndEpoch {
+        leader_id,
+        leader_epoch,
+        _unknown_tagged_fields: Vec::new(),
+    };
+    let response = ProduceResponseData {
+        responses: vec![topic],
+        node_endpoints: vec![ProduceNodeEndpoint {
+            node_id: leader_id,
+            host: KafkaString::from(leader_addr.ip().to_string()),
+            port: i32::from(leader_addr.port()),
+            rack: None,
+            _unknown_tagged_fields: Vec::new(),
+        }],
+        ..ProduceResponseData::default()
+    };
+    response_frame(
+        ApiKey::Produce,
+        header.request_api_version,
+        header.correlation_id,
+        &response,
     )
 }
 
@@ -8035,6 +8965,225 @@ impl MockBroker {
                 .len()
                 .checked_add(2)
                 .expect("handled request count should fit")
+        });
+        Self { addr, join }
+    }
+
+    async fn serve_pipelined_idempotent_produce_reversed(partitions: Vec<i32>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let handshake = read_frame(&mut socket).await;
+            socket
+                .write_all(&api_versions_response_frame(handshake))
+                .await
+                .unwrap();
+
+            let mut init_request = read_frame(&mut socket).await;
+            let init_header =
+                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+            let init =
+                InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
+            assert_eq!(init.transactional_id, None);
+            socket
+                .write_all(&init_producer_id_response_frame(
+                    init_header.correlation_id,
+                    42,
+                    3,
+                ))
+                .await
+                .unwrap();
+
+            let mut correlation_ids = Vec::with_capacity(partitions.len());
+            for expected_partition in &partitions {
+                let mut request = read_frame(&mut socket).await;
+                let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                    .expect("produce request");
+                assert_eq!(produce.acks, -1);
+                assert_eq!(produce.topic_data.len(), 1);
+                let topic_data = produce.topic_data.first().expect("topic produce data");
+                assert_eq!(topic_data.topic_id, TOPIC_ID);
+                assert_eq!(topic_data.partition_data.len(), 1);
+                let partition_data = topic_data
+                    .partition_data
+                    .first()
+                    .expect("partition produce data");
+                assert_eq!(partition_data.index, *expected_partition);
+                let mut records = partition_data.records.clone().expect("records");
+                let batch = RecordBatch::decode(&mut records).expect("record batch");
+                assert_eq!(batch.producer_id, 42);
+                assert_eq!(batch.producer_epoch, 3);
+                assert_eq!(batch.base_sequence, 0);
+                correlation_ids.push((header.correlation_id, *expected_partition));
+            }
+            for (correlation_id, partition) in correlation_ids.into_iter().rev() {
+                let offset = 40_i64
+                    .checked_add(i64::from(partition))
+                    .expect("offset should fit");
+                socket
+                    .write_all(&produce_response_frame(correlation_id, partition, offset))
+                    .await
+                    .unwrap();
+            }
+            partitions
+                .len()
+                .checked_add(2)
+                .expect("handled request count should fit")
+        });
+        Self { addr, join }
+    }
+
+    async fn serve_idempotent_disconnect_then_retry() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = tokio::spawn(async move {
+            let (mut first_socket, _) = listener.accept().await.unwrap();
+            let handshake = read_frame(&mut first_socket).await;
+            first_socket
+                .write_all(&api_versions_response_frame(handshake))
+                .await
+                .unwrap();
+
+            let mut init_request = read_frame(&mut first_socket).await;
+            let init_header =
+                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+            let init =
+                InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
+            assert_eq!(init.transactional_id, None);
+            first_socket
+                .write_all(&init_producer_id_response_frame(
+                    init_header.correlation_id,
+                    42,
+                    3,
+                ))
+                .await
+                .unwrap();
+
+            let mut produce_request = read_frame(&mut first_socket).await;
+            let produce_header =
+                RequestHeaderData::read(&mut produce_request, 2).expect("produce header");
+            assert_eq!(produce_header.request_api_key, ApiKey::Produce as i16);
+            let produce =
+                ProduceRequestData::read(&mut produce_request, produce_header.request_api_version)
+                    .expect("produce request");
+            assert_single_idempotent_produce(&produce, 0, 0);
+            drop(first_socket);
+
+            let (mut retry_socket, _) = listener.accept().await.unwrap();
+            let handshake = read_frame(&mut retry_socket).await;
+            retry_socket
+                .write_all(&api_versions_response_frame(handshake))
+                .await
+                .unwrap();
+            let mut retry_request = read_frame(&mut retry_socket).await;
+            let retry_header =
+                RequestHeaderData::read(&mut retry_request, 2).expect("retry produce header");
+            assert_eq!(retry_header.request_api_key, ApiKey::Produce as i16);
+            let retry =
+                ProduceRequestData::read(&mut retry_request, retry_header.request_api_version)
+                    .expect("retry produce request");
+            assert_single_idempotent_produce(&retry, 0, 0);
+            retry_socket
+                .write_all(&produce_response_frame(retry_header.correlation_id, 0, 40))
+                .await
+                .unwrap();
+            5
+        });
+        Self { addr, join }
+    }
+
+    async fn serve_idempotent_timeout_then_epoch_bump_recovery() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = tokio::spawn(async move {
+            let (mut first_socket, _) = listener.accept().await.unwrap();
+            let handshake = read_frame(&mut first_socket).await;
+            first_socket
+                .write_all(&api_versions_response_frame(handshake))
+                .await
+                .unwrap();
+
+            let mut init_request = read_frame(&mut first_socket).await;
+            let init_header =
+                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+            let init =
+                InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
+            assert_eq!(init.transactional_id, None);
+            assert_eq!(init.producer_id, -1);
+            assert_eq!(init.producer_epoch, -1);
+            first_socket
+                .write_all(&init_producer_id_response_frame(
+                    init_header.correlation_id,
+                    42,
+                    3,
+                ))
+                .await
+                .unwrap();
+
+            let mut produce_request = read_frame(&mut first_socket).await;
+            let produce_header =
+                RequestHeaderData::read(&mut produce_request, 2).expect("produce header");
+            assert_eq!(produce_header.request_api_key, ApiKey::Produce as i16);
+            let produce =
+                ProduceRequestData::read(&mut produce_request, produce_header.request_api_version)
+                    .expect("produce request");
+            assert_single_idempotent_produce(&produce, 0, 0);
+            drop(first_socket);
+
+            let (mut recovery_socket, _) = listener.accept().await.unwrap();
+            let handshake = read_frame(&mut recovery_socket).await;
+            recovery_socket
+                .write_all(&api_versions_response_frame(handshake))
+                .await
+                .unwrap();
+
+            let mut bump_request = read_frame(&mut recovery_socket).await;
+            let bump_header =
+                RequestHeaderData::read(&mut bump_request, 2).expect("epoch bump header");
+            assert_eq!(bump_header.request_api_key, ApiKey::InitProducerId as i16);
+            let bump =
+                InitProducerIdRequestData::read(&mut bump_request, 5).expect("epoch bump request");
+            assert_eq!(bump.transactional_id, None);
+            assert_eq!(bump.producer_id, 42);
+            assert_eq!(bump.producer_epoch, 3);
+            recovery_socket
+                .write_all(&init_producer_id_response_frame(
+                    bump_header.correlation_id,
+                    42,
+                    4,
+                ))
+                .await
+                .unwrap();
+
+            let mut retry_request = read_frame(&mut recovery_socket).await;
+            let retry_header =
+                RequestHeaderData::read(&mut retry_request, 2).expect("recovered produce header");
+            assert_eq!(retry_header.request_api_key, ApiKey::Produce as i16);
+            let retry =
+                ProduceRequestData::read(&mut retry_request, retry_header.request_api_version)
+                    .expect("recovered produce request");
+            assert_eq!(retry.acks, -1);
+            let topic_data = retry.topic_data.first().expect("topic produce data");
+            let partition_data = topic_data
+                .partition_data
+                .first()
+                .expect("partition produce data");
+            let mut records = partition_data.records.clone().expect("records");
+            let batch = RecordBatch::decode(&mut records).expect("record batch");
+            assert_eq!(batch.producer_id, 42);
+            assert_eq!(batch.producer_epoch, 4);
+            assert_eq!(batch.base_sequence, 0);
+            recovery_socket
+                .write_all(&produce_response_frame(retry_header.correlation_id, 0, 41))
+                .await
+                .unwrap();
+            6
         });
         Self { addr, join }
     }

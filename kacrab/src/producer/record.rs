@@ -8,7 +8,7 @@ use core::{
 use std::{
     cell::Cell,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
         atomic::{AtomicU8, Ordering},
     },
     task::Waker,
@@ -18,6 +18,7 @@ use bytes::Bytes;
 pub use kacrab_protocol::record::RecordHeader;
 
 use super::{ProducerError, Result};
+use crate::wire::WireError;
 
 /// Java-style `Header` alias for a Kafka record header.
 pub type Header = RecordHeader;
@@ -556,7 +557,8 @@ pub(crate) struct DeliverySender {
 
 struct DeliveryState {
     status: AtomicU8,
-    receipt: OnceLock<RecordMetadata>,
+    receipts: Mutex<Vec<Option<RecordMetadata>>>,
+    error: Mutex<Option<ProducerError>>,
     record_metadata: Mutex<Vec<RecordDeliveryMetadata>>,
     wakers: Mutex<Vec<Waker>>,
     callbacks: Mutex<Vec<(usize, DeliveryCallback)>>,
@@ -572,7 +574,8 @@ impl Default for DeliveryState {
     fn default() -> Self {
         Self {
             status: AtomicU8::new(DELIVERY_PENDING),
-            receipt: OnceLock::new(),
+            receipts: Mutex::new(Vec::new()),
+            error: Mutex::new(None),
             record_metadata: Mutex::new(Vec::new()),
             wakers: Mutex::new(Vec::new()),
             callbacks: Mutex::new(Vec::new()),
@@ -582,9 +585,14 @@ impl Default for DeliveryState {
 
 impl core::fmt::Debug for DeliveryState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let error = self
+            .error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         f.debug_struct("DeliveryState")
             .field("status", &self.status.load(Ordering::Relaxed))
-            .field("receipt", &self.receipt)
+            .field("receipt_count", &lock_len(&self.receipts))
+            .field("error", &*error)
             .field("record_metadata_count", &lock_len(&self.record_metadata))
             .field("waker_count", &lock_len(&self.wakers))
             .field("callback_count", &lock_len(&self.callbacks))
@@ -625,6 +633,13 @@ impl SendFuture {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             metadata.push(record_metadata);
         }
+        {
+            let mut receipts = state
+                .receipts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            receipts.push(None);
+        }
         (
             DeliverySender {
                 state: Arc::clone(&state),
@@ -639,14 +654,13 @@ impl SendFuture {
     }
 
     fn completed_receipt(&self) -> Poll<Result<RecordMetadata>> {
-        let Some(receipt) = self.state.receipt.get() else {
-            return Poll::Ready(Err(ProducerError::DeliveryDropped));
-        };
-        Poll::Ready(Ok(receipt_for_record(
-            receipt,
-            self.record_index,
-            record_delivery_metadata(&self.state, self.record_index),
-        )))
+        if let Some(error) = delivery_error(&self.state) {
+            return Poll::Ready(Err(error));
+        }
+        record_delivery_receipt(&self.state, self.record_index).map_or(
+            Poll::Ready(Err(ProducerError::DeliveryDropped)),
+            Poll::Ready,
+        )
     }
 
     fn register_pending_waker(&self, cx: &Context<'_>) -> Poll<Result<RecordMetadata>> {
@@ -701,6 +715,14 @@ impl DeliverySender {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             metadata.push(record_metadata);
         }
+        {
+            let mut receipts = self
+                .state
+                .receipts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            receipts.push(None);
+        }
         SendFuture {
             state: Arc::clone(&self.state),
             record_index,
@@ -711,10 +733,40 @@ impl DeliverySender {
         Arc::strong_count(&self.state) > 1 || !lock_is_empty(&self.state.callbacks)
     }
 
-    pub(crate) fn send(mut self, receipt: RecordMetadata) {
+    pub(crate) fn record_count(&self) -> usize {
+        lock_len(&self.state.record_metadata)
+    }
+
+    pub(crate) fn send(self, receipt: &RecordMetadata) {
+        let metadata = record_delivery_metadata_snapshot(&self.state);
+        let receipts = metadata
+            .iter()
+            .enumerate()
+            .map(|(record_index, metadata)| receipt_for_record(receipt, record_index, *metadata))
+            .collect();
+        self.send_records(receipts);
+    }
+
+    pub(crate) fn send_records(mut self, receipts: Vec<RecordMetadata>) {
+        let record_metadata = record_delivery_metadata_snapshot(&self.state);
+        let receipts = receipts
+            .into_iter()
+            .enumerate()
+            .map(|(record_index, mut receipt)| {
+                let metadata = record_metadata
+                    .get(record_index)
+                    .copied()
+                    .unwrap_or_else(RecordDeliveryMetadata::unknown);
+                receipt.serialized_key_size = metadata.serialized_key_size;
+                receipt.serialized_value_size = metadata.serialized_value_size;
+                receipt
+            })
+            .collect();
+        store_record_receipts(&self.state, receipts);
+        if !all_record_receipts_ready(&self.state) {
+            return;
+        }
         let callbacks = take_callbacks(&self.state);
-        let callback_receipt = (!callbacks.is_empty()).then(|| receipt.clone());
-        let _receipt = self.state.receipt.set(receipt);
         self.state
             .status
             .store(DELIVERY_COMPLETED, Ordering::Release);
@@ -723,22 +775,26 @@ impl DeliverySender {
         for waker in wakers {
             waker.wake();
         }
-        if let Some(receipt) = &callback_receipt {
-            let record_metadata = if callbacks.is_empty() {
-                Vec::new()
-            } else {
-                record_delivery_metadata_snapshot(&self.state)
-            };
-            for (record_index, callback) in callbacks {
-                let metadata = record_metadata
-                    .get(record_index)
-                    .copied()
-                    .unwrap_or_else(RecordDeliveryMetadata::unknown);
-                invoke_delivery_callback(
-                    callback,
-                    Ok(receipt_for_record(receipt, record_index, metadata)),
-                );
-            }
+        for (record_index, callback) in callbacks {
+            let result = record_delivery_receipt(&self.state, record_index)
+                .unwrap_or(Err(ProducerError::DeliveryDropped));
+            invoke_delivery_callback(callback, result);
+        }
+    }
+
+    pub(crate) fn send_error(mut self, error: &ProducerError) {
+        store_delivery_error(&self.state, clone_producer_error_for_delivery(error));
+        let callbacks = take_callbacks(&self.state);
+        self.state
+            .status
+            .store(DELIVERY_COMPLETED, Ordering::Release);
+        let wakers = take_wakers(&self.state);
+        self.completed = true;
+        for waker in wakers {
+            waker.wake();
+        }
+        for (_record_index, callback) in callbacks {
+            invoke_delivery_callback(callback, Err(clone_producer_error_for_delivery(error)));
         }
     }
 }
@@ -826,27 +882,215 @@ fn lock_len<T>(mutex: &Mutex<Vec<T>>) -> usize {
         .len()
 }
 
+fn delivery_error(state: &DeliveryState) -> Option<ProducerError> {
+    state
+        .error
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(clone_producer_error_for_delivery)
+}
+
+fn store_delivery_error(state: &DeliveryState, error: ProducerError) {
+    let mut stored = state
+        .error
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *stored = Some(error);
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Delivery errors need value semantics but several public error variants are not \
+              Clone."
+)]
+fn clone_producer_error_for_delivery(error: &ProducerError) -> ProducerError {
+    match error {
+        ProducerError::Backpressure => ProducerError::Backpressure,
+        ProducerError::InvalidRecord { field, message } => {
+            ProducerError::InvalidRecord { field, message }
+        },
+        ProducerError::RecordTooLarge {
+            size,
+            max_request_size,
+        } => ProducerError::RecordTooLarge {
+            size: *size,
+            max_request_size: *max_request_size,
+        },
+        ProducerError::FlushIncomplete => ProducerError::FlushIncomplete,
+        ProducerError::BatchLifecycle(message) => ProducerError::BatchLifecycle(message),
+        ProducerError::CallbackOperation { operation } => {
+            ProducerError::CallbackOperation { operation }
+        },
+        ProducerError::DeliveryTimeout { topic, partition } => ProducerError::DeliveryTimeout {
+            topic: topic.clone(),
+            partition: *partition,
+        },
+        ProducerError::UnknownTopic(topic) => ProducerError::UnknownTopic(topic.clone()),
+        ProducerError::UnknownPartition { topic, partition } => ProducerError::UnknownPartition {
+            topic: topic.clone(),
+            partition: *partition,
+        },
+        ProducerError::LeaderNotFound {
+            topic,
+            partition,
+            leader_id,
+        } => ProducerError::LeaderNotFound {
+            topic: topic.clone(),
+            partition: *partition,
+            leader_id: *leader_id,
+        },
+        ProducerError::MissingProduceResponse { topic, partition } => {
+            ProducerError::MissingProduceResponse {
+                topic: topic.clone(),
+                partition: *partition,
+            }
+        },
+        ProducerError::Broker {
+            topic,
+            partition,
+            error,
+        } => ProducerError::Broker {
+            topic: topic.clone(),
+            partition: *partition,
+            error: *error,
+        },
+        ProducerError::Transaction { operation, error } => ProducerError::Transaction {
+            operation,
+            error: *error,
+        },
+        ProducerError::TransactionalIdRequired => ProducerError::TransactionalIdRequired,
+        ProducerError::InvalidTransactionState(message) => {
+            ProducerError::InvalidTransactionState(message)
+        },
+        ProducerError::TransactionStateBusy => ProducerError::TransactionStateBusy,
+        ProducerError::InvalidConsumerGroupMetadata(message) => {
+            ProducerError::InvalidConsumerGroupMetadata(message)
+        },
+        ProducerError::SequenceOverflow { topic, partition } => ProducerError::SequenceOverflow {
+            topic: topic.clone(),
+            partition: *partition,
+        },
+        ProducerError::UnresolvedSequence { topic, partition } => {
+            ProducerError::UnresolvedSequence {
+                topic: topic.clone(),
+                partition: *partition,
+            }
+        },
+        ProducerError::DispatchTask(message) => ProducerError::DispatchTask(message.clone()),
+        ProducerError::DeliveryDropped => ProducerError::DeliveryDropped,
+        ProducerError::UnsupportedOperation(operation) => {
+            ProducerError::UnsupportedOperation(operation)
+        },
+        ProducerError::TelemetryDisabled => ProducerError::TelemetryDisabled,
+        ProducerError::Telemetry { operation, error } => ProducerError::Telemetry {
+            operation,
+            error: *error,
+        },
+        ProducerError::InvalidTelemetrySubscription(message) => {
+            ProducerError::InvalidTelemetrySubscription(message)
+        },
+        ProducerError::InvalidTelemetryTimeout { timeout_ms } => {
+            ProducerError::InvalidTelemetryTimeout {
+                timeout_ms: *timeout_ms,
+            }
+        },
+        ProducerError::InvalidCloseTimeout { timeout_ms } => ProducerError::InvalidCloseTimeout {
+            timeout_ms: *timeout_ms,
+        },
+        ProducerError::InvalidConfig { key, value } => ProducerError::InvalidConfig {
+            key,
+            value: value.clone(),
+        },
+        ProducerError::Config { error } => ProducerError::Config {
+            error: error.clone(),
+        },
+        ProducerError::Wire(error) => clone_wire_error_for_delivery(error).map_or_else(
+            || ProducerError::DispatchTask(error.to_string()),
+            ProducerError::Wire,
+        ),
+        ProducerError::Record(error) => ProducerError::DispatchTask(error.to_string()),
+    }
+}
+
+fn clone_wire_error_for_delivery(error: &WireError) -> Option<WireError> {
+    match error {
+        WireError::Timeout => Some(WireError::Timeout),
+        WireError::ConnectionClosed => Some(WireError::ConnectionClosed),
+        WireError::Backpressure => Some(WireError::Backpressure),
+        WireError::InvalidSecurityProtocol(protocol) => {
+            Some(WireError::InvalidSecurityProtocol(protocol.clone()))
+        },
+        WireError::InvalidTlsConfig(message) => Some(WireError::InvalidTlsConfig(message.clone())),
+        WireError::TlsHandshake(message) => Some(WireError::TlsHandshake(message.clone())),
+        WireError::UnsupportedTlsOption(option) => {
+            Some(WireError::UnsupportedTlsOption(option.clone()))
+        },
+        WireError::InvalidSaslConfig(message) => {
+            Some(WireError::InvalidSaslConfig(message.clone()))
+        },
+        WireError::UnsupportedSaslMechanism(mechanism) => {
+            Some(WireError::UnsupportedSaslMechanism(mechanism.clone()))
+        },
+        WireError::SaslHandshake(message) => Some(WireError::SaslHandshake(message.clone())),
+        WireError::SaslAuthentication(message) => {
+            Some(WireError::SaslAuthentication(message.clone()))
+        },
+        WireError::SaslServerSignatureMismatch => Some(WireError::SaslServerSignatureMismatch),
+        WireError::TokenRefresh(message) => Some(WireError::TokenRefresh(message.clone())),
+        WireError::GssapiBackendUnavailable => Some(WireError::GssapiBackendUnavailable),
+        WireError::UnknownBroker(broker_id) => Some(WireError::UnknownBroker(*broker_id)),
+        WireError::NoBrokerAvailable => Some(WireError::NoBrokerAvailable),
+        WireError::InvalidBrokerEndpoint {
+            node_id,
+            host,
+            port,
+        } => Some(WireError::InvalidBrokerEndpoint {
+            node_id: *node_id,
+            host: host.clone(),
+            port: *port,
+        }),
+        WireError::Kafka(error) => Some(WireError::Kafka(*error)),
+        WireError::MetadataTopic { topic, error } => Some(WireError::MetadataTopic {
+            topic: topic.clone(),
+            error: *error,
+        }),
+        WireError::MetadataPartition {
+            topic,
+            partition,
+            error,
+        } => Some(WireError::MetadataPartition {
+            topic: topic.clone(),
+            partition: *partition,
+            error: *error,
+        }),
+        WireError::RandomBytes(message) => Some(WireError::RandomBytes(message.clone())),
+        WireError::UnsupportedApiVersion(api_key) => {
+            Some(WireError::UnsupportedApiVersion(*api_key))
+        },
+        WireError::CorrelationIdMismatch { expected, actual } => {
+            Some(WireError::CorrelationIdMismatch {
+                expected: *expected,
+                actual: *actual,
+            })
+        },
+        WireError::Io(_) | WireError::Protocol(_) | WireError::Frame(_) => None,
+    }
+}
+
 fn receipt_for_record(
     receipt: &RecordMetadata,
     record_index: usize,
     record_metadata: RecordDeliveryMetadata,
 ) -> RecordMetadata {
     let mut receipt = receipt.clone();
-    let offset_delta = i64::try_from(record_index).unwrap_or(i64::MAX);
-    receipt.offset = receipt.offset.checked_add(offset_delta).unwrap_or(i64::MAX);
+    if receipt.offset >= 0 {
+        let offset_delta = i64::try_from(record_index).unwrap_or(i64::MAX);
+        receipt.offset = receipt.offset.checked_add(offset_delta).unwrap_or(i64::MAX);
+    }
     receipt.serialized_key_size = record_metadata.serialized_key_size;
     receipt.serialized_value_size = record_metadata.serialized_value_size;
     receipt
-}
-
-fn record_delivery_metadata(state: &DeliveryState, record_index: usize) -> RecordDeliveryMetadata {
-    state
-        .record_metadata
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(record_index)
-        .copied()
-        .unwrap_or_else(RecordDeliveryMetadata::unknown)
 }
 
 fn record_delivery_metadata_snapshot(state: &DeliveryState) -> Vec<RecordDeliveryMetadata> {
@@ -855,6 +1099,40 @@ fn record_delivery_metadata_snapshot(state: &DeliveryState) -> Vec<RecordDeliver
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
+}
+
+fn record_delivery_receipt(
+    state: &DeliveryState,
+    record_index: usize,
+) -> Option<Result<RecordMetadata>> {
+    state
+        .receipts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(record_index)
+        .cloned()
+        .map(|receipt| receipt.ok_or(ProducerError::DeliveryDropped))
+}
+
+fn store_record_receipts(state: &DeliveryState, receipts: Vec<RecordMetadata>) {
+    let mut stored = state
+        .receipts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (index, receipt) in receipts.into_iter().enumerate() {
+        if let Some(slot) = stored.get_mut(index) {
+            *slot = Some(receipt);
+        }
+    }
+}
+
+fn all_record_receipts_ready(state: &DeliveryState) -> bool {
+    state
+        .receipts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .all(Option::is_some)
 }
 
 impl RecordDeliveryMetadata {
@@ -1144,7 +1422,7 @@ mod tests {
         let second = sender.delivery();
         let receipt = metadata(40);
 
-        sender.send(receipt);
+        sender.send(&receipt);
 
         assert_eq!(first.await.unwrap().topic.as_ref(), "orders");
         assert_eq!(second.await.unwrap().offset, 41);
@@ -1157,7 +1435,7 @@ mod tests {
         let third = sender.delivery();
         let receipt = metadata(40);
 
-        sender.send(receipt);
+        sender.send(&receipt);
 
         assert_eq!(first.await.unwrap().offset, 40);
         assert_eq!(second.await.unwrap().offset, 41);
@@ -1180,7 +1458,7 @@ mod tests {
         drop(delivery);
 
         assert!(sender.has_receivers());
-        sender.send(metadata(40));
+        sender.send(&metadata(40));
         assert_eq!(callback_base_offset.load(Ordering::Relaxed), 40);
     }
 
@@ -1192,7 +1470,7 @@ mod tests {
         }));
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            sender.send(metadata(41));
+            sender.send(&metadata(41));
         }));
 
         assert!(result.is_ok());
@@ -1230,7 +1508,7 @@ mod tests {
             Poll::Pending
         ));
 
-        sender.send(metadata(40));
+        sender.send(&metadata(40));
 
         assert_eq!(counter.count.load(Ordering::Relaxed), 1);
         assert!(matches!(
@@ -1248,7 +1526,7 @@ mod tests {
         let (mut sender, first) = SendFuture::channel_for_record(&first_record);
         let second = sender.delivery_for_record(&second_record);
 
-        sender.send(metadata(40));
+        sender.send(&metadata(40));
 
         let first = first.await.expect("first metadata");
         let second = second.await.expect("second metadata");

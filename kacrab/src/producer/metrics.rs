@@ -6,7 +6,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -61,10 +61,18 @@ pub struct ProducerMetricsSnapshot {
     pub queue_depth_bytes: usize,
     /// Records currently buffered in the accumulator.
     pub queue_depth_records: usize,
+    /// Producer buffer memory currently available for new batch reservations.
+    pub buffer_available_bytes: usize,
+    /// API tasks currently blocked waiting for producer buffer memory.
+    pub waiting_threads: usize,
+    /// Batches currently buffered or in flight.
+    pub incomplete_batches: usize,
     /// Producer dispatch tasks currently in flight.
     pub in_flight_dispatches: usize,
     /// Average drained batch fill ratio, capped at `1.0`.
     pub average_batch_fill_ratio: f64,
+    /// Average encoded/uncompressed batch compression ratio.
+    pub average_compression_ratio: f64,
     /// Number of explicit flush calls.
     pub flush_count: u64,
     /// Total wall-clock latency spent in flush calls.
@@ -95,6 +103,15 @@ pub struct ProducerMetricsSnapshot {
     pub transaction_abort_total_latency: Duration,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ProducerQueueMetrics {
+    pub(crate) queue_depth_bytes: usize,
+    pub(crate) queue_depth_records: usize,
+    pub(crate) buffer_available_bytes: usize,
+    pub(crate) incomplete_batches: usize,
+    pub(crate) in_flight_dispatches: usize,
+}
+
 impl ProducerMetricsSnapshot {
     /// Return one named metric value from this snapshot.
     #[must_use]
@@ -118,9 +135,17 @@ impl ProducerMetricsSnapshot {
             "in_flight_stall_count" => Some(ProducerMetricValue::Count(self.in_flight_stall_count)),
             "queue_depth_bytes" => Some(ProducerMetricValue::Gauge(self.queue_depth_bytes)),
             "queue_depth_records" => Some(ProducerMetricValue::Gauge(self.queue_depth_records)),
+            "buffer_available_bytes" => {
+                Some(ProducerMetricValue::Gauge(self.buffer_available_bytes))
+            },
+            "waiting_threads" => Some(ProducerMetricValue::Gauge(self.waiting_threads)),
+            "incomplete_batches" => Some(ProducerMetricValue::Gauge(self.incomplete_batches)),
             "in_flight_dispatches" => Some(ProducerMetricValue::Gauge(self.in_flight_dispatches)),
             "average_batch_fill_ratio" => {
                 Some(ProducerMetricValue::Ratio(self.average_batch_fill_ratio))
+            },
+            "average_compression_ratio" => {
+                Some(ProducerMetricValue::Ratio(self.average_compression_ratio))
             },
             "flush_count" => Some(ProducerMetricValue::Count(self.flush_count)),
             "flush_total_latency" => Some(ProducerMetricValue::Duration(self.flush_total_latency)),
@@ -180,8 +205,12 @@ impl ProducerMetricsSnapshot {
             "in_flight_stall_count",
             "queue_depth_bytes",
             "queue_depth_records",
+            "buffer_available_bytes",
+            "waiting_threads",
+            "incomplete_batches",
             "in_flight_dispatches",
             "average_batch_fill_ratio",
+            "average_compression_ratio",
             "flush_count",
             "flush_total_latency",
             "metadata_wait_count",
@@ -219,8 +248,12 @@ impl ProducerMetricsSnapshot {
                 | "in_flight_stall_count"
                 | "queue_depth_bytes"
                 | "queue_depth_records"
+                | "buffer_available_bytes"
+                | "waiting_threads"
+                | "incomplete_batches"
                 | "in_flight_dispatches"
                 | "average_batch_fill_ratio"
+                | "average_compression_ratio"
                 | "flush_count"
                 | "flush_total_latency"
                 | "metadata_wait_count"
@@ -362,8 +395,12 @@ fn producer_metric_description(name: &str) -> &'static str {
         "in_flight_stall_count" => "backpressure stalls while enqueueing produce requests",
         "queue_depth_bytes" => "bytes currently buffered in the accumulator",
         "queue_depth_records" => "records currently buffered in the accumulator",
+        "buffer_available_bytes" => "producer buffer memory available for new batch reservations",
+        "waiting_threads" => "API tasks blocked waiting for producer buffer memory",
+        "incomplete_batches" => "batches currently buffered or in flight",
         "in_flight_dispatches" => "producer dispatch tasks currently in flight",
         "average_batch_fill_ratio" => "average drained batch fill ratio",
+        "average_compression_ratio" => "average encoded/uncompressed batch compression ratio",
         "flush_count" => "explicit flush calls",
         "flush_total_latency" => "total wall-clock latency spent in flush calls",
         "metadata_wait_count" => "metadata wait operations",
@@ -533,8 +570,11 @@ struct ProducerMetricsInner {
     produce_error_count: AtomicU64,
     requeue_count: AtomicU64,
     in_flight_stall_count: AtomicU64,
+    waiting_threads: AtomicUsize,
     batch_fill_per_mille_sum: AtomicU64,
     batch_fill_samples: AtomicU64,
+    compression_ratio_per_mille_sum: AtomicU64,
+    compression_ratio_samples: AtomicU64,
     flush_count: AtomicU64,
     flush_total_latency_ns: AtomicU64,
     metadata_wait_count: AtomicU64,
@@ -569,11 +609,22 @@ impl ProducerMetrics {
             .fetch_add(payload_bytes, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
     pub(crate) fn record_produce_batch(
         &self,
         batch_bytes: usize,
         batch_size: usize,
         records: usize,
+    ) {
+        self.record_produce_batch_with_compression_ratio(batch_bytes, batch_size, records, 1.0);
+    }
+
+    pub(crate) fn record_produce_batch_with_compression_ratio(
+        &self,
+        batch_bytes: usize,
+        batch_size: usize,
+        records: usize,
+        compression_ratio: f64,
     ) {
         let records = u64::try_from(records).unwrap_or(u64::MAX);
         let _previous = self
@@ -604,6 +655,15 @@ impl ProducerMetrics {
             .inner
             .batch_fill_samples
             .fetch_add(1, Ordering::Relaxed);
+        let compression_ratio_per_mille = ratio_to_per_mille(compression_ratio);
+        let _previous = self
+            .inner
+            .compression_ratio_per_mille_sum
+            .fetch_add(compression_ratio_per_mille, Ordering::Relaxed);
+        let _previous = self
+            .inner
+            .compression_ratio_samples
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_retry(&self) {
@@ -629,6 +689,13 @@ impl ProducerMetrics {
             .inner
             .in_flight_stall_count
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn start_buffer_wait(&self) -> ProducerBufferWaitGuard {
+        let _previous = self.inner.waiting_threads.fetch_add(1, Ordering::Relaxed);
+        ProducerBufferWaitGuard {
+            metrics: self.clone(),
+        }
     }
 
     pub(crate) fn record_request_split(&self) {
@@ -712,12 +779,11 @@ impl ProducerMetrics {
             .fetch_add(duration_nanos(latency), Ordering::Relaxed);
     }
 
-    pub(crate) fn snapshot(
-        &self,
-        queue_depth_bytes: usize,
-        queue_depth_records: usize,
-        in_flight_dispatches: usize,
-    ) -> ProducerMetricsSnapshot {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Snapshot construction intentionally lists every public producer metric field."
+    )]
+    pub(crate) fn snapshot(&self, queue: ProducerQueueMetrics) -> ProducerMetricsSnapshot {
         let batch_fill_samples = self.inner.batch_fill_samples.load(Ordering::Relaxed);
         let batch_fill_sum = self.inner.batch_fill_per_mille_sum.load(Ordering::Relaxed);
         let average_batch_fill_ratio = if batch_fill_samples == 0 {
@@ -727,8 +793,23 @@ impl ProducerMetrics {
             let average_per_mille = u32::try_from(average_per_mille).unwrap_or(1_000);
             f64::from(average_per_mille) / 1_000.0
         };
+        let compression_ratio_samples =
+            self.inner.compression_ratio_samples.load(Ordering::Relaxed);
+        let compression_ratio_sum = self
+            .inner
+            .compression_ratio_per_mille_sum
+            .load(Ordering::Relaxed);
+        let average_compression_ratio = if compression_ratio_samples == 0 {
+            0.0
+        } else {
+            let average_per_mille = compression_ratio_sum
+                .checked_div(compression_ratio_samples)
+                .unwrap_or(0);
+            let average_per_mille = u32::try_from(average_per_mille).unwrap_or(u32::MAX);
+            f64::from(average_per_mille) / 1_000.0
+        };
         let produce_record_count = self.inner.produce_record_count.load(Ordering::Relaxed);
-        let queued_records = u64::try_from(queue_depth_records).unwrap_or(u64::MAX);
+        let queued_records = u64::try_from(queue.queue_depth_records).unwrap_or(u64::MAX);
         let flush_total_latency_ns = self.inner.flush_total_latency_ns.load(Ordering::Relaxed);
         let metadata_wait_total_latency_ns = self
             .inner
@@ -773,10 +854,14 @@ impl ProducerMetrics {
             produce_error_count: self.inner.produce_error_count.load(Ordering::Relaxed),
             requeue_count: self.inner.requeue_count.load(Ordering::Relaxed),
             in_flight_stall_count: self.inner.in_flight_stall_count.load(Ordering::Relaxed),
-            queue_depth_bytes,
-            queue_depth_records,
-            in_flight_dispatches,
+            queue_depth_bytes: queue.queue_depth_bytes,
+            queue_depth_records: queue.queue_depth_records,
+            buffer_available_bytes: queue.buffer_available_bytes,
+            waiting_threads: self.inner.waiting_threads.load(Ordering::Relaxed),
+            incomplete_batches: queue.incomplete_batches,
+            in_flight_dispatches: queue.in_flight_dispatches,
             average_batch_fill_ratio,
+            average_compression_ratio,
             flush_count: self.inner.flush_count.load(Ordering::Relaxed),
             flush_total_latency: Duration::from_nanos(flush_total_latency_ns),
             metadata_wait_count: self.inner.metadata_wait_count.load(Ordering::Relaxed),
@@ -806,8 +891,34 @@ impl ProducerMetrics {
     }
 }
 
+pub(crate) struct ProducerBufferWaitGuard {
+    metrics: ProducerMetrics,
+}
+
+impl Drop for ProducerBufferWaitGuard {
+    fn drop(&mut self) {
+        let _previous = self
+            .metrics
+            .inner
+            .waiting_threads
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 fn duration_nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "Metrics store compression ratios as per-mille counters for lock-free averaging."
+)]
+fn ratio_to_per_mille(ratio: f64) -> u64 {
+    if !ratio.is_finite() || ratio.is_sign_negative() {
+        return 1_000;
+    }
+    (ratio * 1_000.0).round() as u64
 }
 
 #[cfg(test)]
@@ -826,7 +937,8 @@ mod tests {
 
     use super::{
         KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
-        MetricValue, Metrics, MetricsError, ProducerMetricsSnapshot, SensorRecordingLevel,
+        MetricValue, Metrics, MetricsError, ProducerMetricValue, ProducerMetrics,
+        ProducerMetricsSnapshot, ProducerQueueMetrics, SensorRecordingLevel,
     };
 
     #[test]
@@ -1626,6 +1738,38 @@ mod tests {
     }
 
     #[test]
+    fn producer_metrics_expose_average_compression_ratio_like_java() {
+        let metrics = ProducerMetrics::default();
+
+        metrics.record_produce_batch(64, 128, 1);
+        let snapshot = metrics.snapshot(ProducerQueueMetrics::default());
+
+        assert_eq!(
+            snapshot.metric("average_compression_ratio"),
+            Some(ProducerMetricValue::Ratio(1.0))
+        );
+        assert!(
+            snapshot
+                .as_metric_map()
+                .contains_key("average_compression_ratio")
+        );
+    }
+
+    #[test]
+    fn producer_metrics_average_observed_compression_ratios_like_java() {
+        let metrics = ProducerMetrics::default();
+
+        metrics.record_produce_batch_with_compression_ratio(64, 128, 1, 0.50);
+        metrics.record_produce_batch_with_compression_ratio(96, 128, 1, 0.75);
+        let snapshot = metrics.snapshot(ProducerQueueMetrics::default());
+
+        assert_eq!(
+            snapshot.metric("average_compression_ratio"),
+            Some(ProducerMetricValue::Ratio(0.625))
+        );
+    }
+
+    #[test]
     fn remove_sensor_removes_child_sensors_and_metrics_like_java() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let mut metrics = Metrics::new();
@@ -1677,8 +1821,12 @@ mod tests {
             in_flight_stall_count: 0,
             queue_depth_bytes: 128,
             queue_depth_records: 4,
+            buffer_available_bytes: 512,
+            waiting_threads: 3,
+            incomplete_batches: 2,
             in_flight_dispatches: 1,
             average_batch_fill_ratio: 0.5,
+            average_compression_ratio: 1.0,
             flush_count: 1,
             flush_total_latency: Duration::from_millis(2),
             metadata_wait_count: 0,
@@ -1706,6 +1854,11 @@ mod tests {
             payload
                 .windows(b"queue_depth_bytes".len())
                 .any(|window| window == b"queue_depth_bytes")
+        );
+        assert!(
+            payload
+                .windows(b"average_compression_ratio".len())
+                .any(|window| window == b"average_compression_ratio")
         );
         assert!(
             payload

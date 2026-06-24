@@ -13,7 +13,8 @@ use std::{
 use ahash::{AHashMap, AHashSet};
 use bytes::BytesMut;
 use kacrab_protocol::{
-    KafkaString,
+    KafkaString, KafkaUuid,
+    compression::Compression,
     generated::{
         AddOffsetsToTxnRequestData, AddOffsetsToTxnResponseData, AddPartitionsToTxnRequestData,
         AddPartitionsToTxnResponseData, AddPartitionsToTxnTopic, AddPartitionsToTxnTransaction,
@@ -29,23 +30,29 @@ use tokio::{
     task::JoinSet,
 };
 
+#[cfg(test)]
+use super::batch::encode_record_batch_with_producer_state_at_offset_into;
 use super::{
     accumulator::{
         RECORD_BATCH_OVERHEAD_BYTES, ReadyBatch, RecordAccumulator, estimate_record_batch_bytes,
     },
     api::{ConsumerGroupMetadata, OffsetAndMetadata, TopicPartition},
-    batch::encode_record_batch_with_producer_state_at_offset,
+    batch::{
+        encode_record_batch_with_producer_state_at_offset,
+        encode_record_batch_with_producer_state_at_offset_into_buffer,
+    },
+    compression_ratio::CompressionRatioEstimator,
     config::{
         ACKS_NONE, DEFAULT_DELIVERY_TIMEOUT, DEFAULT_RETRY_BACKOFF, DEFAULT_RETRY_BACKOFF_MAX,
         DEFAULT_TIMEOUT_MS, DEFAULT_TRANSACTION_TIMEOUT_MS, ProducerCompression,
         ProducerIdempotenceConfig, ProducerRuntimeConfig,
     },
     error::{ProducerError, Result},
-    metrics::{ProducerMetrics, ProducerMetricsSnapshot},
+    metrics::{ProducerMetrics, ProducerMetricsSnapshot, ProducerQueueMetrics},
     record::RecordMetadata,
     response::{
-        ProduceBrokerError, ProduceReceiptError, current_leader_updates, node_endpoint_updates,
-        produce_receipts_with_error_details,
+        PartitionLeaderUpdate, ProduceBrokerError, ProduceReceiptError, current_leader_updates,
+        node_endpoint_updates, produce_receipts_with_error_details,
     },
     routing::{ProduceRoute, murmur2_java, route},
     transaction::{ProducerBatchState, ProducerIdentity, TransactionState},
@@ -61,6 +68,7 @@ use crate::wire::{
 const DEFAULT_DISPATCHER_ACKS: i16 = 1;
 const PENDING_TRANSACTION_OPERATION_MESSAGE: &str =
     "previous transaction operation is pending and must be retried";
+const COMPRESSION_RATE_ESTIMATION_FACTOR: f32 = 1.05;
 
 /// Dispatches ready accumulator batches to broker leaders through [`WireClient`].
 #[derive(Debug, Clone)]
@@ -84,6 +92,7 @@ pub struct ProducerDispatcher {
     producer_identity_init: Arc<Mutex<()>>,
     produce_enqueue_order: Arc<Mutex<()>>,
     partitioner_state: Arc<Mutex<ProducerPartitionerState>>,
+    compression_ratios: Arc<StdMutex<CompressionRatioEstimator>>,
     metrics: ProducerMetrics,
     metrics_enabled: Arc<AtomicBool>,
 }
@@ -101,7 +110,7 @@ impl ProducerDispatcher {
             retry_backoff_max: DEFAULT_RETRY_BACKOFF_MAX,
             delivery_timeout: DEFAULT_DELIVERY_TIMEOUT,
             compression: ProducerCompression {
-                codec: kacrab_protocol::compression::Compression::None,
+                codec: Compression::None,
                 level: None,
             },
             max_request_size: super::config::DEFAULT_MAX_REQUEST_SIZE,
@@ -121,6 +130,7 @@ impl ProducerDispatcher {
             producer_identity_init: Arc::new(Mutex::new(())),
             produce_enqueue_order: Arc::new(Mutex::new(())),
             partitioner_state: Arc::new(Mutex::new(ProducerPartitionerState::default())),
+            compression_ratios: Arc::new(StdMutex::new(CompressionRatioEstimator::default())),
             metrics: ProducerMetrics::default(),
             metrics_enabled: Arc::new(AtomicBool::new(false)),
         }
@@ -150,6 +160,7 @@ impl ProducerDispatcher {
             producer_identity_init: Arc::new(Mutex::new(())),
             produce_enqueue_order: Arc::new(Mutex::new(())),
             partitioner_state: Arc::new(Mutex::new(ProducerPartitionerState::default())),
+            compression_ratios: Arc::new(StdMutex::new(CompressionRatioEstimator::default())),
             metrics: ProducerMetrics::default(),
             metrics_enabled: Arc::new(AtomicBool::new(false)),
         }
@@ -158,11 +169,32 @@ impl ProducerDispatcher {
     /// Point-in-time producer dispatch metrics snapshot.
     #[must_use]
     pub fn metrics(&self) -> ProducerMetricsSnapshot {
-        self.metrics.snapshot(0, 0, 0)
+        self.metrics.snapshot(ProducerQueueMetrics::default())
     }
 
     pub(crate) fn metrics_handle(&self) -> ProducerMetrics {
         self.metrics.clone()
+    }
+
+    #[cfg(test)]
+    fn set_compression_ratio_estimation_for_test(
+        &self,
+        topic: &str,
+        codec: Compression,
+        ratio: f32,
+    ) {
+        self.compression_ratios
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_estimation(topic, codec, ratio);
+    }
+
+    #[cfg(test)]
+    fn compression_ratio_estimation_for_test(&self, topic: &str, codec: Compression) -> f32 {
+        self.compression_ratios
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .estimation(topic, codec)
     }
 
     pub(crate) async fn fail_if_transaction_error(&self) -> Result<()> {
@@ -309,7 +341,7 @@ impl ProducerDispatcher {
             .wire
             .metadata_for_topics(topics.iter().map(String::as_str))
             .await?;
-        for batch in batches {
+        for batch in &mut *batches {
             let Some(first_record) = batch.records.first().cloned() else {
                 continue;
             };
@@ -357,6 +389,7 @@ impl ProducerDispatcher {
                 self.partitioner_ignore_keys,
                 self.partitioner_adaptive_partitioning_enable,
                 self.partition_sticky_batch_size,
+                self.compression_ratio_estimation(record.topic.as_ref()),
             )?
         };
         record.partition = partition;
@@ -400,6 +433,7 @@ impl ProducerDispatcher {
                 self.partitioner_ignore_keys,
                 self.partitioner_adaptive_partitioning_enable,
                 self.partition_sticky_batch_size,
+                self.compression_ratio_estimation(record.topic.as_ref()),
             )?
         };
         record.partition = partition;
@@ -423,6 +457,7 @@ impl ProducerDispatcher {
                 self.partitioner_ignore_keys,
                 self.partitioner_adaptive_partitioning_enable,
                 self.partition_sticky_batch_size,
+                self.compression_ratio_estimation(record.topic.as_ref()),
             )?
         };
         record.partition = partition;
@@ -438,7 +473,17 @@ impl ProducerDispatcher {
             return false;
         }
         let mut state = self.partitioner_state.lock().await;
-        state.try_assign_cached_sticky_partition(record, self.partition_sticky_batch_size)
+        state.try_assign_cached_sticky_partition(
+            record,
+            self.partition_sticky_batch_size,
+            self.compression_ratio_estimation(record.topic.as_ref()),
+        )
+    }
+
+    pub(crate) fn compression_ratio_estimation(&self, topic: &str) -> f32 {
+        self.compression_ratios.lock().map_or(1.0, |ratios| {
+            ratios.estimation(topic, self.compression.codec)
+        })
     }
 
     pub(crate) async fn mark_sticky_batch_ready(&self, topic: &str) {
@@ -483,6 +528,7 @@ impl ProducerDispatcher {
                     ignore_keys: self.partitioner_ignore_keys,
                     adaptive: self.partitioner_adaptive_partitioning_enable,
                     sticky_batch_size: self.partition_sticky_batch_size,
+                    compression_ratio: self.compression_ratio_estimation(&topic),
                 },
                 records,
             )?;
@@ -514,6 +560,7 @@ impl ProducerDispatcher {
                     ignore_keys: self.partitioner_ignore_keys,
                     adaptive: self.partitioner_adaptive_partitioning_enable,
                     sticky_batch_size: self.partition_sticky_batch_size,
+                    compression_ratio: self.compression_ratio_estimation(&topic),
                 },
                 records,
             )?;
@@ -540,6 +587,7 @@ impl ProducerDispatcher {
                 ignore_keys: self.partitioner_ignore_keys,
                 adaptive: self.partitioner_adaptive_partitioning_enable,
                 sticky_batch_size: self.partition_sticky_batch_size,
+                compression_ratio: self.compression_ratio_estimation(topic),
             },
             records,
         )?;
@@ -565,6 +613,7 @@ impl ProducerDispatcher {
                 ignore_keys: self.partitioner_ignore_keys,
                 adaptive: self.partitioner_adaptive_partitioning_enable,
                 sticky_batch_size: self.partition_sticky_batch_size,
+                compression_ratio: self.compression_ratio_estimation(topic),
             },
             records,
         )?;
@@ -1017,12 +1066,20 @@ impl ProducerDispatcher {
                     if self.metrics_are_enabled() {
                         self.metrics.record_requeue();
                     }
-                    accumulator.requeue_front(batches);
+                    accumulator.requeue_front(batches)?;
                     return Ok(Vec::new());
                 },
                 Err(DispatchError::SplitAndRequeue { topic, partition }) => {
-                    let Some(split) = split_message_too_large_batches(batches, &topic, partition)
-                    else {
+                    let compression_ratio = self.reset_compression_ratio_after_message_too_large(
+                        &batches, &topic, partition,
+                    );
+                    let Some(split) = split_message_too_large_batches(
+                        batches,
+                        &topic,
+                        partition,
+                        self.partition_sticky_batch_size,
+                        compression_ratio,
+                    ) else {
                         if self.metrics_are_enabled() {
                             self.metrics.record_error();
                         }
@@ -1035,15 +1092,18 @@ impl ProducerDispatcher {
                     if self.metrics_are_enabled() {
                         self.metrics.record_requeue();
                     }
-                    accumulator.requeue_front(split);
+                    accumulator.requeue_front(split)?;
                     return Ok(Vec::new());
                 },
                 Err(DispatchError::RetryableLeadership {
                     topic,
                     partition,
                     error,
+                    metadata_updated,
                 }) => {
-                    self.wire.invalidate_topic_partition(&topic, partition);
+                    if !metadata_updated {
+                        self.wire.invalidate_topic_partition(&topic, partition);
+                    }
                     if attempts_remaining == 0 {
                         if self.metrics_are_enabled() {
                             self.metrics.record_error();
@@ -1117,6 +1177,19 @@ impl ProducerDispatcher {
                         return Err(error);
                     }
                 },
+                Err(DispatchError::RetryableWire(error)) => {
+                    if let Some(error) = self
+                        .handle_retryable_wire_retry(
+                            &batches,
+                            &mut attempts_remaining,
+                            &mut retry_backoff,
+                            error,
+                        )
+                        .await
+                    {
+                        return Err(error);
+                    }
+                },
                 Err(DispatchError::Producer(error)) => {
                     if self.metrics_are_enabled() {
                         self.metrics.record_error();
@@ -1157,7 +1230,7 @@ impl ProducerDispatcher {
         match self.dispatch_drained(batches, Instant::now()).await {
             DispatchOutcome::Delivered(result) => result,
             DispatchOutcome::Requeue(batches) => {
-                accumulator.requeue_front(batches);
+                accumulator.requeue_front(batches)?;
                 Err(ProducerError::FlushIncomplete)
             },
         }
@@ -1169,10 +1242,12 @@ impl ProducerDispatcher {
         now: Instant,
     ) -> DispatchOutcome {
         if let Some(batch) = self.expired_batch(&batches, now) {
-            return DispatchOutcome::Delivered(Err(ProducerError::DeliveryTimeout {
+            let error = ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
                 partition: batch.partition,
-            }));
+            };
+            fail_deliveries(&mut batches, &error);
+            return DispatchOutcome::Delivered(Err(error));
         }
 
         let mut attempts_remaining = self.retry_attempts;
@@ -1192,36 +1267,24 @@ impl ProducerDispatcher {
                     topic,
                     partition,
                     error,
+                    metadata_updated,
                 }) => {
-                    self.wire.invalidate_topic_partition(&topic, partition);
-                    if attempts_remaining == 0 {
-                        if self.metrics_are_enabled() {
-                            self.metrics.record_error();
-                        }
-                        self.release_idempotent_partition_after_definite_error(
-                            &batches, &topic, partition,
+                    let retry = LeadershipRetry {
+                        topic,
+                        partition,
+                        error,
+                        metadata_updated,
+                    };
+                    if let Some(outcome) = self
+                        .handle_drained_leadership_retry(
+                            &batches,
+                            &mut attempts_remaining,
+                            &mut retry_backoff,
+                            &retry,
                         )
-                        .await;
-                        return DispatchOutcome::Delivered(Err(ProducerError::Broker {
-                            topic,
-                            partition,
-                            error,
-                        }));
-                    }
-                    attempts_remaining = attempts_remaining.saturating_sub(1);
-                    if self.metrics_are_enabled() {
-                        self.metrics.record_retry();
-                    }
-                    if let Some(error) = self.wait_before_retry(&batches, &mut retry_backoff).await
+                        .await
                     {
-                        if self.metrics_are_enabled() {
-                            self.metrics.record_error();
-                        }
-                        self.release_idempotent_partition_after_definite_error(
-                            &batches, &topic, partition,
-                        )
-                        .await;
-                        return DispatchOutcome::Delivered(Err(error));
+                        return terminal_error_delivered_to_futures(&mut batches, outcome);
                     }
                 },
                 Err(DispatchError::RetryableIdempotent {
@@ -1247,13 +1310,28 @@ impl ProducerDispatcher {
                         )
                         .await
                     {
-                        return outcome;
+                        return terminal_error_delivered_to_futures(&mut batches, outcome);
+                    }
+                },
+                Err(DispatchError::RetryableWire(error)) => {
+                    if let Some(error) = self
+                        .handle_retryable_wire_retry(
+                            &batches,
+                            &mut attempts_remaining,
+                            &mut retry_backoff,
+                            error,
+                        )
+                        .await
+                    {
+                        fail_deliveries(&mut batches, &error);
+                        return DispatchOutcome::Delivered(Err(error));
                     }
                 },
                 Err(DispatchError::Producer(error)) => {
                     if self.metrics_are_enabled() {
                         self.metrics.record_error();
                     }
+                    fail_deliveries(&mut batches, &error);
                     return DispatchOutcome::Delivered(Err(error));
                 },
             }
@@ -1266,7 +1344,15 @@ impl ProducerDispatcher {
         topic: String,
         partition: i32,
     ) -> DispatchOutcome {
-        let Some(split) = split_message_too_large_batches(batches, &topic, partition) else {
+        let compression_ratio =
+            self.reset_compression_ratio_after_message_too_large(&batches, &topic, partition);
+        let Some(split) = split_message_too_large_batches(
+            batches,
+            &topic,
+            partition,
+            self.partition_sticky_batch_size,
+            compression_ratio,
+        ) else {
             return DispatchOutcome::Delivered(Err(ProducerError::Broker {
                 topic,
                 partition,
@@ -1277,6 +1363,55 @@ impl ProducerDispatcher {
             self.metrics.record_requeue();
         }
         DispatchOutcome::Requeue(split)
+    }
+
+    fn reset_compression_ratio_after_message_too_large(
+        &self,
+        batches: &[ReadyBatch],
+        topic: &str,
+        partition: i32,
+    ) -> f32 {
+        let observed_ratio = batches
+            .iter()
+            .find(|batch| batch.topic == topic && batch.partition == partition)
+            .map_or(1.0, |batch| self.observed_compression_ratio(batch));
+        let mut compression_ratios = self
+            .compression_ratios
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        compression_ratios.reset_after_split(topic, self.compression.codec, observed_ratio);
+        compression_ratios.estimation(topic, self.compression.codec)
+    }
+
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Kafka compression ratio estimator stores f32 ratios; lengths are only used as a \
+                  coarse feedback signal."
+    )]
+    fn observed_compression_ratio(&self, batch: &ReadyBatch) -> f32 {
+        if self.compression.codec == Compression::None {
+            return 1.0;
+        }
+        let Ok(compressed) = encode_record_batch_with_producer_state_at_offset(
+            &batch.records,
+            self.compression,
+            batch.producer_state,
+            0,
+        ) else {
+            return 1.0;
+        };
+        let Ok(uncompressed) = encode_record_batch_with_producer_state_at_offset(
+            &batch.records,
+            ProducerCompression::default(),
+            batch.producer_state,
+            0,
+        ) else {
+            return 1.0;
+        };
+        if uncompressed.is_empty() {
+            return 1.0;
+        }
+        compressed.len() as f32 / uncompressed.len() as f32
     }
 
     async fn deliver_successful_batches(
@@ -1334,6 +1469,79 @@ impl ProducerDispatcher {
         None
     }
 
+    async fn handle_drained_leadership_retry(
+        &self,
+        batches: &[ReadyBatch],
+        attempts_remaining: &mut usize,
+        retry_backoff: &mut BackoffState,
+        retry: &LeadershipRetry,
+    ) -> Option<DispatchOutcome> {
+        if !retry.metadata_updated {
+            self.wire
+                .invalidate_topic_partition(&retry.topic, retry.partition);
+        }
+        if *attempts_remaining == 0 {
+            if self.metrics_are_enabled() {
+                self.metrics.record_error();
+            }
+            self.release_idempotent_partition_after_definite_error(
+                batches,
+                &retry.topic,
+                retry.partition,
+            )
+            .await;
+            return Some(DispatchOutcome::Delivered(Err(retry.broker_error())));
+        }
+        *attempts_remaining = attempts_remaining.saturating_sub(1);
+        if self.metrics_are_enabled() {
+            self.metrics.record_retry();
+        }
+        if let Some(error) = self.wait_before_retry(batches, retry_backoff).await {
+            if self.metrics_are_enabled() {
+                self.metrics.record_error();
+            }
+            self.release_idempotent_partition_after_definite_error(
+                batches,
+                &retry.topic,
+                retry.partition,
+            )
+            .await;
+            return Some(DispatchOutcome::Delivered(Err(error)));
+        }
+        None
+    }
+
+    async fn handle_retryable_wire_retry(
+        &self,
+        batches: &[ReadyBatch],
+        attempts_remaining: &mut usize,
+        retry_backoff: &mut BackoffState,
+        error: ProducerError,
+    ) -> Option<ProducerError> {
+        if *attempts_remaining == 0 {
+            if self.metrics_are_enabled() {
+                self.metrics.record_error();
+            }
+            return Some(error);
+        }
+        *attempts_remaining = attempts_remaining.saturating_sub(1);
+        if self.metrics_are_enabled() {
+            self.metrics.record_retry();
+        }
+        if let Some(error) = self.wait_before_retry(batches, retry_backoff).await {
+            if self.metrics_are_enabled() {
+                self.metrics.record_error();
+            }
+            return Some(error);
+        }
+        None
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Produce request preparation keeps idempotent sequence rewind next to each local \
+                  pre-send error path."
+    )]
     async fn dispatch_batches(
         &self,
         batches: &mut [ReadyBatch],
@@ -1350,38 +1558,46 @@ impl ProducerDispatcher {
             client_api_info(ApiKey::Produce).max_version
         };
         let mut by_broker: AHashMap<i32, Vec<BrokerProduceRequest>> = AHashMap::new();
-        for batch in batches {
+        let mut batch_metric_samples = Vec::new();
+        for batch in &mut *batches {
             let Some(first_record) = batch.records.first().cloned() else {
                 continue;
             };
-            let mut route = self
-                .route_for_batch(&metadata, batch, &first_record)
-                .await
-                .map_err(DispatchError::from_route)?;
-            self.add_partition_to_transaction(&route)
-                .await
-                .map_err(DispatchError::from)?;
+            let mut route = match self.route_for_batch(&metadata, batch, &first_record).await {
+                Ok(route) => route,
+                Err(error) => {
+                    self.rewind_unsent_idempotent_sequences(batches).await;
+                    return Err(DispatchError::from_route(error));
+                },
+            };
+            if let Err(error) = self.add_partition_to_transaction(&route).await {
+                self.rewind_unsent_idempotent_sequences(batches).await;
+                return Err(DispatchError::from(error));
+            }
             if batch.producer_state.is_none() {
-                batch.producer_state = self
-                    .producer_batch_state(&route, batch.records.len())
-                    .await
-                    .map_err(DispatchError::from)?;
+                match self.producer_batch_state(&route, batch.records.len()).await {
+                    Ok(producer_state) => batch.producer_state = producer_state,
+                    Err(error) => {
+                        self.rewind_unsent_idempotent_sequences(batches).await;
+                        return Err(DispatchError::from(error));
+                    },
+                }
             }
             route.base_sequence = batch.producer_state.map(|state| state.base_sequence);
-            let records = encode_record_batch_with_producer_state_at_offset(
-                &batch.records,
-                self.compression,
-                batch.producer_state,
-                0,
-            )
-            .map_err(DispatchError::from)?;
+            let records = match self.encode_ready_batch_records_owned(batch, 0) {
+                Ok(records) => records,
+                Err(error) => {
+                    self.rewind_unsent_idempotent_sequences(batches).await;
+                    return Err(error);
+                },
+            };
             let options = BrokerProduceOptions {
                 acks: self.acks,
                 timeout_ms: self.timeout_ms,
                 transactional_id: self.idempotence.transactional_id.as_deref(),
             };
             let requests = by_broker.entry(route.leader_id).or_default();
-            let placement = broker_request_placement_for_batch(
+            let placement = match broker_request_placement_for_batch(
                 requests,
                 &route,
                 &records,
@@ -1390,29 +1606,68 @@ impl ProducerDispatcher {
                     version,
                     max_request_size: self.max_request_size,
                 },
-            )?;
+            ) {
+                Ok(placement) => placement,
+                Err(error) => {
+                    self.rewind_unsent_idempotent_sequences(batches).await;
+                    return Err(error);
+                },
+            };
             if placement.split && self.metrics_are_enabled() {
                 self.metrics.record_request_split();
             }
-            let request_base_offset = request_batch_base_offset(requests, placement.index, &route)?;
+            let request_base_offset =
+                match request_batch_base_offset(requests, placement.index, &route) {
+                    Ok(offset) => offset,
+                    Err(error) => {
+                        self.rewind_unsent_idempotent_sequences(batches).await;
+                        return Err(error);
+                    },
+                };
             let records = if request_base_offset == 0 {
                 records
             } else {
-                encode_record_batch_with_producer_state_at_offset(
-                    &batch.records,
-                    self.compression,
-                    batch.producer_state,
-                    request_base_offset,
-                )
-                .map_err(DispatchError::from)?
+                match self.encode_ready_batch_records_owned(batch, request_base_offset) {
+                    Ok(records) => records,
+                    Err(error) => {
+                        self.rewind_unsent_idempotent_sequences(batches).await;
+                        return Err(error);
+                    },
+                }
             };
+            let batch_metric_sample =
+                self.metrics_are_enabled()
+                    .then(|| ProduceBatchMetricSample {
+                        bytes: records.len(),
+                        records: batch.records.len(),
+                        compression_ratio: self.actual_compression_ratio_for_encoded_batch(
+                            batch,
+                            request_base_offset,
+                            records.len(),
+                        ),
+                    });
             if placement.index == requests.len() {
-                requests.push(BrokerProduceRequest::default());
+                requests.push(BrokerProduceRequest::with_record_buffer_owner(&self.wire));
             }
             let Some(request) = requests.get_mut(placement.index) else {
+                self.rewind_unsent_idempotent_sequences(batches).await;
                 return Err(DispatchError::Producer(ProducerError::FlushIncomplete));
             };
             request.push(route, records, options, batch.records.len());
+            if let Some(sample) = batch_metric_sample {
+                batch_metric_samples.push(sample);
+            }
+        }
+
+        if self.metrics_are_enabled() {
+            for sample in batch_metric_samples {
+                self.metrics.record_produce_batch_with_compression_ratio(
+                    sample.bytes,
+                    self.partition_sticky_batch_size,
+                    sample.records,
+                    sample.compression_ratio,
+                );
+            }
         }
 
         let mut receipts = Vec::new();
@@ -1423,6 +1678,80 @@ impl ProducerDispatcher {
             receipts.append(&mut broker_receipts);
         }
         Ok(receipts)
+    }
+
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Producer metrics expose compression ratios as f64 like Java metrics."
+    )]
+    fn actual_compression_ratio_for_encoded_batch(
+        &self,
+        batch: &ReadyBatch,
+        base_offset: i64,
+        encoded_bytes: usize,
+    ) -> f64 {
+        if self.compression.codec == Compression::None {
+            return 1.0;
+        }
+        let Ok(uncompressed) = encode_record_batch_with_producer_state_at_offset(
+            &batch.records,
+            ProducerCompression::default(),
+            batch.producer_state,
+            base_offset,
+        ) else {
+            return 1.0;
+        };
+        if uncompressed.is_empty() {
+            return 1.0;
+        }
+        encoded_bytes as f64 / uncompressed.len() as f64
+    }
+
+    #[cfg(test)]
+    fn encode_ready_batch_records(
+        &self,
+        batch: &ReadyBatch,
+        base_offset: i64,
+    ) -> std::result::Result<bytes::Bytes, DispatchError> {
+        let mut buffer = self
+            .wire
+            .acquire_write_buffer(batch.bytes.max(RECORD_BATCH_OVERHEAD_BYTES));
+        let result = encode_record_batch_with_producer_state_at_offset_into(
+            &batch.records,
+            self.compression,
+            batch.producer_state,
+            base_offset,
+            &mut buffer,
+        )
+        .map_err(DispatchError::from);
+        self.wire.release_write_buffer(buffer);
+        result
+    }
+
+    fn encode_ready_batch_records_owned(
+        &self,
+        batch: &ReadyBatch,
+        base_offset: i64,
+    ) -> std::result::Result<bytes::Bytes, DispatchError> {
+        let mut buffer = self
+            .wire
+            .acquire_write_buffer(batch.bytes.max(RECORD_BATCH_OVERHEAD_BYTES));
+        match encode_record_batch_with_producer_state_at_offset_into_buffer(
+            &batch.records,
+            self.compression,
+            batch.producer_state,
+            base_offset,
+            &mut buffer,
+        ) {
+            Ok(()) => Ok(bytes::Bytes::from_owner(PooledRecordBuffer::new(
+                buffer,
+                self.wire.clone(),
+            ))),
+            Err(error) => {
+                self.wire.release_write_buffer(buffer);
+                Err(DispatchError::from(error))
+            },
+        }
     }
 
     #[expect(
@@ -1455,10 +1784,18 @@ impl ProducerDispatcher {
                 }
                 let metrics = self.metrics.clone();
                 let metrics_enabled = self.metrics_are_enabled();
+                let backpressure_deadline =
+                    backpressure_deadline_after(self.delivery_timeout, Instant::now());
                 if metrics_enabled {
-                    let request_bytes = RequestMessage::encoded_len(&request.data, version)
-                        .map_err(crate::wire::WireError::from)
-                        .map_err(DispatchError::from)?;
+                    let request_bytes = match RequestMessage::encoded_len(&request.data, version) {
+                        Ok(request_bytes) => request_bytes,
+                        Err(error) => {
+                            let mut request = request;
+                            let _released_record_buffers =
+                                request.release_record_buffers(&self.wire);
+                            return Err(DispatchError::from(crate::wire::WireError::from(error)));
+                        },
+                    };
                     metrics.record_produce_request(request_bytes, request.payload_bytes);
                 }
                 self.record_broker_drain_started(broker_id, Instant::now())
@@ -1482,6 +1819,7 @@ impl ProducerDispatcher {
                             target,
                             &request,
                             backpressure,
+                            backpressure_deadline,
                         )
                         .await;
                         (index, broker_id, request, response)
@@ -1498,6 +1836,7 @@ impl ProducerDispatcher {
                         target,
                         &request,
                         backpressure,
+                        backpressure_deadline,
                     )
                     .await;
                     in_flight.spawn(async move {
@@ -1527,12 +1866,15 @@ impl ProducerDispatcher {
             for route in &request.routes {
                 let _removed = in_flight_routes.remove(&TopicPartitionKey::from(route));
             }
-            completed.push((index, request, response.map_err(ProducerError::from)?));
+            completed.push(broker_dispatch_completed_result(
+                &self.wire, index, request, response,
+            )?);
         }
         completed.sort_by_key(|(index, _request, _response)| *index);
 
         let mut receipts = Vec::new();
         for (_index, request, response) in completed {
+            let mut updated_leaders = AHashSet::new();
             let request_receipts = match response {
                 ProduceDispatchResponse::Acknowledged(response) => {
                     let endpoints = node_endpoint_updates(&response);
@@ -1541,20 +1883,27 @@ impl ProducerDispatcher {
                     {
                         Err(ProduceReceiptError::Producer(ProducerError::Wire(error)))
                     } else {
-                        let updates = current_leader_updates(&response);
-                        for update in updates {
+                        let leader_changes = current_leader_updates(&response);
+                        for update in leader_changes {
+                            let topic = resolved_leader_update_topic(&update, &request.routes);
                             let leader_broker = endpoints
                                 .iter()
                                 .find(|endpoint| endpoint.node_id == update.leader_id);
-                            let _updated =
+                            let applied_leader_change =
                                 self.wire
                                     .apply_partition_leader_update(PartitionLeaderChange {
-                                        topic: &update.topic,
+                                        topic,
                                         partition_index: update.partition,
                                         leader_id: update.leader_id,
                                         leader_epoch: update.leader_epoch,
                                         leader_broker,
                                     });
+                            if applied_leader_change {
+                                let _inserted = updated_leaders.insert(TopicPartitionKey {
+                                    topic: topic.to_owned(),
+                                    partition: update.partition,
+                                });
+                            }
                         }
                         produce_receipts_with_error_details(&response, &request.routes)
                     }
@@ -1567,10 +1916,15 @@ impl ProducerDispatcher {
                     if self.metrics_are_enabled() {
                         self.metrics.record_error();
                     }
+                    let metadata_updated = updated_leaders.contains(&TopicPartitionKey {
+                        topic: error.topic.clone(),
+                        partition: error.partition,
+                    });
                     return Err(DispatchError::RetryableLeadership {
                         topic: error.topic,
                         partition: error.partition,
                         error: error.error,
+                        metadata_updated,
                     });
                 },
                 Err(ProduceReceiptError::Broker(error))
@@ -1650,6 +2004,35 @@ impl ProducerDispatcher {
         Ok(receipts)
     }
 
+    async fn rewind_unsent_idempotent_sequences(&self, batches: &[ReadyBatch]) {
+        if !self.idempotence.enabled {
+            return;
+        }
+        let mut rewind_to: AHashMap<TopicPartitionKey, i32> = AHashMap::new();
+        for batch in batches {
+            let Some(producer_state) = batch.producer_state else {
+                continue;
+            };
+            let key = TopicPartitionKey {
+                topic: batch.topic.clone(),
+                partition: batch.partition,
+            };
+            let _previous = rewind_to
+                .entry(key)
+                .and_modify(|base_sequence| {
+                    *base_sequence = (*base_sequence).min(producer_state.base_sequence);
+                })
+                .or_insert(producer_state.base_sequence);
+        }
+        if rewind_to.is_empty() {
+            return;
+        }
+        let mut state = self.producer_state.lock().await;
+        for (key, base_sequence) in rewind_to {
+            state.rewind_sequence_to(&key.topic, key.partition, base_sequence);
+        }
+    }
+
     fn broker_dispatch_in_flight_limit(&self) -> usize {
         self.max_in_flight_requests_per_connection.max(1)
     }
@@ -1672,6 +2055,7 @@ impl ProducerDispatcher {
                 self.partitioner_ignore_keys,
                 true,
                 self.partition_sticky_batch_size,
+                self.compression_ratio_estimation(record.topic.as_ref()),
             )?
         };
         record.partition = partition;
@@ -1782,7 +2166,25 @@ impl ProducerDispatcher {
                 partition: route.partition,
             })?;
         let mut state = self.producer_state.lock().await;
-        let base_sequence = state.next_sequence(&route.topic, route.partition, record_count)?;
+        let base_sequence = match state.next_sequence(&route.topic, route.partition, record_count) {
+            Ok(base_sequence) => base_sequence,
+            Err(ProducerError::UnresolvedSequence { .. })
+                if self.idempotence.transactional_id.is_none() =>
+            {
+                drop(state);
+                let identity = self.bump_producer_identity(route.leader_id).await?;
+                let mut state = self.producer_state.lock().await;
+                state.reset_sequence(&route.topic, route.partition);
+                let base_sequence =
+                    state.next_sequence(&route.topic, route.partition, record_count)?;
+                drop(state);
+                return Ok(Some(ProducerBatchState {
+                    identity,
+                    base_sequence,
+                }));
+            },
+            Err(error) => return Err(error),
+        };
         drop(state);
         Ok(Some(ProducerBatchState {
             identity,
@@ -2921,6 +3323,7 @@ struct TopicPartitionAssignment<'a> {
     ignore_keys: bool,
     adaptive: bool,
     sticky_batch_size: usize,
+    compression_ratio: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2961,6 +3364,7 @@ impl ProducerPartitionerState {
         ignore_keys: bool,
         adaptive: bool,
         sticky_batch_size: usize,
+        compression_ratio: f32,
     ) -> Result<i32> {
         if record.has_assigned_partition() {
             return Ok(record.partition);
@@ -2976,6 +3380,32 @@ impl ProducerPartitionerState {
             record,
             adaptive,
             sticky_batch_size,
+            compression_ratio,
+        )
+    }
+
+    #[cfg(test)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Test-only entrypoint pins ratio-aware sticky sizing without constructing a \
+                  dispatcher."
+    )]
+    fn partition_for_record_with_compression_ratio(
+        &mut self,
+        metadata: &crate::wire::ClusterMetadata,
+        record: &super::ProducerRecord,
+        ignore_keys: bool,
+        adaptive: bool,
+        sticky_batch_size: usize,
+        compression_ratio: f32,
+    ) -> Result<i32> {
+        self.partition_for_record(
+            metadata,
+            record,
+            ignore_keys,
+            adaptive,
+            sticky_batch_size,
+            compression_ratio,
         )
     }
 
@@ -2983,6 +3413,7 @@ impl ProducerPartitionerState {
         &mut self,
         record: &mut super::ProducerRecord,
         sticky_batch_size: usize,
+        compression_ratio: f32,
     ) -> bool {
         if record.has_assigned_partition() {
             return true;
@@ -2993,7 +3424,7 @@ impl ProducerPartitionerState {
         if sticky.switch_on_next {
             return false;
         }
-        let record_bytes = estimate_record_batch_bytes(record);
+        let record_bytes = estimate_sticky_record_bytes(record, compression_ratio);
         let next_bytes = sticky.bytes.saturating_add(record_bytes);
         if next_bytes >= sticky_batch_size.max(1).saturating_mul(2) {
             return false;
@@ -3014,6 +3445,7 @@ impl ProducerPartitionerState {
             ignore_keys,
             adaptive,
             sticky_batch_size,
+            compression_ratio,
         } = assignment;
         ensure_partitions(topic, super::record::UNASSIGNED_PARTITION, topic_metadata)?;
         let existing_sticky = self.valid_sticky(topic, topic_metadata);
@@ -3047,7 +3479,7 @@ impl ProducerPartitionerState {
             record.partition = sticky.partition;
             sticky.bytes = sticky
                 .bytes
-                .saturating_add(estimate_record_batch_bytes(record));
+                .saturating_add(estimate_sticky_record_bytes(record, compression_ratio));
             if sticky.bytes >= sticky_batch_size.max(1).saturating_mul(2) {
                 sticky = StickyPartitionState {
                     partition: self.next_partition(topic, topic_metadata, adaptive)?,
@@ -3074,6 +3506,7 @@ impl ProducerPartitionerState {
             topic_metadata,
             adaptive,
             sticky_batch_size,
+            compression_ratio,
             ..
         } = assignment;
         ensure_partitions(topic, super::record::UNASSIGNED_PARTITION, topic_metadata)?;
@@ -3098,7 +3531,7 @@ impl ProducerPartitionerState {
             record.partition = sticky.partition;
             sticky.bytes = sticky
                 .bytes
-                .saturating_add(estimate_record_batch_bytes(record));
+                .saturating_add(estimate_sticky_record_bytes(record, compression_ratio));
             if sticky.bytes >= sticky_batch_size.max(1).saturating_mul(2) {
                 sticky = StickyPartitionState {
                     partition: self.next_partition(topic, topic_metadata, adaptive)?,
@@ -3123,6 +3556,7 @@ impl ProducerPartitionerState {
         record: &super::ProducerRecord,
         adaptive: bool,
         sticky_batch_size: usize,
+        compression_ratio: f32,
     ) -> Result<i32> {
         ensure_partitions(topic, record.partition, topic_metadata)?;
 
@@ -3146,7 +3580,7 @@ impl ProducerPartitionerState {
         let partition = sticky.partition;
         sticky.bytes = sticky
             .bytes
-            .saturating_add(estimate_record_batch_bytes(record));
+            .saturating_add(estimate_sticky_record_bytes(record, compression_ratio));
         if sticky.bytes >= sticky_batch_size.max(1).saturating_mul(2) {
             sticky = StickyPartitionState {
                 partition: self.next_partition(topic, topic_metadata, adaptive)?,
@@ -3424,6 +3858,22 @@ fn key_partition(
             topic: topic.to_owned(),
             partition,
         })
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "Kafka compression ratio estimates are f32 and only influence sticky byte budgets."
+)]
+fn estimate_sticky_record_bytes(record: &super::ProducerRecord, compression_ratio: f32) -> usize {
+    let ratio = if compression_ratio.is_finite() && compression_ratio > 0.0 {
+        compression_ratio
+    } else {
+        1.0
+    };
+    ((estimate_record_batch_bytes(record) as f32) * ratio * COMPRESSION_RATE_ESTIMATION_FACTOR)
+        .ceil() as usize
 }
 
 fn uniform_partition_for_random(
@@ -4008,6 +4458,7 @@ enum DispatchError {
         topic: String,
         partition: i32,
         error: ErrorCode,
+        metadata_updated: bool,
     },
     RetryableIdempotent {
         topic: String,
@@ -4016,6 +4467,7 @@ enum DispatchError {
         error: ErrorCode,
         reset_sequence: bool,
     },
+    RetryableWire(ProducerError),
 }
 
 struct IdempotentRetry {
@@ -4024,6 +4476,13 @@ struct IdempotentRetry {
     leader_id: i32,
     error: ErrorCode,
     reset_sequence: bool,
+}
+
+struct LeadershipRetry {
+    topic: String,
+    partition: i32,
+    error: ErrorCode,
+    metadata_updated: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -4036,6 +4495,16 @@ struct IdempotentRetryDecision<'a> {
 }
 
 impl IdempotentRetry {
+    fn broker_error(&self) -> ProducerError {
+        ProducerError::Broker {
+            topic: self.topic.clone(),
+            partition: self.partition,
+            error: self.error,
+        }
+    }
+}
+
+impl LeadershipRetry {
     fn broker_error(&self) -> ProducerError {
         ProducerError::Broker {
             topic: self.topic.clone(),
@@ -4064,8 +4533,21 @@ impl DispatchError {
 
 impl From<crate::wire::WireError> for DispatchError {
     fn from(error: crate::wire::WireError) -> Self {
-        Self::Producer(ProducerError::from(error))
+        if is_retryable_wire_error(&error) {
+            Self::RetryableWire(ProducerError::from(error))
+        } else {
+            Self::Producer(ProducerError::from(error))
+        }
     }
+}
+
+const fn is_retryable_wire_error(error: &crate::wire::WireError) -> bool {
+    matches!(
+        error,
+        crate::wire::WireError::ConnectionClosed
+            | crate::wire::WireError::Timeout
+            | crate::wire::WireError::Io(_)
+    )
 }
 
 #[derive(Debug, Default)]
@@ -4074,14 +4556,28 @@ struct BrokerProduceRequest {
     routes: Vec<ProduceRoute>,
     record_count: usize,
     batch_count: usize,
+    record_buffer_leases: Vec<RecordBufferLease>,
+    record_buffer_owner: Option<WireClient>,
     payload_bytes: usize,
 }
 
 impl BrokerProduceRequest {
+    fn with_record_buffer_owner(wire: &WireClient) -> Self {
+        Self {
+            data: ProduceRequestData::default(),
+            routes: Vec::new(),
+            record_count: 0,
+            batch_count: 0,
+            record_buffer_leases: Vec::new(),
+            record_buffer_owner: Some(wire.clone()),
+            payload_bytes: 0,
+        }
+    }
+
     fn contains_route(&self, route: &ProduceRoute) -> bool {
-        self.routes.iter().any(|existing| {
-            existing.topic_id == route.topic_id && existing.partition == route.partition
-        })
+        self.routes
+            .iter()
+            .any(|existing| produce_route_matches(existing, route))
     }
 
     fn encoded_len_after_push(
@@ -4127,11 +4623,12 @@ impl BrokerProduceRequest {
 
     fn push(
         &mut self,
-        mut route: ProduceRoute,
+        route: ProduceRoute,
         records: bytes::Bytes,
         options: BrokerProduceOptions<'_>,
         record_count: usize,
     ) {
+        let mut route = route;
         apply_produce_options(&mut self.data, options);
         route.request_offset_delta = self
             .records_before_route(&route)
@@ -4140,21 +4637,272 @@ impl BrokerProduceRequest {
         route.record_count = record_count;
         self.record_count = self.record_count.saturating_add(record_count);
         self.batch_count = self.batch_count.saturating_add(1);
+        self.record_buffer_leases.push(RecordBufferLease::new(
+            &route,
+            records.len(),
+            self.record_buffer_owner.clone(),
+        ));
         self.payload_bytes = self.payload_bytes.saturating_add(records.len());
-        push_partition(&mut self.data.topic_data, &route, records);
+        push_partition_with_owner(
+            &mut self.data.topic_data,
+            &route,
+            records,
+            self.record_buffer_owner.as_ref(),
+        );
         self.routes.push(route);
     }
 
     fn records_before_route(&self, route: &ProduceRoute) -> Option<usize> {
         self.routes
             .iter()
-            .filter(|existing| {
-                existing.topic_id == route.topic_id && existing.partition == route.partition
-            })
+            .filter(|existing| produce_route_matches(existing, route))
             .try_fold(0usize, |count, existing| {
                 count.checked_add(existing.record_count)
             })
     }
+
+    fn release_record_buffers(&mut self, wire: &WireClient) -> RecordBufferRelease {
+        self.release_record_buffers_with(|leases, topic_id, topic, partition| {
+            if record_buffer_has_owner_for_partition(leases, topic_id, topic, partition) {
+                Some(RecordBufferReleaseTarget::OwnedBytes)
+            } else {
+                Some(RecordBufferReleaseTarget::RecoveredBytes(wire.clone()))
+            }
+        })
+    }
+
+    fn release_owned_record_buffers(&mut self) -> RecordBufferRelease {
+        self.release_record_buffers_with(|leases, topic_id, topic, partition| {
+            record_buffer_has_owner_for_partition(leases, topic_id, topic, partition)
+                .then_some(RecordBufferReleaseTarget::OwnedBytes)
+        })
+    }
+
+    fn release_record_buffers_with(
+        &mut self,
+        mut release_target_for_partition: impl FnMut(
+            &[RecordBufferLease],
+            KafkaUuid,
+            &str,
+            i32,
+        ) -> Option<RecordBufferReleaseTarget>,
+    ) -> RecordBufferRelease {
+        let mut release = RecordBufferRelease::from_leases(&self.record_buffer_leases);
+        for topic in &mut self.data.topic_data {
+            let topic_id = topic.topic_id;
+            let topic_name = topic.name.as_str();
+            for partition in &mut topic.partition_data {
+                let Some(records) = partition.records.take() else {
+                    continue;
+                };
+                let Some(target) = release_target_for_partition(
+                    &self.record_buffer_leases,
+                    topic_id,
+                    topic_name,
+                    partition.index,
+                ) else {
+                    partition.records = Some(records);
+                    continue;
+                };
+                match target {
+                    RecordBufferReleaseTarget::OwnedBytes => {
+                        let released = release_record_buffer_leases_for_partition(
+                            &mut self.record_buffer_leases,
+                            topic_id,
+                            topic_name,
+                            partition.index,
+                        );
+                        drop(records);
+                        release.released = release.released.saturating_add(released.expected);
+                        release.released_bytes = release
+                            .released_bytes
+                            .saturating_add(released.expected_bytes);
+                    },
+                    RecordBufferReleaseTarget::RecoveredBytes(wire) => {
+                        match records.try_into_mut() {
+                            Ok(buffer) => {
+                                let released = release_record_buffer_leases_for_partition(
+                                    &mut self.record_buffer_leases,
+                                    topic_id,
+                                    topic_name,
+                                    partition.index,
+                                );
+                                wire.release_write_buffer(buffer);
+                                release.released =
+                                    release.released.saturating_add(released.expected);
+                                release.released_bytes = release
+                                    .released_bytes
+                                    .saturating_add(released.expected_bytes);
+                            },
+                            Err(records) => {
+                                partition.records = Some(records);
+                            },
+                        }
+                    },
+                }
+            }
+        }
+        let unreleased = RecordBufferRelease::from_leases(&self.record_buffer_leases);
+        release.unrecovered = unreleased.expected;
+        release.unrecovered_bytes = unreleased.expected_bytes;
+        release
+    }
+}
+
+impl Drop for BrokerProduceRequest {
+    fn drop(&mut self) {
+        let _released_record_buffers = self.release_owned_record_buffers();
+    }
+}
+
+#[derive(Debug)]
+struct PooledRecordBuffer {
+    buffer: Option<BytesMut>,
+    wire: WireClient,
+}
+
+impl PooledRecordBuffer {
+    const fn new(buffer: BytesMut, wire: WireClient) -> Self {
+        Self {
+            buffer: Some(buffer),
+            wire,
+        }
+    }
+}
+
+impl AsRef<[u8]> for PooledRecordBuffer {
+    fn as_ref(&self) -> &[u8] {
+        self.buffer.as_ref().map_or(&[], BytesMut::as_ref)
+    }
+}
+
+impl Drop for PooledRecordBuffer {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.buffer.take() {
+            self.wire.release_write_buffer(buffer);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum RecordBufferReleaseTarget {
+    OwnedBytes,
+    RecoveredBytes(WireClient),
+}
+
+#[derive(Debug, Clone)]
+struct RecordBufferLease {
+    topic_id: KafkaUuid,
+    topic: String,
+    partition: i32,
+    bytes: usize,
+    released: bool,
+    owner: Option<WireClient>,
+}
+
+impl RecordBufferLease {
+    fn new(route: &ProduceRoute, bytes: usize, owner: Option<WireClient>) -> Self {
+        Self {
+            topic_id: route.topic_id,
+            topic: route.topic.clone(),
+            partition: route.partition,
+            bytes,
+            released: false,
+            owner,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RecordBufferRelease {
+    expected: usize,
+    released: usize,
+    unrecovered: usize,
+    expected_bytes: usize,
+    released_bytes: usize,
+    unrecovered_bytes: usize,
+}
+
+impl RecordBufferRelease {
+    fn from_leases(leases: &[RecordBufferLease]) -> Self {
+        leases
+            .iter()
+            .filter(|lease| !lease.released)
+            .fold(Self::default(), |mut release, lease| {
+                release.expected = release.expected.saturating_add(1);
+                release.expected_bytes = release.expected_bytes.saturating_add(lease.bytes);
+                release
+            })
+    }
+}
+
+fn release_record_buffer_leases_for_partition(
+    leases: &mut [RecordBufferLease],
+    topic_id: KafkaUuid,
+    topic: &str,
+    partition: i32,
+) -> RecordBufferRelease {
+    leases
+        .iter_mut()
+        .filter(|lease| {
+            !lease.released
+                && lease.partition == partition
+                && produce_topic_key_matches(lease.topic_id, &lease.topic, topic_id, topic)
+        })
+        .fold(RecordBufferRelease::default(), |mut release, lease| {
+            lease.released = true;
+            release.expected = release.expected.saturating_add(1);
+            release.expected_bytes = release.expected_bytes.saturating_add(lease.bytes);
+            release
+        })
+}
+
+fn record_buffer_has_owner_for_partition(
+    leases: &[RecordBufferLease],
+    topic_id: KafkaUuid,
+    topic: &str,
+    partition: i32,
+) -> bool {
+    leases.iter().any(|lease| {
+        !lease.released
+            && lease.owner.is_some()
+            && lease.partition == partition
+            && produce_topic_key_matches(lease.topic_id, &lease.topic, topic_id, topic)
+    })
+}
+
+fn produce_route_matches(existing: &ProduceRoute, route: &ProduceRoute) -> bool {
+    existing.partition == route.partition
+        && produce_topic_key_matches(
+            existing.topic_id,
+            &existing.topic,
+            route.topic_id,
+            &route.topic,
+        )
+}
+
+fn produce_topic_key_matches(
+    existing_topic_id: KafkaUuid,
+    existing_topic: &str,
+    route_topic_id: KafkaUuid,
+    route_topic: &str,
+) -> bool {
+    if existing_topic_id != KafkaUuid::ZERO && route_topic_id != KafkaUuid::ZERO {
+        existing_topic_id == route_topic_id
+    } else {
+        existing_topic == route_topic
+    }
+}
+
+fn broker_dispatch_completed_result(
+    wire: &WireClient,
+    index: usize,
+    mut request: BrokerProduceRequest,
+    response: crate::wire::Result<ProduceDispatchResponse>,
+) -> std::result::Result<(usize, BrokerProduceRequest, ProduceDispatchResponse), DispatchError> {
+    let _released_record_buffers = request.release_record_buffers(wire);
+    let response = response.map_err(DispatchError::from)?;
+    Ok((index, request, response))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4234,6 +4982,19 @@ fn sequence_overflow(route: &ProduceRoute) -> DispatchError {
     })
 }
 
+fn resolved_leader_update_topic<'a>(
+    update: &'a PartitionLeaderUpdate,
+    routes: &'a [ProduceRoute],
+) -> &'a str {
+    if !update.topic.is_empty() {
+        return update.topic.as_str();
+    }
+    routes
+        .iter()
+        .find(|route| route.topic_id == update.topic_id && route.partition == update.partition)
+        .map_or(update.topic.as_str(), |route| route.topic.as_str())
+}
+
 fn apply_produce_options(request_data: &mut ProduceRequestData, options: BrokerProduceOptions<'_>) {
     request_data.acks = options.acks;
     request_data.timeout_ms = options.timeout_ms;
@@ -4302,6 +5063,7 @@ async fn send_produce_with_backpressure_retry(
     target: BrokerProduceTarget,
     request: &BrokerProduceRequest,
     backpressure: ProduceBackpressureRecorder,
+    backpressure_deadline: Option<Instant>,
 ) -> crate::wire::Result<ProduceDispatchResponse> {
     loop {
         let result = if request.data.acks == ACKS_NONE {
@@ -4325,6 +5087,9 @@ async fn send_produce_with_backpressure_retry(
         };
         match result {
             Err(crate::wire::WireError::Backpressure) => {
+                if backpressure_deadline_expired(backpressure_deadline) {
+                    return Err(crate::wire::WireError::Backpressure);
+                }
                 backpressure.record(target.broker_id).await;
                 tokio::task::yield_now().await;
             },
@@ -4338,6 +5103,7 @@ async fn enqueue_produce_with_backpressure_retry(
     target: BrokerProduceTarget,
     request: &BrokerProduceRequest,
     backpressure: ProduceBackpressureRecorder,
+    backpressure_deadline: Option<Instant>,
 ) -> crate::wire::Result<
     crate::wire::PendingBrokerResponse<kacrab_protocol::generated::ProduceResponseData>,
 > {
@@ -4350,12 +5116,23 @@ async fn enqueue_produce_with_backpressure_retry(
         );
         match result {
             Err(crate::wire::WireError::Backpressure) => {
+                if backpressure_deadline_expired(backpressure_deadline) {
+                    return Err(crate::wire::WireError::Backpressure);
+                }
                 backpressure.record(target.broker_id).await;
                 tokio::task::yield_now().await;
             },
             result => return result,
         }
     }
+}
+
+fn backpressure_deadline_after(timeout: Duration, now: Instant) -> Option<Instant> {
+    now.checked_add(timeout)
+}
+
+fn backpressure_deadline_expired(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
 async fn record_broker_backpressure(
@@ -4378,14 +5155,16 @@ enum ProduceDispatchResponse {
 fn no_ack_receipts(routes: &[ProduceRoute]) -> Vec<RecordMetadata> {
     routes
         .iter()
-        .map(|route| RecordMetadata {
-            topic: Arc::from(route.topic.as_str()),
-            partition: route.partition,
-            leader_id: route.leader_id,
-            offset: -1,
-            timestamp_ms: -1,
-            serialized_key_size: -1,
-            serialized_value_size: -1,
+        .flat_map(|route| {
+            (0..route.record_count.max(1)).map(|_record_index| RecordMetadata {
+                topic: Arc::from(route.topic.as_str()),
+                partition: route.partition,
+                leader_id: route.leader_id,
+                offset: -1,
+                timestamp_ms: -1,
+                serialized_key_size: -1,
+                serialized_value_size: -1,
+            })
         })
         .collect()
 }
@@ -4397,17 +5176,37 @@ struct BrokerProduceOptions<'a> {
     transactional_id: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ProduceBatchMetricSample {
+    bytes: usize,
+    records: usize,
+    compression_ratio: f64,
+}
+
 fn push_partition(topics: &mut Vec<TopicProduceData>, route: &ProduceRoute, records: bytes::Bytes) {
-    if let Some(topic) = topics
-        .iter_mut()
-        .find(|topic| topic.topic_id == route.topic_id)
-    {
+    push_partition_with_owner(topics, route, records, None);
+}
+
+fn push_partition_with_owner(
+    topics: &mut Vec<TopicProduceData>,
+    route: &ProduceRoute,
+    records: bytes::Bytes,
+    owner: Option<&WireClient>,
+) {
+    if let Some(topic) = topics.iter_mut().find(|topic| {
+        produce_topic_key_matches(
+            topic.topic_id,
+            topic.name.as_str(),
+            route.topic_id,
+            &route.topic,
+        )
+    }) {
         if let Some(partition) = topic
             .partition_data
             .iter_mut()
             .find(|partition| partition.index == route.partition)
         {
-            append_partition_records(partition, records);
+            append_partition_records(partition, records, owner);
             return;
         }
         topic.partition_data.push(partition_data(route, records));
@@ -4421,14 +5220,26 @@ fn push_partition(topics: &mut Vec<TopicProduceData>, route: &ProduceRoute, reco
     });
 }
 
-fn append_partition_records(partition: &mut PartitionProduceData, records: bytes::Bytes) {
+fn append_partition_records(
+    partition: &mut PartitionProduceData,
+    records: bytes::Bytes,
+    owner: Option<&WireClient>,
+) {
     match partition.records.take() {
         Some(existing) => {
-            let mut combined =
-                BytesMut::with_capacity(existing.len().saturating_add(records.len()));
+            let capacity = existing.len().saturating_add(records.len());
+            let mut combined = owner.map_or_else(
+                || BytesMut::with_capacity(capacity),
+                |wire| wire.acquire_write_buffer(capacity),
+            );
             combined.extend_from_slice(&existing);
             combined.extend_from_slice(&records);
-            partition.records = Some(combined.freeze());
+            partition.records = Some(match owner {
+                Some(wire) => {
+                    bytes::Bytes::from_owner(PooledRecordBuffer::new(combined, wire.clone()))
+                },
+                None => combined.freeze(),
+            });
         },
         None => {
             partition.records = Some(records);
@@ -4458,12 +5269,15 @@ fn split_message_too_large_batches(
     batches: Vec<ReadyBatch>,
     topic: &str,
     partition: i32,
+    target_batch_bytes: usize,
+    compression_ratio: f32,
 ) -> Option<Vec<ReadyBatch>> {
     let mut split_batches = Vec::with_capacity(batches.len());
     let mut split_found = false;
     for batch in batches {
         if !split_found && batch.topic == topic && batch.partition == partition {
-            let split = batch.split_for_retry()?;
+            let split = batch
+                .split_for_retry_with_compression_ratio(target_batch_bytes, compression_ratio)?;
             split_batches.extend(split);
             split_found = true;
         } else {
@@ -4495,20 +5309,58 @@ fn complete_deliveries(batches: &mut [ReadyBatch], receipts: &[RecordMetadata]) 
         if !sender.has_receivers() {
             continue;
         }
-        let Some((receipt_index, receipt)) =
-            receipts.iter().enumerate().find(|(index, receipt)| {
-                !used_receipts.get(*index).copied().unwrap_or(false)
+        let expected_receipts = sender.record_count();
+        let receipt_indexes: Vec<_> = receipts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, receipt)| {
+                (!used_receipts.get(index).copied().unwrap_or(false)
                     && receipt.topic.as_ref() == batch.topic
-                    && receipt.partition == batch.partition
+                    && receipt.partition == batch.partition)
+                    .then_some(index)
             })
-        else {
+            .take(expected_receipts)
+            .collect();
+        if receipt_indexes.len() != expected_receipts {
+            continue;
+        }
+        let record_receipts: Vec<RecordMetadata> = receipt_indexes
+            .iter()
+            .filter_map(|index| receipts.get(*index))
+            .cloned()
+            .collect();
+        for receipt_index in receipt_indexes {
+            if let Some(used) = used_receipts.get_mut(receipt_index) {
+                *used = true;
+            }
+        }
+        if expected_receipts == 1 {
+            if let Some(receipt) = record_receipts.into_iter().next() {
+                sender.send(&receipt);
+            }
+        } else {
+            sender.send_records(record_receipts);
+        }
+    }
+}
+
+fn fail_deliveries(batches: &mut [ReadyBatch], error: &ProducerError) {
+    for batch in batches {
+        let Some(sender) = batch.delivery.take() else {
             continue;
         };
-        if let Some(used) = used_receipts.get_mut(receipt_index) {
-            *used = true;
-        }
-        sender.send(receipt.clone());
+        sender.send_error(error);
     }
+}
+
+fn terminal_error_delivered_to_futures(
+    batches: &mut [ReadyBatch],
+    outcome: DispatchOutcome,
+) -> DispatchOutcome {
+    if let DispatchOutcome::Delivered(Err(error)) = &outcome {
+        fail_deliveries(batches, error);
+    }
+    outcome
 }
 
 const fn is_leadership_error(error: ErrorCode) -> bool {
@@ -4603,7 +5455,10 @@ mod tests {
     use std::{
         collections::VecDeque,
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicI64, Ordering},
+        },
         time::{Duration, Instant},
     };
 
@@ -4611,9 +5466,11 @@ mod tests {
     use bytes::Bytes;
     use kacrab_protocol::{
         KafkaString, KafkaUuid,
+        compression::Compression,
         generated::{
             AddPartitionsToTxnPartitionResult, AddPartitionsToTxnResponseData,
             AddPartitionsToTxnResult, AddPartitionsToTxnTopicResult, ApiKey, ErrorCode,
+            ProduceRequestData,
         },
         version::client_api_info,
     };
@@ -4622,26 +5479,29 @@ mod tests {
         BrokerProduceOptions, BrokerProduceRequest, BrokerRequestPlacement, DispatchError,
         IdempotentRetryDecision, PartitionLoadRefresh, PendingTransactionOperationGuard,
         ProduceRequestSizing, ProducerDispatcher, ProducerIdempotenceState,
-        ProducerPartitionerState, RECORD_BATCH_OVERHEAD_BYTES, TopicPartitionKey,
-        TransactionOperation, TransactionPendingOperationStart, broker_request_placement_for_batch,
+        ProducerPartitionerState, RECORD_BATCH_OVERHEAD_BYTES, RecordBufferRelease,
+        TopicPartitionKey, TransactionOperation, TransactionPendingOperationStart,
+        broker_dispatch_completed_result, broker_request_placement_for_batch,
         build_partition_load_stats, choose_coordinator_addr, complete_deliveries, end_txn_version,
-        estimate_record_batch_bytes, fail_pending_transaction_operation, init_producer_id_version,
-        is_fatal_transaction_error, is_leadership_error, no_ack_receipts,
-        pop_dispatchable_broker_request, produce_version, txn_offset_commit_version,
-        uniform_partition_for_random, unique_topics, unique_unassigned_record_topics,
-        validate_consumer_group_metadata,
+        estimate_record_batch_bytes, estimate_sticky_record_bytes,
+        fail_pending_transaction_operation, init_producer_id_version, is_fatal_transaction_error,
+        is_leadership_error, no_ack_receipts, pop_dispatchable_broker_request, produce_version,
+        txn_offset_commit_version, uniform_partition_for_random, unique_topics,
+        unique_unassigned_record_topics, validate_consumer_group_metadata,
     };
     use crate::{
         producer::{
-            AccumulatorConfig, ConsumerGroupMetadata, ProducerError, ProducerIdempotenceConfig,
-            ProducerIdentity, ProducerRecord, ProducerRuntimeConfig, RecordAccumulator,
-            RecordMetadata,
+            AccumulatorConfig, ConsumerGroupMetadata, ProducerCompression, ProducerError,
+            ProducerIdempotenceConfig, ProducerIdentity, ProducerRecord, ProducerRuntimeConfig,
+            RecordAccumulator, RecordMetadata, compression_ratio::CompressionRatioEstimator,
         },
         wire::{
             BrokerEndpoint, BrokerMetadata, ClusterMetadata, ConnectionConfig, PartitionMetadata,
             TopicMetadata, WireClient,
         },
     };
+
+    const TEST_LARGE_BATCH_SIZE: usize = 16 * 1024;
 
     fn test_wire() -> WireClient {
         WireClient::connect_with_brokers(
@@ -5053,7 +5913,7 @@ mod tests {
         let partitions: Vec<_> = (0..4)
             .map(|_| {
                 state
-                    .partition_for_record(&metadata, &record, false, true, 128)
+                    .partition_for_record(&metadata, &record, false, true, 128, 1.0)
                     .expect("partition")
             })
             .collect();
@@ -5065,7 +5925,7 @@ mod tests {
 
         state.mark_sticky_batch_ready("orders", 128);
         let _next_partition = state
-            .partition_for_record(&metadata, &record, false, true, 128)
+            .partition_for_record(&metadata, &record, false, true, 128, 1.0)
             .expect("partition");
         let sticky = state
             .sticky_by_topic
@@ -5086,7 +5946,7 @@ mod tests {
         let partitions: Vec<_> = (0..3)
             .map(|_| {
                 state
-                    .partition_for_record(&metadata, &record, false, true, sticky_batch_size)
+                    .partition_for_record(&metadata, &record, false, true, sticky_batch_size, 1.0)
                     .expect("partition")
             })
             .collect();
@@ -5099,24 +5959,98 @@ mod tests {
     }
 
     #[test]
+    fn sticky_partitioner_uses_compression_ratio_estimate_for_batch_budget() {
+        let metadata = metadata_with_partitions("orders", 3);
+        let record = ProducerRecord::unassigned("orders").value(Bytes::from(vec![b'x'; 128]));
+        let sticky_batch_size =
+            RECORD_BATCH_OVERHEAD_BYTES + estimate_record_batch_bytes(&record) / 2;
+
+        let mut uncompressed = ProducerPartitionerState::default();
+        let uncompressed_partitions: Vec<_> = (0..4)
+            .map(|_| {
+                uncompressed
+                    .partition_for_record_with_compression_ratio(
+                        &metadata,
+                        &record,
+                        false,
+                        false,
+                        sticky_batch_size,
+                        1.0,
+                    )
+                    .expect("partition")
+            })
+            .collect();
+
+        let mut compressed = ProducerPartitionerState::default();
+        let compressed_partitions: Vec<_> = (0..4)
+            .map(|_| {
+                compressed
+                    .partition_for_record_with_compression_ratio(
+                        &metadata,
+                        &record,
+                        false,
+                        false,
+                        sticky_batch_size,
+                        0.25,
+                    )
+                    .expect("partition")
+            })
+            .collect();
+
+        assert_ne!(
+            uncompressed_partitions[2], uncompressed_partitions[0],
+            "raw sizing should exhaust the sticky batch before the third record"
+        );
+        assert!(
+            compressed_partitions
+                .iter()
+                .all(|partition| *partition == compressed_partitions[0]),
+            "compressed sizing should keep the sticky partition longer"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        reason = "Test mirrors Java's f32 compression estimate formula exactly."
+    )]
+    fn sticky_record_estimate_uses_java_compression_safety_factor() {
+        let record = ProducerRecord::unassigned("orders").value(Bytes::from(vec![b'x'; 128]));
+        let raw = estimate_record_batch_bytes(&record);
+        let estimated = estimate_sticky_record_bytes(&record, 0.50);
+
+        assert_eq!(estimated, ((raw as f32) * 0.50 * 1.05).ceil() as usize);
+    }
+
+    #[test]
     fn cached_sticky_partition_assigns_without_metadata_until_batch_ready() {
         let metadata = metadata_with_partitions("orders", 3);
         let mut state = ProducerPartitionerState::default();
         let record = ProducerRecord::unassigned("orders").value(Bytes::from_static(b"1234567890"));
         let sticky_batch_size = 1024;
         let partition = state
-            .partition_for_record(&metadata, &record, false, true, sticky_batch_size)
+            .partition_for_record(&metadata, &record, false, true, sticky_batch_size, 1.0)
             .expect("initial sticky partition");
 
         let mut cached_record =
             ProducerRecord::unassigned("orders").value(Bytes::from_static(b"cached"));
-        assert!(state.try_assign_cached_sticky_partition(&mut cached_record, sticky_batch_size));
+        assert!(state.try_assign_cached_sticky_partition(
+            &mut cached_record,
+            sticky_batch_size,
+            1.0
+        ));
         assert_eq!(cached_record.partition, partition);
 
         state.mark_sticky_batch_ready("orders", 1);
         let mut next_record =
             ProducerRecord::unassigned("orders").value(Bytes::from_static(b"next"));
-        assert!(!state.try_assign_cached_sticky_partition(&mut next_record, sticky_batch_size));
+        assert!(!state.try_assign_cached_sticky_partition(
+            &mut next_record,
+            sticky_batch_size,
+            1.0
+        ));
         assert_eq!(
             next_record.partition,
             crate::producer::record::UNASSIGNED_PARTITION
@@ -5142,7 +6076,7 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(
                 state
-                    .partition_for_record(&metadata, &record, false, true, 256)
+                    .partition_for_record(&metadata, &record, false, true, 256, 1.0)
                     .expect("partition"),
                 expected
             );
@@ -5160,7 +6094,7 @@ mod tests {
         let partitions: Vec<_> = (0..3)
             .map(|_| {
                 state
-                    .partition_for_record(&metadata, &record, true, true, 128)
+                    .partition_for_record(&metadata, &record, true, true, 128, 1.0)
                     .expect("partition")
             })
             .collect();
@@ -5174,7 +6108,7 @@ mod tests {
         let after_switch: Vec<_> = (0..2)
             .map(|_| {
                 state
-                    .partition_for_record(&metadata, &record, true, true, 128)
+                    .partition_for_record(&metadata, &record, true, true, 128, 1.0)
                     .expect("partition")
             })
             .collect();
@@ -5197,7 +6131,7 @@ mod tests {
         let partitions: Vec<_> = (0..3)
             .map(|_| {
                 state
-                    .partition_for_record(&metadata, &record, true, true, 1)
+                    .partition_for_record(&metadata, &record, true, true, 1, 1.0)
                     .expect("partition")
             })
             .collect();
@@ -5449,6 +6383,776 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compression_ratio_estimator_updates_and_resets_like_java() {
+        let mut estimator = CompressionRatioEstimator::default();
+
+        assert_ratio_close(estimator.estimation("orders", Compression::Lz4), 1.0);
+        assert_ratio_close(
+            estimator.update_estimation("orders", Compression::Lz4, 0.60),
+            0.995,
+        );
+        assert_ratio_close(
+            estimator.update_estimation("orders", Compression::Lz4, 1.30),
+            1.30,
+        );
+        assert_ratio_close(
+            estimator.update_estimation("orders", Compression::Lz4, 1.20),
+            1.295,
+        );
+
+        estimator.reset_after_split("orders", Compression::Lz4, 0.42);
+        assert_ratio_close(estimator.estimation("orders", Compression::Lz4), 1.0);
+
+        estimator.reset_after_split("orders", Compression::Lz4, 1.25);
+        assert_ratio_close(estimator.estimation("orders", Compression::Lz4), 1.25);
+    }
+
+    #[test]
+    fn message_too_large_split_resets_compression_ratio_estimation() {
+        let dispatcher = ProducerDispatcher::with_config(
+            test_wire(),
+            ProducerRuntimeConfig {
+                compression: ProducerCompression {
+                    codec: Compression::None,
+                    level: None,
+                },
+                ..ProducerRuntimeConfig::default()
+            },
+        );
+        dispatcher.set_compression_ratio_estimation_for_test("orders", Compression::None, 0.40);
+        let batches = vec![ready_batch("orders", 0)];
+
+        let outcome = dispatcher.message_too_large_split_outcome(batches, "orders".to_owned(), 0);
+
+        assert!(matches!(
+            outcome,
+            super::DispatchOutcome::Delivered(Err(ProducerError::Broker {
+                topic,
+                partition: 0,
+                error: ErrorCode::MessageTooLarge,
+            })) if topic == "orders"
+        ));
+        assert_ratio_close(
+            dispatcher.compression_ratio_estimation_for_test("orders", Compression::None),
+            1.0,
+        );
+    }
+
+    #[test]
+    fn message_too_large_split_uses_compression_ratio_estimation_for_split_groups() {
+        let now = Instant::now();
+        let mut accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(TEST_LARGE_BATCH_SIZE)
+                .buffer_memory(TEST_LARGE_BATCH_SIZE * 4)
+                .linger(Duration::from_secs(1)),
+        );
+        for value in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()] {
+            accumulator
+                .append_at(
+                    ProducerRecord::new("orders", 0).value(Bytes::copy_from_slice(value)),
+                    now,
+                )
+                .expect("append record");
+        }
+        let batches = accumulator.drain_all();
+
+        let split = super::split_message_too_large_batches(batches, "orders", 0, 78, 2.0)
+            .expect("multi-record batch should split");
+
+        assert_eq!(split.len(), 3);
+        assert!(split.iter().all(|batch| batch.records.len() == 1));
+    }
+
+    fn assert_ratio_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 0.000_001,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn dispatcher_record_batch_encoding_uses_wire_write_buffer_pool() {
+        let wire = WireClient::connect_with_brokers(
+            ConnectionConfig::default().buffer_pool_capacity(1),
+            "dispatcher-test",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("valid socket address"),
+            )],
+        );
+        let dispatcher = ProducerDispatcher::new(wire.clone());
+        let batch = ready_batch("orders", 0);
+
+        let encoded = dispatcher
+            .encode_ready_batch_records(&batch, 0)
+            .expect("ready batch should encode");
+
+        assert!(!encoded.is_empty());
+        let stats = wire.buffer_pool_stats();
+        assert_eq!(stats.write_acquired, 1);
+        assert_eq!(stats.write_released, 1);
+    }
+
+    #[test]
+    fn broker_produce_request_releases_unique_record_bytes_to_wire_pool() {
+        let wire = WireClient::connect_with_brokers(
+            ConnectionConfig::default().buffer_pool_capacity(2),
+            "dispatcher-test",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("valid socket address"),
+            )],
+        );
+        let dispatcher = ProducerDispatcher::new(wire.clone());
+        let records = dispatcher
+            .encode_ready_batch_records_owned(&ready_batch("orders", 0), 0)
+            .expect("ready batch should encode");
+        let mut request = BrokerProduceRequest::with_record_buffer_owner(&wire);
+        request.push(
+            route("orders", 0),
+            records,
+            BrokerProduceOptions {
+                acks: 1,
+                timeout_ms: 1_500,
+                transactional_id: None,
+            },
+            1,
+        );
+        let before_release = wire.buffer_pool_stats();
+
+        assert_eq!(request.release_record_buffers(&wire).released, 1);
+
+        let after_release = wire.buffer_pool_stats();
+        assert_eq!(
+            after_release.write_released,
+            before_release.write_released + 1
+        );
+        assert!(
+            request.data.topic_data[0].partition_data[0]
+                .records
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn owned_broker_produce_request_drop_releases_unique_record_bytes_to_wire_pool() {
+        let wire = WireClient::connect_with_brokers(
+            ConnectionConfig::default().buffer_pool_capacity(2),
+            "dispatcher-test",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("valid socket address"),
+            )],
+        );
+        let dispatcher = ProducerDispatcher::new(wire.clone());
+        let records = dispatcher
+            .encode_ready_batch_records_owned(&ready_batch("orders", 0), 0)
+            .expect("ready batch should encode");
+        let before_drop = wire.buffer_pool_stats();
+
+        {
+            let mut request = BrokerProduceRequest::with_record_buffer_owner(&wire);
+            request.push(
+                route("orders", 0),
+                records,
+                BrokerProduceOptions {
+                    acks: 1,
+                    timeout_ms: 1_500,
+                    transactional_id: None,
+                },
+                1,
+            );
+        }
+
+        let after_drop = wire.buffer_pool_stats();
+        assert_eq!(after_drop.write_released, before_drop.write_released + 1);
+    }
+
+    #[test]
+    fn owned_record_buffer_releases_when_last_request_clone_drops() {
+        let wire = WireClient::connect_with_brokers(
+            ConnectionConfig::default().buffer_pool_capacity(2),
+            "dispatcher-test",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("valid socket address"),
+            )],
+        );
+        let dispatcher = ProducerDispatcher::new(wire.clone());
+        let records = dispatcher
+            .encode_ready_batch_records_owned(&ready_batch("orders", 0), 0)
+            .expect("ready batch should encode");
+        let cloned_records = {
+            let mut request = BrokerProduceRequest::with_record_buffer_owner(&wire);
+            request.push(
+                route("orders", 0),
+                records,
+                BrokerProduceOptions {
+                    acks: 1,
+                    timeout_ms: 1_500,
+                    transactional_id: None,
+                },
+                1,
+            );
+            let records = request.data.topic_data[0].partition_data[0]
+                .records
+                .as_ref()
+                .expect("records should be present")
+                .clone();
+            let before_drop = wire.buffer_pool_stats();
+
+            drop(request);
+
+            let after_request_drop = wire.buffer_pool_stats();
+            assert_eq!(
+                after_request_drop.write_released,
+                before_drop.write_released
+            );
+            records
+        };
+
+        let before_clone_drop = wire.buffer_pool_stats();
+        drop(cloned_records);
+
+        let after_clone_drop = wire.buffer_pool_stats();
+        assert_eq!(
+            after_clone_drop.write_released,
+            before_clone_drop.write_released + 1
+        );
+    }
+
+    #[test]
+    fn broker_produce_request_reports_unrecovered_record_buffer_when_clone_is_alive() {
+        let wire = WireClient::connect_with_brokers(
+            ConnectionConfig::default().buffer_pool_capacity(2),
+            "dispatcher-test",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("valid socket address"),
+            )],
+        );
+        let dispatcher = ProducerDispatcher::new(wire.clone());
+        let records = dispatcher
+            .encode_ready_batch_records(&ready_batch("orders", 0), 0)
+            .expect("ready batch should encode");
+        let encoded_bytes = records.len();
+        let mut request = BrokerProduceRequest::default();
+        request.push(
+            route("orders", 0),
+            records,
+            BrokerProduceOptions {
+                acks: 1,
+                timeout_ms: 1_500,
+                transactional_id: None,
+            },
+            1,
+        );
+        let cloned_request_data = request.data.clone();
+        let before_release = wire.buffer_pool_stats();
+
+        let release = request.release_record_buffers(&wire);
+
+        assert_eq!(
+            release,
+            RecordBufferRelease {
+                expected: 1,
+                released: 0,
+                unrecovered: 1,
+                expected_bytes: encoded_bytes,
+                released_bytes: 0,
+                unrecovered_bytes: encoded_bytes,
+            }
+        );
+        let after_first_release = wire.buffer_pool_stats();
+        assert_eq!(
+            after_first_release.write_released,
+            before_release.write_released
+        );
+        assert!(
+            request.data.topic_data[0].partition_data[0]
+                .records
+                .is_some()
+        );
+
+        drop(cloned_request_data);
+        let release = request.release_record_buffers(&wire);
+
+        assert_eq!(
+            release,
+            RecordBufferRelease {
+                expected: 1,
+                released: 1,
+                unrecovered: 0,
+                expected_bytes: encoded_bytes,
+                released_bytes: encoded_bytes,
+                unrecovered_bytes: 0,
+            }
+        );
+        let after_second_release = wire.buffer_pool_stats();
+        assert_eq!(
+            after_second_release.write_released,
+            after_first_release.write_released + 1
+        );
+        assert!(
+            request.data.topic_data[0].partition_data[0]
+                .records
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn broker_produce_request_reports_unrecovered_lease_when_records_are_missing() {
+        let wire = WireClient::connect_with_brokers(
+            ConnectionConfig::default().buffer_pool_capacity(2),
+            "dispatcher-test",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("valid socket address"),
+            )],
+        );
+        let dispatcher = ProducerDispatcher::new(wire.clone());
+        let records = dispatcher
+            .encode_ready_batch_records(&ready_batch("orders", 0), 0)
+            .expect("ready batch should encode");
+        let encoded_bytes = records.len();
+        let mut request = BrokerProduceRequest::default();
+        request.push(
+            route("orders", 0),
+            records,
+            BrokerProduceOptions {
+                acks: 1,
+                timeout_ms: 1_500,
+                transactional_id: None,
+            },
+            1,
+        );
+        let _lost_records = request.data.topic_data[0].partition_data[0]
+            .records
+            .take()
+            .expect("test should remove encoded records");
+        let before_release = wire.buffer_pool_stats();
+
+        let release = request.release_record_buffers(&wire);
+
+        assert_eq!(
+            release,
+            RecordBufferRelease {
+                expected: 1,
+                released: 0,
+                unrecovered: 1,
+                expected_bytes: encoded_bytes,
+                released_bytes: 0,
+                unrecovered_bytes: encoded_bytes,
+            }
+        );
+        let after_release = wire.buffer_pool_stats();
+        assert_eq!(after_release.write_released, before_release.write_released);
+    }
+
+    #[test]
+    fn broker_produce_request_reports_unrecovered_lease_bytes_when_records_are_missing() {
+        let wire = WireClient::connect_with_brokers(
+            ConnectionConfig::default().buffer_pool_capacity(2),
+            "dispatcher-test",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("valid socket address"),
+            )],
+        );
+        let dispatcher = ProducerDispatcher::new(wire.clone());
+        let records = dispatcher
+            .encode_ready_batch_records(&ready_batch("orders", 0), 0)
+            .expect("ready batch should encode");
+        let encoded_bytes = records.len();
+        let mut request = BrokerProduceRequest::default();
+        request.push(
+            route("orders", 0),
+            records,
+            BrokerProduceOptions {
+                acks: 1,
+                timeout_ms: 1_500,
+                transactional_id: None,
+            },
+            1,
+        );
+        let _lost_records = request.data.topic_data[0].partition_data[0]
+            .records
+            .take()
+            .expect("test should remove encoded records");
+
+        let release = request.release_record_buffers(&wire);
+
+        assert_eq!(
+            release,
+            RecordBufferRelease {
+                expected: 1,
+                released: 0,
+                unrecovered: 1,
+                expected_bytes: encoded_bytes,
+                released_bytes: 0,
+                unrecovered_bytes: encoded_bytes,
+            }
+        );
+    }
+
+    #[test]
+    fn broker_produce_request_matches_partial_release_bytes_to_partition_lease() {
+        let wire = WireClient::connect_with_brokers(
+            ConnectionConfig::default().buffer_pool_capacity(2),
+            "dispatcher-test",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("valid socket address"),
+            )],
+        );
+        let dispatcher = ProducerDispatcher::new(wire.clone());
+        let first_records = dispatcher
+            .encode_ready_batch_records(&ready_batch_with_value("orders", 0, b"a"), 0)
+            .expect("first ready batch should encode");
+        let first_bytes = first_records.len();
+        let second_records = dispatcher
+            .encode_ready_batch_records(
+                &ready_batch_with_value("orders", 1, b"second-value-is-longer"),
+                0,
+            )
+            .expect("second ready batch should encode");
+        let second_bytes = second_records.len();
+        assert_ne!(first_bytes, second_bytes);
+        let mut request = BrokerProduceRequest::default();
+        request.push(
+            route("orders", 0),
+            first_records,
+            BrokerProduceOptions {
+                acks: 1,
+                timeout_ms: 1_500,
+                transactional_id: None,
+            },
+            1,
+        );
+        request.push(
+            route("orders", 1),
+            second_records,
+            BrokerProduceOptions {
+                acks: 1,
+                timeout_ms: 1_500,
+                transactional_id: None,
+            },
+            1,
+        );
+        let _first_records_clone = request.data.topic_data[0].partition_data[0]
+            .records
+            .as_ref()
+            .expect("first records")
+            .clone();
+
+        let release = request.release_record_buffers(&wire);
+
+        assert_eq!(
+            release,
+            RecordBufferRelease {
+                expected: 2,
+                released: 1,
+                unrecovered: 1,
+                expected_bytes: first_bytes + second_bytes,
+                released_bytes: second_bytes,
+                unrecovered_bytes: first_bytes,
+            }
+        );
+        assert!(
+            request.data.topic_data[0].partition_data[0]
+                .records
+                .is_some()
+        );
+        assert!(
+            request.data.topic_data[0].partition_data[1]
+                .records
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn broker_produce_request_reports_all_leases_when_same_partition_records_are_merged() {
+        let wire = WireClient::connect_with_brokers(
+            ConnectionConfig::default().buffer_pool_capacity(2),
+            "dispatcher-test",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("valid socket address"),
+            )],
+        );
+        let dispatcher = ProducerDispatcher::new(wire.clone());
+        let first_records = dispatcher
+            .encode_ready_batch_records(&ready_batch_with_value("orders", 0, b"a"), 0)
+            .expect("first ready batch should encode");
+        let first_bytes = first_records.len();
+        let second_records = dispatcher
+            .encode_ready_batch_records(
+                &ready_batch_with_value("orders", 0, b"second-value-is-longer"),
+                0,
+            )
+            .expect("second ready batch should encode");
+        let second_bytes = second_records.len();
+        assert_ne!(first_bytes, second_bytes);
+        let mut request = BrokerProduceRequest::default();
+        request.push(
+            route("orders", 0),
+            first_records,
+            BrokerProduceOptions {
+                acks: 1,
+                timeout_ms: 1_500,
+                transactional_id: None,
+            },
+            1,
+        );
+        request.push(
+            route("orders", 0),
+            second_records,
+            BrokerProduceOptions {
+                acks: 1,
+                timeout_ms: 1_500,
+                transactional_id: None,
+            },
+            1,
+        );
+        assert_eq!(request.data.topic_data[0].partition_data.len(), 1);
+        let before_release = wire.buffer_pool_stats();
+
+        let release = request.release_record_buffers(&wire);
+
+        assert_eq!(
+            release,
+            RecordBufferRelease {
+                expected: 2,
+                released: 2,
+                unrecovered: 0,
+                expected_bytes: first_bytes + second_bytes,
+                released_bytes: first_bytes + second_bytes,
+                unrecovered_bytes: 0,
+            }
+        );
+        let after_release = wire.buffer_pool_stats();
+        assert_eq!(
+            after_release.write_released,
+            before_release.write_released + 1
+        );
+        assert!(
+            request.data.topic_data[0].partition_data[0]
+                .records
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn owned_same_partition_merge_keeps_combined_records_in_write_pool() {
+        let wire = WireClient::connect_with_brokers(
+            ConnectionConfig::default().buffer_pool_capacity(4),
+            "dispatcher-test",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("valid socket address"),
+            )],
+        );
+        let dispatcher = ProducerDispatcher::new(wire.clone());
+        let first_records = dispatcher
+            .encode_ready_batch_records_owned(&ready_batch_with_value("orders", 0, b"a"), 0)
+            .expect("first ready batch should encode");
+        let second_records = dispatcher
+            .encode_ready_batch_records_owned(
+                &ready_batch_with_value("orders", 0, b"second-value-is-longer"),
+                0,
+            )
+            .expect("second ready batch should encode");
+        let before_merge = wire.buffer_pool_stats();
+
+        {
+            let mut request = BrokerProduceRequest::with_record_buffer_owner(&wire);
+            request.push(
+                route("orders", 0),
+                first_records,
+                BrokerProduceOptions {
+                    acks: 1,
+                    timeout_ms: 1_500,
+                    transactional_id: None,
+                },
+                1,
+            );
+            request.push(
+                route("orders", 0),
+                second_records,
+                BrokerProduceOptions {
+                    acks: 1,
+                    timeout_ms: 1_500,
+                    transactional_id: None,
+                },
+                1,
+            );
+            assert_eq!(request.data.topic_data[0].partition_data.len(), 1);
+            let after_merge = wire.buffer_pool_stats();
+            assert_eq!(after_merge.write_acquired, before_merge.write_acquired + 1);
+            assert_eq!(after_merge.write_released, before_merge.write_released + 2);
+        }
+
+        let after_drop = wire.buffer_pool_stats();
+        assert_eq!(after_drop.write_acquired, before_merge.write_acquired + 1);
+        assert_eq!(after_drop.write_released, before_merge.write_released + 3);
+    }
+
+    #[test]
+    fn broker_dispatch_result_releases_record_bytes_before_wire_error() {
+        let wire = WireClient::connect_with_brokers(
+            ConnectionConfig::default().buffer_pool_capacity(2),
+            "dispatcher-test",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("valid socket address"),
+            )],
+        );
+        let dispatcher = ProducerDispatcher::new(wire.clone());
+        let records = dispatcher
+            .encode_ready_batch_records(&ready_batch("orders", 0), 0)
+            .expect("ready batch should encode");
+        let mut request = BrokerProduceRequest::default();
+        request.push(
+            route("orders", 0),
+            records,
+            BrokerProduceOptions {
+                acks: 1,
+                timeout_ms: 1_500,
+                transactional_id: None,
+            },
+            1,
+        );
+        let before_error = wire.buffer_pool_stats();
+
+        let result = broker_dispatch_completed_result(
+            &wire,
+            0,
+            request,
+            Err(crate::wire::WireError::ConnectionClosed),
+        );
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::RetryableWire(ProducerError::Wire(
+                crate::wire::WireError::ConnectionClosed
+            )))
+        ));
+        let after_error = wire.buffer_pool_stats();
+        assert_eq!(after_error.write_released, before_error.write_released + 1);
+    }
+
+    #[tokio::test]
+    async fn broker_dispatch_releases_record_bytes_when_metrics_sizing_fails() {
+        let wire = WireClient::connect_with_brokers(
+            ConnectionConfig::default().buffer_pool_capacity(2),
+            "dispatcher-test",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("valid socket address"),
+            )],
+        );
+        let dispatcher = ProducerDispatcher::new(wire.clone());
+        dispatcher.enable_metrics();
+        let records = dispatcher
+            .encode_ready_batch_records(&ready_batch("orders", 0), 0)
+            .expect("ready batch should encode");
+        let mut request = BrokerProduceRequest::default();
+        request.push(
+            route("orders", 0),
+            records,
+            BrokerProduceOptions {
+                acks: 1,
+                timeout_ms: 1_500,
+                transactional_id: None,
+            },
+            1,
+        );
+        let before_error = wire.buffer_pool_stats();
+
+        let result = dispatcher
+            .dispatch_broker_requests(7, vec![request], i16::MAX)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::Producer(ProducerError::Wire(_)))
+        ));
+        let after_error = wire.buffer_pool_stats();
+        assert_eq!(after_error.write_released, before_error.write_released + 1);
+    }
+
+    #[tokio::test]
+    async fn broker_dispatch_backpressure_retry_is_bounded_and_releases_record_bytes() {
+        let version = client_api_info(ApiKey::Produce).max_version;
+        let wire = WireClient::connect_with_brokers(
+            ConnectionConfig::default()
+                .broker_queue_capacity(1)
+                .request_timeout(Duration::from_secs(30))
+                .reconnect_backoff_initial(Duration::from_secs(30))
+                .reconnect_backoff_max(Duration::from_secs(30))
+                .buffer_pool_capacity(2),
+            "dispatcher-test",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9".parse().expect("valid socket address"),
+            )],
+        );
+        let filler = ProduceRequestData::default();
+        let _first = wire
+            .enqueue_to_broker::<_, kacrab_protocol::generated::ProduceResponseData>(
+                7,
+                ApiKey::Produce,
+                version,
+                &filler,
+            )
+            .expect("first command should create broker handle");
+        tokio::task::yield_now().await;
+        let _second = wire.enqueue_to_broker::<_, kacrab_protocol::generated::ProduceResponseData>(
+            7,
+            ApiKey::Produce,
+            version,
+            &filler,
+        );
+        let dispatcher =
+            ProducerDispatcher::new(wire.clone()).delivery_timeout(Duration::from_millis(5));
+        let records = dispatcher
+            .encode_ready_batch_records(&ready_batch("orders", 0), 0)
+            .expect("ready batch should encode");
+        let mut request = BrokerProduceRequest::default();
+        request.push(
+            route("orders", 0),
+            records,
+            BrokerProduceOptions {
+                acks: 1,
+                timeout_ms: 1_500,
+                transactional_id: None,
+            },
+            1,
+        );
+        let before_dispatch = wire.buffer_pool_stats();
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            dispatcher.dispatch_broker_requests(7, vec![request], version),
+        )
+        .await
+        .expect("backpressure retry should be bounded by delivery timeout");
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::Producer(ProducerError::Wire(
+                crate::wire::WireError::Backpressure
+            )))
+        ));
+        let after_dispatch = wire.buffer_pool_stats();
+        assert_eq!(
+            after_dispatch.write_released,
+            before_dispatch.write_released + 1
+        );
+    }
+
     #[tokio::test]
     async fn retry_wait_returns_delivery_timeout_when_outer_deadline_expires() {
         let dispatcher =
@@ -5481,6 +7185,14 @@ mod tests {
     }
 
     fn ready_batch(topic: &str, partition: i32) -> super::ReadyBatch {
+        ready_batch_with_value(topic, partition, b"value")
+    }
+
+    fn ready_batch_with_value(
+        topic: &str,
+        partition: i32,
+        value: &'static [u8],
+    ) -> super::ReadyBatch {
         let mut accumulator = RecordAccumulator::new(
             AccumulatorConfig::default()
                 .batch_size(1)
@@ -5488,7 +7200,7 @@ mod tests {
         );
         accumulator
             .append_at(
-                ProducerRecord::new(topic, partition).value(Bytes::from_static(b"value")),
+                ProducerRecord::new(topic, partition).value(Bytes::from_static(value)),
                 Instant::now(),
             )
             .expect("append test record");
@@ -6369,6 +8081,56 @@ mod tests {
     }
 
     #[test]
+    fn broker_produce_request_keeps_zero_topic_id_topics_separate() {
+        let mut request = BrokerProduceRequest::default();
+        let orders = route("orders", 0);
+        let payments = route("payments", 0);
+        request.push(
+            orders,
+            Bytes::from_static(b"orders-records"),
+            BrokerProduceOptions {
+                acks: -1,
+                timeout_ms: 1_500,
+                transactional_id: None,
+            },
+            1,
+        );
+
+        assert!(!request.contains_route(&payments));
+
+        request.push(
+            payments,
+            Bytes::from_static(b"payments-records"),
+            BrokerProduceOptions {
+                acks: -1,
+                timeout_ms: 1_500,
+                transactional_id: None,
+            },
+            1,
+        );
+
+        assert_eq!(request.data.topic_data.len(), 2);
+        assert_eq!(request.data.topic_data[0].name.as_str(), "orders");
+        assert_eq!(request.data.topic_data[1].name.as_str(), "payments");
+        assert_eq!(
+            request.data.topic_data[0].partition_data[0]
+                .records
+                .as_ref()
+                .expect("orders records")
+                .as_ref(),
+            b"orders-records"
+        );
+        assert_eq!(
+            request.data.topic_data[1].partition_data[0]
+                .records
+                .as_ref()
+                .expect("payments records")
+                .as_ref(),
+            b"payments-records"
+        );
+    }
+
+    #[test]
     fn broker_produce_request_detects_duplicate_partition_route() {
         let mut request = BrokerProduceRequest::default();
         let options = BrokerProduceOptions {
@@ -6598,6 +8360,79 @@ mod tests {
         complete_deliveries(&mut batches, std::slice::from_ref(&receipt));
 
         assert_eq!(delivery.await.expect("delivered receipt"), receipt);
+    }
+
+    #[tokio::test]
+    async fn complete_deliveries_uses_later_split_receipts_for_original_delivery_handles() {
+        let mut accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(TEST_LARGE_BATCH_SIZE)
+                .buffer_memory(TEST_LARGE_BATCH_SIZE * 4)
+                .linger(Duration::from_secs(1)),
+        );
+        let first = accumulator
+            .append_for_delivery(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+            .expect("append first delivery");
+        let second = accumulator
+            .append_for_delivery(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
+            .expect("append second delivery");
+        let third = accumulator
+            .append_for_delivery(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"c")))
+            .expect("append third delivery");
+        let callback_offset = Arc::new(AtomicI64::new(-1));
+        let callback_sink = Arc::clone(&callback_offset);
+        third.register_callback(Box::new(move |result| {
+            callback_sink.store(
+                result.expect("third callback receipt").offset,
+                Ordering::Relaxed,
+            );
+        }));
+        let batch = accumulator
+            .drain_all()
+            .pop()
+            .expect("drained delivery batch");
+        let mut batches = batch
+            .split_for_retry_with_compression_ratio(78, 1.0)
+            .expect("split into retry batches");
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].records.len(), 2);
+        assert_eq!(batches[1].records.len(), 1);
+        let receipts = vec![
+            RecordMetadata {
+                topic: Arc::from("orders"),
+                partition: 0,
+                leader_id: 7,
+                offset: 40,
+                timestamp_ms: -1,
+                serialized_key_size: -1,
+                serialized_value_size: 1,
+            },
+            RecordMetadata {
+                topic: Arc::from("orders"),
+                partition: 0,
+                leader_id: 7,
+                offset: 41,
+                timestamp_ms: -1,
+                serialized_key_size: -1,
+                serialized_value_size: 1,
+            },
+            RecordMetadata {
+                topic: Arc::from("orders"),
+                partition: 0,
+                leader_id: 7,
+                offset: 99,
+                timestamp_ms: -1,
+                serialized_key_size: -1,
+                serialized_value_size: 1,
+            },
+        ];
+
+        complete_deliveries(&mut batches, &receipts);
+
+        assert_eq!(first.await.expect("first receipt").offset, 40);
+        assert_eq!(second.await.expect("second receipt").offset, 41);
+        assert_eq!(callback_offset.load(Ordering::Relaxed), 99);
+        assert_eq!(third.await.expect("third receipt").offset, 99);
     }
 
     #[test]

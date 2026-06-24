@@ -36,6 +36,9 @@ pub enum ProducerError {
     /// Flush forced out buffered records but routing metadata was still incomplete.
     #[error("flush could not route all buffered records")]
     FlushIncomplete,
+    /// Internal producer batch ownership invariant was violated.
+    #[error("producer batch lifecycle violation: {0}")]
+    BatchLifecycle(&'static str),
     /// Producer API was called from a delivery callback where Java forbids blocking.
     #[error("producer operation {operation} cannot be invoked from a delivery callback")]
     CallbackOperation {

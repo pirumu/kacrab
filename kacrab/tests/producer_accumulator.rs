@@ -116,7 +116,7 @@ fn accumulator_batch_size_uses_encoded_batch_bytes_not_buffer_memory_overhead() 
             .unwrap();
     }
 
-    assert!(accumulator.buffered_bytes() > 128);
+    assert_eq!(accumulator.buffered_bytes(), 128);
     assert!(accumulator.drain_ready(now).is_empty());
 
     for _ in 0..6 {
