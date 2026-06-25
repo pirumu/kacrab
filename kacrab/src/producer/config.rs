@@ -23,8 +23,14 @@ pub(super) const DEFAULT_DELIVERY_TIMEOUT: Duration = Duration::from_mins(2);
 /// Kafka's effective default retries is `Integer.MAX_VALUE`; delivery timeout
 /// remains the real upper bound.
 pub(super) const DEFAULT_RETRY_ATTEMPTS: usize = usize::MAX;
+/// Kafka default `retry.backoff.ms`.
+pub(super) const DEFAULT_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+/// Kafka default `retry.backoff.max.ms`.
+pub(super) const DEFAULT_RETRY_BACKOFF_MAX: Duration = Duration::from_secs(1);
 /// Kafka idempotent-producer limit. Values above 5 can break ordering on retry.
 pub(super) const IDEMPOTENT_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION: i32 = 5;
+/// Kafka default `max.request.size`: 1 MiB.
+pub(super) const DEFAULT_MAX_REQUEST_SIZE: usize = 1_048_576;
 /// Default transaction timeout sent to `InitProducerId`; matches Kafka's
 /// `transaction.timeout.ms` default.
 pub(super) const DEFAULT_TRANSACTION_TIMEOUT_MS: i32 = 60_000;
@@ -58,16 +64,28 @@ pub struct ProducerRuntimeConfig {
     pub timeout_ms: i32,
     /// Maximum retry attempts before delivery timeout wins.
     pub retry_attempts: usize,
+    /// Initial backoff before retrying retriable producer errors.
+    pub retry_backoff: Duration,
+    /// Maximum backoff before retrying retriable producer errors.
+    pub retry_backoff_max: Duration,
     /// Upper bound for delivering an accumulated batch.
     pub delivery_timeout: Duration,
     /// Maximum time producer APIs wait for buffer memory or metadata-dependent partitioning.
     pub max_block: Duration,
     /// Maximum unacknowledged produce requests per broker connection.
     pub max_in_flight_requests_per_connection: usize,
+    /// Maximum serialized record/request size accepted by the producer.
+    pub max_request_size: usize,
+    /// Whether Kafka client telemetry push APIs are enabled.
+    pub enable_metrics_push: bool,
     /// Record-batch compression settings.
     pub compression: ProducerCompression,
     /// Whether key-based partitioning should be disabled.
     pub partitioner_ignore_keys: bool,
+    /// Whether sticky partition switching uses adaptive load statistics.
+    pub partitioner_adaptive_partitioning_enable: bool,
+    /// How long a broker may be unable to drain before adaptive sticky excludes its partitions.
+    pub partitioner_availability_timeout: Duration,
     /// Idempotent/transactional producer settings.
     pub idempotence: ProducerIdempotenceConfig,
 }
@@ -103,12 +121,18 @@ impl Default for ProducerRuntimeConfig {
             acks: ACKS_ALL,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             retry_attempts: DEFAULT_RETRY_ATTEMPTS,
+            retry_backoff: DEFAULT_RETRY_BACKOFF,
+            retry_backoff_max: DEFAULT_RETRY_BACKOFF_MAX,
             delivery_timeout: DEFAULT_DELIVERY_TIMEOUT,
             max_block: Duration::from_mins(1),
             max_in_flight_requests_per_connection:
                 crate::wire::DEFAULT_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
+            max_request_size: DEFAULT_MAX_REQUEST_SIZE,
+            enable_metrics_push: true,
             compression: ProducerCompression::default(),
             partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
             idempotence: ProducerIdempotenceConfig::default(),
         }
     }
@@ -141,14 +165,24 @@ impl ProducerRuntimeConfig {
                 crate::config::ProducerConfig::REQUEST_TIMEOUT_MS_CONFIG,
             )?,
             retry_attempts: retries_to_usize(config.retries)?,
+            retry_backoff: config.retry_backoff_ms.duration(),
+            retry_backoff_max: config.retry_backoff_max_ms.duration(),
             delivery_timeout: config.delivery_timeout_ms.duration(),
             max_block: config.max_block_ms.duration(),
             max_in_flight_requests_per_connection,
+            max_request_size: byte_size_to_usize(
+                config.max_request_size,
+                crate::config::ProducerConfig::MAX_REQUEST_SIZE_CONFIG,
+            )?,
+            enable_metrics_push: config.enable_metrics_push,
             compression: ProducerCompression {
                 codec: parse_compression(&config.compression_type)?,
                 level: compression_level(config),
             },
             partitioner_ignore_keys: config.partitioner_ignore_keys,
+            partitioner_adaptive_partitioning_enable: config
+                .partitioner_adaptive_partitioning_enable,
+            partitioner_availability_timeout: config.partitioner_availability_timeout_ms.duration(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: config.enable_idempotence || !config.transactional_id.is_empty(),
                 transactional_id: (!config.transactional_id.is_empty())
@@ -260,10 +294,10 @@ fn byte_size_to_usize(value: crate::config::ByteSize, key: &'static str) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        ACKS_ALL, ACKS_LEADER, ACKS_NONE, DEFAULT_DELIVERY_TIMEOUT, DEFAULT_TIMEOUT_MS,
-        DEFAULT_TRANSACTION_TIMEOUT_MS, ProducerCompression, ProducerIdempotenceConfig,
-        ProducerRuntimeConfig, byte_size_to_usize, duration_ms_to_i32, parse_acks,
-        parse_compression, positive_i32_to_usize, retries_to_usize,
+        ACKS_ALL, ACKS_LEADER, ACKS_NONE, DEFAULT_DELIVERY_TIMEOUT, DEFAULT_RETRY_BACKOFF,
+        DEFAULT_RETRY_BACKOFF_MAX, DEFAULT_TIMEOUT_MS, DEFAULT_TRANSACTION_TIMEOUT_MS,
+        ProducerCompression, ProducerIdempotenceConfig, ProducerRuntimeConfig, byte_size_to_usize,
+        duration_ms_to_i32, parse_acks, parse_compression, positive_i32_to_usize, retries_to_usize,
     };
     use crate::{
         config::{ByteSize, DurationMs, ProducerConfig},
@@ -277,6 +311,8 @@ mod tests {
 
         assert_eq!(runtime.acks, ACKS_ALL);
         assert_eq!(runtime.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(runtime.retry_backoff, DEFAULT_RETRY_BACKOFF);
+        assert_eq!(runtime.retry_backoff_max, DEFAULT_RETRY_BACKOFF_MAX);
         assert_eq!(runtime.delivery_timeout, DEFAULT_DELIVERY_TIMEOUT);
         assert_eq!(
             idempotence.transaction_timeout_ms,
@@ -408,5 +444,23 @@ mod tests {
         assert!(!runtime.idempotence.enabled);
         assert_eq!(runtime.acks, ACKS_LEADER);
         assert_eq!(runtime.retry_attempts, 0);
+    }
+
+    #[test]
+    fn runtime_config_maps_retry_backoff_settings() {
+        let config = ProducerConfig::builder()
+            .bootstrap_servers("localhost:9092")
+            .retry_backoff_ms(DurationMs::from_millis(17))
+            .retry_backoff_max_ms(DurationMs::from_millis(71))
+            .build()
+            .expect("producer config");
+
+        let runtime = ProducerRuntimeConfig::from_config(&config).expect("runtime config");
+
+        assert_eq!(runtime.retry_backoff, std::time::Duration::from_millis(17));
+        assert_eq!(
+            runtime.retry_backoff_max,
+            std::time::Duration::from_millis(71)
+        );
     }
 }

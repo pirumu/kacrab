@@ -15,7 +15,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use kacrab::producer::{KafkaProducer, ProducerRecord};
+use kacrab::producer::{Producer, ProducerRecord};
 
 #[tokio::test]
 #[ignore = "requires local Kafka from docker-compose.kafka.yml"]
@@ -28,7 +28,7 @@ async fn real_kafka_commits_transactional_send() {
          transactional.id={transactional_id}"
     );
 
-    let mut producer = KafkaProducer::builder()
+    let mut producer = Producer::builder()
         .set("bootstrap.servers", bootstrap.to_string())
         .set("client.id", "kacrab-real-kafka-transaction-test")
         .set("transactional.id", transactional_id)
@@ -65,7 +65,7 @@ async fn real_kafka_commits_transactional_send() {
 
     let receipt = delivery.await.expect("delivery receipt should complete");
     assert_eq!(receipt.partition, 0);
-    assert!(receipt.base_offset >= 0);
+    assert!(receipt.offset >= 0);
 }
 
 fn bootstrap_addr() -> SocketAddr {

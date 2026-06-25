@@ -2,6 +2,7 @@
 
 use std::{
     collections::VecDeque,
+    marker::PhantomData,
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
@@ -33,6 +34,7 @@ use super::{
         OAuthTokenCache, ScramExchange, oauthbearer_auth_bytes, plain_auth_bytes,
         validate_sasl_extension_hooks,
     },
+    backoff::{BackoffPolicy, BackoffState},
     buffer::BufferPools,
     capabilities::BrokerCapabilities,
     config::{ConnectionConfig, TransportConfig},
@@ -115,6 +117,27 @@ impl BrokerEndpoint {
 #[derive(Debug, Clone)]
 pub(crate) struct BrokerHandle {
     tx: mpsc::Sender<RequestCommand>,
+    /// Latest `ApiVersions` capabilities negotiated by the broker task, shared so
+    /// the control plane can read the broker's advertised version for an API
+    /// (for example, gating client-side epoch bumps on the coordinator's
+    /// `InitProducerId` support). `None` until the first connection negotiates.
+    #[cfg_attr(not(feature = "producer"), allow(dead_code))]
+    capabilities: Arc<std::sync::RwLock<Option<BrokerCapabilities>>>,
+}
+
+pub(crate) struct PendingBrokerResponse<Resp> {
+    rx: oneshot::Receiver<Result<ResponseEnvelope>>,
+    _response: PhantomData<Resp>,
+}
+
+impl<Resp> PendingBrokerResponse<Resp>
+where
+    Resp: ResponseMessage,
+{
+    pub(crate) async fn wait(self) -> Result<Resp> {
+        let envelope = self.rx.await.map_err(|_| WireError::ConnectionClosed)??;
+        decode_response::<Resp>(envelope)
+    }
 }
 
 struct RequestCommand {
@@ -122,7 +145,35 @@ struct RequestCommand {
     max_api_version: i16,
     request: Box<dyn EncodableRequest>,
     enqueued_at: Instant,
-    tx: oneshot::Sender<Result<ResponseEnvelope>>,
+    completion: RequestCompletion,
+}
+
+impl RequestCommand {
+    const fn expects_response(&self) -> bool {
+        self.completion.expects_response()
+    }
+}
+
+enum RequestCompletion {
+    Response(oneshot::Sender<Result<ResponseEnvelope>>),
+    NoResponse(oneshot::Sender<Result<()>>),
+}
+
+impl RequestCompletion {
+    const fn expects_response(&self) -> bool {
+        matches!(self, Self::Response(_))
+    }
+
+    fn send_error(self, error: WireError) {
+        match self {
+            Self::Response(tx) => {
+                let _ignored = tx.send(Err(error));
+            },
+            Self::NoResponse(tx) => {
+                let _ignored = tx.send(Err(error));
+            },
+        }
+    }
 }
 
 trait EncodableRequest: Send {
@@ -165,6 +216,7 @@ impl BrokerHandle {
         let (tx, rx) = mpsc::channel(config.broker_queue_capacity);
         #[cfg(feature = "gssapi")]
         let kerberos_login = KerberosLoginManager::new(&config.sasl);
+        let capabilities = Arc::new(std::sync::RwLock::new(None));
         let task = BrokerTask {
             endpoint,
             client_id,
@@ -172,11 +224,23 @@ impl BrokerHandle {
             buffers,
             oauth_token_cache,
             rx,
+            capabilities: Arc::clone(&capabilities),
             #[cfg(feature = "gssapi")]
             kerberos_login,
         };
         let _task = tokio::spawn(task.run());
-        Self { tx }
+        Self { tx, capabilities }
+    }
+
+    /// Highest mutually-supported version the broker advertised for `api_key`,
+    /// or `None` until the connection has completed `ApiVersions` negotiation.
+    #[cfg(feature = "producer")]
+    pub(crate) fn negotiated_version(&self, api_key: ApiKey) -> Option<i16> {
+        self.capabilities
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()?
+            .version_for(api_key)
     }
 
     pub(crate) async fn send<Req, Resp>(
@@ -189,6 +253,19 @@ impl BrokerHandle {
         Req: RequestMessage + Clone + Send + Sync + 'static,
         Resp: ResponseMessage,
     {
+        self.enqueue(api_key, api_version, request)?.wait().await
+    }
+
+    pub(crate) fn enqueue<Req, Resp>(
+        &self,
+        api_key: ApiKey,
+        api_version: i16,
+        request: &Req,
+    ) -> Result<PendingBrokerResponse<Resp>>
+    where
+        Req: RequestMessage + Clone + Send + Sync + 'static,
+        Resp: ResponseMessage,
+    {
         let (tx, rx) = oneshot::channel();
         let command = RequestCommand {
             api_key,
@@ -197,15 +274,43 @@ impl BrokerHandle {
                 request: request.clone(),
             }),
             enqueued_at: Instant::now(),
-            tx,
+            completion: RequestCompletion::Response(tx),
+        };
+        self.tx.try_send(command).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => WireError::Backpressure,
+            mpsc::error::TrySendError::Closed(_) => WireError::ConnectionClosed,
+        })?;
+        Ok(PendingBrokerResponse {
+            rx,
+            _response: PhantomData,
+        })
+    }
+
+    pub(crate) async fn send_without_response<Req>(
+        &self,
+        api_key: ApiKey,
+        api_version: i16,
+        request: &Req,
+    ) -> Result<()>
+    where
+        Req: RequestMessage + Clone + Send + Sync + 'static,
+    {
+        let (tx, rx) = oneshot::channel();
+        let command = RequestCommand {
+            api_key,
+            max_api_version: api_version,
+            request: Box::new(OwnedRequest {
+                request: request.clone(),
+            }),
+            enqueued_at: Instant::now(),
+            completion: RequestCompletion::NoResponse(tx),
         };
         self.tx.try_send(command).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => WireError::Backpressure,
             mpsc::error::TrySendError::Closed(_) => WireError::ConnectionClosed,
         })?;
 
-        let envelope = rx.await.map_err(|_| WireError::ConnectionClosed)??;
-        decode_response::<Resp>(envelope)
+        rx.await.map_err(|_| WireError::ConnectionClosed)?
     }
 }
 
@@ -216,6 +321,7 @@ struct BrokerTask {
     buffers: Arc<BufferPools>,
     oauth_token_cache: Arc<tokio::sync::Mutex<OAuthTokenCache>>,
     rx: mpsc::Receiver<RequestCommand>,
+    capabilities: Arc<std::sync::RwLock<Option<BrokerCapabilities>>>,
     #[cfg(feature = "gssapi")]
     kerberos_login: KerberosLoginManager,
 }
@@ -224,7 +330,7 @@ impl BrokerTask {
     async fn run(mut self) {
         let mut pending = VecDeque::new();
         let mut rx_open = true;
-        let mut backoff = reconnect_backoff_initial(&self.config);
+        let mut backoff = reconnect_backoff_state(&self.config);
         loop {
             if pending.is_empty() && rx_open {
                 match self.rx.recv().await {
@@ -243,7 +349,12 @@ impl BrokerTask {
 
             match self.connect_and_negotiate().await {
                 Ok((stream, capabilities)) => {
-                    backoff = reconnect_backoff_initial(&self.config);
+                    backoff.reset();
+                    *self
+                        .capabilities
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(capabilities.clone());
                     if matches!(
                         self.serve_connection(stream, capabilities, &mut pending, &mut rx_open)
                             .await,
@@ -265,8 +376,20 @@ impl BrokerTask {
                     if pending.is_empty() && !rx_open {
                         return;
                     }
-                    tokio::time::sleep(backoff).await;
-                    backoff = next_reconnect_backoff(backoff, self.config.reconnect_backoff_max);
+                    let delay = match backoff.next_delay() {
+                        Ok(delay) => delay,
+                        Err(error) => {
+                            let error = error.to_string();
+                            fail_pending_setup_error(&mut pending, || {
+                                WireError::RandomBytes(error.clone())
+                            });
+                            if pending.is_empty() && !rx_open {
+                                return;
+                            }
+                            continue;
+                        },
+                    };
+                    tokio::time::sleep(delay).await;
                 },
             }
         }
@@ -311,10 +434,10 @@ impl BrokerTask {
                         pipeline.fail_all();
                         return ServeOutcome::Closed;
                     };
-                    if pipeline.has_capacity() && pending.is_empty() {
+                    if (!command.expects_response() || pipeline.has_capacity()) && pending.is_empty() {
                         pending.push_back(command);
                     } else {
-                        let _ignored = command.tx.send(Err(WireError::Backpressure));
+                        command.completion.send_error(WireError::Backpressure);
                     }
                 },
                 maybe_response = response_rx.recv() => {
@@ -324,9 +447,12 @@ impl BrokerTask {
                     };
                     pipeline.complete_response(response);
                 },
-                _ = timeout_tick.tick() => {
+                _ = timeout_tick.tick(), if !pipeline.is_empty() || !pending.is_empty() => {
                     pipeline.fail_expired();
                     expire_pending_commands(pending, self.config.request_timeout);
+                },
+                () = tokio::time::sleep(self.config.connections_max_idle), if pipeline.is_empty() && pending.is_empty() => {
+                    return ServeOutcome::Disconnected;
                 },
             }
         }
@@ -340,7 +466,10 @@ impl BrokerTask {
         capabilities: &BrokerCapabilities,
     ) -> Result<()> {
         let mut wrote_any = false;
-        while pipeline.has_capacity() {
+        while pending
+            .front()
+            .is_some_and(|command| !command.expects_response() || pipeline.has_capacity())
+        {
             let Some(command) = pending.pop_front() else {
                 break;
             };
@@ -369,18 +498,46 @@ impl BrokerTask {
             api_key,
             max_api_version,
             request,
-            tx,
+            completion,
             ..
         } = command;
         let Some(api_version) = capabilities.version_for_limit(api_key, max_api_version) else {
-            let _ignored = tx.send(Err(WireError::UnsupportedApiVersion(api_key)));
+            completion.send_error(WireError::UnsupportedApiVersion(api_key));
             return Ok(false);
         };
         let body_len = match request.encoded_len(api_version) {
             Ok(body_len) => body_len,
             Err(error) => {
-                let _ignored = tx.send(Err(error.into()));
+                completion.send_error(error.into());
                 return Ok(false);
+            },
+        };
+        let tx = match completion {
+            RequestCompletion::Response(tx) => tx,
+            RequestCompletion::NoResponse(tx) => {
+                let correlation_id = pipeline.next_correlation_id();
+                let spec = RequestFrameSpec {
+                    api_key,
+                    api_version,
+                    correlation_id,
+                    client_id: &self.client_id,
+                    capacity_hint: 0,
+                };
+                let frame = match self.encode_request_frame(spec, body_len, &*request) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        let _ignored = tx.send(Err(error));
+                        return Ok(false);
+                    },
+                };
+                if let Err(error) = writer.write_all(&frame).await {
+                    self.buffers.release_write(frame);
+                    let _ignored = tx.send(Err(WireError::Io(error)));
+                    return Err(WireError::ConnectionClosed);
+                }
+                self.buffers.release_write(frame);
+                let _ignored = tx.send(Ok(()));
+                return Ok(true);
             },
         };
         let correlation_id = match pipeline.reserve(api_key, api_version, tx) {
@@ -757,7 +914,7 @@ fn expire_pending_commands(pending: &mut VecDeque<RequestCommand>, request_timeo
     let mut retained = VecDeque::with_capacity(pending.len());
     while let Some(command) = pending.pop_front() {
         if now.duration_since(command.enqueued_at) >= request_timeout {
-            let _ignored = command.tx.send(Err(WireError::Timeout));
+            command.completion.send_error(WireError::Timeout);
         } else {
             retained.push_back(command);
         }
@@ -767,10 +924,10 @@ fn expire_pending_commands(pending: &mut VecDeque<RequestCommand>, request_timeo
 
 fn fail_pending_setup_error(
     pending: &mut VecDeque<RequestCommand>,
-    error_factory: fn() -> WireError,
+    mut error_factory: impl FnMut() -> WireError,
 ) {
     while let Some(command) = pending.pop_front() {
-        let _ignored = command.tx.send(Err(error_factory()));
+        command.completion.send_error(error_factory());
     }
 }
 
@@ -800,19 +957,14 @@ fn unsupported_sasl_mechanism_error() -> WireError {
     WireError::UnsupportedSaslMechanism("unsupported SASL mechanism".to_owned())
 }
 
-fn reconnect_backoff_initial(config: &ConnectionConfig) -> Duration {
-    config
-        .reconnect_backoff_initial
-        .max(MIN_TIMEOUT_TICK)
-        .min(reconnect_backoff_max(config))
-}
-
-fn reconnect_backoff_max(config: &ConnectionConfig) -> Duration {
-    config.reconnect_backoff_max.max(MIN_TIMEOUT_TICK)
-}
-
-fn next_reconnect_backoff(current: Duration, max: Duration) -> Duration {
-    current.saturating_mul(2).min(max.max(MIN_TIMEOUT_TICK))
+fn reconnect_backoff_state(config: &ConnectionConfig) -> BackoffState {
+    BackoffState::new(
+        BackoffPolicy::new(
+            config.reconnect_backoff_initial,
+            config.reconnect_backoff_max,
+        )
+        .with_jitter_factor(super::backoff::DEFAULT_JITTER_FACTOR),
+    )
 }
 
 async fn read_response_frames<R>(
@@ -908,10 +1060,9 @@ mod tests {
     use super::KerberosLoginManager;
     use super::{
         BrokerCapabilities, BrokerEndpoint, BrokerHandle, BrokerStream, BrokerTask, BufferPools,
-        EncodableRequest, OAuthTokenCache, OwnedRequest, RequestCommand, RequestPipeline,
-        ResponseEnvelope, ServeOutcome, expire_pending_commands, next_reconnect_backoff,
-        read_frame, read_response_frames, reconnect_backoff_initial, reconnect_backoff_max,
-        timeout_tick_duration,
+        EncodableRequest, OAuthTokenCache, OwnedRequest, RequestCommand, RequestCompletion,
+        RequestPipeline, ResponseEnvelope, ServeOutcome, expire_pending_commands, read_frame,
+        read_response_frames, reconnect_backoff_state, timeout_tick_duration,
     };
     use crate::wire::{
         ConnectionConfig, Result as WireResult, SaslClientAction, SaslClientAuthenticator,
@@ -986,7 +1137,7 @@ mod tests {
                 request: api_versions_request(),
             }),
             enqueued_at,
-            tx,
+            completion: RequestCompletion::Response(tx),
         }
     }
 
@@ -1090,6 +1241,7 @@ mod tests {
             buffers: Arc::new(BufferPools::new(1)),
             oauth_token_cache: Arc::new(tokio::sync::Mutex::new(OAuthTokenCache::default())),
             rx,
+            capabilities: Arc::new(std::sync::RwLock::new(None)),
             #[cfg(feature = "gssapi")]
             kerberos_login,
         };
@@ -1097,17 +1249,16 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_backoff_is_clamped_and_doubles_to_max() {
+    fn reconnect_backoff_state_resets_after_successful_connection() {
         let config = ConnectionConfig::default()
-            .reconnect_backoff_initial(Duration::ZERO)
-            .reconnect_backoff_max(Duration::from_millis(3));
+            .reconnect_backoff_initial(Duration::from_millis(5))
+            .reconnect_backoff_max(Duration::from_millis(20));
+        let mut state = reconnect_backoff_state(&config);
 
-        assert_eq!(reconnect_backoff_initial(&config), Duration::from_millis(1));
-        assert_eq!(reconnect_backoff_max(&config), Duration::from_millis(3));
-        assert_eq!(
-            next_reconnect_backoff(Duration::from_millis(2), Duration::from_millis(3)),
-            Duration::from_millis(3)
-        );
+        assert_eq!(state.next_delay_with_sample(0.5), Duration::from_millis(5));
+        assert_eq!(state.next_delay_with_sample(0.5), Duration::from_millis(10));
+        state.reset();
+        assert_eq!(state.next_delay_with_sample(0.5), Duration::from_millis(5));
     }
 
     #[test]
@@ -1150,7 +1301,10 @@ mod tests {
     async fn broker_handle_reports_full_and_closed_queue() {
         let (tx, mut rx) = mpsc::channel(1);
         tx.try_send(request_command()).expect("prefill queue");
-        let full = BrokerHandle { tx };
+        let full = BrokerHandle {
+            tx,
+            capabilities: Arc::new(std::sync::RwLock::new(None)),
+        };
 
         assert!(matches!(
             full.send::<_, ApiVersionsResponseData>(
@@ -1165,7 +1319,10 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
-        let closed = BrokerHandle { tx };
+        let closed = BrokerHandle {
+            tx,
+            capabilities: Arc::new(std::sync::RwLock::new(None)),
+        };
         assert!(matches!(
             closed
                 .send::<_, ApiVersionsResponseData>(ApiKey::ApiVersions, 3, &api_versions_request())
@@ -1186,6 +1343,7 @@ mod tests {
             buffers: Arc::new(BufferPools::new(1)),
             oauth_token_cache: Arc::new(tokio::sync::Mutex::new(OAuthTokenCache::default())),
             rx: mpsc::channel(1).1,
+            capabilities: Arc::new(std::sync::RwLock::new(None)),
             #[cfg(feature = "gssapi")]
             kerberos_login,
         };

@@ -13,7 +13,10 @@ use std::time::{Duration, Instant};
 use bytes::{Bytes, BytesMut};
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use kacrab::{
-    producer::{AccumulatorConfig, ProducerDispatcher, ProducerRecord, RecordAccumulator},
+    producer::{
+        ProducerRecord,
+        internals::{AccumulatorConfig, ProducerDispatcher, RecordAccumulator},
+    },
     wire::{BrokerEndpoint, ConnectionConfig, WireClient},
 };
 use kacrab_protocol::{
@@ -44,7 +47,7 @@ fn bench_producer_dispatcher(c: &mut Criterion) {
         .expect("benchmark runtime");
     let mut group = c.benchmark_group("producer_dispatcher");
     let _group = group.throughput(Throughput::Elements(RECORDS_PER_ITERATION));
-    let _group = group.sample_size(10);
+    let _group = group.measurement_time(Duration::from_secs(15));
     let _group = group.bench_function("multi_broker_dispatch", |b| {
         b.to_async(&runtime).iter_custom(|iters| async move {
             let started = Instant::now();

@@ -40,7 +40,7 @@ Auth and producer are treated as **100% Java-compatible targets** for the
 implemented surface:
 
 - Java-style config keys work through `ClientConfig` and
-  `KafkaProducer::builder().set(...)`.
+  `Producer::builder().set(...)`.
 - `security.protocol`, TLS, SASL, idempotence, transactions, batching, request
   timeout, delivery timeout, compression, and in-flight limits map through the
   same Kafka property names users know from the Java client.
@@ -70,7 +70,7 @@ implemented surface:
         error invalidation, reconnect/backoff policy, and sustained multi-broker
         stress tests.
 - [x] Producer usable baseline
-  - [x] Public `KafkaProducer` API with Java-style config keys.
+  - [x] Public `Producer` API with Java-style config keys.
   - [x] Batching by topic-partition, linger, bounded memory, `max.block.ms`,
         compression hooks, and delivery handles.
   - [x] Metadata routing with default partition assignment, keyed murmur2
@@ -124,11 +124,11 @@ The public producer API is intentionally close to Java/Kafka config style
 while keeping Rust delivery handles explicit:
 
 ```rust
-use kacrab::producer::{KafkaProducer, ProducerRecord};
+use kacrab::producer::{Producer, ProducerRecord};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut producer = KafkaProducer::builder()
+    let mut producer = Producer::builder()
         .set("bootstrap.servers", "127.0.0.1:9092")
         .set("client.id", "orders-writer")
         .set("acks", "all")
@@ -159,14 +159,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`send_batch` returns one `Delivery` per record. `send_batch_untracked` skips
-per-record delivery handles and relies on `flush` or `close` to wait for broker
-acknowledgement.
+`send` returns a per-record `SendFuture`. `send_with_callback` mirrors Java
+producer's `send(record, callback)` shape by returning a `SendFuture` while also
+invoking the callback on acknowledgement. Batching is automatic inside the
+producer accumulator/sender based on `batch.size`, `linger.ms`, buffer memory,
+partition routing, and flush/close boundaries; there is no separate public batch
+send API.
 
 Transactions use the same producer:
 
 ```rust
-let mut producer = KafkaProducer::builder()
+let mut producer = Producer::builder()
     .set("bootstrap.servers", "127.0.0.1:9092")
     .set("transactional.id", "orders-tx-1")
     .build()
@@ -184,7 +187,7 @@ Auth uses Kafka-compatible property names. For built-in `PLAIN` and `SCRAM`,
 kacrab only reads the credential options; it does not load Java login modules:
 
 ```rust
-let producer = KafkaProducer::builder()
+let producer = Producer::builder()
     .set("bootstrap.servers", "broker-1:9093")
     .set("security.protocol", "SASL_SSL")
     .set("ssl.truststore.location", "/etc/kafka/client.truststore.p12")
@@ -205,7 +208,7 @@ Supported runtime paths include:
 - OAuth bearer tokens from JAAS tokens, files, HTTP(S) token endpoints, and
   locally signed JWT assertions.
 - Native Rust custom SASL authenticators via
-  `KafkaProducerBuilder::sasl_client_authenticator(...)`.
+  `ProducerBuilder::sasl_client_authenticator(...)`.
 
 Full Java JAAS strings are accepted for migration compatibility, but the Rust
 runtime parses only the options it supports.
@@ -273,7 +276,7 @@ Latest measured coverage on 2026-06-16:
 The producer target is production-grade throughput, not a toy wrapper. Local
 benchmark hooks live in [`benches/`](benches/) and include accumulator,
 wire-pipeline, mock multi-broker producer dispatch, and real Kafka smoke
-benchmarks through the public `KafkaProducer` API.
+benchmarks through the public `Producer` API.
 
 Benchmark host for the 2026-06-17 local baselines:
 
@@ -291,26 +294,66 @@ KACRAB_BENCH_SMOKE=1 cargo run -p kacrab-benches --release --bin producer_kafka_
 KACRAB_ONLY_10KIB=1 cargo run -p kacrab-benches --release --bin producer_kafka_bench
 ```
 
-Latest local performance snapshot from 2026-06-17 after the record-batch,
-request-frame, encoded batch-size, and producer polling pass, with kacrab and
-Java both using in-flight `5`.
+By default, `producer_kafka_bench` now runs the `kafka-default` profile: it
+sets only `bootstrap.servers` and `client.id`, then lets the producer use its
+normal Kafka-compatible defaults. The older throughput-oriented comparison is
+kept behind `KACRAB_BENCH_PROFILE=relaxed`.
+
+Default-profile real Kafka 5-run snapshot from 2026-06-17:
+
+| Scenario | kacrab `producer_kafka_bench`, `kafka-default` |
+| --- | ---: |
+| 5M × 10B | avg 3.33M msg/sec; median 3.50M; min-max 2.23M-4.40M; 31.78 MiB/sec |
+| 100K × 10 KiB | avg 14.32K msg/sec; median 14.31K; min-max 14.01K-14.59K; 139.86 MiB/sec |
+
+These default numbers are expected to be lower than the relaxed throughput
+baseline because Kafka-compatible defaults use `acks=all` and idempotence. This
+snapshot predates the per-topic-partition idempotent dispatch path; the producer
+now preserves idempotent sequence ordering per topic-partition while allowing
+independent partitions to use the configured in-flight budget. The relaxed
+profile disables idempotence and keeps the old throughput path for
+apples-to-apples baseline comparison.
+
+Latest relaxed-profile local performance snapshot from 2026-06-17 after the
+record-batch, request-frame, encoded batch-size, producer polling, and opt-in
+metrics pass, with kacrab and Java both using in-flight `5`.
 Detailed run commands, raw run outputs, and limits live in
 [`benches/README.md`](benches/README.md).
 
-Real Kafka / Java 5-run comparison:
+Relaxed real Kafka / Java 5-run comparison, using the old untracked kacrab path:
 
 | Scenario | kacrab `producer_kafka_bench` | Java `kafka-producer-perf-test.sh` |
 | --- | ---: | ---: |
-| 5M × 10B | avg 7.89M msg/sec; median 7.87M; min-max 7.58M-8.15M; 75.29 MiB/sec; latency avg 2.02 ms, p99 5.25 ms | avg 3.59M records/sec; median 3.60M; min-max 3.31M-3.90M; 34.28 MB/sec; latency avg 0.59 ms, p99 9.00 ms |
-| 100K × 10 KiB | avg 46.80K msg/sec; median 47.30K; min-max 44.63K-48.74K; 457.06 MiB/sec; latency avg 1.63 ms, p99 6.72 ms | avg 31.17K records/sec; median 29.21K; min-max 25.52K-40.27K; 304.39 MB/sec; latency avg 63.31 ms, p99 146.40 ms |
+| 5M × 10B | avg 7.98M msg/sec; median 7.92M; min-max 7.77M-8.24M; 76.07 MiB/sec; dispatch latency avg 2.00 ms, p99 4.70 ms | avg 3.59M records/sec; median 3.60M; min-max 3.31M-3.90M; 34.28 MB/sec; latency avg 0.59 ms, p99 9.00 ms |
+| 100K × 10 KiB | avg 55.76K msg/sec; median 55.67K; min-max 55.12K-56.33K; 544.49 MiB/sec; dispatch latency avg 1.39 ms, p99 4.46 ms | avg 31.17K records/sec; median 29.21K; min-max 25.52K-40.27K; 304.39 MB/sec; latency avg 63.31 ms, p99 146.40 ms |
 
-Shared real-Kafka comparison settings: 5 runs, in-flight `5`, `acks=1`,
+Shared relaxed comparison settings: 5 runs, in-flight `5`, `acks=1`,
 idempotence disabled, no compression, 3 partitions, RF=1. The kacrab
-100K × 10 KiB run used the default `KACRAB_BATCH_MESSAGES_10KIB=96`.
-Kacrab latency is
+100K × 10 KiB run used `KACRAB_BATCH_MESSAGES_10KIB=96`, which is the
+benchmark harness outer API chunk size, not Kafka producer `batch.size`.
+Each kacrab scenario warms up one outer API chunk before the measured window.
+Kacrab latency in the table is explicitly
 dispatch latency for the untracked throughput path: earliest append timestamp
 in a ProduceRequest group to broker response handling, without per-record
-delivery handles.
+delivery handles. That is not the same latency metric as Java's perf tool:
+kacrab's sample spans client-side batch grouping, Tokio dispatch scheduling,
+wire write/read, and response handling for each ProduceRequest group, while
+Java reports its own producer-perf latency accounting. Latency sampling is
+opt-in in the Rust benchmark with `KACRAB_ENABLE_LATENCY=1`. The saved relaxed
+result has
+higher average dispatch latency than Java but higher throughput, which points
+at larger effective batch grouping and runtime scheduling overhead rather than
+broker-side append latency alone. Producer accounting metrics are opt-in with
+`KACRAB_ENABLE_METRICS=1`; the default throughput benchmark keeps them disabled
+to measure the baseline hot path. Current tracked mode ports Kafka Java
+`ProducerPerformance.Stats` callback-completion accounting and total-line
+format; the saved table above predates that tracked measurement.
+
+The producer benchmark now uses the Java-style public path: one
+`send_with_callback` call per record, with batching handled internally before
+Produce requests are dispatched. Callback latency is measured from immediately
+before send to callback completion, matching Kafka Java producer-perf tracking
+semantics.
 
 Internal hot-path checks:
 

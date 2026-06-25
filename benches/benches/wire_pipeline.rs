@@ -36,7 +36,7 @@ fn bench_wire_pipeline(c: &mut Criterion) {
         .expect("benchmark runtime");
     let mut group = c.benchmark_group("wire_pipeline");
     let _group = group.throughput(Throughput::Elements(REQUESTS));
-    let _group = group.sample_size(10);
+    let _group = group.measurement_time(Duration::from_secs(15));
     let _group = group.bench_function("api_versions_send_to_broker", |b| {
         b.to_async(&runtime).iter_custom(|iters| async move {
             let started = std::time::Instant::now();

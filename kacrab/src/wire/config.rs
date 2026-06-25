@@ -18,6 +18,17 @@ pub const DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX: Duration = Duration::from
 /// Kafka default `metadata.max.age.ms`: force a refresh every five minutes to
 /// discover broker/partition changes even without leadership errors.
 pub const DEFAULT_METADATA_MAX_AGE: Duration = Duration::from_mins(5);
+/// Kafka default `metadata.max.idle.ms`: forget idle topic metadata after five minutes.
+pub const DEFAULT_METADATA_MAX_IDLE: Duration = Duration::from_mins(5);
+/// Kafka default `metadata.recovery.rebootstrap.trigger.ms`.
+pub const DEFAULT_METADATA_REBOOTSTRAP_TRIGGER: Duration = Duration::from_mins(5);
+/// Kafka default `retry.backoff.ms`, reused by metadata refresh scheduling.
+pub const DEFAULT_METADATA_REFRESH_BACKOFF_INITIAL: Duration = Duration::from_millis(100);
+/// Kafka default `retry.backoff.max.ms`, capping metadata refresh retry backoff.
+pub const DEFAULT_METADATA_REFRESH_BACKOFF_MAX: Duration = Duration::from_secs(1);
+/// Kafka default `connections.max.idle.ms`: close idle broker sockets after
+/// nine minutes while keeping the broker task alive for future reconnects.
+pub(super) const DEFAULT_CONNECTIONS_MAX_IDLE: Duration = Duration::from_mins(9);
 /// Kafka producer default `max.in.flight.requests.per.connection`; it preserves
 /// idempotent ordering guarantees while allowing useful pipelining.
 pub const DEFAULT_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION: usize = 5;
@@ -40,6 +51,15 @@ pub const DEFAULT_TCP_NODELAY: bool = true;
 /// `SO_REUSEADDR` is enabled for client sockets so reconnects do not get delayed
 /// by local address reuse behavior across platforms.
 pub const DEFAULT_REUSE_ADDRESS: bool = true;
+
+/// Metadata recovery policy when known brokers no longer provide usable metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataRecoveryStrategy {
+    /// Reset known endpoints to the configured bootstrap set after the trigger window.
+    Rebootstrap,
+    /// Do not reset to bootstrap endpoints; return the metadata failure to callers.
+    None,
+}
 
 /// Wire connection configuration for one broker session.
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +84,18 @@ pub struct ConnectionConfig {
     pub read_buffer_capacity: Option<usize>,
     /// Maximum age for cached cluster metadata before refresh.
     pub metadata_max_age: Duration,
+    /// Maximum idle time before cached topic metadata is forgotten.
+    pub metadata_max_idle: Duration,
+    /// Recovery strategy used when no known broker can provide usable metadata.
+    pub metadata_recovery_strategy: MetadataRecoveryStrategy,
+    /// Time without usable metadata before bootstrap endpoints may be retried.
+    pub metadata_rebootstrap_trigger: Duration,
+    /// Initial delay before retrying failed metadata refreshes.
+    pub metadata_refresh_backoff_initial: Duration,
+    /// Maximum delay before retrying failed metadata refreshes.
+    pub metadata_refresh_backoff_max: Duration,
+    /// Maximum idle time before a broker socket is closed.
+    pub connections_max_idle: Duration,
     /// Maximum in-flight requests allowed on one broker connection.
     pub max_in_flight_requests_per_connection: usize,
     /// Bounded pending command queue capacity for one broker task.
@@ -89,6 +121,12 @@ impl Default for ConnectionConfig {
             socket_connection_setup_timeout_max: DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX,
             read_buffer_capacity: None,
             metadata_max_age: DEFAULT_METADATA_MAX_AGE,
+            metadata_max_idle: DEFAULT_METADATA_MAX_IDLE,
+            metadata_recovery_strategy: MetadataRecoveryStrategy::Rebootstrap,
+            metadata_rebootstrap_trigger: DEFAULT_METADATA_REBOOTSTRAP_TRIGGER,
+            metadata_refresh_backoff_initial: DEFAULT_METADATA_REFRESH_BACKOFF_INITIAL,
+            metadata_refresh_backoff_max: DEFAULT_METADATA_REFRESH_BACKOFF_MAX,
+            connections_max_idle: DEFAULT_CONNECTIONS_MAX_IDLE,
             max_in_flight_requests_per_connection: DEFAULT_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
             broker_queue_capacity: DEFAULT_BROKER_QUEUE_CAPACITY,
             reconnect_backoff_initial: DEFAULT_RECONNECT_BACKOFF_INITIAL,
@@ -174,6 +212,48 @@ impl ConnectionConfig {
     #[must_use]
     pub const fn metadata_max_age(mut self, timeout: Duration) -> Self {
         self.metadata_max_age = timeout;
+        self
+    }
+
+    /// Set the maximum idle time before cached topic metadata is forgotten.
+    #[must_use]
+    pub const fn metadata_max_idle(mut self, timeout: Duration) -> Self {
+        self.metadata_max_idle = timeout;
+        self
+    }
+
+    /// Set the metadata recovery strategy.
+    #[must_use]
+    pub const fn metadata_recovery_strategy(mut self, strategy: MetadataRecoveryStrategy) -> Self {
+        self.metadata_recovery_strategy = strategy;
+        self
+    }
+
+    /// Set the time without usable metadata before rebootstrap may trigger.
+    #[must_use]
+    pub const fn metadata_rebootstrap_trigger(mut self, timeout: Duration) -> Self {
+        self.metadata_rebootstrap_trigger = timeout;
+        self
+    }
+
+    /// Set the initial metadata refresh retry delay.
+    #[must_use]
+    pub const fn metadata_refresh_backoff_initial(mut self, timeout: Duration) -> Self {
+        self.metadata_refresh_backoff_initial = timeout;
+        self
+    }
+
+    /// Set the maximum metadata refresh retry delay.
+    #[must_use]
+    pub const fn metadata_refresh_backoff_max(mut self, timeout: Duration) -> Self {
+        self.metadata_refresh_backoff_max = timeout;
+        self
+    }
+
+    /// Set the maximum idle time before a broker socket is closed.
+    #[must_use]
+    pub const fn connections_max_idle(mut self, timeout: Duration) -> Self {
+        self.connections_max_idle = timeout;
         self
     }
 
@@ -366,9 +446,9 @@ mod default_tests {
 
     use super::{
         ConnectionConfig, DEFAULT_BROKER_QUEUE_CAPACITY, DEFAULT_BUFFER_POOL_CAPACITY,
-        DEFAULT_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, DEFAULT_METADATA_MAX_AGE,
-        DEFAULT_RECONNECT_BACKOFF_INITIAL, DEFAULT_RECONNECT_BACKOFF_MAX, DEFAULT_REQUEST_TIMEOUT,
-        DEFAULT_REUSE_ADDRESS, DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT,
+        DEFAULT_CONNECTIONS_MAX_IDLE, DEFAULT_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
+        DEFAULT_METADATA_MAX_AGE, DEFAULT_RECONNECT_BACKOFF_INITIAL, DEFAULT_RECONNECT_BACKOFF_MAX,
+        DEFAULT_REQUEST_TIMEOUT, DEFAULT_REUSE_ADDRESS, DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT,
         DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX, DEFAULT_TCP_NODELAY, SocketConfig,
         TcpKeepaliveConfig,
     };
@@ -387,6 +467,7 @@ mod default_tests {
             DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX
         );
         assert_eq!(config.metadata_max_age, DEFAULT_METADATA_MAX_AGE);
+        assert_eq!(config.connections_max_idle, DEFAULT_CONNECTIONS_MAX_IDLE);
         assert_eq!(
             config.max_in_flight_requests_per_connection,
             DEFAULT_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION
@@ -410,6 +491,7 @@ mod default_tests {
             .socket_connection_setup_timeout_max(Duration::from_millis(3))
             .read_buffer_capacity(4)
             .metadata_max_age(Duration::from_millis(5))
+            .connections_max_idle(Duration::from_millis(9))
             .max_in_flight_requests_per_connection(0)
             .broker_queue_capacity(0)
             .reconnect_backoff_initial(Duration::from_millis(6))
@@ -428,6 +510,7 @@ mod default_tests {
         );
         assert_eq!(config.read_buffer_capacity, Some(4));
         assert_eq!(config.metadata_max_age, Duration::from_millis(5));
+        assert_eq!(config.connections_max_idle, Duration::from_millis(9));
         assert_eq!(config.max_in_flight_requests_per_connection, 1);
         assert_eq!(config.broker_queue_capacity, 1);
         assert_eq!(config.reconnect_backoff_initial, Duration::from_millis(6));
@@ -524,6 +607,7 @@ mod tests {
             .request_timeout(Duration::from_secs(7))
             .socket_connection_setup_timeout(Duration::from_secs(3))
             .socket_connection_setup_timeout_max(Duration::from_secs(11))
+            .connections_max_idle(Duration::from_secs(13))
             .read_buffer_capacity(256 * 1024);
 
         assert_eq!(config.socket.send_buffer_bytes, Some(65_536));
@@ -537,6 +621,7 @@ mod tests {
             config.socket_connection_setup_timeout_max,
             Duration::from_secs(11)
         );
+        assert_eq!(config.connections_max_idle, Duration::from_secs(13));
         assert_eq!(config.read_buffer_capacity, Some(256 * 1024));
         assert_eq!(config.metadata_max_age, Duration::from_mins(5));
         assert_eq!(config.max_in_flight_requests_per_connection, 5);

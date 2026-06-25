@@ -75,8 +75,18 @@ impl RequestPipeline {
         Ok(correlation_id)
     }
 
+    pub(crate) const fn next_correlation_id(&mut self) -> i32 {
+        let correlation_id = self.next_correlation_id;
+        self.next_correlation_id = self.next_correlation_id.wrapping_add(1);
+        correlation_id
+    }
+
     pub(crate) const fn has_capacity(&self) -> bool {
         self.len < self.slots.len()
+    }
+
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     pub(crate) fn complete_response(&mut self, bytes: Bytes) {
@@ -85,13 +95,14 @@ impl RequestPipeline {
             return;
         }
 
-        let head = self.head;
-        let Some(in_flight) = self.slots.get_mut(head).and_then(Option::take) else {
+        let response_correlation_id = response_correlation_id(&bytes);
+        let index = response_correlation_id
+            .and_then(|correlation_id| self.slot_index_for_correlation(correlation_id))
+            .unwrap_or(self.head);
+        let Some(in_flight) = self.slots.get_mut(index).and_then(Option::take) else {
             self.trim_empty_head();
             return;
         };
-        self.head = self.next_index(self.head);
-        self.len = self.len.saturating_sub(1);
 
         let response = match frame::decode_response_envelope(
             in_flight.api_key,
@@ -111,6 +122,7 @@ impl RequestPipeline {
             Err(error) => Err(WireError::from(error)),
         };
         let _ignored = in_flight.tx.send(response);
+        self.trim_empty_head();
     }
 
     pub(crate) fn fail_correlation(&mut self, correlation_id: i32, error: WireError) {
@@ -171,10 +183,28 @@ impl RequestPipeline {
         index
     }
 
+    fn slot_index_for_correlation(&self, correlation_id: i32) -> Option<usize> {
+        for offset in 0..self.len {
+            let index = self.slot_index(offset);
+            let Some(in_flight) = self.slots.get(index).and_then(Option::as_ref) else {
+                continue;
+            };
+            if in_flight.correlation_id == correlation_id {
+                return Some(index);
+            }
+        }
+        None
+    }
+
     fn next_index(&self, index: usize) -> usize {
         let next = index.checked_add(1).unwrap_or_default();
         if next == self.slots.len() { 0 } else { next }
     }
+}
+
+fn response_correlation_id(bytes: &Bytes) -> Option<i32> {
+    let raw = bytes.get(..4)?;
+    Some(i32::from_be_bytes(raw.try_into().ok()?))
 }
 
 #[cfg(test)]
@@ -249,6 +279,30 @@ mod tests {
         let response = rx.await.expect("sender").expect("response");
 
         assert_eq!(response.api_version, 3);
+        assert!(pipeline.is_empty());
+        assert!(pipeline.has_capacity());
+    }
+
+    #[tokio::test]
+    async fn pipeline_completes_out_of_order_responses_by_correlation_id() {
+        let mut pipeline = RequestPipeline::new(2, Duration::from_secs(1));
+        let (first_tx, first_rx) = channel();
+        let (second_tx, second_rx) = channel();
+        let first = pipeline
+            .reserve(ApiKey::ApiVersions, 3, first_tx)
+            .expect("first reserve");
+        let second = pipeline
+            .reserve(ApiKey::Metadata, 12, second_tx)
+            .expect("second reserve");
+
+        pipeline.complete_response(response_frame(ApiKey::Metadata, 12, second));
+        let second_response = second_rx.await.expect("second sender").expect("second");
+        assert_eq!(second_response.api_version, 12);
+
+        pipeline.complete_response(response_frame(ApiKey::ApiVersions, 3, first));
+        let first_response = first_rx.await.expect("first sender").expect("first");
+        assert_eq!(first_response.api_version, 3);
+        assert!(pipeline.is_empty());
         assert!(pipeline.has_capacity());
     }
 

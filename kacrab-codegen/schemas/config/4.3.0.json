@@ -1318,6 +1318,30 @@
           "importance": "LOW",
           "documentation": "Initial reusable in-process read buffer capacity for broker frame reads.",
           "feature": "socket2"
+        },
+        {
+          "origin": "kacrab_runtime",
+          "key": "broker.queue.capacity",
+          "java_constant": "BROKER_QUEUE_CAPACITY",
+          "rust_field": "broker_queue_capacity",
+          "java_type": "int",
+          "default": {
+            "kind": "null"
+          },
+          "importance": "LOW",
+          "documentation": "Bounded pending command queue capacity for each broker IO task."
+        },
+        {
+          "origin": "kacrab_runtime",
+          "key": "buffer.pool.capacity",
+          "java_constant": "BUFFER_POOL_CAPACITY",
+          "rust_field": "buffer_pool_capacity",
+          "java_type": "int",
+          "default": {
+            "kind": "null"
+          },
+          "importance": "LOW",
+          "documentation": "Number of reusable wire read/write buffers retained per client."
         }
       ]
     },

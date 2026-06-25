@@ -27,3 +27,6 @@ Thumbs.db
 *.profdata
 tarpaulin-report.html
 cobertura.xml
+
+# Local upstream source checkouts for reference/debugging
+/upstream/

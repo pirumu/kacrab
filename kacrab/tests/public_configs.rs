@@ -7,7 +7,10 @@
 )]
 
 #[cfg(feature = "producer")]
-use kacrab::producer::{ProducerCompression, ProducerIdempotenceConfig, ProducerRuntimeConfig};
+use kacrab::producer::{
+    ProducerCompression,
+    internals::{AccumulatorConfig, ProducerIdempotenceConfig, ProducerRuntimeConfig},
+};
 use kacrab::{
     config::{
         AdminConfig, ByteSize, ClientConfig, ClientKind, ConfigError, ConfigStatus, ConsumerConfig,
@@ -89,6 +92,8 @@ fn producer_config_maps_delivery_batching_and_compression_to_runtime_config() {
         .linger_ms(DurationMs::from_millis(12))
         .delivery_timeout_ms(DurationMs::from_millis(45_000))
         .request_timeout_ms(DurationMs::from_millis(9_000))
+        .partitioner_adaptive_partitioning_enable(false)
+        .partitioner_availability_timeout_ms(DurationMs::from_millis(42))
         .max_in_flight_requests_per_connection(3)
         .enable_idempotence(false)
         .build()
@@ -101,7 +106,7 @@ fn producer_config_maps_delivery_batching_and_compression_to_runtime_config() {
     assert_eq!(
         runtime,
         ProducerRuntimeConfig {
-            accumulator: kacrab::producer::AccumulatorConfig {
+            accumulator: AccumulatorConfig {
                 batch_size: 65_536,
                 linger: core::time::Duration::from_millis(12),
                 buffer_memory: 8_388_608,
@@ -109,14 +114,20 @@ fn producer_config_maps_delivery_batching_and_compression_to_runtime_config() {
             acks: -1,
             timeout_ms: 9_000,
             retry_attempts: 7,
+            retry_backoff: core::time::Duration::from_millis(100),
+            retry_backoff_max: core::time::Duration::from_secs(1),
             delivery_timeout: core::time::Duration::from_secs(45),
             max_block: core::time::Duration::from_mins(1),
             max_in_flight_requests_per_connection: 3,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
             compression: ProducerCompression {
                 codec: Compression::Lz4,
                 level: Some(11),
             },
             partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: false,
+            partitioner_availability_timeout: core::time::Duration::from_millis(42),
             idempotence: ProducerIdempotenceConfig {
                 enabled: false,
                 transactional_id: None,

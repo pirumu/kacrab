@@ -168,6 +168,66 @@ async fn wire_client_uses_negotiated_broker_api_version_for_request_encoding() {
 }
 
 #[tokio::test]
+async fn wire_client_send_without_response_completes_after_write() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let join = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut handshake = read_frame(&mut socket).await;
+        let header = RequestHeaderData::read(&mut handshake, 2).expect("request header");
+        let response = ApiVersionsResponseData {
+            error_code: 0,
+            api_keys: vec![
+                ApiVersion {
+                    api_key: ApiKey::ApiVersions as i16,
+                    min_version: 0,
+                    max_version: 4,
+                    _unknown_tagged_fields: Vec::new(),
+                },
+                ApiVersion {
+                    api_key: ApiKey::Produce as i16,
+                    min_version: 0,
+                    max_version: 8,
+                    _unknown_tagged_fields: Vec::new(),
+                },
+            ],
+            ..ApiVersionsResponseData::default()
+        };
+        let frame = response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response);
+        socket.write_all(&frame).await.unwrap();
+
+        let mut request = read_frame(&mut socket).await;
+        let header_version = request_header_version(ApiKey::Produce as i16, 8);
+        let header =
+            RequestHeaderData::read(&mut request, header_version).expect("produce request header");
+        assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+        assert_eq!(header.request_api_version, 8);
+        let body = ProduceRequestData::read(&mut request, 8).expect("produce request body");
+        assert_eq!(body.acks, 0);
+        2
+    });
+    let client = WireClient::connect_with_brokers(
+        ConnectionConfig::default().request_timeout(std::time::Duration::from_millis(200)),
+        "kacrab-test",
+        [BrokerEndpoint::new(7, addr)],
+    );
+    let request = ProduceRequestData {
+        acks: 0,
+        ..ProduceRequestData::default()
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        client.send_to_broker_without_response(7, ApiKey::Produce, 8, &request),
+    )
+    .await
+    .expect("no-response request should not wait for a broker response");
+
+    assert!(result.is_ok());
+    assert_eq!(join.await.unwrap(), 2);
+}
+
+#[tokio::test]
 async fn wire_client_rejects_request_when_in_flight_limit_is_full() {
     let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
     let server = MockBroker::serve_blocking_after_handshake(request_seen_tx).await;

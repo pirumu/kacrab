@@ -4,7 +4,7 @@ Runnable examples for the public `kacrab` API. **Not published.**
 
 ## Scope
 
-- `producer` - public `KafkaProducer` usage, batching, idempotence,
+- `producer` - public `Producer` usage, batching, idempotence,
   transactions, and auth configuration examples.
 - `config` - Java-style config facade and typed config conversion examples.
 

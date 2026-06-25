@@ -110,8 +110,26 @@ impl ClientConfig {
     /// Returns a producer error when config validation, bootstrap resolution, or
     /// producer setup fails.
     #[cfg(feature = "producer")]
-    pub async fn create_producer(&self) -> crate::producer::Result<crate::producer::KafkaProducer> {
-        crate::producer::KafkaProducer::from_client_config(self).await
+    pub async fn create_producer(&self) -> crate::producer::Result<crate::producer::Producer> {
+        crate::producer::Producer::from_client_config(self).await
+    }
+}
+
+impl From<Properties> for ClientConfig {
+    fn from(properties: Properties) -> Self {
+        Self { properties }
+    }
+}
+
+impl<K, V> FromIterator<(K, V)> for ClientConfig
+where
+    K: Into<ConfigKey>,
+    V: Into<ConfigValue>,
+{
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+        Self {
+            properties: Properties::from_iter(iter),
+        }
     }
 }
 

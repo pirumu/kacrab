@@ -11,7 +11,10 @@
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use kacrab::producer::{AccumulatorConfig, ProducerError, ProducerRecord, RecordAccumulator};
+use kacrab::producer::{
+    ProducerError, ProducerRecord,
+    internals::{AccumulatorConfig, RecordAccumulator},
+};
 
 #[test]
 fn accumulator_drains_batch_size_ready_records_by_topic_partition() {
@@ -113,7 +116,7 @@ fn accumulator_batch_size_uses_encoded_batch_bytes_not_buffer_memory_overhead() 
             .unwrap();
     }
 
-    assert!(accumulator.buffered_bytes() > 128);
+    assert_eq!(accumulator.buffered_bytes(), 128);
     assert!(accumulator.drain_ready(now).is_empty());
 
     for _ in 0..6 {

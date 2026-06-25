@@ -11,7 +11,10 @@ use bytes::Bytes;
 use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
-use kacrab::producer::{AccumulatorConfig, ProducerRecord, RecordAccumulator};
+use kacrab::producer::{
+    ProducerRecord,
+    internals::{AccumulatorConfig, RecordAccumulator},
+};
 
 fn bench_accumulator_append_and_drain(c: &mut Criterion) {
     let mut group = c.benchmark_group("producer_accumulator");
@@ -39,7 +42,7 @@ fn bench_accumulator_append_and_drain(c: &mut Criterion) {
                             .drain_ready(now.checked_add(Duration::from_millis(6)).unwrap_or(now));
                         let _ready = black_box(ready);
                     },
-                    BatchSize::SmallInput,
+                    BatchSize::LargeInput,
                 );
             },
         );

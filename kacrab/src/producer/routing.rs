@@ -14,6 +14,9 @@ pub(crate) struct ProduceRoute {
     pub(crate) partition: i32,
     pub(crate) topic_id: KafkaUuid,
     pub(crate) leader_id: i32,
+    pub(crate) base_sequence: Option<i32>,
+    pub(crate) request_offset_delta: i64,
+    pub(crate) record_count: usize,
 }
 
 pub(crate) fn route(metadata: &ClusterMetadata, record: &ProducerRecord) -> Result<ProduceRoute> {
@@ -43,6 +46,9 @@ pub(crate) fn route(metadata: &ClusterMetadata, record: &ProducerRecord) -> Resu
         partition: record.partition,
         topic_id: topic_metadata.topic_id,
         leader_id: partition_metadata.leader_id,
+        base_sequence: None,
+        request_offset_delta: 0,
+        record_count: 0,
     })
 }
 

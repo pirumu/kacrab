@@ -15,7 +15,7 @@
 
 use std::{env, error::Error};
 
-use kacrab::producer::{Delivery, KafkaProducer, ProduceReceipt, ProducerRecord};
+use kacrab::producer::{Producer, ProducerRecord, RecordMetadata, SendFuture};
 
 const CLIENT_ID: &str = "kacrab-example-producer";
 const ACKS: &str = "all";
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let deliveries = match write_records(&mut producer, &args).await {
         Ok(deliveries) => deliveries,
         Err(error) => {
-            abort_transaction_if_open(&producer).await;
+            abort_transaction_if_open(&mut producer).await;
             return Err(error);
         },
     };
@@ -65,8 +65,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn build_producer(bootstrap: &str) -> Result<KafkaProducer, Box<dyn Error>> {
-    let mut builder = KafkaProducer::builder()
+async fn build_producer(bootstrap: &str) -> Result<Producer, Box<dyn Error>> {
+    let mut builder = Producer::builder()
         .set("bootstrap.servers", bootstrap)
         .set("client.id", CLIENT_ID)
         .set("acks", ACKS)
@@ -94,29 +94,42 @@ async fn build_producer(bootstrap: &str) -> Result<KafkaProducer, Box<dyn Error>
 }
 
 async fn write_records(
-    producer: &mut KafkaProducer,
+    producer: &mut Producer,
     args: &ExampleArgs,
-) -> Result<Vec<Delivery>, Box<dyn Error>> {
-    let mut deliveries = Vec::with_capacity(args.messages.saturating_add(1));
+) -> Result<Vec<SendFuture>, Box<dyn Error>> {
+    let mut deliveries = Vec::with_capacity(args.messages.saturating_add(2));
 
     let first = producer
         .send(record(&args.topic, args.partition, 0, "single-send"))
         .await?;
     deliveries.push(first);
 
-    let tracked_records = (1..=args.messages)
-        .map(|sequence| record(&args.topic, args.partition, sequence, "tracked-send-batch"));
-    deliveries.extend(producer.send_batch(tracked_records).await?);
-
-    let untracked_records = (0..2).map(|sequence| {
-        record(
-            &args.topic,
-            args.partition,
-            sequence,
-            "untracked-send-batch",
+    let callback_sequence = args.messages.saturating_add(1);
+    let callback_delivery = producer
+        .send_with_callback(
+            record(
+                &args.topic,
+                args.partition,
+                callback_sequence,
+                "callback-send",
+            ),
+            |_result| {},
         )
-    });
-    producer.send_batch_untracked(untracked_records).await?;
+        .await?;
+    deliveries.push(callback_delivery);
+
+    for sequence in 1..=args.messages {
+        let delivery = producer
+            .send(record(
+                &args.topic,
+                args.partition,
+                sequence,
+                "tracked-send",
+            ))
+            .await?;
+        deliveries.push(delivery);
+    }
+    producer.flush().await?;
 
     Ok(deliveries)
 }
@@ -127,7 +140,7 @@ fn record(topic: &str, partition: i32, sequence: usize, prefix: &str) -> Produce
         .value(format!("{prefix}-{sequence}"))
 }
 
-async fn abort_transaction_if_open(producer: &KafkaProducer) {
+async fn abort_transaction_if_open(producer: &mut Producer) {
     if TRANSACTIONAL_ID.is_none() {
         return;
     }
@@ -136,14 +149,10 @@ async fn abort_transaction_if_open(producer: &KafkaProducer) {
     }
 }
 
-fn print_receipt(receipt: &ProduceReceipt) {
+fn print_receipt(receipt: &RecordMetadata) {
     println!(
         "topic={} partition={} leader={} offset={} log_append_time_ms={}",
-        receipt.topic,
-        receipt.partition,
-        receipt.leader_id,
-        receipt.base_offset,
-        receipt.log_append_time_ms
+        receipt.topic, receipt.partition, receipt.leader_id, receipt.offset, receipt.timestamp_ms
     );
 }
 
