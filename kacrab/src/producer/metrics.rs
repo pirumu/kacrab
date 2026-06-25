@@ -693,19 +693,29 @@ impl ProducerMetrics {
     }
 
     pub(crate) fn record_retry(&self) {
+        self.record_retry_for_topic(None);
+    }
+
+    /// Record a record-send retry, attributing it to `topic` for per-topic metrics.
+    pub(crate) fn record_retry_for_topic(&self, topic: Option<&str>) {
         let _previous = self
             .inner
             .produce_retry_count
             .fetch_add(1, Ordering::Relaxed);
-        self.inner.sender_registry.record_retry(None);
+        self.inner.sender_registry.record_retry(topic);
     }
 
     pub(crate) fn record_error(&self) {
+        self.record_error_for_topic(None);
+    }
+
+    /// Record a record-send error, attributing it to `topic` for per-topic metrics.
+    pub(crate) fn record_error_for_topic(&self, topic: Option<&str>) {
         let _previous = self
             .inner
             .produce_error_count
             .fetch_add(1, Ordering::Relaxed);
-        self.inner.sender_registry.record_error(None);
+        self.inner.sender_registry.record_error(topic);
     }
 
     /// Snapshot the Java-named (Kafka `SenderMetricsRegistry`) producer metrics.
@@ -746,6 +756,13 @@ impl ProducerMetrics {
     /// Update the in-flight request gauge (Kafka requests-in-flight).
     pub(crate) fn set_requests_in_flight(&self, in_flight: usize) {
         self.inner.sender_registry.set_requests_in_flight(in_flight);
+    }
+
+    /// Update the metadata-age gauge in seconds (Kafka metadata-age).
+    pub(crate) fn set_metadata_age(&self, age: Duration) {
+        self.inner
+            .sender_registry
+            .set_metadata_age(age.as_secs_f64());
     }
 
     pub(crate) fn record_requeue(&self) {

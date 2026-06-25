@@ -60,6 +60,7 @@ struct ClientSensors {
     produce_throttle_time: SensorId,
     record_queue_time: SensorId,
     requests_in_flight: SensorId,
+    metadata_age: SensorId,
 }
 
 /// Per-topic (`producer-topic-metrics`) sensor handles.
@@ -190,6 +191,12 @@ impl ClientSensors {
             "requests-in-flight",
             "The current number of in-flight requests awaiting a response.",
         );
+        let metadata_age = value_only(
+            metrics,
+            "metadata-age",
+            "metadata-age",
+            "The age in seconds of the current producer metadata being used.",
+        );
         Self {
             records_sent,
             record_errors,
@@ -204,6 +211,7 @@ impl ClientSensors {
             produce_throttle_time,
             record_queue_time,
             requests_in_flight,
+            metadata_age,
         }
     }
 }
@@ -341,6 +349,11 @@ impl SenderMetricsRegistry {
     /// Update the current in-flight request gauge.
     pub(crate) fn set_requests_in_flight(&self, in_flight: usize) {
         self.record(|client| client.requests_in_flight, in_flight as f64);
+    }
+
+    /// Update the metadata-age gauge in seconds.
+    pub(crate) fn set_metadata_age(&self, age_seconds: f64) {
+        self.record(|client| client.metadata_age, age_seconds);
     }
 
     /// Record a record-send error for the client and (optionally) a topic.
@@ -508,7 +521,7 @@ mod tests {
         registry.record_batch("orders", 3, 300, 0.5);
         registry.record_batch("orders", 2, 200, 0.5);
         registry.record_error(Some("orders"));
-        registry.record_retry(None);
+        registry.record_retry(Some("orders"));
         registry.record_split();
 
         let metrics = registry.kafka_metrics();
@@ -546,6 +559,10 @@ mod tests {
             metrics.get("producer-topic-metrics:record-error-total:topic=orders"),
             Some(&1.0)
         );
+        assert_eq!(
+            metrics.get("producer-topic-metrics:record-retry-total:topic=orders"),
+            Some(&1.0)
+        );
 
         // Rate/avg/gauge sensors are registered under their Kafka names.
         for name in [
@@ -555,6 +572,7 @@ mod tests {
             "producer-metrics:request-latency-avg",
             "producer-metrics:batch-size-avg",
             "producer-metrics:requests-in-flight",
+            "producer-metrics:metadata-age",
         ] {
             assert!(metrics.contains_key(name), "missing metric {name}");
         }

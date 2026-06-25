@@ -777,10 +777,13 @@ impl Producer {
     /// `producer-topic-metrics:record-send-total:topic=orders`).
     #[must_use]
     pub fn kafka_metrics(&self) -> BTreeMap<String, f64> {
-        // Refresh point-in-time gauges from the current sender queue snapshot.
+        // Refresh point-in-time gauges from the current sender queue + metadata.
         if let Ok(sender) = self.sender.try_lock() {
             self.metrics
                 .set_requests_in_flight(sender.queue_snapshot().in_flight_dispatches);
+        }
+        if let Some(age) = self.control_dispatcher.metadata_age() {
+            self.metrics.set_metadata_age(age);
         }
         self.metrics.kafka_metrics()
     }
@@ -4102,6 +4105,7 @@ mod tests {
             "producer-metrics:produce-throttle-time-avg",
             "producer-metrics:record-queue-time-avg",
             "producer-metrics:requests-in-flight",
+            "producer-metrics:metadata-age",
         ] {
             assert!(metrics.contains_key(name), "missing kafka metric {name}");
         }

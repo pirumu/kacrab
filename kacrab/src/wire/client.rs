@@ -103,6 +103,17 @@ impl WireClient {
         self.handle_for(broker_id).ok()?.negotiated_version(api_key)
     }
 
+    /// Age of the currently cached cluster metadata (Kafka `metadata-age`), or
+    /// `None` when no metadata has been fetched yet.
+    #[cfg(feature = "producer")]
+    pub(crate) fn metadata_age(&self) -> Option<std::time::Duration> {
+        self.inner
+            .metadata
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .current_age(Instant::now())
+    }
+
     /// Return wire buffer pool diagnostic counters.
     #[must_use]
     pub fn buffer_pool_stats(&self) -> BufferPoolStats {

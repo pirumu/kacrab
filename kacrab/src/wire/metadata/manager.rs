@@ -112,6 +112,14 @@ impl MetadataManager {
         Ok(())
     }
 
+    /// Age of the currently cached metadata snapshot, or `None` when no
+    /// metadata has been stored yet. Mirrors Kafka's `metadata-age` metric.
+    pub(crate) fn current_age(&self, now: Instant) -> Option<Duration> {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| now.saturating_duration_since(snapshot.updated_at))
+    }
+
     pub(crate) fn cached_for<I, S>(&self, topics: I, now: Instant) -> Option<Arc<ClusterMetadata>>
     where
         I: IntoIterator<Item = S>,
