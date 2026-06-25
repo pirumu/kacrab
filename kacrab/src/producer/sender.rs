@@ -66,22 +66,23 @@ pub(crate) struct ProducerSenderRuntime {
 
 #[derive(Debug, Default)]
 pub(crate) struct ProducerSenderLoop {
-    handle: Option<AbortHandle>,
+    // Interior mutability so the send hot path can ensure the loop is running
+    // through `&self`, which lets `Producer::send` take `&self` and be called
+    // concurrently from multiple tasks (Java-style thread-safe producer).
+    started: AtomicBool,
+    handle: std::sync::Mutex<Option<AbortHandle>>,
 }
 
 impl ProducerSenderLoop {
-    const fn inactive() -> Self {
-        Self { handle: None }
-    }
-
-    const fn from_handle(handle: AbortHandle) -> Self {
+    const fn store_handle(handle: AbortHandle) -> Self {
         Self {
-            handle: Some(handle),
+            started: AtomicBool::new(true),
+            handle: std::sync::Mutex::new(Some(handle)),
         }
     }
 
-    pub(crate) const fn is_running(&self) -> bool {
-        self.handle.is_some()
+    pub(crate) fn is_running(&self) -> bool {
+        self.started.load(Ordering::Acquire)
     }
 
     pub(crate) fn spawn(
@@ -91,7 +92,7 @@ impl ProducerSenderLoop {
         accumulator_batch_size: usize,
     ) -> Self {
         let Ok(handle) = Handle::try_current() else {
-            return Self::inactive();
+            return Self::default();
         };
         let task = handle.spawn(ProducerSender::background_loop(
             sender,
@@ -99,26 +100,55 @@ impl ProducerSenderLoop {
             metrics,
             accumulator_batch_size,
         ));
-        Self::from_handle(task.abort_handle())
+        Self::store_handle(task.abort_handle())
     }
 
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the started flag is published while the handle lock is held so a concurrent \
+                  ensure_running cannot observe started=false and double-spawn the loop"
+    )]
     pub(crate) fn ensure_running(
-        &mut self,
+        &self,
         sender: Arc<AsyncMutex<ProducerSender>>,
         metrics_enabled: Arc<AtomicBool>,
         metrics: ProducerMetrics,
         accumulator_batch_size: usize,
     ) {
-        if self.is_running() {
+        if self.started.load(Ordering::Acquire) {
             return;
         }
-        *self = Self::spawn(sender, metrics_enabled, metrics, accumulator_batch_size);
+        let mut guard = self
+            .handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Double-check under the lock so only one task spawns the loop.
+        if self.started.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(handle) = Handle::try_current() else {
+            return;
+        };
+        let task = handle.spawn(ProducerSender::background_loop(
+            sender,
+            metrics_enabled,
+            metrics,
+            accumulator_batch_size,
+        ));
+        *guard = Some(task.abort_handle());
+        self.started.store(true, Ordering::Release);
     }
 
-    fn abort_inner(&mut self) {
-        if let Some(handle) = self.handle.take() {
+    fn abort_inner(&self) {
+        let handle = self
+            .handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(handle) = handle {
             handle.abort();
         }
+        self.started.store(false, Ordering::Release);
     }
 }
 
@@ -234,7 +264,7 @@ impl ProducerSenderRuntime {
         self.loop_metrics_enabled.store(true, Ordering::Relaxed);
     }
 
-    pub(crate) fn ensure_loop_running(&mut self) {
+    pub(crate) fn ensure_loop_running(&self) {
         // Fast path: avoid cloning the sender Arc, metrics-enabled Arc, and the
         // metrics handle on every send once the background loop is already up.
         if self.loop_handle.is_running() {
@@ -249,7 +279,7 @@ impl ProducerSenderRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) const fn loop_is_running(&self) -> bool {
+    pub(crate) fn loop_is_running(&self) -> bool {
         self.loop_handle.is_running()
     }
 }

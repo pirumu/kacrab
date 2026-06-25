@@ -63,7 +63,7 @@ pub struct Producer {
     partitioner_ignore_keys: bool,
     metrics: ProducerMetrics,
     metrics_enabled: bool,
-    dispatch_latency_samples: Option<Vec<std::time::Duration>>,
+    dispatch_latency_samples: std::sync::Mutex<Option<Vec<std::time::Duration>>>,
     client_instance_id: RwLock<KafkaUuid>,
     telemetry_subscription: RwLock<Option<TelemetrySubscription>>,
     enable_metrics_push: bool,
@@ -111,7 +111,7 @@ impl Producer {
             partitioner_ignore_keys,
             metrics,
             metrics_enabled: false,
-            dispatch_latency_samples: None,
+            dispatch_latency_samples: std::sync::Mutex::new(None),
             client_instance_id: RwLock::new(KafkaUuid::ZERO),
             telemetry_subscription: RwLock::new(None),
             enable_metrics_push,
@@ -124,7 +124,7 @@ impl Producer {
         }
     }
 
-    fn ensure_background_sender_loop(&mut self) {
+    fn ensure_background_sender_loop(&self) {
         self.sender.ensure_loop_running();
     }
 
@@ -352,7 +352,7 @@ impl Producer {
     /// # Errors
     ///
     /// Returns producer backpressure or errors from pumping ready batches.
-    pub async fn send(&mut self, record: ProducerRecord) -> Result<SendFuture> {
+    pub async fn send(&self, record: ProducerRecord) -> Result<SendFuture> {
         self.ensure_background_sender_loop();
         self.fail_if_send_transaction_error().await?;
         let now = std::time::Instant::now();
@@ -418,7 +418,7 @@ impl Producer {
     ///
     /// Returns producer backpressure or errors from pumping ready batches.
     pub async fn send_with_callback<F>(
-        &mut self,
+        &self,
         record: ProducerRecord,
         callback: F,
     ) -> Result<SendFuture>
@@ -1173,7 +1173,13 @@ impl Producer {
     /// dispatch group until the broker response has been handled. This avoids
     /// per-record delivery handles on the untracked throughput path.
     pub fn enable_dispatch_latency_metrics(&mut self) {
-        let _samples = self.dispatch_latency_samples.get_or_insert_with(Vec::new);
+        let samples = self
+            .dispatch_latency_samples
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if samples.is_none() {
+            *samples = Some(Vec::new());
+        }
     }
 
     /// Add a producer interceptor to this producer instance.
@@ -1195,8 +1201,10 @@ impl Producer {
 
     /// Take and clear collected dispatch latency samples.
     #[must_use]
-    pub fn take_dispatch_latency_samples(&mut self) -> Vec<std::time::Duration> {
+    pub fn take_dispatch_latency_samples(&self) -> Vec<std::time::Duration> {
         self.dispatch_latency_samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_mut()
             .map(core::mem::take)
             .unwrap_or_default()
@@ -1222,8 +1230,13 @@ impl Producer {
         self.wait_for_handled_dispatch(true).await
     }
 
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "part of the &mut self flush/abort control-plane surface; dispatch latency \
+                  samples are now interior-mutable so no field is mutated directly here"
+    )]
     async fn wait_for_abort_completion(&mut self) -> Result<()> {
-        let dispatch_latency_samples = &mut self.dispatch_latency_samples;
+        let dispatch_latency_samples = &self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
         self.sender
@@ -1231,9 +1244,7 @@ impl Producer {
             .await
             .wait_for_abort_completion(
                 |latency| {
-                    if let Some(samples) = dispatch_latency_samples {
-                        samples.push(latency);
-                    }
+                    push_dispatch_latency_sample(dispatch_latency_samples, latency);
                 },
                 || {
                     if metrics_enabled {
@@ -1254,8 +1265,13 @@ impl Producer {
             .await
     }
 
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "part of the &mut self flush control-plane surface; dispatch latency samples \
+                  are now interior-mutable so no field is mutated directly here"
+    )]
     async fn drive_flush_until_complete(&mut self) -> Result<()> {
-        let dispatch_latency_samples = &mut self.dispatch_latency_samples;
+        let dispatch_latency_samples = &self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
         self.sender
@@ -1263,9 +1279,7 @@ impl Producer {
             .await
             .drive_flush_until_complete(ReadyDispatchObservers::new(
                 |latency| {
-                    if let Some(samples) = dispatch_latency_samples {
-                        samples.push(latency);
-                    }
+                    push_dispatch_latency_sample(dispatch_latency_samples, latency);
                 },
                 || {
                     if metrics_enabled {
@@ -1278,7 +1292,7 @@ impl Producer {
     }
 
     async fn append_for_delivery_with_max_block<BeforeDispatch>(
-        &mut self,
+        &self,
         record: ProducerRecord,
         now: std::time::Instant,
         sticky_topic: Option<&str>,
@@ -1291,7 +1305,7 @@ impl Producer {
         let deadline = std::time::Instant::now()
             .checked_add(self.max_block)
             .unwrap_or_else(std::time::Instant::now);
-        let dispatch_latency_samples = &mut self.dispatch_latency_samples;
+        let dispatch_latency_samples = &self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
         self.sender
@@ -1300,9 +1314,7 @@ impl Producer {
                 before_dispatch,
                 ReadyDispatchObservers::new(
                     |latency| {
-                        if let Some(samples) = dispatch_latency_samples {
-                            samples.push(latency);
-                        }
+                        push_dispatch_latency_sample(dispatch_latency_samples, latency);
                     },
                     || {
                         if metrics_enabled {
@@ -1316,7 +1328,7 @@ impl Producer {
     }
 
     async fn append_callback_for_delivery_with_max_block<BeforeDispatch>(
-        &mut self,
+        &self,
         record: ProducerRecord,
         now: std::time::Instant,
         sticky_topic: Option<&str>,
@@ -1329,7 +1341,7 @@ impl Producer {
         let deadline = std::time::Instant::now()
             .checked_add(self.max_block)
             .unwrap_or_else(std::time::Instant::now);
-        let dispatch_latency_samples = &mut self.dispatch_latency_samples;
+        let dispatch_latency_samples = &self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
         self.sender
@@ -1338,9 +1350,7 @@ impl Producer {
                 before_dispatch,
                 ReadyDispatchObservers::new(
                     |latency| {
-                        if let Some(samples) = dispatch_latency_samples {
-                            samples.push(latency);
-                        }
+                        push_dispatch_latency_sample(dispatch_latency_samples, latency);
                     },
                     || {
                         if metrics_enabled {
@@ -1359,7 +1369,7 @@ impl Producer {
         result: Result<TimedDispatchOutcome>,
         requeue_is_error: bool,
     ) -> Result<()> {
-        let dispatch_latency_samples = &mut self.dispatch_latency_samples;
+        let dispatch_latency_samples = &self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
         let Ok(mut sender) = self.sender.try_lock() else {
@@ -1370,9 +1380,7 @@ impl Producer {
         sender.handle_completed_dispatch(
             CompletedDispatch::new(result, requeue_is_error),
             |latency| {
-                if let Some(samples) = dispatch_latency_samples {
-                    samples.push(latency);
-                }
+                push_dispatch_latency_sample(dispatch_latency_samples, latency);
             },
             || {
                 if metrics_enabled {
@@ -1384,7 +1392,7 @@ impl Producer {
 
     #[cfg(test)]
     fn handle_finished_dispatches(&mut self, requeue_is_error: bool) -> Result<()> {
-        let dispatch_latency_samples = &mut self.dispatch_latency_samples;
+        let dispatch_latency_samples = &self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
         let Ok(mut sender) = self.sender.try_lock() else {
@@ -1395,9 +1403,7 @@ impl Producer {
         sender.handle_finished_dispatches(
             requeue_is_error,
             |latency| {
-                if let Some(samples) = dispatch_latency_samples {
-                    samples.push(latency);
-                }
+                push_dispatch_latency_sample(dispatch_latency_samples, latency);
             },
             || {
                 if metrics_enabled {
@@ -1409,7 +1415,7 @@ impl Producer {
 
     #[cfg(test)]
     async fn wait_for_handled_dispatch(&mut self, requeue_is_error: bool) -> Result<()> {
-        let dispatch_latency_samples = &mut self.dispatch_latency_samples;
+        let dispatch_latency_samples = &self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
         self.sender
@@ -1418,9 +1424,7 @@ impl Producer {
             .wait_for_handled_dispatch(
                 requeue_is_error,
                 |latency| {
-                    if let Some(samples) = dispatch_latency_samples {
-                        samples.push(latency);
-                    }
+                    push_dispatch_latency_sample(dispatch_latency_samples, latency);
                 },
                 || {
                     if metrics_enabled {
@@ -1537,6 +1541,20 @@ impl Drop for Producer {
         self.interceptors.close();
         self.partitioner.close();
         close_metric_reporters(&self.metric_reporters);
+    }
+}
+
+/// Append a dispatch-latency sample to the shared diagnostic buffer, if latency
+/// collection is enabled. Lock-poison and the disabled (`None`) state are both
+/// treated as "skip", so the hot dispatch path never panics on this path.
+fn push_dispatch_latency_sample(
+    samples: &std::sync::Mutex<Option<Vec<std::time::Duration>>>,
+    latency: std::time::Duration,
+) {
+    if let Ok(mut guard) = samples.lock()
+        && let Some(samples) = guard.as_mut()
+    {
+        samples.push(latency);
     }
 }
 
@@ -2424,7 +2442,7 @@ mod tests {
         let cases = [
             (
                 "send",
-                "pub async fn send(&mut self, record: ProducerRecord) -> Result<SendFuture> {",
+                "pub async fn send(&self, record: ProducerRecord) -> Result<SendFuture> {",
                 "/// Append one record with a Java-style completion callback.",
             ),
             (

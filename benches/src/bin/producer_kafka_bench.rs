@@ -41,8 +41,7 @@ fn main() {
     // produce tasks can run concurrently with the send loop (better pipelining).
     // Set KACRAB_BENCH_CURRENT_THREAD=1 to force the old single-thread runtime.
     let current_thread = env::var("KACRAB_BENCH_CURRENT_THREAD")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
     let runtime = if current_thread {
         Builder::new_current_thread()
             .enable_io()
@@ -131,7 +130,15 @@ async fn run_scenario(run: BenchmarkRun<'_>) -> BenchmarkRunSummary {
     producer.enable_metrics();
     warm_up_producer(&mut producer, &run, value.clone()).await;
     let warmup_metrics = producer.metrics();
-    let send = run_per_record_tracked_send_loop(&mut producer, &run, value).await;
+    let concurrency = send_concurrency();
+    let send = if concurrency > 1 {
+        let (result, recovered) =
+            run_per_record_tracked_send_loop_concurrent(producer, &run, value, concurrency).await;
+        producer = recovered;
+        result
+    } else {
+        run_per_record_tracked_send_loop(&mut producer, &run, value).await
+    };
     let current_metrics = producer.metrics();
     let metrics = metrics_delta(&current_metrics, &warmup_metrics);
     let java_perf = send
@@ -265,6 +272,95 @@ async fn run_per_record_tracked_send_loop(
         elapsed,
         java_perf: Some(java_perf),
     }
+}
+
+fn send_concurrency() -> usize {
+    env::var("KACRAB_BENCH_SEND_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1)
+}
+
+/// Drive the per-record tracked send path from `concurrency` concurrent tasks
+/// that share one `Producer` through `Arc`. This exercises the Java-style
+/// thread-safe `send(&self)` surface to measure whether concurrent appends lift
+/// the single-send-loop throughput ceiling.
+async fn run_per_record_tracked_send_loop_concurrent(
+    producer: Producer,
+    run: &BenchmarkRun<'_>,
+    value: Bytes,
+    concurrency: usize,
+) -> (SendLoopResult, Producer) {
+    let producer = Arc::new(producer);
+    let topic = Arc::<str>::from(run.topic);
+    let total = run.scenario.messages;
+    let per_task = total.div_ceil(concurrency);
+    let started = Instant::now();
+    let java_perf = ProducerPerformanceStatsHandle::new(ProducerPerformanceStats::new(
+        total,
+        run.reporting_interval,
+        false,
+    ));
+    let mut handles = Vec::with_capacity(concurrency);
+    for task in 0..concurrency {
+        let start_index = task.saturating_mul(per_task);
+        let end_index = start_index.saturating_add(per_task).min(total);
+        if start_index >= end_index {
+            break;
+        }
+        let producer = Arc::clone(&producer);
+        let topic = Arc::clone(&topic);
+        let value = value.clone();
+        let java_perf = java_perf.clone();
+        handles.push(tokio::spawn(async move {
+            let value_size = value.len();
+            for index in start_index..end_index {
+                let send_started = Instant::now();
+                let stats = java_perf.clone();
+                let _delivery = producer
+                    .send_with_callback(
+                        benchmark_record(Arc::clone(&topic), index).value(value.clone()),
+                        move |result| {
+                            let completed = Instant::now();
+                            if let Some(line) = record_tracked_callback_completion(
+                                &result,
+                                TrackedCompletionStart::Single(send_started),
+                                &stats,
+                                completed,
+                                value_size,
+                            ) {
+                                println!("{line}");
+                            }
+                            if result.is_err() {
+                                eprintln!("producer callback reported delivery error: {result:?}");
+                            }
+                        },
+                    )
+                    .await
+                    .expect("benchmark concurrent send should fit and dispatch");
+            }
+        }));
+    }
+    for handle in handles {
+        handle.await.expect("benchmark concurrent send task should finish");
+    }
+    let mut producer =
+        Arc::into_inner(producer).expect("producer should be unique after concurrent send join");
+    producer
+        .flush()
+        .await
+        .expect("benchmark concurrent final flush should succeed");
+    let elapsed = started.elapsed();
+    let java_perf = java_perf.summary(elapsed);
+    (
+        SendLoopResult {
+            outer_chunks: total,
+            elapsed,
+            java_perf: Some(java_perf),
+        },
+        producer,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
