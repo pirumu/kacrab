@@ -1177,6 +1177,25 @@ impl ProducerDispatcher {
                         return Err(error);
                     }
                 },
+                Err(DispatchError::RetryableBroker {
+                    topic,
+                    partition,
+                    error,
+                }) => {
+                    if let Some(error) = self
+                        .handle_retryable_broker_retry(
+                            &batches,
+                            &mut attempts_remaining,
+                            &mut retry_backoff,
+                            &topic,
+                            partition,
+                            error,
+                        )
+                        .await
+                    {
+                        return Err(error);
+                    }
+                },
                 Err(DispatchError::RetryableWire(error)) => {
                     if let Some(error) = self
                         .handle_retryable_wire_retry(
@@ -1311,6 +1330,26 @@ impl ProducerDispatcher {
                         .await
                     {
                         return terminal_error_delivered_to_futures(&mut batches, outcome);
+                    }
+                },
+                Err(DispatchError::RetryableBroker {
+                    topic,
+                    partition,
+                    error,
+                }) => {
+                    if let Some(error) = self
+                        .handle_retryable_broker_retry(
+                            &batches,
+                            &mut attempts_remaining,
+                            &mut retry_backoff,
+                            &topic,
+                            partition,
+                            error,
+                        )
+                        .await
+                    {
+                        fail_deliveries(&mut batches, &error);
+                        return DispatchOutcome::Delivered(Err(error));
                     }
                 },
                 Err(DispatchError::RetryableWire(error)) => {
@@ -1533,6 +1572,45 @@ impl ProducerDispatcher {
                 self.metrics.record_error();
             }
             return Some(error);
+        }
+        None
+    }
+
+    /// Retry a generic retriable broker produce error (Java `Sender.canRetry`):
+    /// retry while attempts remain and the delivery timeout has not elapsed,
+    /// otherwise fail the batch definitively.
+    async fn handle_retryable_broker_retry(
+        &self,
+        batches: &[ReadyBatch],
+        attempts_remaining: &mut usize,
+        retry_backoff: &mut BackoffState,
+        topic: &str,
+        partition: i32,
+        error: ErrorCode,
+    ) -> Option<ProducerError> {
+        if *attempts_remaining == 0 {
+            if self.metrics_are_enabled() {
+                self.metrics.record_error();
+            }
+            self.release_idempotent_partition_after_definite_error(batches, topic, partition)
+                .await;
+            return Some(ProducerError::Broker {
+                topic: topic.to_owned(),
+                partition,
+                error,
+            });
+        }
+        *attempts_remaining = attempts_remaining.saturating_sub(1);
+        if self.metrics_are_enabled() {
+            self.metrics.record_retry();
+        }
+        if let Some(timeout_error) = self.wait_before_retry(batches, retry_backoff).await {
+            if self.metrics_are_enabled() {
+                self.metrics.record_error();
+            }
+            self.release_idempotent_partition_after_definite_error(batches, topic, partition)
+                .await;
+            return Some(timeout_error);
         }
         None
     }
@@ -1982,6 +2060,17 @@ impl ProducerDispatcher {
                         partition: error.partition,
                         error: error.error,
                     }));
+                },
+                Err(ProduceReceiptError::Broker(error)) if error.error.is_retriable() => {
+                    // Java Sender.canRetry: any RetriableException is retried
+                    // (non-transactional path; transactional errors are handled
+                    // above) subject to attempts < retries and the delivery
+                    // timeout.
+                    return Err(DispatchError::RetryableBroker {
+                        topic: error.topic,
+                        partition: error.partition,
+                        error: error.error,
+                    });
                 },
                 Err(ProduceReceiptError::Broker(error)) => {
                     if self.metrics_are_enabled() {
@@ -4689,6 +4778,13 @@ enum DispatchError {
         leader_id: i32,
         error: ErrorCode,
         reset_sequence: bool,
+    },
+    /// A generic retriable broker produce error (Java `RetriableException`) that
+    /// is neither leadership- nor idempotence-specific.
+    RetryableBroker {
+        topic: String,
+        partition: i32,
+        error: ErrorCode,
     },
     RetryableWire(ProducerError),
 }
@@ -7438,6 +7534,61 @@ mod tests {
             .drain_ready(Instant::now())
             .pop()
             .expect("ready batch")
+    }
+
+    #[tokio::test]
+    async fn retryable_broker_error_fails_definitively_when_attempts_exhausted_like_java() {
+        // Java Sender.canRetry stops retrying once attempts are exhausted: the
+        // generic retriable broker error becomes a definite Broker failure.
+        let dispatcher = ProducerDispatcher::new(test_wire());
+        let batches = vec![ready_batch("orders", 0)];
+        let mut retry_backoff = dispatcher.retry_backoff_state();
+        let mut attempts_remaining = 0;
+
+        let error = dispatcher
+            .handle_retryable_broker_retry(
+                &batches,
+                &mut attempts_remaining,
+                &mut retry_backoff,
+                "orders",
+                0,
+                ErrorCode::NotEnoughReplicas,
+            )
+            .await
+            .expect("exhausted attempts fail definitively");
+
+        assert!(matches!(
+            error,
+            ProducerError::Broker {
+                error: ErrorCode::NotEnoughReplicas,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn retryable_broker_error_retries_while_attempts_remain_like_java() {
+        // With attempts left and the delivery timeout not reached, a retriable
+        // broker error is retried (no error returned) and the attempt budget
+        // is decremented.
+        let dispatcher = ProducerDispatcher::new(test_wire());
+        let batches = vec![ready_batch("orders", 0)];
+        let mut retry_backoff = dispatcher.retry_backoff_state();
+        let mut attempts_remaining = 3;
+
+        let outcome = dispatcher
+            .handle_retryable_broker_retry(
+                &batches,
+                &mut attempts_remaining,
+                &mut retry_backoff,
+                "orders",
+                0,
+                ErrorCode::NotEnoughReplicas,
+            )
+            .await;
+
+        assert!(outcome.is_none());
+        assert_eq!(attempts_remaining, 2);
     }
 
     #[tokio::test]
