@@ -1189,8 +1189,8 @@ impl ProducerSender {
         let AppendCallbackDeliveryRecord {
             record,
             now,
-            deadline: _,
             sticky_topic,
+            ..
         } = append;
         let (delivery, status) = match self
             .accumulator
