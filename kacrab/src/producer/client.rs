@@ -1256,13 +1256,13 @@ impl Producer {
     }
 
     async fn fail_if_send_transaction_error(&self) -> Result<()> {
-        // Check transaction error state through the shared control dispatcher
-        // instead of locking the sender on every send. The dispatcher returns
-        // `Ok` without taking any lock for non-transactional producers, so the
-        // common hot path no longer contends with the background sender loop.
-        self.control_dispatcher
-            .fail_if_transaction_error()
-            .await
+        // Fast path for non-transactional producers: skip building/awaiting the
+        // async transaction-error guard future entirely. Only transactional
+        // producers pay for the lock-protected state check.
+        if !self.control_dispatcher.is_transactional() {
+            return Ok(());
+        }
+        self.control_dispatcher.fail_if_transaction_error().await
     }
 
     #[expect(

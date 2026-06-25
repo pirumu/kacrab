@@ -197,6 +197,13 @@ impl ProducerDispatcher {
             .estimation(topic, codec)
     }
 
+    /// Whether this producer was configured with a `transactional.id`. Cheap,
+    /// lock-free check used to skip the async transaction-error guard entirely
+    /// on the per-record send hot path for non-transactional producers.
+    pub(crate) const fn is_transactional(&self) -> bool {
+        self.idempotence.transactional_id.is_some()
+    }
+
     pub(crate) async fn fail_if_transaction_error(&self) -> Result<()> {
         if self.idempotence.transactional_id.is_none() {
             return Ok(());
@@ -1786,9 +1793,7 @@ impl ProducerDispatcher {
                     sample.compression_ratio,
                 );
                 self.metrics.record_queue_time(sample.queued);
-                for size in &sample.record_sizes {
-                    self.metrics.record_record_size(*size);
-                }
+                self.metrics.record_record_sizes(&sample.record_sizes);
             }
         }
 

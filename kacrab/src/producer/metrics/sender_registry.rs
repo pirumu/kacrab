@@ -331,10 +331,25 @@ impl SenderMetricsRegistry {
         self.record(|client| client.request_latency, latency_ms);
     }
 
-    /// Record one serialized record size in bytes.
-    pub(crate) fn record_record_size(&self, size: f64) {
-        self.record(|client| client.record_size, size);
+    /// Record many serialized record sizes (one produce batch) with a single
+    /// lock acquisition and a single clock read, instead of paying both per
+    /// record. This keeps the per-record metric semantics (avg/max see every
+    /// value) while removing the per-record lock + `clock_gettime` overhead.
+    pub(crate) fn record_record_sizes(&self, sizes: &[usize]) {
+        if sizes.is_empty() {
+            return;
+        }
+        let now = now_ms();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sensor = inner.client.record_size;
+        for &size in sizes {
+            let _ignored = inner.metrics.record_at_ms(sensor, size as f64, now);
+        }
     }
+
 
     /// Record a broker-imposed throttle window in milliseconds.
     pub(crate) fn record_throttle_time(&self, throttle_ms: f64) {

@@ -744,10 +744,10 @@ impl ProducerMetrics {
             .record_queue_time(duration_to_ms_f64(queued));
     }
 
-    /// Record one record's serialized size in bytes (Kafka record-size).
-    pub(crate) fn record_record_size(&self, size: usize) {
-        let size = u32::try_from(size).map_or_else(|_| f64::from(u32::MAX), f64::from);
-        self.inner.sender_registry.record_record_size(size);
+    /// Record all serialized record sizes for one produce batch in a single
+    /// locked pass (avoids per-record lock + clock overhead on the send path).
+    pub(crate) fn record_record_sizes(&self, sizes: &[usize]) {
+        self.inner.sender_registry.record_record_sizes(sizes);
     }
 
     /// Update the in-flight request gauge (Kafka requests-in-flight).

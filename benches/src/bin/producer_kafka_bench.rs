@@ -127,7 +127,9 @@ async fn run_scenario(run: BenchmarkRun<'_>) -> BenchmarkRunSummary {
     let producer_config = benchmark_producer_config(run.bootstrap);
     println!("{}", format_effective_config_snapshot(&producer_config));
     let mut producer = build_producer(&producer_config).await;
-    producer.enable_metrics();
+    if env::var("KACRAB_BENCH_NO_METRICS").is_err() {
+        producer.enable_metrics();
+    }
     warm_up_producer(&mut producer, &run, value.clone()).await;
     let warmup_metrics = producer.metrics();
     let concurrency = send_concurrency();
