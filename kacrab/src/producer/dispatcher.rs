@@ -1955,6 +1955,15 @@ impl ProducerDispatcher {
             let mut updated_leaders = AHashSet::new();
             let request_receipts = match response {
                 ProduceDispatchResponse::Acknowledged(response) => {
+                    // Java honors the broker-imposed quota throttle window by
+                    // muting the channel for throttle_time_ms. Honor it here by
+                    // delaying this dispatch before the next request is issued.
+                    // No-op in the common (unthrottled) case where it is 0.
+                    if response.throttle_time_ms > 0
+                        && let Ok(throttle_ms) = u64::try_from(response.throttle_time_ms)
+                    {
+                        tokio::time::sleep(Duration::from_millis(throttle_ms)).await;
+                    }
                     let endpoints = node_endpoint_updates(&response);
                     if !endpoints.is_empty()
                         && let Err(error) = self.wire.upsert_broker_metadata(&endpoints).await
