@@ -452,26 +452,25 @@ impl RecordAccumulator {
             partition: record.partition,
         };
         let batch_size = self.config.batch_size.max(1);
-        let target = planned_append_target(
-            self.partitions.get(&key),
-            &record,
-            batch_size,
-            compression_sizing,
-        );
         let available = self
             .config
             .buffer_memory
             .saturating_sub(self.buffered_bytes);
-        if target.reserved_buffer_bytes > available {
-            return Err(ProducerError::Backpressure);
-        }
-
+        // Single hash lookup: take the (mutable) partition queue up front and
+        // compute the append target from it, instead of an immutable get()
+        // followed by a separate entry() — both hash the topic Arc<str> on every
+        // append. An empty queue plans the same target as a missing one.
         let queue = self
             .partitions
             .entry(key)
             .or_insert_with(|| PartitionQueue {
                 batches: VecDeque::new(),
             });
+        let target =
+            planned_append_target(Some(&*queue), &record, batch_size, compression_sizing);
+        if target.reserved_buffer_bytes > available {
+            return Err(ProducerError::Backpressure);
+        }
         let next_identity = &mut self.next_batch_id;
         if let Some(identity) = apply_append_target(queue, now, batch_size, target, next_identity) {
             let _inserted = self.buffered_batch_identities.insert(identity);
@@ -510,26 +509,25 @@ impl RecordAccumulator {
             partition: record.partition,
         };
         let batch_size = self.config.batch_size.max(1);
-        let target = planned_append_target(
-            self.partitions.get(&key),
-            &record,
-            batch_size,
-            compression_sizing,
-        );
         let available = self
             .config
             .buffer_memory
             .saturating_sub(self.buffered_bytes);
-        if target.reserved_buffer_bytes > available {
-            return Err(ProducerError::Backpressure);
-        }
-
+        // Single hash lookup: take the (mutable) partition queue up front and
+        // compute the append target from it, instead of an immutable get()
+        // followed by a separate entry() — both hash the topic Arc<str> on every
+        // append. An empty queue plans the same target as a missing one.
         let queue = self
             .partitions
             .entry(key)
             .or_insert_with(|| PartitionQueue {
                 batches: VecDeque::new(),
             });
+        let target =
+            planned_append_target(Some(&*queue), &record, batch_size, compression_sizing);
+        if target.reserved_buffer_bytes > available {
+            return Err(ProducerError::Backpressure);
+        }
         let next_identity = &mut self.next_batch_id;
         if let Some(identity) = apply_append_target(queue, now, batch_size, target, next_identity) {
             let _inserted = self.buffered_batch_identities.insert(identity);
