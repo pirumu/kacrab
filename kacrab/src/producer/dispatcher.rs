@@ -2368,6 +2368,9 @@ impl ProducerDispatcher {
         let version = client_api_info(ApiKey::AddPartitionsToTxn).max_version;
         let mut attempts_remaining = self.retry_attempts;
         let mut retry_backoff = self.retry_backoff_state();
+        // Java maybeOverrideRetryBackoffMs latches a 20ms backoff once the first
+        // AddPartitions of a transaction hits CONCURRENT_TRANSACTIONS.
+        let mut reduced_concurrent_backoff = false;
         let mut request_guard = self
             .track_transaction_request(TransactionRequestKind::AddPartitionsOrOffsets)
             .await;
@@ -2400,7 +2403,20 @@ impl ProducerDispatcher {
                     && is_add_partitions_retry_error(transaction_error) =>
                 {
                     attempts_remaining = attempts_remaining.saturating_sub(1);
-                    self.sleep_retry_backoff(&mut retry_backoff).await?;
+                    if transaction_error == ErrorCode::ConcurrentTransactions
+                        && !reduced_concurrent_backoff
+                    {
+                        let partitions_empty = {
+                            let state = self.producer_state.lock().await;
+                            state.partitions_in_transaction.is_empty()
+                        };
+                        reduced_concurrent_backoff = partitions_empty;
+                    }
+                    if reduced_concurrent_backoff {
+                        tokio::time::sleep(ADD_PARTITIONS_RETRY_BACKOFF).await;
+                    } else {
+                        self.sleep_retry_backoff(&mut retry_backoff).await?;
+                    }
                 },
                 Err(ProducerError::Transaction {
                     operation,
@@ -5593,6 +5609,10 @@ const NON_2PC_INIT_PRODUCER_ID_MAX_VERSION: i16 = 5;
 /// Lowest coordinator `InitProducerId` version that supports bumping the
 /// producer epoch from the client (Java `coordinatorSupportsBumpingEpoch`).
 const COORDINATOR_EPOCH_BUMP_MIN_INIT_PRODUCER_ID_VERSION: i16 = 3;
+/// Java `ADD_PARTITIONS_RETRY_BACKOFF_MS`: shortened backoff for the first
+/// `AddPartitionsToTxn` retrying on `CONCURRENT_TRANSACTIONS`, so a new
+/// transaction does not wait long for the previous one to finish completing.
+const ADD_PARTITIONS_RETRY_BACKOFF: Duration = Duration::from_millis(20);
 /// Kafka 4.3 marks Produce v12+ as transaction V2.
 const TRANSACTION_V1_PRODUCE_MAX_VERSION: i16 = 11;
 /// Kafka 4.3 marks `TxnOffsetCommit` v5+ as transaction V2.
