@@ -367,11 +367,12 @@ impl Producer {
                 .uses_sticky_partitioner(&record)
                 .then(|| record.topic.to_string());
             if !record.has_assigned_partition() {
-                let metadata_started_at = self.metrics_enabled.then(std::time::Instant::now);
+                // Reuse the send-start instant as the metadata-wait start instead
+                // of a second clock_gettime; only one extra clock read (elapsed)
+                // is needed, and on macOS each Instant::now is a real syscall.
                 self.assign_partition(&mut record).await?;
-                if let Some(metadata_started_at) = metadata_started_at {
-                    self.metrics
-                        .record_metadata_wait(metadata_started_at.elapsed());
+                if self.metrics_enabled {
+                    self.metrics.record_metadata_wait(now.elapsed());
                 }
             }
             error_record = self.error_record_snapshot(&record);
@@ -444,11 +445,12 @@ impl Producer {
                 .uses_sticky_partitioner(&record)
                 .then(|| record.topic.to_string());
             if !record.has_assigned_partition() {
-                let metadata_started_at = self.metrics_enabled.then(std::time::Instant::now);
+                // Reuse the send-start instant as the metadata-wait start instead
+                // of a second clock_gettime; only one extra clock read (elapsed)
+                // is needed, and on macOS each Instant::now is a real syscall.
                 self.assign_partition(&mut record).await?;
-                if let Some(metadata_started_at) = metadata_started_at {
-                    self.metrics
-                        .record_metadata_wait(metadata_started_at.elapsed());
+                if self.metrics_enabled {
+                    self.metrics.record_metadata_wait(now.elapsed());
                 }
             }
             error_record = self.error_record_snapshot(&record);
