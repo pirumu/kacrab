@@ -52,7 +52,7 @@ pub(crate) struct ProducerSender {
     pub(crate) state: ProducerSenderState,
     dispatcher: ProducerDispatcher,
     sender_loop_notify: Arc<Notify>,
-    background_dispatch_paused: bool,
+    background_dispatch_paused: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -62,6 +62,13 @@ pub(crate) struct ProducerSenderRuntime {
     loop_metrics_enabled: Arc<AtomicBool>,
     accumulator_batch_size: usize,
     metrics: ProducerMetrics,
+    // Shared handles for the lock-free append fast path: appending touches only
+    // these (no `sender` async-mutex), so concurrent send(&self) calls don't
+    // serialize on the sender mutex with each other or the background loop.
+    bypass_accumulator: Arc<SharedAccumulator>,
+    bypass_dispatcher: ProducerDispatcher,
+    bypass_paused: Arc<AtomicBool>,
+    bypass_notify: Arc<Notify>,
 }
 
 #[derive(Debug, Default)]
@@ -182,6 +189,10 @@ impl ProducerSenderRuntime {
         accumulator_batch_size: usize,
     ) -> (Self, ProducerMetrics) {
         let metrics = sender.metrics_handle();
+        let bypass_accumulator = Arc::clone(&sender.accumulator);
+        let bypass_dispatcher = sender.dispatcher.clone();
+        let bypass_paused = Arc::clone(&sender.background_dispatch_paused);
+        let bypass_notify = Arc::clone(&sender.sender_loop_notify);
         let sender = Arc::new(AsyncMutex::new(sender));
         let loop_metrics_enabled = Arc::new(AtomicBool::new(false));
         let loop_handle = ProducerSenderLoop::spawn(
@@ -197,6 +208,10 @@ impl ProducerSenderRuntime {
                 loop_metrics_enabled,
                 accumulator_batch_size,
                 metrics: metrics.clone(),
+                bypass_accumulator,
+                bypass_dispatcher,
+                bypass_paused,
+                bypass_notify,
             },
             metrics,
         )
@@ -223,40 +238,135 @@ impl ProducerSenderRuntime {
         BatchObserver: FnMut(&[ReadyBatch]),
         BeforeDispatch: FnOnce(&SendFuture),
     {
-        // Sync fast path mirroring the callback variant: append without awaiting
-        // when the sender lock is uncontended and there is buffer capacity.
-        if let Ok(mut guard) = self.sender.try_lock() {
-            match guard.try_sync_append_delivery(append, before_dispatch) {
-                SyncDeliveryAppend::Appended {
-                    delivery,
-                    sticky_ready_topic,
-                } => {
-                    if let Some(topic) = sticky_ready_topic {
-                        guard.dispatcher.mark_sticky_batch_ready(&topic).await;
-                    }
-                    return Ok(delivery);
-                },
-                SyncDeliveryAppend::Failed(error) => return Err(error),
-                SyncDeliveryAppend::WouldBlock(append, before_dispatch) => {
-                    drop(guard);
-                    return self
-                        .sender
-                        .lock()
-                        .await
-                        .append_delivery_record_then_apply_dispatch(
-                            append,
-                            before_dispatch,
-                            observers,
-                        )
-                        .await;
-                },
-            }
+        // Lock-free fast path mirroring the callback variant (no sender mutex).
+        match self.try_bypass_append_delivery(append, before_dispatch) {
+            SyncDeliveryAppend::Appended {
+                delivery,
+                sticky_ready_topic,
+            } => {
+                if let Some(topic) = sticky_ready_topic {
+                    self.bypass_dispatcher.mark_sticky_batch_ready(&topic).await;
+                }
+                Ok(delivery)
+            },
+            SyncDeliveryAppend::Failed(error) => Err(error),
+            SyncDeliveryAppend::WouldBlock(append, before_dispatch) => {
+                self.sender
+                    .lock()
+                    .await
+                    .append_delivery_record_then_apply_dispatch(append, before_dispatch, observers)
+                    .await
+            },
         }
-        self.sender
-            .lock()
-            .await
-            .append_delivery_record_then_apply_dispatch(append, before_dispatch, observers)
-            .await
+    }
+
+    /// Lock-free callback append using the bypass handles (no sender mutex).
+    fn try_bypass_append_callback<'a, BeforeDispatch>(
+        &self,
+        append: AppendCallbackDeliveryRecord<'a>,
+        before_dispatch: BeforeDispatch,
+    ) -> SyncCallbackAppend<'a, BeforeDispatch>
+    where
+        BeforeDispatch: FnOnce(&SendFuture),
+    {
+        let compression_ratio = self
+            .bypass_dispatcher
+            .compression_ratio_estimation(append.record.topic.as_ref());
+        // Fast-path capacity check ignores in-flight bytes (a small, bounded
+        // buffer.memory over-commit); the awaiting slow path counts them exactly.
+        if !self
+            .bypass_accumulator
+            .has_available_memory_for_reserved_with_compression_ratio(
+                &append.record,
+                0,
+                compression_ratio,
+            )
+        {
+            return SyncCallbackAppend::WouldBlock(append, before_dispatch);
+        }
+        let AppendCallbackDeliveryRecord {
+            record,
+            now,
+            sticky_topic,
+            ..
+        } = append;
+        let (delivery, status) = match self
+            .bypass_accumulator
+            .append_for_delivery_with_status_at_compression_ratio(record, now, compression_ratio)
+        {
+            Ok(appended) => appended,
+            Err(error) => return SyncCallbackAppend::Failed(error),
+        };
+        before_dispatch(&delivery);
+        let decision = ProducerSenderState::single_append_dispatch_decision(status);
+        self.note_bypass_append(status);
+        let sticky_ready_topic = if decision.should_mark_sticky_batch_ready() {
+            sticky_topic.map(str::to_owned)
+        } else {
+            None
+        };
+        SyncCallbackAppend::Appended {
+            delivery,
+            sticky_ready_topic,
+        }
+    }
+
+    /// Lock-free delivery append using the bypass handles (no sender mutex).
+    fn try_bypass_append_delivery<'a, BeforeDispatch>(
+        &self,
+        append: AppendDeliveryRecord<'a>,
+        before_dispatch: BeforeDispatch,
+    ) -> SyncDeliveryAppend<'a, BeforeDispatch>
+    where
+        BeforeDispatch: FnOnce(&SendFuture),
+    {
+        let compression_ratio = self
+            .bypass_dispatcher
+            .compression_ratio_estimation(append.record.topic.as_ref());
+        if !self
+            .bypass_accumulator
+            .has_available_memory_for_reserved_with_compression_ratio(
+                &append.record,
+                0,
+                compression_ratio,
+            )
+        {
+            return SyncDeliveryAppend::WouldBlock(append, before_dispatch);
+        }
+        let AppendDeliveryRecord {
+            record,
+            now,
+            sticky_topic,
+            ..
+        } = append;
+        let (delivery, status) = match self
+            .bypass_accumulator
+            .append_for_delivery_with_status_at_compression_ratio(record, now, compression_ratio)
+        {
+            Ok(appended) => appended,
+            Err(error) => return SyncDeliveryAppend::Failed(error),
+        };
+        before_dispatch(&delivery);
+        let decision = ProducerSenderState::single_append_dispatch_decision(status);
+        self.note_bypass_append(status);
+        let sticky_ready_topic = if decision.should_mark_sticky_batch_ready() {
+            sticky_topic.map(str::to_owned)
+        } else {
+            None
+        };
+        SyncDeliveryAppend::Appended {
+            delivery,
+            sticky_ready_topic,
+        }
+    }
+
+    /// Wake the background sender loop after a bypass append, gated like
+    /// `note_append_status_for_sender_loop` (only on new batch or batch ready).
+    fn note_bypass_append(&self, status: AppendStatus) {
+        if status.starts_new_batch || status.batch_ready {
+            self.bypass_paused.store(false, Ordering::Relaxed);
+            self.bypass_notify.notify_one();
+        }
     }
 
     pub(crate) async fn append_callback_delivery_record_then_apply_dispatch<
@@ -276,42 +386,33 @@ impl ProducerSenderRuntime {
         BatchObserver: FnMut(&[ReadyBatch]),
         BeforeDispatch: FnOnce(&SendFuture),
     {
-        // Sync fast path: when the sender lock is uncontended and there is buffer
-        // capacity, append without awaiting and defer dispatch to the background
-        // loop. This stops the send task from suspending per record (the dominant
-        // single-thread cost), only awaiting for the rare sticky-batch rotation.
-        if let Ok(mut guard) = self.sender.try_lock() {
-            match guard.try_sync_append_callback_delivery(append, before_dispatch) {
-                SyncCallbackAppend::Appended {
-                    delivery,
-                    sticky_ready_topic,
-                } => {
-                    if let Some(topic) = sticky_ready_topic {
-                        guard.dispatcher.mark_sticky_batch_ready(&topic).await;
-                    }
-                    return Ok(delivery);
-                },
-                SyncCallbackAppend::Failed(error) => return Err(error),
-                SyncCallbackAppend::WouldBlock(append, before_dispatch) => {
-                    drop(guard);
-                    return self
-                        .sender
-                        .lock()
-                        .await
-                        .append_callback_delivery_record_then_apply_dispatch(
-                            append,
-                            before_dispatch,
-                            observers,
-                        )
-                        .await;
-                },
-            }
+        // Lock-free fast path: append to the shared accumulator WITHOUT the sender
+        // async mutex, so concurrent send(&self) calls don't serialize. Only the
+        // rare sticky-batch rotation awaits. Falls back to the awaiting slow path
+        // on backpressure (which counts in-flight bytes and may wait for buffer).
+        match self.try_bypass_append_callback(append, before_dispatch) {
+            SyncCallbackAppend::Appended {
+                delivery,
+                sticky_ready_topic,
+            } => {
+                if let Some(topic) = sticky_ready_topic {
+                    self.bypass_dispatcher.mark_sticky_batch_ready(&topic).await;
+                }
+                Ok(delivery)
+            },
+            SyncCallbackAppend::Failed(error) => Err(error),
+            SyncCallbackAppend::WouldBlock(append, before_dispatch) => {
+                self.sender
+                    .lock()
+                    .await
+                    .append_callback_delivery_record_then_apply_dispatch(
+                        append,
+                        before_dispatch,
+                        observers,
+                    )
+                    .await
+            },
         }
-        self.sender
-            .lock()
-            .await
-            .append_callback_delivery_record_then_apply_dispatch(append, before_dispatch, observers)
-            .await
     }
 
     pub(crate) fn try_lock(
@@ -362,7 +463,7 @@ impl ProducerSender {
             state,
             dispatcher,
             sender_loop_notify,
-            background_dispatch_paused: false,
+            background_dispatch_paused: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -452,15 +553,15 @@ impl ProducerSender {
         self.sender_loop_notify.notify_one();
     }
 
-    fn note_append_status_for_sender_loop(&mut self, status: AppendStatus) {
+    fn note_append_status_for_sender_loop(&self, status: AppendStatus) {
         if Self::should_notify_sender_loop_after_append(status) {
-            self.background_dispatch_paused = false;
+            self.background_dispatch_paused.store(false, Ordering::Relaxed);
             self.notify_sender_loop();
         }
     }
 
-    const fn pause_background_dispatch_after_requeue(&mut self) {
-        self.background_dispatch_paused = true;
+    fn pause_background_dispatch_after_requeue(&self) {
+        self.background_dispatch_paused.store(true, Ordering::Relaxed);
     }
 
     const fn should_notify_sender_loop_after_append(status: AppendStatus) -> bool {
@@ -780,7 +881,7 @@ impl ProducerSender {
             if requeued {
                 self.pause_background_dispatch_after_requeue();
             }
-            if self.background_dispatch_paused {
+            if self.background_dispatch_paused.load(Ordering::Relaxed) {
                 return Ok(SenderLoopWait::Parked);
             }
             match self.next_wake_action(now) {
@@ -1187,107 +1288,6 @@ impl ProducerSender {
         )
         .await?;
         Ok(delivery)
-    }
-
-    /// Synchronous callback-append fast path used by the runtime when the sender
-    /// lock is uncontended. Appends the record and runs `before_dispatch`
-    /// WITHOUT awaiting, deferring the actual dispatch to the background loop via
-    /// the gated sender-loop notify. This avoids suspending the send task per
-    /// record (the dominant single-thread cost). Returns the topic to mark
-    /// sticky-ready when a batch sealed (the caller awaits that — rare), or hands
-    /// `append`/`before_dispatch` back when there is no buffer capacity so the
-    /// caller can take the awaiting slow path.
-    pub(crate) fn try_sync_append_callback_delivery<'a, BeforeDispatch>(
-        &mut self,
-        append: AppendCallbackDeliveryRecord<'a>,
-        before_dispatch: BeforeDispatch,
-    ) -> SyncCallbackAppend<'a, BeforeDispatch>
-    where
-        BeforeDispatch: FnOnce(&SendFuture),
-    {
-        let compression_ratio = self
-            .dispatcher
-            .compression_ratio_estimation(append.record.topic.as_ref());
-        if !self.state.has_available_memory_for_with_compression_ratio(
-            &self.accumulator,
-            &append.record,
-            compression_ratio,
-        ) {
-            return SyncCallbackAppend::WouldBlock(append, before_dispatch);
-        }
-        let AppendCallbackDeliveryRecord {
-            record,
-            now,
-            sticky_topic,
-            ..
-        } = append;
-        let (delivery, status) = match self
-            .accumulator
-            .append_for_delivery_with_status_at_compression_ratio(record, now, compression_ratio)
-        {
-            Ok(appended) => appended,
-            Err(error) => return SyncCallbackAppend::Failed(error),
-        };
-        before_dispatch(&delivery);
-        let decision = self.callback_append_dispatch_decision(status);
-        self.note_append_status_for_sender_loop(status);
-        let sticky_ready_topic = if decision.should_mark_sticky_batch_ready() {
-            sticky_topic.map(str::to_owned)
-        } else {
-            None
-        };
-        SyncCallbackAppend::Appended {
-            delivery,
-            sticky_ready_topic,
-        }
-    }
-
-    /// Synchronous delivery-append fast path (the non-callback `send()` variant).
-    /// Mirrors [`Self::try_sync_append_callback_delivery`] but uses the plain
-    /// single-append dispatch decision.
-    pub(crate) fn try_sync_append_delivery<'a, BeforeDispatch>(
-        &mut self,
-        append: AppendDeliveryRecord<'a>,
-        before_dispatch: BeforeDispatch,
-    ) -> SyncDeliveryAppend<'a, BeforeDispatch>
-    where
-        BeforeDispatch: FnOnce(&SendFuture),
-    {
-        let compression_ratio = self
-            .dispatcher
-            .compression_ratio_estimation(append.record.topic.as_ref());
-        if !self.state.has_available_memory_for_with_compression_ratio(
-            &self.accumulator,
-            &append.record,
-            compression_ratio,
-        ) {
-            return SyncDeliveryAppend::WouldBlock(append, before_dispatch);
-        }
-        let AppendDeliveryRecord {
-            record,
-            now,
-            sticky_topic,
-            ..
-        } = append;
-        let (delivery, status) = match self
-            .accumulator
-            .append_for_delivery_with_status_at_compression_ratio(record, now, compression_ratio)
-        {
-            Ok(appended) => appended,
-            Err(error) => return SyncDeliveryAppend::Failed(error),
-        };
-        before_dispatch(&delivery);
-        let decision = Self::single_append_dispatch_decision(status);
-        self.note_append_status_for_sender_loop(status);
-        let sticky_ready_topic = if decision.should_mark_sticky_batch_ready() {
-            sticky_topic.map(str::to_owned)
-        } else {
-            None
-        };
-        SyncDeliveryAppend::Appended {
-            delivery,
-            sticky_ready_topic,
-        }
     }
 
     #[cfg(test)]
