@@ -1122,8 +1122,14 @@ impl ProducerDispatcher {
                     if self.metrics_are_enabled() {
                         self.metrics.record_retry();
                     }
-                    if let Some(error) = self.wait_before_retry(&batches, &mut retry_backoff).await
-                    {
+                    // Leader changed for the ongoing retry -> retry immediately
+                    // (Java skips backoff); otherwise back off normally.
+                    let retry_wait = if metadata_updated {
+                        self.check_delivery_timeout_before_retry(&batches).await
+                    } else {
+                        self.wait_before_retry(&batches, &mut retry_backoff).await
+                    };
+                    if let Some(error) = retry_wait {
                         if self.metrics_are_enabled() {
                             self.metrics.record_error();
                         }
@@ -1535,7 +1541,14 @@ impl ProducerDispatcher {
         if self.metrics_are_enabled() {
             self.metrics.record_retry();
         }
-        if let Some(error) = self.wait_before_retry(batches, retry_backoff).await {
+        // Leader changed for the ongoing retry -> retry immediately (Java skips
+        // backoff); otherwise back off normally.
+        let retry_wait = if retry.metadata_updated {
+            self.check_delivery_timeout_before_retry(batches).await
+        } else {
+            self.wait_before_retry(batches, retry_backoff).await
+        };
+        if let Some(error) = retry_wait {
             if self.metrics_are_enabled() {
                 self.metrics.record_error();
             }
@@ -2201,6 +2214,31 @@ impl ProducerDispatcher {
             self.mark_expired_idempotent_batches_unresolved(batches, now)
                 .await;
             return Some(ProducerError::DeliveryTimeout {
+                topic: batch.topic.clone(),
+                partition: batch.partition,
+            });
+        }
+        None
+    }
+
+    /// Java `hasLeaderChangedForTheOngoingRetry`: when the partition leader has
+    /// changed for the ongoing retry, retry immediately without the backoff
+    /// sleep, while still honoring the delivery timeout. Mirrors the
+    /// delivery-timeout guard of [`Self::wait_before_retry`] without the wait.
+    async fn check_delivery_timeout_before_retry(
+        &self,
+        batches: &[ReadyBatch],
+    ) -> Option<ProducerError> {
+        let now = Instant::now();
+        let earliest = batches
+            .iter()
+            .map(|batch| batch.first_append_at)
+            .min()
+            .unwrap_or(now);
+        if now.duration_since(earliest) >= self.delivery_timeout {
+            self.mark_expired_idempotent_batches_unresolved(batches, now)
+                .await;
+            return batches.first().map(|batch| ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
                 partition: batch.partition,
             });
@@ -7598,6 +7636,29 @@ mod tests {
 
         assert!(outcome.is_none());
         assert_eq!(attempts_remaining, 2);
+    }
+
+    #[tokio::test]
+    async fn leader_change_retry_skips_backoff_but_honors_delivery_timeout() {
+        // Leader changed and delivery timeout not reached -> retry immediately
+        // (no backoff sleep, returns None).
+        let dispatcher = ProducerDispatcher::new(test_wire());
+        let batches = vec![ready_batch("orders", 0)];
+        assert!(
+            dispatcher
+                .check_delivery_timeout_before_retry(&batches)
+                .await
+                .is_none()
+        );
+
+        // Delivery timeout already elapsed -> fail even on a leader change.
+        let expired = ProducerDispatcher::new(test_wire()).delivery_timeout(Duration::ZERO);
+        let batches = vec![ready_batch("orders", 0)];
+        assert!(matches!(
+            expired.check_delivery_timeout_before_retry(&batches).await,
+            Some(ProducerError::DeliveryTimeout { topic, partition })
+                if topic == "orders" && partition == 0
+        ));
     }
 
     #[tokio::test]
