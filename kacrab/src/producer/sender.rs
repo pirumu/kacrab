@@ -247,6 +247,37 @@ impl ProducerSenderRuntime {
         BatchObserver: FnMut(&[ReadyBatch]),
         BeforeDispatch: FnOnce(&SendFuture),
     {
+        // Sync fast path: when the sender lock is uncontended and there is buffer
+        // capacity, append without awaiting and defer dispatch to the background
+        // loop. This stops the send task from suspending per record (the dominant
+        // single-thread cost), only awaiting for the rare sticky-batch rotation.
+        if let Ok(mut guard) = self.sender.try_lock() {
+            match guard.try_sync_append_callback_delivery(append, before_dispatch) {
+                SyncCallbackAppend::Appended {
+                    delivery,
+                    sticky_ready_topic,
+                } => {
+                    if let Some(topic) = sticky_ready_topic {
+                        guard.dispatcher.mark_sticky_batch_ready(&topic).await;
+                    }
+                    return Ok(delivery);
+                },
+                SyncCallbackAppend::Failed(error) => return Err(error),
+                SyncCallbackAppend::WouldBlock(append, before_dispatch) => {
+                    drop(guard);
+                    return self
+                        .sender
+                        .lock()
+                        .await
+                        .append_callback_delivery_record_then_apply_dispatch(
+                            append,
+                            before_dispatch,
+                            observers,
+                        )
+                        .await;
+                },
+            }
+        }
         self.sender
             .lock()
             .await
@@ -1129,6 +1160,59 @@ impl ProducerSender {
         Ok(delivery)
     }
 
+    /// Synchronous callback-append fast path used by the runtime when the sender
+    /// lock is uncontended. Appends the record and runs `before_dispatch`
+    /// WITHOUT awaiting, deferring the actual dispatch to the background loop via
+    /// the gated sender-loop notify. This avoids suspending the send task per
+    /// record (the dominant single-thread cost). Returns the topic to mark
+    /// sticky-ready when a batch sealed (the caller awaits that — rare), or hands
+    /// `append`/`before_dispatch` back when there is no buffer capacity so the
+    /// caller can take the awaiting slow path.
+    pub(crate) fn try_sync_append_callback_delivery<'a, BeforeDispatch>(
+        &mut self,
+        append: AppendCallbackDeliveryRecord<'a>,
+        before_dispatch: BeforeDispatch,
+    ) -> SyncCallbackAppend<'a, BeforeDispatch>
+    where
+        BeforeDispatch: FnOnce(&SendFuture),
+    {
+        let compression_ratio = self
+            .dispatcher
+            .compression_ratio_estimation(append.record.topic.as_ref());
+        if !self.state.has_available_memory_for_with_compression_ratio(
+            &self.accumulator,
+            &append.record,
+            compression_ratio,
+        ) {
+            return SyncCallbackAppend::WouldBlock(append, before_dispatch);
+        }
+        let AppendCallbackDeliveryRecord {
+            record,
+            now,
+            deadline: _,
+            sticky_topic,
+        } = append;
+        let (delivery, status) = match self
+            .accumulator
+            .append_for_delivery_with_status_at_compression_ratio(record, now, compression_ratio)
+        {
+            Ok(appended) => appended,
+            Err(error) => return SyncCallbackAppend::Failed(error),
+        };
+        before_dispatch(&delivery);
+        let decision = self.callback_append_dispatch_decision(status);
+        self.note_append_status_for_sender_loop(status);
+        let sticky_ready_topic = if decision.should_mark_sticky_batch_ready() {
+            sticky_topic.map(str::to_owned)
+        } else {
+            None
+        };
+        SyncCallbackAppend::Appended {
+            delivery,
+            sticky_ready_topic,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn try_append_callback_delivery_record(
         &mut self,
@@ -1816,6 +1900,21 @@ impl AppendDispatchDecision {
 pub(crate) enum CallbackAppendFastPath {
     Appended(Result<(SendFuture, AppendDispatchDecision), ProducerError>),
     WouldBlock(ProducerRecord),
+}
+
+/// Outcome of the synchronous callback-append fast path.
+pub(crate) enum SyncCallbackAppend<'a, BeforeDispatch> {
+    /// Appended without awaiting; `sticky_ready_topic` is set when the caller
+    /// must async-mark a sealed sticky batch ready.
+    Appended {
+        delivery: SendFuture,
+        sticky_ready_topic: Option<String>,
+    },
+    /// No buffer capacity — caller should take the awaiting slow path with the
+    /// returned record and callback.
+    WouldBlock(AppendCallbackDeliveryRecord<'a>, BeforeDispatch),
+    /// The append itself failed.
+    Failed(ProducerError),
 }
 
 #[derive(Debug)]
