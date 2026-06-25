@@ -31,11 +31,11 @@ pub trait ProducerPartitioner: Send + Sync + 'static {
     fn close(&self) {}
 }
 
-/// Built-in partitioner mirroring Kafka's `RoundRobinPartitioner`: it spreads
-/// records evenly across a topic's available partitions regardless of the record
-/// key, using a per-topic counter. Unlike the default sticky partitioner this
-/// switches partition on every record rather than per batch.
+/// Built-in partitioner mirroring Kafka's `RoundRobinPartitioner`.
 ///
+/// It spreads records evenly across a topic's available partitions regardless of
+/// the record key, using a per-topic counter. Unlike the default sticky
+/// partitioner this switches partition on every record rather than per batch.
 /// Install it with [`super::ProducerBuilder::partitioner`] /
 /// [`super::Producer::set_partitioner`].
 #[derive(Debug, Default)]
@@ -50,7 +50,11 @@ impl RoundRobinPartitioner {
         Self::default()
     }
 
-    fn next_counter(&self, topic: &str) -> u32 {
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "The counter map guard is held only for the get-and-increment."
+    )]
+    fn next_counter(&self, topic: &str) -> usize {
         let mut counters = self
             .counters
             .lock()
@@ -58,7 +62,7 @@ impl RoundRobinPartitioner {
         let counter = counters.entry(topic.to_owned()).or_insert(0);
         let current = *counter;
         *counter = counter.wrapping_add(1);
-        current
+        current as usize
     }
 }
 
@@ -68,7 +72,7 @@ impl ProducerPartitioner for RoundRobinPartitioner {
             .topic(&record.topic)
             .filter(|topic| !topic.partitions.is_empty())
             .ok_or_else(|| ProducerError::UnknownTopic(record.topic.to_string()))?;
-        let counter = self.next_counter(&record.topic) as usize;
+        let counter = self.next_counter(&record.topic);
         // Prefer partitions with a live leader (Java availablePartitions); fall
         // back to all partitions when none are currently available.
         let available: Vec<i32> = topic
@@ -77,12 +81,18 @@ impl ProducerPartitioner for RoundRobinPartitioner {
             .filter(|partition| partition.leader_id >= 0)
             .map(|partition| partition.partition_index)
             .collect();
-        if available.is_empty() {
-            let index = counter % topic.partitions.len();
-            Ok(topic.partitions[index].partition_index)
+        let selected = if available.is_empty() {
+            counter
+                .checked_rem(topic.partitions.len())
+                .and_then(|index| topic.partitions.get(index))
+                .map(|partition| partition.partition_index)
         } else {
-            Ok(available[counter % available.len()])
-        }
+            counter
+                .checked_rem(available.len())
+                .and_then(|index| available.get(index))
+                .copied()
+        };
+        selected.ok_or_else(|| ProducerError::UnknownTopic(record.topic.to_string()))
     }
 }
 

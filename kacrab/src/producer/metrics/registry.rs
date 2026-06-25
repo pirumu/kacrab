@@ -2123,6 +2123,11 @@ impl Metrics {
         self.registered.get(metric_name)
     }
 
+    /// Iterate every registered metric and its current value handle.
+    pub fn registered_metrics(&self) -> impl Iterator<Item = (&MetricName, &KafkaMetric)> {
+        self.registered.iter()
+    }
+
     /// Close all reporters once.
     pub fn close(&mut self) {
         if self.closed {

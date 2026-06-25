@@ -1,6 +1,9 @@
 //! Low-overhead producer metrics snapshots.
 
 mod registry;
+mod sender_registry;
+
+pub(crate) use sender_registry::SenderMetricsRegistry;
 
 use std::{
     collections::BTreeMap,
@@ -589,10 +592,20 @@ struct ProducerMetricsInner {
     transaction_commit_total_latency_ns: AtomicU64,
     transaction_abort_count: AtomicU64,
     transaction_abort_total_latency_ns: AtomicU64,
+    /// Java-named client + per-topic metrics (Kafka `SenderMetricsRegistry`).
+    sender_registry: SenderMetricsRegistry,
 }
 
 impl ProducerMetrics {
-    pub(crate) fn record_produce_request(&self, request_bytes: usize, payload_bytes: usize) {
+    pub(crate) fn record_produce_request(
+        &self,
+        request_bytes: usize,
+        payload_bytes: usize,
+        records: usize,
+    ) {
+        self.inner
+            .sender_registry
+            .record_records_per_request(u64::try_from(records).unwrap_or(u64::MAX));
         let _previous = self
             .inner
             .produce_request_count
@@ -616,17 +629,30 @@ impl ProducerMetrics {
         batch_size: usize,
         records: usize,
     ) {
-        self.record_produce_batch_with_compression_ratio(batch_bytes, batch_size, records, 1.0);
+        self.record_produce_batch_with_compression_ratio(
+            "test", batch_bytes, batch_size, records, 1.0,
+        );
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Mirrors Java handleProduceResponse batch metrics (topic, bytes, size, count, ratio)."
+    )]
     pub(crate) fn record_produce_batch_with_compression_ratio(
         &self,
+        topic: &str,
         batch_bytes: usize,
         batch_size: usize,
         records: usize,
         compression_ratio: f64,
     ) {
         let records = u64::try_from(records).unwrap_or(u64::MAX);
+        self.inner.sender_registry.record_batch(
+            topic,
+            records,
+            u64::try_from(batch_bytes).unwrap_or(u64::MAX),
+            compression_ratio,
+        );
         let _previous = self
             .inner
             .produce_record_count
@@ -671,6 +697,7 @@ impl ProducerMetrics {
             .inner
             .produce_retry_count
             .fetch_add(1, Ordering::Relaxed);
+        self.inner.sender_registry.record_retry(None);
     }
 
     pub(crate) fn record_error(&self) {
@@ -678,6 +705,47 @@ impl ProducerMetrics {
             .inner
             .produce_error_count
             .fetch_add(1, Ordering::Relaxed);
+        self.inner.sender_registry.record_error(None);
+    }
+
+    /// Snapshot the Java-named (Kafka `SenderMetricsRegistry`) producer metrics.
+    pub(crate) fn kafka_metrics(&self) -> BTreeMap<String, f64> {
+        self.inner.sender_registry.kafka_metrics()
+    }
+
+    /// Record a produce request round-trip latency (Kafka request-latency).
+    pub(crate) fn record_request_latency(&self, latency: Duration) {
+        self.inner
+            .sender_registry
+            .record_request_latency(duration_to_ms_f64(latency));
+    }
+
+    /// Record a broker-imposed throttle window (Kafka produce-throttle-time).
+    pub(crate) fn record_throttle_time(&self, throttle: Duration) {
+        self.inner
+            .sender_registry
+            .record_throttle_time(duration_to_ms_f64(throttle));
+    }
+
+    /// Record the time a batch spent buffered before drain (Kafka record-queue-time).
+    pub(crate) fn record_queue_time(&self, queued: Duration) {
+        self.inner
+            .sender_registry
+            .record_queue_time(duration_to_ms_f64(queued));
+    }
+
+    /// Record the average serialized record size for a batch (Kafka record-size).
+    pub(crate) fn record_record_size(&self, batch_bytes: usize, records: usize) {
+        let Some(average) = batch_bytes.checked_div(records) else {
+            return;
+        };
+        let average = u32::try_from(average).map_or_else(|_| f64::from(u32::MAX), f64::from);
+        self.inner.sender_registry.record_record_size(average);
+    }
+
+    /// Update the in-flight request gauge (Kafka requests-in-flight).
+    pub(crate) fn set_requests_in_flight(&self, in_flight: usize) {
+        self.inner.sender_registry.set_requests_in_flight(in_flight);
     }
 
     pub(crate) fn record_requeue(&self) {
@@ -703,6 +771,7 @@ impl ProducerMetrics {
             .inner
             .produce_request_split_count
             .fetch_add(1, Ordering::Relaxed);
+        self.inner.sender_registry.record_split();
     }
 
     pub(crate) fn record_flush(&self, latency: Duration) {
@@ -919,6 +988,14 @@ fn ratio_to_per_mille(ratio: f64) -> u64 {
         return 1_000;
     }
     (ratio * 1_000.0).round() as u64
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Metrics latency values are coarse observability samples; ms precision loss is fine."
+)]
+fn duration_to_ms_f64(duration: Duration) -> f64 {
+    duration.as_nanos() as f64 / 1_000_000.0
 }
 
 #[cfg(test)]
@@ -1759,8 +1836,8 @@ mod tests {
     fn producer_metrics_average_observed_compression_ratios_like_java() {
         let metrics = ProducerMetrics::default();
 
-        metrics.record_produce_batch_with_compression_ratio(64, 128, 1, 0.50);
-        metrics.record_produce_batch_with_compression_ratio(96, 128, 1, 0.75);
+        metrics.record_produce_batch_with_compression_ratio("orders", 64, 128, 1, 0.50);
+        metrics.record_produce_batch_with_compression_ratio("orders", 96, 128, 1, 0.75);
         let snapshot = metrics.snapshot(ProducerQueueMetrics::default());
 
         assert_eq!(

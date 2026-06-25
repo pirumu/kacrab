@@ -1261,6 +1261,11 @@ impl ProducerDispatcher {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Single drain loop handles every dispatch outcome (split, leadership, idempotent, \
+                  retriable broker, wire) in one place to mirror Java's Sender.runOnce."
+    )]
     pub(crate) async fn dispatch_drained(
         &self,
         mut batches: Vec<ReadyBatch>,
@@ -1592,6 +1597,10 @@ impl ProducerDispatcher {
     /// Retry a generic retriable broker produce error (Java `Sender.canRetry`):
     /// retry while attempts remain and the delivery timeout has not elapsed,
     /// otherwise fail the batch definitively.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Mirrors the existing leadership/wire retry handlers' parameter set."
+    )]
     async fn handle_retryable_broker_retry(
         &self,
         batches: &[ReadyBatch],
@@ -1729,8 +1738,10 @@ impl ProducerDispatcher {
             let batch_metric_sample =
                 self.metrics_are_enabled()
                     .then(|| ProduceBatchMetricSample {
+                        topic: batch.topic.clone(),
                         bytes: records.len(),
                         records: batch.records.len(),
+                        queued: Instant::now().saturating_duration_since(batch.first_append_at),
                         compression_ratio: self.actual_compression_ratio_for_encoded_batch(
                             batch,
                             request_base_offset,
@@ -1753,19 +1764,31 @@ impl ProducerDispatcher {
         if self.metrics_are_enabled() {
             for sample in batch_metric_samples {
                 self.metrics.record_produce_batch_with_compression_ratio(
+                    &sample.topic,
                     sample.bytes,
                     self.partition_sticky_batch_size,
                     sample.records,
                     sample.compression_ratio,
                 );
+                self.metrics.record_queue_time(sample.queued);
+                if sample.records > 0 {
+                    // Average serialized size per record (Kafka record-size).
+                    self.metrics
+                        .record_record_size(sample.bytes, sample.records);
+                }
             }
         }
 
         let mut receipts = Vec::new();
         for (broker_id, requests) in by_broker {
+            let request_started = self.metrics_are_enabled().then(Instant::now);
             let mut broker_receipts = self
                 .dispatch_broker_requests(broker_id, requests, version)
                 .await?;
+            if let Some(started) = request_started {
+                self.metrics
+                    .record_request_latency(started.elapsed());
+            }
             receipts.append(&mut broker_receipts);
         }
         Ok(receipts)
@@ -1887,7 +1910,11 @@ impl ProducerDispatcher {
                             return Err(DispatchError::from(crate::wire::WireError::from(error)));
                         },
                     };
-                    metrics.record_produce_request(request_bytes, request.payload_bytes);
+                    metrics.record_produce_request(
+                        request_bytes,
+                        request.payload_bytes,
+                        request.record_count,
+                    );
                 }
                 self.record_broker_drain_started(broker_id, Instant::now())
                     .await;
@@ -1975,6 +2002,10 @@ impl ProducerDispatcher {
                     if response.throttle_time_ms > 0
                         && let Ok(throttle_ms) = u64::try_from(response.throttle_time_ms)
                     {
+                        if self.metrics_are_enabled() {
+                            self.metrics
+                                .record_throttle_time(Duration::from_millis(throttle_ms));
+                        }
                         tokio::time::sleep(Duration::from_millis(throttle_ms)).await;
                     }
                     let endpoints = node_endpoint_updates(&response);
@@ -3072,6 +3103,10 @@ impl ProducerDispatcher {
 }
 
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Mirrors Java TransactionManager's flat transaction/idempotence state flags."
+)]
 struct ProducerIdempotenceState {
     identity: Option<ProducerIdentity>,
     /// Per-partition idempotent bookkeeping (Java `TxnPartitionMap` /
@@ -5542,10 +5577,12 @@ struct BrokerProduceOptions<'a> {
     transactional_id: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ProduceBatchMetricSample {
+    topic: String,
     bytes: usize,
     records: usize,
+    queued: Duration,
     compression_ratio: f64,
 }
 
@@ -5820,9 +5857,11 @@ fn choose_coordinator_addr(addresses: impl IntoIterator<Item = SocketAddr>) -> O
 mod tests {
     #![allow(
         clippy::expect_used,
+        clippy::field_reassign_with_default,
         clippy::missing_assert_message,
+        clippy::significant_drop_tightening,
         clippy::unwrap_used,
-        reason = "Unit test fixtures fail fastest with contextual unwrap/expect calls."
+        reason = "Unit test fixtures fail fastest with contextual unwrap/expect and direct state setup."
     )]
 
     use std::{

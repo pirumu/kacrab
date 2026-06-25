@@ -771,6 +771,20 @@ impl Producer {
         self.metrics().as_metric_map()
     }
 
+    /// Snapshot producer metrics under their Kafka metric names, mirroring Java's
+    /// `SenderMetricsRegistry`. Keys are formatted as `group:name[:tag=value]`
+    /// (e.g. `producer-metrics:record-send-rate`,
+    /// `producer-topic-metrics:record-send-total:topic=orders`).
+    #[must_use]
+    pub fn kafka_metrics(&self) -> BTreeMap<String, f64> {
+        // Refresh point-in-time gauges from the current sender queue snapshot.
+        if let Ok(sender) = self.sender.try_lock() {
+            self.metrics
+                .set_requests_in_flight(sender.queue_snapshot().in_flight_dispatches);
+        }
+        self.metrics.kafka_metrics()
+    }
+
     /// Serialize producer and registered application metrics as OTLP `MetricsData`.
     #[must_use]
     pub fn otlp_metrics_data(&self, time_unix_nanos: u64) -> Bytes {
@@ -4063,6 +4077,34 @@ mod tests {
             Some(ProducerMetricValue::Ratio(0.0))
         ));
         assert!(!registry.contains_key("custom.orders.sent"));
+    }
+
+    #[test]
+    fn kafka_metrics_exposes_java_named_producer_metrics() {
+        let producer = producer(1);
+        let metrics = producer.kafka_metrics();
+
+        // The client-level SenderMetricsRegistry sensors are registered under
+        // their Kafka metric names on the producer-metrics group.
+        for name in [
+            "producer-metrics:record-send-rate",
+            "producer-metrics:record-send-total",
+            "producer-metrics:record-error-rate",
+            "producer-metrics:record-retry-rate",
+            "producer-metrics:byte-rate",
+            "producer-metrics:batch-split-total",
+            "producer-metrics:compression-rate-avg",
+            "producer-metrics:records-per-request-avg",
+            "producer-metrics:request-latency-avg",
+            "producer-metrics:request-latency-max",
+            "producer-metrics:batch-size-avg",
+            "producer-metrics:record-size-avg",
+            "producer-metrics:produce-throttle-time-avg",
+            "producer-metrics:record-queue-time-avg",
+            "producer-metrics:requests-in-flight",
+        ] {
+            assert!(metrics.contains_key(name), "missing kafka metric {name}");
+        }
     }
 
     #[tokio::test]
