@@ -766,6 +766,127 @@ impl RecordAccumulator {
     }
 }
 
+/// Thread-safe wrapper around [`RecordAccumulator`]. The inner accumulator keeps
+/// its single-threaded logic unchanged; this wrapper guards it with a short
+/// `std::sync::Mutex` held only across synchronous accumulator operations. That
+/// lets concurrent `send(&self)` appends use the accumulator directly without
+/// going through the producer's async sender mutex (which serialized every
+/// append). All accumulator methods are synchronous, so the guard is never held
+/// across an `.await`.
+#[derive(Debug)]
+pub(crate) struct SharedAccumulator {
+    inner: std::sync::Mutex<RecordAccumulator>,
+}
+
+impl SharedAccumulator {
+    pub(crate) fn new(accumulator: RecordAccumulator) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(accumulator),
+        }
+    }
+
+    /// Lock the accumulator for a short synchronous critical section. Never hold
+    /// the returned guard across an `.await`.
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, RecordAccumulator> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    // --- Delegates: each acquires the short lock and forwards to the inner
+    // accumulator, so callers keep their existing call sites (only the parameter
+    // type changes from `&mut RecordAccumulator` to `&SharedAccumulator`). ---
+
+    pub(crate) fn append_for_delivery_with_status_at_compression_ratio(
+        &self,
+        record: ProducerRecord,
+        now: Instant,
+        compression_ratio: f32,
+    ) -> Result<(SendFuture, AppendStatus)> {
+        self.lock()
+            .append_for_delivery_with_status_at_compression_ratio(record, now, compression_ratio)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn append_with_status_at_compression_ratio(
+        &self,
+        record: ProducerRecord,
+        now: Instant,
+        compression_ratio: f32,
+    ) -> Result<AppendStatus> {
+        self.lock()
+            .append_with_status_at_compression_ratio(record, now, compression_ratio)
+    }
+
+    pub(crate) fn buffer_memory(&self) -> usize {
+        self.lock().buffer_memory()
+    }
+
+    pub(crate) fn partition_queue_load_with_availability<F>(
+        &self,
+        topic_metadata: &TopicMetadata,
+        is_partition_available: F,
+    ) -> Option<PartitionQueueLoad>
+    where
+        F: FnMut(&PartitionMetadata) -> bool,
+    {
+        self.lock()
+            .partition_queue_load_with_availability(topic_metadata, is_partition_available)
+    }
+
+    pub(crate) fn buffered_batches(&self) -> usize {
+        self.lock().buffered_batches()
+    }
+
+    pub(crate) fn buffered_bytes(&self) -> usize {
+        self.lock().buffered_bytes()
+    }
+
+    pub(crate) fn buffered_records(&self) -> usize {
+        self.lock().buffered_records()
+    }
+
+    pub(crate) fn complete_batch_identities<I>(&self, identities: I) -> usize
+    where
+        I: IntoIterator<Item = ReadyBatchIdentity>,
+    {
+        self.lock().complete_batch_identities(identities)
+    }
+
+    pub(crate) fn discard_all(&self) -> Vec<ReadyBatch> {
+        self.lock().discard_all()
+    }
+
+    pub(crate) fn drain_all(&self) -> Vec<ReadyBatch> {
+        self.lock().drain_all()
+    }
+
+    pub(crate) fn drain_ready(&self, now: Instant) -> Vec<ReadyBatch> {
+        self.lock().drain_ready(now)
+    }
+
+    pub(crate) fn has_available_memory_for_reserved_with_compression_ratio(
+        &self,
+        record: &ProducerRecord,
+        reserved_bytes: usize,
+        compression_ratio: f32,
+    ) -> bool {
+        self.lock().has_available_memory_for_reserved_with_compression_ratio(
+            record,
+            reserved_bytes,
+            compression_ratio,
+        )
+    }
+
+    pub(crate) fn next_ready_at(&self, now: Instant) -> Option<Instant> {
+        self.lock().next_ready_at(now)
+    }
+
+    pub(crate) fn requeue_front(&self, batches: Vec<ReadyBatch>) -> Result<()> {
+        self.lock().requeue_front(batches)
+    }
+}
+
 fn split_producer_state(
     producer_state: Option<ProducerBatchState>,
     record_index: usize,

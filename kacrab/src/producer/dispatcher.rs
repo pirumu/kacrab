@@ -412,7 +412,7 @@ impl ProducerDispatcher {
     /// to reuse its current sticky partition without a metadata lookup.
     pub(crate) async fn assign_partition_with_accumulator(
         &self,
-        accumulator: &RecordAccumulator,
+        accumulator: &super::accumulator::SharedAccumulator,
         record: &mut super::ProducerRecord,
     ) -> Result<()> {
         if record.has_assigned_partition() {
@@ -636,7 +636,7 @@ impl ProducerDispatcher {
     /// Refresh adaptive sticky partition load stats from the current accumulator queues.
     pub async fn refresh_partition_load_stats<I, S>(
         &self,
-        accumulator: &RecordAccumulator,
+        accumulator: &super::accumulator::SharedAccumulator,
         topics: I,
     ) -> Result<()>
     where
@@ -665,7 +665,7 @@ impl ProducerDispatcher {
     /// Refresh adaptive sticky partition load stats using a caller-provided metadata snapshot.
     pub(crate) async fn refresh_partition_load_stats_with_metadata<I, S>(
         &self,
-        accumulator: &RecordAccumulator,
+        accumulator: &super::accumulator::SharedAccumulator,
         metadata: &crate::wire::ClusterMetadata,
         topics: I,
     ) -> Result<()>
@@ -700,7 +700,7 @@ impl ProducerDispatcher {
     #[cfg(test)]
     pub(crate) async fn refresh_topic_load_stats_with_metadata(
         &self,
-        accumulator: &RecordAccumulator,
+        accumulator: &super::accumulator::SharedAccumulator,
         metadata: &crate::wire::ClusterMetadata,
         topic: &str,
     ) -> Result<()> {
@@ -3603,7 +3603,7 @@ struct TopicPartitionAssignment<'a> {
 struct PartitionLoadRefresh<'a> {
     topic: &'a str,
     topic_metadata: &'a TopicMetadata,
-    accumulator: &'a RecordAccumulator,
+    accumulator: &'a super::accumulator::SharedAccumulator,
     now: Instant,
     availability_timeout: Duration,
 }
@@ -3943,7 +3943,7 @@ impl ProducerPartitionerState {
         &mut self,
         topic: &str,
         topic_metadata: &TopicMetadata,
-        accumulator: &RecordAccumulator,
+        accumulator: &super::accumulator::SharedAccumulator,
     ) {
         self.update_partition_load_stats_from_accumulator_at(PartitionLoadRefresh {
             topic,
