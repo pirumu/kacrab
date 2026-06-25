@@ -37,11 +37,31 @@ const TRACKED_API_CHUNK_RECORDS: usize = 16_384;
 const BENCH_RUNS: usize = 5;
 
 fn main() {
-    let runtime = Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("benchmark runtime");
+    // Default to a multi-thread runtime so the background sender + in-flight
+    // produce tasks can run concurrently with the send loop (better pipelining).
+    // Set KACRAB_BENCH_CURRENT_THREAD=1 to force the old single-thread runtime.
+    let current_thread = env::var("KACRAB_BENCH_CURRENT_THREAD")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let runtime = if current_thread {
+        Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("benchmark runtime")
+    } else {
+        let workers = env::var("KACRAB_BENCH_WORKERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(4);
+        Builder::new_multi_thread()
+            .worker_threads(workers)
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("benchmark runtime")
+    };
     runtime.block_on(async {
         let bootstrap = bootstrap_addr();
         let topic = topic();

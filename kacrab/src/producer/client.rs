@@ -1245,7 +1245,13 @@ impl Producer {
     }
 
     async fn fail_if_send_transaction_error(&self) -> Result<()> {
-        self.sender.lock().await.fail_if_transaction_error().await
+        // Check transaction error state through the shared control dispatcher
+        // instead of locking the sender on every send. The dispatcher returns
+        // `Ok` without taking any lock for non-transactional producers, so the
+        // common hot path no longer contends with the background sender loop.
+        self.control_dispatcher
+            .fail_if_transaction_error()
+            .await
     }
 
     async fn drive_flush_until_complete(&mut self) -> Result<()> {

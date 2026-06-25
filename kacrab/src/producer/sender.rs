@@ -235,6 +235,11 @@ impl ProducerSenderRuntime {
     }
 
     pub(crate) fn ensure_loop_running(&mut self) {
+        // Fast path: avoid cloning the sender Arc, metrics-enabled Arc, and the
+        // metrics handle on every send once the background loop is already up.
+        if self.loop_handle.is_running() {
+            return;
+        }
         self.loop_handle.ensure_running(
             Arc::clone(&self.sender),
             Arc::clone(&self.loop_metrics_enabled),
@@ -439,6 +444,7 @@ impl ProducerSender {
         self.dispatcher.uses_sticky_partitioner(record)
     }
 
+    #[cfg(test)]
     pub(crate) async fn fail_if_transaction_error(&self) -> Result<(), ProducerError> {
         self.dispatcher.fail_if_transaction_error().await
     }
