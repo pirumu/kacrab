@@ -2131,7 +2131,9 @@ impl ProducerDispatcher {
         if !self.idempotence.enabled {
             return;
         }
+        let transactional = self.idempotence.transactional_id.is_some();
         let mut state = self.producer_state.lock().await;
+        let mut expired_partitions: Vec<(String, i32)> = Vec::new();
         for batch in batches {
             if now.duration_since(batch.first_append_at) < self.delivery_timeout {
                 continue;
@@ -2148,6 +2150,17 @@ impl ProducerDispatcher {
                 producer_state.base_sequence,
                 record_count,
             );
+            if !expired_partitions
+                .iter()
+                .any(|(topic, partition)| topic == &batch.topic && *partition == batch.partition)
+            {
+                expired_partitions.push((batch.topic.clone(), batch.partition));
+            }
+        }
+        // Java maybeResolveSequences: these batches have now fully drained
+        // (expired) for their partitions, so resolve or recover each.
+        for (topic, partition) in expired_partitions {
+            state.resolve_unresolved_sequence_after_drain(&topic, partition, transactional);
         }
     }
 
@@ -2290,6 +2303,19 @@ impl ProducerDispatcher {
                 continue;
             };
             state.release_sequence(&batch.topic, batch.partition, next_sequence);
+            // Java handleCompletedBatch: record the last acked sequence/offset for
+            // this partition (used by maybeResolveSequences and UnknownProducerId
+            // disambiguation).
+            state.maybe_update_last_acked_sequence(
+                &batch.topic,
+                batch.partition,
+                next_sequence.saturating_sub(1),
+            );
+            if let Some(receipt) = receipts.iter().find(|receipt| {
+                receipt.topic.as_ref() == batch.topic && receipt.partition == batch.partition
+            }) {
+                state.update_last_acked_offset(&batch.topic, batch.partition, receipt.offset);
+            }
         }
     }
 
@@ -2896,8 +2922,10 @@ impl ProducerDispatcher {
 #[derive(Debug, Default)]
 struct ProducerIdempotenceState {
     identity: Option<ProducerIdentity>,
-    sequences: AHashMap<TopicPartitionKey, i32>,
-    unresolved_sequences: AHashMap<TopicPartitionKey, i32>,
+    /// Per-partition idempotent bookkeeping (Java `TxnPartitionMap` /
+    /// `TxnPartitionEntry`): next sequence, last-acked sequence and offset, and
+    /// any unresolved-sequence marker.
+    partitions: AHashMap<TopicPartitionKey, IdempotentPartitionEntry>,
     coordinator_id: Option<i32>,
     transaction_state: TransactionState,
     in_transaction: bool,
@@ -4361,8 +4389,7 @@ impl ProducerIdempotenceState {
     }
 
     fn reset_sequences_after_epoch_bump(&mut self) {
-        self.sequences.clear();
-        self.unresolved_sequences.clear();
+        self.partitions.clear();
         self.epoch_bump_required = false;
     }
 
@@ -4371,20 +4398,21 @@ impl ProducerIdempotenceState {
             topic: topic.to_owned(),
             partition,
         };
-        if self.unresolved_sequences.contains_key(&key) {
+        let entry = self.partitions.entry(key).or_default();
+        if entry.unresolved_next_sequence.is_some() {
             return Err(ProducerError::UnresolvedSequence {
                 topic: topic.to_owned(),
                 partition,
             });
         }
-        let base_sequence = self.sequences.get(&key).copied().unwrap_or(0);
+        let base_sequence = entry.next_sequence;
         let next_sequence = base_sequence.checked_add(record_count).ok_or_else(|| {
             ProducerError::SequenceOverflow {
                 topic: topic.to_owned(),
                 partition,
             }
         })?;
-        let _previous = self.sequences.insert(key, next_sequence);
+        entry.next_sequence = next_sequence;
         Ok(base_sequence)
     }
 
@@ -4400,11 +4428,12 @@ impl ProducerIdempotenceState {
             partition,
         };
         let next_sequence = base_sequence.saturating_add(record_count);
-        let _sequence = self
-            .unresolved_sequences
-            .entry(key)
-            .and_modify(|sequence| *sequence = (*sequence).max(next_sequence))
-            .or_insert(next_sequence);
+        let entry = self.partitions.entry(key).or_default();
+        entry.unresolved_next_sequence = Some(
+            entry
+                .unresolved_next_sequence
+                .map_or(next_sequence, |existing| existing.max(next_sequence)),
+        );
     }
 
     fn reset_sequence(&mut self, topic: &str, partition: i32) {
@@ -4412,8 +4441,12 @@ impl ProducerIdempotenceState {
             topic: topic.to_owned(),
             partition,
         };
-        let _removed = self.unresolved_sequences.remove(&key);
-        let _previous = self.sequences.insert(key, 0);
+        // Java startSequencesAtBeginning: sequence restarts at 0 with no acks.
+        let entry = self.partitions.entry(key).or_default();
+        entry.unresolved_next_sequence = None;
+        entry.next_sequence = 0;
+        entry.last_acked_sequence = NO_LAST_ACKED_SEQUENCE;
+        entry.last_acked_offset = INVALID_LAST_ACKED_OFFSET;
     }
 
     fn release_sequence(&mut self, topic: &str, partition: i32, base_sequence: i32) {
@@ -4421,13 +4454,100 @@ impl ProducerIdempotenceState {
             topic: topic.to_owned(),
             partition,
         };
-        if self
-            .unresolved_sequences
-            .get(&key)
-            .is_some_and(|sequence| *sequence <= base_sequence)
+        if let Some(entry) = self.partitions.get_mut(&key)
+            && entry
+                .unresolved_next_sequence
+                .is_some_and(|sequence| sequence <= base_sequence)
         {
-            let _removed = self.unresolved_sequences.remove(&key);
+            entry.unresolved_next_sequence = None;
         }
+    }
+
+    /// Java `maybeResolveSequences`: once a partition's in-flight batches have
+    /// drained with its sequence still unresolved, either confirm it was fully
+    /// acknowledged (drop the marker) or recover. When unacked messages remain,
+    /// a transactional producer transitions to an abortable error (or fatal when
+    /// the coordinator cannot bump the epoch) and an idempotent producer requests
+    /// an epoch bump.
+    fn resolve_unresolved_sequence_after_drain(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        transactional: bool,
+    ) {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        let (has_unresolved, resolved) = match self.partitions.get(&key) {
+            Some(entry) => (
+                entry.unresolved_next_sequence.is_some(),
+                // isNextSequence: lastAcked + 1 == nextSequence => fully acked.
+                entry.last_acked_sequence != NO_LAST_ACKED_SEQUENCE
+                    && entry.next_sequence.saturating_sub(entry.last_acked_sequence) == 1,
+            ),
+            None => return,
+        };
+        if !has_unresolved {
+            return;
+        }
+        if !resolved {
+            if transactional {
+                if self.in_transaction || self.transaction_state.is_completing() {
+                    if self.coordinator_lacks_epoch_bump_support {
+                        self.transaction_state = TransactionState::FatalError;
+                    } else {
+                        self.transaction_state = TransactionState::AbortableError;
+                        self.epoch_bump_required = true;
+                    }
+                }
+            } else {
+                self.epoch_bump_required = true;
+            }
+        }
+        if let Some(entry) = self.partitions.get_mut(&key) {
+            entry.unresolved_next_sequence = None;
+        }
+    }
+
+    /// Java `TxnPartitionEntry::maybeUpdateLastAckedSequence`: record the highest
+    /// acknowledged sequence for a partition.
+    fn maybe_update_last_acked_sequence(&mut self, topic: &str, partition: i32, sequence: i32) {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        let entry = self.partitions.entry(key).or_default();
+        if sequence > entry.last_acked_sequence {
+            entry.last_acked_sequence = sequence;
+        }
+    }
+
+    /// Java `TxnPartitionMap::updateLastAckedOffset`: record the highest
+    /// acknowledged base offset, used to disambiguate `UnknownProducerId`.
+    fn update_last_acked_offset(&mut self, topic: &str, partition: i32, last_offset: i64) {
+        if last_offset == INVALID_LAST_ACKED_OFFSET {
+            return;
+        }
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        let entry = self.partitions.entry(key).or_default();
+        if last_offset > entry.last_acked_offset {
+            entry.last_acked_offset = last_offset;
+        }
+    }
+
+    fn last_acked_offset(&self, topic: &str, partition: i32) -> Option<i64> {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        self.partitions
+            .get(&key)
+            .map(|entry| entry.last_acked_offset)
+            .filter(|offset| *offset != INVALID_LAST_ACKED_OFFSET)
     }
 
     fn should_reset_sequence_for_idempotent_retry(
@@ -4435,6 +4555,15 @@ impl ProducerIdempotenceState {
         decision: IdempotentRetryDecision<'_>,
     ) -> bool {
         if matches!(decision.error, ErrorCode::UnknownProducerId) {
+            // Retention elapsed (lastAckedOffset < logStartOffset) is recoverable
+            // by resetting; genuine data loss is not. Without a last-acked offset
+            // we fall back to Java's logStartOffset != -1 heuristic.
+            if let Some(last_acked_offset) =
+                self.last_acked_offset(decision.topic, decision.partition)
+                && decision.log_start_offset != -1
+            {
+                return last_acked_offset < decision.log_start_offset;
+            }
             return decision.log_start_offset != -1;
         }
         if !matches!(decision.error, ErrorCode::OutOfOrderSequenceNumber) {
@@ -4447,9 +4576,10 @@ impl ProducerIdempotenceState {
             topic: decision.topic.to_owned(),
             partition: decision.partition,
         };
-        self.unresolved_sequences
+        self.partitions
             .get(&key)
-            .is_none_or(|unresolved_next_sequence| base_sequence == *unresolved_next_sequence)
+            .and_then(|entry| entry.unresolved_next_sequence)
+            .is_none_or(|unresolved_next_sequence| base_sequence == unresolved_next_sequence)
     }
 
     fn rewind_sequence_to(&mut self, topic: &str, partition: i32, base_sequence: i32) {
@@ -4457,10 +4587,47 @@ impl ProducerIdempotenceState {
             topic: topic.to_owned(),
             partition,
         };
-        let _removed = self.unresolved_sequences.remove(&key);
-        let current = self.sequences.entry(key).or_insert(base_sequence);
-        if *current >= base_sequence {
-            *current = base_sequence;
+        let entry = self.partitions.entry(key).or_insert_with(|| IdempotentPartitionEntry {
+            next_sequence: base_sequence,
+            ..IdempotentPartitionEntry::default()
+        });
+        entry.unresolved_next_sequence = None;
+        if entry.next_sequence >= base_sequence {
+            entry.next_sequence = base_sequence;
+        }
+    }
+}
+
+/// Java `TxnPartitionEntry::NO_LAST_ACKED_SEQUENCE_NUMBER`.
+const NO_LAST_ACKED_SEQUENCE: i32 = -1;
+/// Java `ProduceResponse::INVALID_OFFSET`.
+const INVALID_LAST_ACKED_OFFSET: i64 = -1;
+
+/// Per-partition idempotent bookkeeping, mirroring Java `TxnPartitionEntry`.
+/// In-flight batches themselves are not stored here: Rust rewrites their base
+/// sequences directly on the dispatch-path batch slices, so this entry only
+/// tracks the scalar sequence/offset state.
+#[derive(Debug, Clone)]
+struct IdempotentPartitionEntry {
+    /// Base sequence of the next batch bound for this partition.
+    next_sequence: i32,
+    /// Sequence of the last record of the last acknowledged batch, or
+    /// [`NO_LAST_ACKED_SEQUENCE`] when nothing has been acknowledged.
+    last_acked_sequence: i32,
+    /// Last acknowledged base offset, or [`INVALID_LAST_ACKED_OFFSET`].
+    last_acked_offset: i64,
+    /// When set, new sends to this partition block until the marked sequence is
+    /// resolved (Java `partitionsWithUnresolvedSequences`).
+    unresolved_next_sequence: Option<i32>,
+}
+
+impl Default for IdempotentPartitionEntry {
+    fn default() -> Self {
+        Self {
+            next_sequence: 0,
+            last_acked_sequence: NO_LAST_ACKED_SEQUENCE,
+            last_acked_offset: INVALID_LAST_ACKED_OFFSET,
+            unresolved_next_sequence: None,
         }
     }
 }
@@ -8056,7 +8223,7 @@ mod tests {
             topic: "orders".to_owned(),
             partition: 0,
         };
-        let _previous = state.sequences.insert(key, i32::MAX);
+        state.partitions.entry(key).or_default().next_sequence = i32::MAX;
         assert!(matches!(
             state.next_sequence("orders", 0, 1),
             Err(ProducerError::SequenceOverflow { topic, partition })
@@ -8094,6 +8261,67 @@ mod tests {
                 .next_sequence("orders", 0, 1)
                 .expect("reset clears unresolved sequence"),
             0
+        );
+    }
+
+    #[test]
+    fn resolve_unresolved_after_drain_bumps_epoch_for_idempotent_like_java() {
+        // Idempotent producer: unacked messages after drain request an epoch bump.
+        let mut state = ProducerIdempotenceState::default();
+        let _ = state.next_sequence("orders", 0, 3).expect("sequence");
+        state.mark_sequence_unresolved("orders", 0, 0, 3);
+
+        state.resolve_unresolved_sequence_after_drain("orders", 0, false);
+
+        assert!(state.epoch_bump_required);
+        // Marker cleared, so the partition no longer blocks (epoch bump resets it).
+        assert_eq!(
+            state.next_sequence("orders", 0, 1).expect("unblocked"),
+            3
+        );
+    }
+
+    #[test]
+    fn resolve_unresolved_after_drain_aborts_transaction_like_java() {
+        use super::super::transaction::TransactionState;
+        // Transactional producer with a bump-capable coordinator: abortable error.
+        let mut state = ProducerIdempotenceState::default();
+        state.in_transaction = true;
+        let _ = state.next_sequence("orders", 0, 3).expect("sequence");
+        state.mark_sequence_unresolved("orders", 0, 0, 3);
+
+        state.resolve_unresolved_sequence_after_drain("orders", 0, true);
+
+        assert_eq!(state.transaction_state, TransactionState::AbortableError);
+        assert!(state.epoch_bump_required);
+
+        // A coordinator that cannot bump escalates to fatal.
+        let mut fatal = ProducerIdempotenceState::default();
+        fatal.in_transaction = true;
+        fatal.coordinator_lacks_epoch_bump_support = true;
+        let _ = fatal.next_sequence("orders", 0, 3).expect("sequence");
+        fatal.mark_sequence_unresolved("orders", 0, 0, 3);
+
+        fatal.resolve_unresolved_sequence_after_drain("orders", 0, true);
+
+        assert_eq!(fatal.transaction_state, TransactionState::FatalError);
+    }
+
+    #[test]
+    fn resolve_unresolved_after_drain_clears_marker_when_fully_acked_like_java() {
+        // If subsequent batches were acked (lastAcked + 1 == next), the partition
+        // is resolved without an epoch bump.
+        let mut state = ProducerIdempotenceState::default();
+        let _ = state.next_sequence("orders", 0, 3).expect("sequence");
+        state.mark_sequence_unresolved("orders", 0, 0, 3);
+        state.maybe_update_last_acked_sequence("orders", 0, 2); // next=3, lastAcked=2 => resolved
+
+        state.resolve_unresolved_sequence_after_drain("orders", 0, false);
+
+        assert!(!state.epoch_bump_required);
+        assert_eq!(
+            state.next_sequence("orders", 0, 1).expect("unblocked"),
+            3
         );
     }
 
