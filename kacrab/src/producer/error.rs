@@ -33,6 +33,16 @@ pub enum ProducerError {
         /// Configured `max.request.size`.
         max_request_size: usize,
     },
+    /// Serialized record could never fit in the total producer buffer.
+    #[error(
+        "serialized record is {size} bytes, larger than the total buffer.memory={buffer_memory}"
+    )]
+    RecordExceedsBufferMemory {
+        /// Estimated serialized record-batch bytes.
+        size: usize,
+        /// Configured `buffer.memory`.
+        buffer_memory: usize,
+    },
     /// Flush forced out buffered records but routing metadata was still incomplete.
     #[error("flush could not route all buffered records")]
     FlushIncomplete,

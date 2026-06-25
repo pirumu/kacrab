@@ -59,6 +59,7 @@ pub struct Producer {
     sender: ProducerSenderRuntime,
     max_block: std::time::Duration,
     max_request_size: usize,
+    buffer_memory: usize,
     partitioner_ignore_keys: bool,
     metrics: ProducerMetrics,
     metrics_enabled: bool,
@@ -90,6 +91,7 @@ impl Producer {
         let max_request_size = config.max_request_size;
         let enable_metrics_push = config.enable_metrics_push;
         let accumulator_config = config.accumulator;
+        let buffer_memory = accumulator_config.buffer_memory;
         let max_in_flight_requests = config.max_in_flight_requests_per_connection;
         let idempotent_ordering = config.idempotence.enabled;
         let partitioner_ignore_keys = config.partitioner_ignore_keys;
@@ -105,6 +107,7 @@ impl Producer {
             sender,
             max_block,
             max_request_size,
+            buffer_memory,
             partitioner_ignore_keys,
             metrics,
             metrics_enabled: false,
@@ -1428,6 +1431,14 @@ impl Producer {
                 max_request_size: self.max_request_size,
             });
         }
+        // Java ensureValidRecordSize: a record larger than the whole buffer can
+        // never be allocated, so fail fast instead of blocking until max.block.ms.
+        if estimated_size > self.buffer_memory {
+            return Err(ProducerError::RecordExceedsBufferMemory {
+                size: estimated_size,
+                buffer_memory: self.buffer_memory,
+            });
+        }
         Ok(())
     }
 
@@ -1546,6 +1557,13 @@ fn producer_error_for_callback(error: &ProducerError) -> Option<ProducerError> {
         } => Some(ProducerError::RecordTooLarge {
             size: *size,
             max_request_size: *max_request_size,
+        }),
+        ProducerError::RecordExceedsBufferMemory {
+            size,
+            buffer_memory,
+        } => Some(ProducerError::RecordExceedsBufferMemory {
+            size: *size,
+            buffer_memory: *buffer_memory,
         }),
         ProducerError::FlushIncomplete => Some(ProducerError::FlushIncomplete),
         ProducerError::BatchLifecycle(message) => Some(ProducerError::BatchLifecycle(message)),
@@ -4322,7 +4340,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_api_surfaces_backpressure_before_dispatch() {
+    async fn send_api_rejects_record_larger_than_buffer_before_dispatch() {
+        // A record that cannot fit the whole buffer is rejected up front (Java
+        // ensureValidRecordSize / G17) rather than blocking or surfacing generic
+        // backpressure. Buffer-full backpressure for fitting records is covered
+        // at the accumulator level.
         let mut config = runtime_config(1);
         config.accumulator = AccumulatorConfig::default().buffer_memory(1);
         let mut producer = Producer::from_parts(test_wire(), config);
@@ -4331,7 +4353,7 @@ mod tests {
             producer
                 .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")))
                 .await,
-            Err(ProducerError::Backpressure)
+            Err(ProducerError::RecordExceedsBufferMemory { .. })
         ));
     }
 

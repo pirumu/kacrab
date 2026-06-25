@@ -917,6 +917,13 @@ fn clone_producer_error_for_delivery(error: &ProducerError) -> ProducerError {
             size: *size,
             max_request_size: *max_request_size,
         },
+        ProducerError::RecordExceedsBufferMemory {
+            size,
+            buffer_memory,
+        } => ProducerError::RecordExceedsBufferMemory {
+            size: *size,
+            buffer_memory: *buffer_memory,
+        },
         ProducerError::FlushIncomplete => ProducerError::FlushIncomplete,
         ProducerError::BatchLifecycle(message) => ProducerError::BatchLifecycle(message),
         ProducerError::CallbackOperation { operation } => {
