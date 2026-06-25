@@ -1747,6 +1747,16 @@ impl ProducerDispatcher {
                         bytes: records.len(),
                         records: batch.records.len(),
                         queued: Instant::now().saturating_duration_since(batch.first_append_at),
+                        // Per-record serialized (uncompressed) sizes for Kafka's
+                        // record-size avg/max, mirroring Java's per-record metric.
+                        record_sizes: batch
+                            .records
+                            .iter()
+                            .map(|record| {
+                                record.key.as_ref().map_or(0, bytes::Bytes::len)
+                                    + record.value.as_ref().map_or(0, bytes::Bytes::len)
+                            })
+                            .collect(),
                         compression_ratio: self.actual_compression_ratio_for_encoded_batch(
                             batch,
                             request_base_offset,
@@ -1776,10 +1786,8 @@ impl ProducerDispatcher {
                     sample.compression_ratio,
                 );
                 self.metrics.record_queue_time(sample.queued);
-                if sample.records > 0 {
-                    // Average serialized size per record (Kafka record-size).
-                    self.metrics
-                        .record_record_size(sample.bytes, sample.records);
+                for size in &sample.record_sizes {
+                    self.metrics.record_record_size(*size);
                 }
             }
         }
@@ -5588,6 +5596,7 @@ struct ProduceBatchMetricSample {
     bytes: usize,
     records: usize,
     queued: Duration,
+    record_sizes: Vec<usize>,
     compression_ratio: f64,
 }
 
