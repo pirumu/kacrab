@@ -34,7 +34,7 @@ use tokio::{
 use super::batch::encode_record_batch_with_producer_state_at_offset_into;
 use super::{
     accumulator::{
-        RECORD_BATCH_OVERHEAD_BYTES, ReadyBatch, RecordAccumulator, estimate_record_batch_bytes,
+        RECORD_BATCH_OVERHEAD_BYTES, ReadyBatch, SharedAccumulator, estimate_record_batch_bytes,
     },
     api::{ConsumerGroupMetadata, OffsetAndMetadata, TopicPartition},
     batch::{
@@ -412,7 +412,7 @@ impl ProducerDispatcher {
     /// to reuse its current sticky partition without a metadata lookup.
     pub(crate) async fn assign_partition_with_accumulator(
         &self,
-        accumulator: &super::accumulator::SharedAccumulator,
+        accumulator: &SharedAccumulator,
         record: &mut super::ProducerRecord,
     ) -> Result<()> {
         if record.has_assigned_partition() {
@@ -636,7 +636,7 @@ impl ProducerDispatcher {
     /// Refresh adaptive sticky partition load stats from the current accumulator queues.
     pub async fn refresh_partition_load_stats<I, S>(
         &self,
-        accumulator: &super::accumulator::SharedAccumulator,
+        accumulator: &SharedAccumulator,
         topics: I,
     ) -> Result<()>
     where
@@ -665,7 +665,7 @@ impl ProducerDispatcher {
     /// Refresh adaptive sticky partition load stats using a caller-provided metadata snapshot.
     pub(crate) async fn refresh_partition_load_stats_with_metadata<I, S>(
         &self,
-        accumulator: &super::accumulator::SharedAccumulator,
+        accumulator: &SharedAccumulator,
         metadata: &crate::wire::ClusterMetadata,
         topics: I,
     ) -> Result<()>
@@ -700,7 +700,7 @@ impl ProducerDispatcher {
     #[cfg(test)]
     pub(crate) async fn refresh_topic_load_stats_with_metadata(
         &self,
-        accumulator: &super::accumulator::SharedAccumulator,
+        accumulator: &SharedAccumulator,
         metadata: &crate::wire::ClusterMetadata,
         topic: &str,
     ) -> Result<()> {
@@ -1055,7 +1055,7 @@ impl ProducerDispatcher {
     )]
     pub async fn dispatch_ready(
         &self,
-        accumulator: &mut RecordAccumulator,
+        accumulator: &SharedAccumulator,
         now: Instant,
     ) -> Result<Vec<RecordMetadata>> {
         let mut batches = accumulator.drain_ready(now);
@@ -1258,7 +1258,7 @@ impl ProducerDispatcher {
     /// Drain all accumulator batches and send them regardless of linger or size.
     pub async fn dispatch_all(
         &self,
-        accumulator: &mut RecordAccumulator,
+        accumulator: &SharedAccumulator,
     ) -> Result<Vec<RecordMetadata>> {
         let batches = accumulator.drain_all();
         if batches.is_empty() {
@@ -3603,7 +3603,7 @@ struct TopicPartitionAssignment<'a> {
 struct PartitionLoadRefresh<'a> {
     topic: &'a str,
     topic_metadata: &'a TopicMetadata,
-    accumulator: &'a super::accumulator::SharedAccumulator,
+    accumulator: &'a SharedAccumulator,
     now: Instant,
     availability_timeout: Duration,
 }
@@ -3943,7 +3943,7 @@ impl ProducerPartitionerState {
         &mut self,
         topic: &str,
         topic_metadata: &TopicMetadata,
-        accumulator: &super::accumulator::SharedAccumulator,
+        accumulator: &SharedAccumulator,
     ) {
         self.update_partition_load_stats_from_accumulator_at(PartitionLoadRefresh {
             topic,
@@ -5911,7 +5911,7 @@ mod tests {
         IdempotentRetryDecision, PartitionLoadRefresh, PendingTransactionOperationGuard,
         ProduceRequestSizing, ProducerDispatcher, ProducerIdempotenceState,
         ProducerPartitionerState, RECORD_BATCH_OVERHEAD_BYTES, RecordBufferRelease,
-        TopicPartitionKey, TransactionOperation, TransactionPendingOperationStart,
+        SharedAccumulator, TopicPartitionKey, TransactionOperation, TransactionPendingOperationStart,
         broker_dispatch_completed_result, broker_request_placement_for_batch,
         build_partition_load_stats, choose_coordinator_addr, complete_deliveries, end_txn_version,
         estimate_record_batch_bytes, estimate_sticky_record_bytes,
@@ -6647,7 +6647,7 @@ mod tests {
     fn adaptive_sticky_updates_load_stats_from_accumulator_queues() {
         let metadata = metadata_with_partitions("orders", 3);
         let topic_metadata = metadata.topic("orders").expect("topic metadata");
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default().batch_size(1));
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default().batch_size(1));
         let now = Instant::now();
         accumulator
             .append_at(ProducerRecord::new("orders", 0), now)
@@ -6675,7 +6675,7 @@ mod tests {
     fn adaptive_sticky_keeps_drained_empty_partition_queues_like_java() {
         let metadata = metadata_with_partitions("orders", 3);
         let topic_metadata = metadata.topic("orders").expect("topic metadata");
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(128)
                 .linger(Duration::from_mins(1)),
@@ -6715,7 +6715,7 @@ mod tests {
         metadata.topics[0].partitions[1].leader_id = 8;
         metadata.topics[0].partitions[2].leader_id = 9;
         let topic_metadata = metadata.topic("orders").expect("topic metadata");
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default().batch_size(1024));
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default().batch_size(1024));
         let now = Instant::now();
         for partition in 0..3 {
             accumulator
@@ -6753,7 +6753,7 @@ mod tests {
         metadata.topics[0].partitions[1].leader_id = 8;
         metadata.topics[0].partitions[2].leader_id = 9;
         let topic_metadata = metadata.topic("orders").expect("topic metadata");
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default().batch_size(1024));
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default().batch_size(1024));
         let now = Instant::now();
         for partition in 0..3 {
             accumulator
@@ -6873,7 +6873,7 @@ mod tests {
     #[test]
     fn message_too_large_split_uses_compression_ratio_estimation_for_split_groups() {
         let now = Instant::now();
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(TEST_LARGE_BATCH_SIZE)
                 .buffer_memory(TEST_LARGE_BATCH_SIZE * 4)
@@ -7588,7 +7588,7 @@ mod tests {
     async fn retry_wait_returns_delivery_timeout_when_outer_deadline_expires() {
         let dispatcher =
             ProducerDispatcher::new(test_wire()).delivery_timeout(Duration::from_millis(1));
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
@@ -7624,7 +7624,7 @@ mod tests {
         partition: i32,
         value: &'static [u8],
     ) -> super::ReadyBatch {
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .linger(Duration::from_secs(1)),
@@ -8264,11 +8264,11 @@ mod tests {
     #[tokio::test]
     async fn dispatch_entrypoints_return_immediately_for_empty_inputs() {
         let dispatcher = ProducerDispatcher::new(test_wire());
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
 
         assert!(
             dispatcher
-                .dispatch_ready(&mut accumulator, Instant::now())
+                .dispatch_ready(&accumulator, Instant::now())
                 .await
                 .expect("empty ready")
                 .is_empty()
@@ -8282,7 +8282,7 @@ mod tests {
         );
         assert!(
             dispatcher
-                .dispatch_all(&mut accumulator)
+                .dispatch_all(&accumulator)
                 .await
                 .expect("empty all")
                 .is_empty()
@@ -8293,7 +8293,7 @@ mod tests {
     async fn dispatch_ready_returns_producer_error_when_no_broker_is_available() {
         let wire = WireClient::connect_with_brokers(ConnectionConfig::default(), "client-a", []);
         let dispatcher = ProducerDispatcher::new(wire);
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
@@ -8307,7 +8307,7 @@ mod tests {
 
         assert!(matches!(
             dispatcher
-                .dispatch_ready(&mut accumulator, Instant::now())
+                .dispatch_ready(&accumulator, Instant::now())
                 .await,
             Err(ProducerError::Wire(
                 crate::wire::WireError::NoBrokerAvailable
@@ -8964,7 +8964,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_deliveries_skips_missing_receivers_and_missing_receipts() {
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .linger(Duration::from_secs(1)),
@@ -8986,7 +8986,7 @@ mod tests {
             Err(ProducerError::DeliveryDropped)
         ));
 
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .linger(Duration::from_secs(1)),
@@ -9011,7 +9011,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_deliveries_uses_later_split_receipts_for_original_delivery_handles() {
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(TEST_LARGE_BATCH_SIZE)
                 .buffer_memory(TEST_LARGE_BATCH_SIZE * 4)

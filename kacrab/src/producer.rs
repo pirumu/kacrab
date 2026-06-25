@@ -20,7 +20,7 @@ mod transaction;
 
 #[cfg(test)]
 pub(crate) use self::{
-    accumulator::RecordAccumulator,
+    accumulator::{RecordAccumulator, SharedAccumulator},
     config::ProducerIdempotenceConfig,
     transaction::{ProducerBatchState, ProducerIdentity},
 };
@@ -61,7 +61,7 @@ pub use self::{
 #[doc(hidden)]
 pub mod internals {
     pub use super::{
-        accumulator::{AccumulatorConfig, ReadyBatch, RecordAccumulator},
+        accumulator::{AccumulatorConfig, ReadyBatch, RecordAccumulator, SharedAccumulator},
         config::{ProducerIdempotenceConfig, ProducerRuntimeConfig},
         dispatcher::ProducerDispatcher,
         transaction::{ProducerBatchState, ProducerIdentity},

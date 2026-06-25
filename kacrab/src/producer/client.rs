@@ -715,7 +715,7 @@ impl Producer {
     /// aborted with a [`ProducerError::ProducerClosed`] error (Java's forced
     /// close fails incomplete batches) rather than silently dropped.
     pub fn close_now(self) {
-        if let Ok(mut sender) = self.sender.try_lock() {
+        if let Ok(sender) = self.sender.try_lock() {
             let _aborted = sender.fail_buffered_batches(&ProducerError::ProducerClosed);
         }
         drop(self);
@@ -3549,7 +3549,7 @@ mod tests {
     }
 
     fn ready_batch_for_partition(topic: &str, partition: i32) -> ReadyBatch {
-        let mut accumulator = crate::producer::RecordAccumulator::new(
+        let accumulator = crate::producer::SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .linger(Duration::from_mins(1)),

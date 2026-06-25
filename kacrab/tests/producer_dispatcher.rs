@@ -23,7 +23,7 @@ use kacrab::{
         RecordMetadata,
         internals::{
             AccumulatorConfig, ProducerDispatcher, ProducerIdempotenceConfig,
-            ProducerRuntimeConfig, RecordAccumulator,
+            ProducerRuntimeConfig, RecordAccumulator, SharedAccumulator,
         },
     },
     wire::{BrokerEndpoint, ClusterMetadata, ConnectionConfig, WireClient},
@@ -5974,7 +5974,7 @@ async fn dispatcher_drains_ready_batches_by_leader_broker() {
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
     let dispatcher = ProducerDispatcher::new(wire.clone());
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -5988,7 +5988,7 @@ async fn dispatcher_drains_ready_batches_by_leader_broker() {
 
     let before_dispatch = wire.buffer_pool_stats();
     let mut receipts = dispatcher
-        .dispatch_ready(&mut accumulator, Instant::now())
+        .dispatch_ready(&accumulator, Instant::now())
         .await
         .unwrap();
     receipts.sort_by_key(|receipt| receipt.partition);
@@ -6342,7 +6342,7 @@ async fn dispatcher_does_not_consume_sequence_after_local_record_too_large_error
         },
     );
     let now = Instant::now();
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -6421,7 +6421,7 @@ async fn dispatcher_releases_encoded_buffers_after_later_local_record_too_large_
         },
     );
     let now = Instant::now();
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -6514,7 +6514,7 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_lik
     );
     let dispatcher = ProducerDispatcher::new(wire);
     let now = Instant::now();
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(16 * 1024)
             .linger(Duration::ZERO)
@@ -6530,11 +6530,11 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_lik
     }
 
     let first = dispatcher
-        .dispatch_ready(&mut accumulator, now)
+        .dispatch_ready(&accumulator, now)
         .await
         .unwrap();
     let second = dispatcher
-        .dispatch_ready(&mut accumulator, now)
+        .dispatch_ready(&accumulator, now)
         .await
         .unwrap();
 
@@ -7087,7 +7087,7 @@ async fn dispatcher_sends_compressed_record_batches_from_runtime_config() {
             idempotence: idempotence_disabled(),
         },
     );
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -7097,7 +7097,7 @@ async fn dispatcher_sends_compressed_record_batches_from_runtime_config() {
         .unwrap();
 
     let receipts = dispatcher
-        .dispatch_ready(&mut accumulator, Instant::now())
+        .dispatch_ready(&accumulator, Instant::now())
         .await
         .unwrap();
 
@@ -7149,7 +7149,7 @@ async fn dispatcher_invalidates_metadata_on_leadership_error() {
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
     let dispatcher = ProducerDispatcher::new(wire.clone());
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -7159,7 +7159,7 @@ async fn dispatcher_invalidates_metadata_on_leadership_error() {
         .unwrap();
 
     let error = dispatcher
-        .dispatch_ready(&mut accumulator, Instant::now())
+        .dispatch_ready(&accumulator, Instant::now())
         .await
         .unwrap_err();
     assert!(matches!(
@@ -7237,7 +7237,7 @@ async fn dispatcher_retries_leadership_error_after_metadata_refresh() {
     );
     let dispatcher = ProducerDispatcher::new(wire).retry_attempts(1);
     dispatcher.enable_metrics();
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -7247,7 +7247,7 @@ async fn dispatcher_retries_leadership_error_after_metadata_refresh() {
         .unwrap();
 
     let receipts = dispatcher
-        .dispatch_ready(&mut accumulator, Instant::now())
+        .dispatch_ready(&accumulator, Instant::now())
         .await
         .unwrap();
     let metrics = dispatcher.metrics();
@@ -7286,7 +7286,7 @@ async fn dispatcher_requeues_batch_when_metadata_is_missing() {
     );
     let dispatcher = ProducerDispatcher::new(wire);
     dispatcher.enable_metrics();
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -7296,7 +7296,7 @@ async fn dispatcher_requeues_batch_when_metadata_is_missing() {
         .unwrap();
 
     let receipts = dispatcher
-        .dispatch_ready(&mut accumulator, Instant::now())
+        .dispatch_ready(&accumulator, Instant::now())
         .await
         .unwrap();
     let metrics = dispatcher.metrics();
@@ -7366,7 +7366,7 @@ async fn dispatcher_dispatch_all_requeues_and_reports_flush_incomplete() {
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
     let dispatcher = ProducerDispatcher::new(wire);
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(16 * 1024)
             .buffer_memory(16 * 1024),
@@ -7375,7 +7375,7 @@ async fn dispatcher_dispatch_all_requeues_and_reports_flush_incomplete() {
         .append(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
         .unwrap();
 
-    let error = dispatcher.dispatch_all(&mut accumulator).await.unwrap_err();
+    let error = dispatcher.dispatch_all(&accumulator).await.unwrap_err();
 
     assert!(matches!(
         error,
@@ -7708,7 +7708,7 @@ async fn dispatcher_fails_expired_batch_with_delivery_timeout() {
         [BrokerEndpoint::new(1, "127.0.0.1:1".parse().unwrap())],
     );
     let dispatcher = ProducerDispatcher::new(wire).delivery_timeout(Duration::from_millis(1));
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -7721,7 +7721,7 @@ async fn dispatcher_fails_expired_batch_with_delivery_timeout() {
         .unwrap();
 
     let error = dispatcher
-        .dispatch_ready(&mut accumulator, dispatch_at)
+        .dispatch_ready(&accumulator, dispatch_at)
         .await
         .unwrap_err();
 
@@ -8002,7 +8002,7 @@ fn ready_batches_for_value(
     value: &'static [u8],
     now: Instant,
 ) -> Vec<kacrab::producer::internals::ReadyBatch> {
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),

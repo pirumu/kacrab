@@ -18,7 +18,7 @@ use tokio::{
 
 use super::{
     ProducerRecord, ReadyBatch,
-    accumulator::{AppendStatus, ReadyBatchIdentity, RecordAccumulator, SharedAccumulator},
+    accumulator::{AppendStatus, ReadyBatchIdentity, SharedAccumulator},
     dispatcher::{DispatchOutcome, ProducerDispatcher},
     error::ProducerError,
     metrics::ProducerMetrics,
@@ -358,7 +358,7 @@ impl ProducerSender {
         );
         state.notify_on_dispatch_completion(Arc::clone(&sender_loop_notify));
         Self {
-            accumulator: Arc::new(SharedAccumulator::new(RecordAccumulator::new(accumulator_config))),
+            accumulator: Arc::new(SharedAccumulator::with_config(accumulator_config)),
             state,
             dispatcher,
             sender_loop_notify,
@@ -652,14 +652,14 @@ impl ProducerSender {
         self.state.callback_append_dispatch_decision(status)
     }
 
-    pub(crate) fn discard_buffered_batches(&mut self) -> usize {
+    pub(crate) fn discard_buffered_batches(&self) -> usize {
         ProducerSenderState::discard_buffered_batches(&self.accumulator)
     }
 
     /// Fail every buffered record's delivery with `error` and drop the batches,
     /// mirroring Java `RecordAccumulator.abortIncompleteBatches` on a forced
     /// close. Returns the number of batches aborted.
-    pub(crate) fn fail_buffered_batches(&mut self, error: &ProducerError) -> usize {
+    pub(crate) fn fail_buffered_batches(&self, error: &ProducerError) -> usize {
         let mut batches = self.accumulator.discard_all();
         let count = batches.len();
         for batch in &mut batches {
@@ -3728,7 +3728,7 @@ mod tests {
     use crate::{
         producer::{
             ProducerError, ProducerRecord, ProducerRuntimeConfig,
-            accumulator::{AccumulatorConfig, AppendStatus, ReadyBatchIdentity, RecordAccumulator},
+            accumulator::{AccumulatorConfig, AppendStatus, ReadyBatchIdentity, RecordAccumulator, SharedAccumulator},
             dispatcher::DispatchOutcome,
             metrics::{ProducerMetricValue, ProducerQueueMetrics},
         },
@@ -3754,8 +3754,8 @@ mod tests {
         }
     }
 
-    fn ready_accumulator() -> RecordAccumulator {
-        let mut accumulator = RecordAccumulator::new(
+    fn ready_accumulator() -> SharedAccumulator {
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .linger(Duration::ZERO)
@@ -3770,8 +3770,8 @@ mod tests {
         accumulator
     }
 
-    fn lingering_accumulator(now: std::time::Instant) -> RecordAccumulator {
-        let mut accumulator = RecordAccumulator::new(
+    fn lingering_accumulator(now: std::time::Instant) -> SharedAccumulator {
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(16 * 1024)
                 .linger(Duration::from_millis(10))
@@ -3845,7 +3845,7 @@ mod tests {
     #[tokio::test]
     async fn sender_state_reports_pending_work_from_buffer_or_in_flight_dispatch() {
         let mut state = ProducerSenderState::new(1);
-        let empty = RecordAccumulator::new(AccumulatorConfig::default());
+        let empty = SharedAccumulator::with_config(AccumulatorConfig::default());
         assert!(!state.has_pending_work(&empty));
 
         let buffered = ready_accumulator();
@@ -3904,7 +3904,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_flush_completion_handles_in_flight_dispatches_until_empty() {
         let mut state = ProducerSenderState::new(2);
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
         let first_latency = Duration::from_millis(3);
         let second_latency = Duration::from_millis(7);
         let mut observed_latencies = Vec::new();
@@ -3927,7 +3927,7 @@ mod tests {
 
         state
             .wait_for_flush_completion(
-                &mut accumulator,
+                &accumulator,
                 |latency| observed_latencies.push(latency),
                 || observed_requeues += 1,
             )
@@ -3946,7 +3946,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_abort_completion_handles_in_flight_dispatches_until_empty() {
         let mut state = ProducerSenderState::new(2);
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
         let first_latency = Duration::from_millis(5);
         let second_latency = Duration::from_millis(11);
         let mut observed_latencies = Vec::new();
@@ -3969,7 +3969,7 @@ mod tests {
 
         state
             .wait_for_abort_completion(
-                &mut accumulator,
+                &accumulator,
                 |latency| observed_latencies.push(latency),
                 || observed_requeues += 1,
             )
@@ -3988,7 +3988,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_abort_completion_drops_requeued_in_flight_batches() {
         let mut state = ProducerSenderState::new(1);
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
         let batch = ready_batch("orders", 0);
         let mut observed_latencies = Vec::new();
         let mut observed_requeues = 0;
@@ -4003,7 +4003,7 @@ mod tests {
 
         state
             .wait_for_abort_completion(
-                &mut accumulator,
+                &accumulator,
                 |latency| observed_latencies.push(latency),
                 || observed_requeues += 1,
             )
@@ -4062,7 +4062,7 @@ mod tests {
     #[tokio::test]
     async fn drive_flush_until_complete_drains_in_flight_completion_after_empty_step() {
         let mut state = ProducerSenderState::new(1);
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
         let latency = Duration::from_millis(23);
         let mut observed_latencies = Vec::new();
         let mut observed_requeues = 0;
@@ -4078,7 +4078,7 @@ mod tests {
         state
             .drive_flush_until_complete(
                 &test_dispatcher(),
-                &mut accumulator,
+                &accumulator,
                 ReadyDispatchObservers::new(
                     |observed_latency| observed_latencies.push(observed_latency),
                     || observed_requeues += 1,
@@ -4408,9 +4408,9 @@ mod tests {
 
     #[test]
     fn sender_state_discards_buffered_batches_for_abort_lifecycle() {
-        let mut accumulator = ready_accumulator();
+        let accumulator = ready_accumulator();
 
-        let dropped = ProducerSenderState::discard_buffered_batches(&mut accumulator);
+        let dropped = ProducerSenderState::discard_buffered_batches(&accumulator);
 
         assert_eq!(dropped, 1);
         assert_eq!(accumulator.buffered_records(), 0);
@@ -4750,12 +4750,12 @@ mod tests {
     async fn sender_state_applies_append_dispatch_decision() {
         let mut state = ProducerSenderState::new(1);
         let dispatcher = test_dispatcher();
-        let mut accumulator = ready_accumulator();
+        let accumulator = ready_accumulator();
         let mut observed_batches = Vec::new();
 
         state
             .apply_append_dispatch_decision(
-                &mut accumulator,
+                &accumulator,
                 AppendDispatchApplication::new(
                     &dispatcher,
                     AppendDispatchDecision::MarkBatchReady,
@@ -4778,7 +4778,7 @@ mod tests {
 
         state
             .apply_append_dispatch_decision(
-                &mut accumulator,
+                &accumulator,
                 AppendDispatchApplication::new(
                     &dispatcher,
                     AppendDispatchDecision::DriveReady,
@@ -4804,7 +4804,7 @@ mod tests {
     async fn sender_state_applies_append_dispatch_decision_then_collects_finished_dispatches() {
         let mut state = ProducerSenderState::new(2);
         let dispatcher = test_dispatcher();
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
         let latency = Duration::from_millis(7);
         let mut observed_latencies = Vec::new();
         let mut observed_requeues = 0;
@@ -4821,7 +4821,7 @@ mod tests {
 
         state
             .apply_append_dispatch_decision_then_collect_finished(
-                &mut accumulator,
+                &accumulator,
                 AppendDispatchApplication::new(&dispatcher, AppendDispatchDecision::Idle, None),
                 false,
                 ReadyDispatchObservers::new(
@@ -4884,13 +4884,13 @@ mod tests {
     async fn sender_state_finishes_batch_append_by_driving_ready_dispatch() {
         let mut state = ProducerSenderState::new(1);
         let dispatcher = test_dispatcher();
-        let mut accumulator = ready_accumulator();
+        let accumulator = ready_accumulator();
         let mut observed_batches = Vec::new();
 
         state
             .finish_batch_append_dispatch(
                 &dispatcher,
-                &mut accumulator,
+                &accumulator,
                 ReadyDispatchObservers::new(
                     |_| {},
                     || {},
@@ -4944,7 +4944,7 @@ mod tests {
     async fn sender_state_applies_batch_append_status_with_poll_budget() {
         let mut state = ProducerSenderState::new(2);
         let dispatcher = test_dispatcher();
-        let mut accumulator = ready_accumulator();
+        let accumulator = ready_accumulator();
         let mut budget = state.append_poll_budget();
         let status = AppendStatus {
             batch_ready: true,
@@ -4955,7 +4955,7 @@ mod tests {
 
         state
             .apply_batch_append_status(
-                &mut accumulator,
+                &accumulator,
                 &mut budget,
                 BatchAppendStatusApplication::new(&dispatcher, status, Some("orders")),
                 ReadyDispatchObservers::new(
@@ -4975,7 +4975,7 @@ mod tests {
 
         state
             .apply_batch_append_status(
-                &mut accumulator,
+                &accumulator,
                 &mut budget,
                 BatchAppendStatusApplication::new(&dispatcher, status, Some("orders")),
                 ReadyDispatchObservers::new(
@@ -5179,7 +5179,7 @@ mod tests {
     async fn wait_for_buffer_progress_handles_dispatch_completion() {
         let mut state = ProducerSenderState::new(1);
         let now = std::time::Instant::now();
-        let mut accumulator = lingering_accumulator(now);
+        let accumulator = lingering_accumulator(now);
         let latency = Duration::from_millis(19);
         let mut observed_latencies = Vec::new();
         let mut observed_requeues = 0;
@@ -5195,7 +5195,7 @@ mod tests {
         state
             .wait_for_buffer_progress(
                 &test_dispatcher(),
-                &mut accumulator,
+                &accumulator,
                 now + Duration::from_millis(5),
                 ReadyDispatchObservers::new(
                     |observed_latency| observed_latencies.push(observed_latency),
@@ -5256,7 +5256,7 @@ mod tests {
         let record = ProducerRecord::new("orders", 0).value(Bytes::from_static(
             b"this record is intentionally too large for the remaining buffer",
         ));
-        let available = RecordAccumulator::new(AccumulatorConfig::default());
+        let available = SharedAccumulator::with_config(AccumulatorConfig::default());
 
         assert_eq!(
             state.append_backpressure_action(&available, &record, now, deadline),
@@ -5264,13 +5264,13 @@ mod tests {
         );
 
         let full_without_work =
-            RecordAccumulator::new(AccumulatorConfig::default().buffer_memory(1));
+            SharedAccumulator::with_config(AccumulatorConfig::default().buffer_memory(1));
         assert_eq!(
             state.append_backpressure_action(&full_without_work, &record, now, deadline),
             AppendBackpressureAction::Backpressure
         );
 
-        let mut full_with_work = RecordAccumulator::new(
+        let mut full_with_work = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(128)
                 .buffer_memory(128),
@@ -5296,7 +5296,7 @@ mod tests {
         let mut state = ProducerSenderState::new(1);
         let now = std::time::Instant::now();
         let deadline = now + Duration::from_millis(5);
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(128)
                 .linger(Duration::ZERO)
@@ -5316,7 +5316,7 @@ mod tests {
 
         let result = state
             .wait_for_append_capacity(
-                &mut accumulator,
+                &accumulator,
                 AppendCapacityWait::new(&dispatcher, &record, deadline),
                 ReadyDispatchObservers::new(
                     |_| {},
@@ -5346,7 +5346,7 @@ mod tests {
         let mut state = ProducerSenderState::new(1);
         let now = std::time::Instant::now();
         let deadline = now + Duration::from_millis(5);
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(128)
                 .linger(Duration::ZERO)
@@ -5366,7 +5366,7 @@ mod tests {
 
         let result = state
             .append_untracked_with_capacity_wait(
-                &mut accumulator,
+                &accumulator,
                 AppendUntracked::new(&dispatcher, record, now, deadline),
                 ReadyDispatchObservers::new(
                     |_| {},
@@ -5648,7 +5648,7 @@ mod tests {
         let mut state = ProducerSenderState::new(1);
         let now = std::time::Instant::now();
         let deadline = now + Duration::from_millis(5);
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(128)
                 .linger(Duration::ZERO)
@@ -5668,7 +5668,7 @@ mod tests {
 
         let result = state
             .append_for_delivery_with_capacity_wait(
-                &mut accumulator,
+                &accumulator,
                 AppendDelivery::new(&dispatcher, record, now, deadline),
                 ReadyDispatchObservers::new(
                     |_| {},
@@ -6207,7 +6207,7 @@ mod tests {
         .delivery_timeout(Duration::ZERO);
         let now = std::time::Instant::now();
         let deadline = now + Duration::from_millis(5);
-        let accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(128)
                 .buffer_memory(160),
@@ -6228,7 +6228,7 @@ mod tests {
 
         let result = state
             .wait_for_handled_dispatch(
-                &mut RecordAccumulator::new(AccumulatorConfig::default()),
+                &mut SharedAccumulator::with_config(AccumulatorConfig::default()),
                 false,
                 |_| {},
                 || {},
@@ -6320,7 +6320,7 @@ mod tests {
             WireClient::connect_with_brokers(ConnectionConfig::default(), "producer-test", []),
         )
         .delivery_timeout(Duration::ZERO);
-        let accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(128)
                 .buffer_memory(160),
@@ -6343,7 +6343,7 @@ mod tests {
 
         let result = state
             .wait_for_handled_dispatch(
-                &mut RecordAccumulator::new(AccumulatorConfig::default()),
+                &mut SharedAccumulator::with_config(AccumulatorConfig::default()),
                 false,
                 |_| {},
                 || {},
@@ -6378,7 +6378,7 @@ mod tests {
             WireClient::connect_with_brokers(ConnectionConfig::default(), "producer-test", []),
         )
         .delivery_timeout(Duration::from_millis(50));
-        let accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(128)
                 .buffer_memory(256),
@@ -6424,7 +6424,7 @@ mod tests {
             WireClient::connect_with_brokers(ConnectionConfig::default(), "producer-test", []),
         )
         .delivery_timeout(Duration::ZERO);
-        let accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(128)
                 .buffer_memory(256),
@@ -6441,7 +6441,7 @@ mod tests {
             .expect("first dispatch should reserve identity");
         let result = state
             .wait_for_handled_dispatch(
-                &mut RecordAccumulator::new(AccumulatorConfig::default()),
+                &mut SharedAccumulator::with_config(AccumulatorConfig::default()),
                 false,
                 |_| {},
                 || {},
@@ -6475,7 +6475,7 @@ mod tests {
     async fn terminal_dispatch_completes_accumulator_batch_identity() {
         let mut state = ProducerSenderState::new(2);
         let now = std::time::Instant::now();
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(128)
                 .buffer_memory(256),
@@ -6514,7 +6514,7 @@ mod tests {
             .spawn_observed_drained_dispatch(dispatch, |_| {})
             .expect("observed drained dispatch should spawn");
         let result = state
-            .wait_for_handled_dispatch(&mut accumulator, false, |_| {}, || {})
+            .wait_for_handled_dispatch(&accumulator, false, |_| {}, || {})
             .await;
         assert!(matches!(
             result,
@@ -6564,7 +6564,7 @@ mod tests {
     async fn queue_snapshot_reports_buffer_available_across_in_flight_release() {
         let mut state = ProducerSenderState::new(1);
         let now = std::time::Instant::now();
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(128)
                 .buffer_memory(160),
@@ -6600,7 +6600,7 @@ mod tests {
 
         let result = state
             .wait_for_handled_dispatch(
-                &mut RecordAccumulator::new(AccumulatorConfig::default()),
+                &mut SharedAccumulator::with_config(AccumulatorConfig::default()),
                 false,
                 |_| {},
                 || {},
@@ -6629,7 +6629,7 @@ mod tests {
             WireClient::connect_with_brokers(ConnectionConfig::default(), "producer-test", []),
         )
         .delivery_timeout(Duration::ZERO);
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
         let selection = DispatchSelection {
             dispatchable: vec![dispatchable],
             deferred: vec![deferred],
@@ -6639,7 +6639,7 @@ mod tests {
 
         let started = state
             .start_dispatch_selection(
-                &mut accumulator,
+                &accumulator,
                 DispatchSelectionStart::new(dispatcher, selection, std::time::Instant::now()),
                 |batches| {
                     observed_records = batches.iter().map(|batch| batch.records.len()).sum();
@@ -6696,7 +6696,7 @@ mod tests {
         let dispatcher = crate::producer::dispatcher::ProducerDispatcher::new(
             WireClient::connect_with_brokers(ConnectionConfig::default(), "producer-test", []),
         );
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
@@ -6709,7 +6709,7 @@ mod tests {
             .expect("append record");
 
         let selection = state
-            .drain_ready_dispatch_batches(&dispatcher, &mut accumulator, std::time::Instant::now())
+            .drain_ready_dispatch_batches(&dispatcher, &accumulator, std::time::Instant::now())
             .await
             .expect("ready non-idempotent batches should prepare")
             .expect("ready batch should produce a selection");
@@ -6753,7 +6753,7 @@ mod tests {
     #[tokio::test]
     async fn sender_state_waits_for_ready_dispatch_slot_after_readiness() {
         let mut state = ProducerSenderState::new(1);
-        let empty = RecordAccumulator::new(AccumulatorConfig::default());
+        let empty = SharedAccumulator::with_config(AccumulatorConfig::default());
         let idle = state
             .wait_for_ready_dispatch_slot(&empty, std::time::Instant::now())
             .await;
@@ -6801,7 +6801,7 @@ mod tests {
         );
 
         let mut empty_state = ProducerSenderState::new(1);
-        let mut empty = RecordAccumulator::new(AccumulatorConfig::default());
+        let mut empty = SharedAccumulator::with_config(AccumulatorConfig::default());
         let idle = empty_state
             .prepare_ready_dispatch_batches(&dispatcher, &mut empty, std::time::Instant::now())
             .await
@@ -6844,12 +6844,12 @@ mod tests {
             ProducerRuntimeConfig::default(),
         );
         let mut state = ProducerSenderState::new(1);
-        let mut accumulator = ready_accumulator();
+        let accumulator = ready_accumulator();
 
         let result = state
             .prepare_ready_dispatch_batches_or_requeue(
                 &dispatcher,
-                &mut accumulator,
+                &accumulator,
                 std::time::Instant::now(),
             )
             .await;
@@ -6865,7 +6865,7 @@ mod tests {
         );
 
         let mut empty_state = ProducerSenderState::new(1);
-        let mut empty = RecordAccumulator::new(AccumulatorConfig::default());
+        let mut empty = SharedAccumulator::with_config(AccumulatorConfig::default());
         let idle = empty_state
             .prepare_all_dispatch_batches(&dispatcher, &mut empty)
             .await
@@ -6908,10 +6908,10 @@ mod tests {
             ProducerRuntimeConfig::default(),
         );
         let mut state = ProducerSenderState::new(1);
-        let mut accumulator = ready_accumulator();
+        let accumulator = ready_accumulator();
 
         let result = state
-            .prepare_all_dispatch_batches_or_requeue(&dispatcher, &mut accumulator)
+            .prepare_all_dispatch_batches_or_requeue(&dispatcher, &accumulator)
             .await;
 
         assert!(result.is_err());
@@ -7095,7 +7095,7 @@ mod tests {
     #[tokio::test]
     async fn handle_finished_dispatches_collects_and_handles_completed_tasks() {
         let mut state = ProducerSenderState::new(2);
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
         let latency = Duration::from_millis(9);
         let batch = ready_batch("orders", 0);
         let mut observed_latencies = Vec::new();
@@ -7118,7 +7118,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         let result = state.handle_finished_dispatches(
-            &mut accumulator,
+            &accumulator,
             false,
             |duration| observed_latencies.push(duration),
             || observed_requeues += 1,
@@ -7172,7 +7172,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_handled_dispatch_handles_next_completed_task() {
         let mut state = ProducerSenderState::new(1);
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
         let latency = Duration::from_millis(11);
         let mut observed_latencies = Vec::new();
         let mut observed_requeues = 0;
@@ -7187,7 +7187,7 @@ mod tests {
 
         state
             .wait_for_handled_dispatch(
-                &mut accumulator,
+                &accumulator,
                 false,
                 |duration| observed_latencies.push(duration),
                 || observed_requeues += 1,
@@ -7234,14 +7234,14 @@ mod tests {
     #[tokio::test]
     async fn apply_ready_dispatch_progress_handles_completion_and_prepared_selection() {
         let mut state = ProducerSenderState::new(1);
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
         let latency = Duration::from_millis(13);
         let mut observed_latencies = Vec::new();
         let mut observed_requeues = 0;
         let mut observed_batches = Vec::new();
 
         let progress = state.apply_ready_dispatch_progress(
-            &mut accumulator,
+            &accumulator,
             ReadyDispatchApplication::new(
                 test_dispatcher(),
                 PreparedReadyDispatch::PendingCompletion(Ok(TimedDispatchOutcome {
@@ -7271,7 +7271,7 @@ mod tests {
             partitions: vec![partition],
         };
         let progress = state.apply_ready_dispatch_progress(
-            &mut accumulator,
+            &accumulator,
             ReadyDispatchApplication::new(
                 test_dispatcher(),
                 PreparedReadyDispatch::Prepared(selection),
@@ -7295,13 +7295,13 @@ mod tests {
     #[tokio::test]
     async fn drive_ready_dispatch_progress_prepares_and_applies_ready_batches() {
         let mut state = ProducerSenderState::new(1);
-        let mut accumulator = ready_accumulator();
+        let accumulator = ready_accumulator();
         let mut observed_batches = Vec::new();
 
         let progress = state
             .drive_ready_dispatch_progress(
                 &test_dispatcher(),
-                &mut accumulator,
+                &accumulator,
                 std::time::Instant::now(),
                 ReadyDispatchObservers::new(
                     |_| {},
@@ -7326,7 +7326,7 @@ mod tests {
     #[tokio::test]
     async fn drive_ready_dispatch_until_blocked_handles_completion_then_starts_ready_batch() {
         let mut state = ProducerSenderState::new(1);
-        let mut accumulator = ready_accumulator();
+        let accumulator = ready_accumulator();
         let latency = Duration::from_millis(17);
         let mut observed_latencies = Vec::new();
         let mut observed_requeues = 0;
@@ -7342,7 +7342,7 @@ mod tests {
         state
             .drive_ready_dispatch_until_blocked(
                 &test_dispatcher(),
-                &mut accumulator,
+                &accumulator,
                 ReadyDispatchObservers::new(
                     |observed_latency| observed_latencies.push(observed_latency),
                     || observed_requeues += 1,
@@ -7409,14 +7409,14 @@ mod tests {
     #[tokio::test]
     async fn apply_all_dispatch_progress_handles_empty_completion_and_prepared_selection() {
         let mut state = ProducerSenderState::new(1);
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
         let latency = Duration::from_millis(17);
         let mut observed_latencies = Vec::new();
         let mut observed_requeues = 0;
         let mut observed_batches = Vec::new();
 
         let progress = state.apply_all_dispatch_progress(
-            &mut accumulator,
+            &accumulator,
             AllDispatchApplication::new(
                 test_dispatcher(),
                 PreparedAllDispatch::Empty,
@@ -7435,7 +7435,7 @@ mod tests {
         assert!(observed_batches.is_empty());
 
         let progress = state.apply_all_dispatch_progress(
-            &mut accumulator,
+            &accumulator,
             AllDispatchApplication::new(
                 test_dispatcher(),
                 PreparedAllDispatch::PendingCompletion(Ok(TimedDispatchOutcome {
@@ -7463,7 +7463,7 @@ mod tests {
             partitions: vec![partition],
         };
         let progress = state.apply_all_dispatch_progress(
-            &mut accumulator,
+            &accumulator,
             AllDispatchApplication::new(
                 test_dispatcher(),
                 PreparedAllDispatch::Prepared(selection),
@@ -7487,13 +7487,13 @@ mod tests {
     #[tokio::test]
     async fn drive_all_dispatch_progress_prepares_and_applies_buffered_batches() {
         let mut state = ProducerSenderState::new(1);
-        let mut accumulator = ready_accumulator();
+        let accumulator = ready_accumulator();
         let mut observed_batches = Vec::new();
 
         let progress = state
             .drive_all_dispatch_progress(
                 &test_dispatcher(),
-                &mut accumulator,
+                &accumulator,
                 std::time::Instant::now(),
                 ReadyDispatchObservers::new(
                     |_| {},
@@ -7552,13 +7552,13 @@ mod tests {
     #[tokio::test]
     async fn drive_flush_dispatch_progress_maps_empty_and_spawned_steps() {
         let mut state = ProducerSenderState::new(1);
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
         let mut observed_batches = Vec::new();
 
         let progress = state
             .drive_flush_dispatch_progress(
                 &test_dispatcher(),
-                &mut accumulator,
+                &accumulator,
                 std::time::Instant::now(),
                 ReadyDispatchObservers::new(
                     |_| {},
@@ -7574,11 +7574,11 @@ mod tests {
         assert_eq!(progress, FlushDispatchProgress::Complete);
         assert!(observed_batches.is_empty());
 
-        let mut accumulator = ready_accumulator();
+        let accumulator = ready_accumulator();
         let progress = state
             .drive_flush_dispatch_progress(
                 &test_dispatcher(),
-                &mut accumulator,
+                &accumulator,
                 std::time::Instant::now(),
                 ReadyDispatchObservers::new(
                     |_| {},
@@ -7601,7 +7601,7 @@ mod tests {
     async fn drive_flush_dispatch_step_waits_for_deferred_in_flight_partition() {
         let mut state = ProducerSenderState::new(2);
         state.idempotent_ordering = true;
-        let mut accumulator = ready_accumulator();
+        let accumulator = ready_accumulator();
         let blocked = ready_batch("orders", 0);
         let partition = super::InFlightPartitionKey::from(&blocked);
         let partitions = vec![partition.clone()];
@@ -7627,7 +7627,7 @@ mod tests {
         let progress = state
             .drive_flush_dispatch_step(
                 &test_dispatcher(),
-                &mut accumulator,
+                &accumulator,
                 std::time::Instant::now(),
                 ReadyDispatchObservers::new(
                     |observed_latency| observed_latencies.push(observed_latency),
@@ -7662,13 +7662,13 @@ mod tests {
 
     #[test]
     fn handle_completed_dispatch_records_latency_and_propagates_delivered_error() {
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
         let latency = Duration::from_millis(7);
         let mut observed_latency = None;
         let mut observed_requeues = 0;
 
         let result = ProducerSenderState::handle_completed_dispatch(
-            &mut accumulator,
+            &accumulator,
             CompletedDispatch::new(
                 Ok(TimedDispatchOutcome {
                     outcome: DispatchOutcome::Delivered(Err(ProducerError::Backpressure)),
@@ -7716,13 +7716,13 @@ mod tests {
 
     #[test]
     fn handle_completed_dispatch_requeues_batches_and_reports_flush_incomplete() {
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
         let batch = ready_batch("orders", 0);
         let mut observed_latency = None;
         let mut observed_requeues = 0;
 
         ProducerSenderState::handle_completed_dispatch(
-            &mut accumulator,
+            &accumulator,
             CompletedDispatch::new(
                 Ok(TimedDispatchOutcome {
                     outcome: DispatchOutcome::Requeue(vec![batch]),
@@ -7741,7 +7741,7 @@ mod tests {
 
         let batch = accumulator.drain_all().pop().expect("requeued batch");
         let result = ProducerSenderState::handle_completed_dispatch(
-            &mut accumulator,
+            &accumulator,
             CompletedDispatch::new(
                 Ok(TimedDispatchOutcome {
                     outcome: DispatchOutcome::Requeue(vec![batch]),

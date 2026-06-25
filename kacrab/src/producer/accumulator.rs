@@ -766,23 +766,53 @@ impl RecordAccumulator {
     }
 }
 
-/// Thread-safe wrapper around [`RecordAccumulator`]. The inner accumulator keeps
-/// its single-threaded logic unchanged; this wrapper guards it with a short
-/// `std::sync::Mutex` held only across synchronous accumulator operations. That
-/// lets concurrent `send(&self)` appends use the accumulator directly without
-/// going through the producer's async sender mutex (which serialized every
-/// append). All accumulator methods are synchronous, so the guard is never held
-/// across an `.await`.
+/// Thread-safe wrapper around [`RecordAccumulator`].
+///
+/// The inner accumulator keeps its single-threaded logic unchanged; this wrapper
+/// guards it with a short `std::sync::Mutex` held only across synchronous
+/// accumulator operations. That lets concurrent `send(&self)` appends use the
+/// accumulator directly without going through the producer's async sender mutex
+/// (which serialized every append). All accumulator methods are synchronous, so
+/// the guard is never held across an `.await`.
 #[derive(Debug)]
-pub(crate) struct SharedAccumulator {
+pub struct SharedAccumulator {
     inner: std::sync::Mutex<RecordAccumulator>,
 }
 
 impl SharedAccumulator {
-    pub(crate) fn new(accumulator: RecordAccumulator) -> Self {
+    pub(crate) const fn new(accumulator: RecordAccumulator) -> Self {
         Self {
             inner: std::sync::Mutex::new(accumulator),
         }
+    }
+
+    /// Build a shared accumulator from a config.
+    pub fn with_config(config: AccumulatorConfig) -> Self {
+        Self::new(RecordAccumulator::new(config))
+    }
+
+    /// Append a record (delegates to the inner accumulator under the lock).
+    pub fn append(&self, record: ProducerRecord) -> Result<()> {
+        self.lock().append(record)
+    }
+
+    /// Append a record at a supplied timestamp.
+    pub fn append_at(&self, record: ProducerRecord, now: Instant) -> Result<()> {
+        self.lock().append_at(record, now)
+    }
+
+    /// Append a record and return its delivery future.
+    pub fn append_for_delivery(&self, record: ProducerRecord) -> Result<SendFuture> {
+        self.lock().append_for_delivery(record)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn append_with_status_at(
+        &self,
+        record: ProducerRecord,
+        now: Instant,
+    ) -> Result<AppendStatus> {
+        self.lock().append_with_status_at(record, now)
     }
 
     /// Lock the accumulator for a short synchronous critical section. Never hold
@@ -838,7 +868,8 @@ impl SharedAccumulator {
         self.lock().buffered_batches()
     }
 
-    pub(crate) fn buffered_bytes(&self) -> usize {
+    /// Bytes currently buffered across all partitions.
+    pub fn buffered_bytes(&self) -> usize {
         self.lock().buffered_bytes()
     }
 
@@ -861,7 +892,8 @@ impl SharedAccumulator {
         self.lock().drain_all()
     }
 
-    pub(crate) fn drain_ready(&self, now: Instant) -> Vec<ReadyBatch> {
+    /// Drain all batches that are ready to dispatch.
+    pub fn drain_ready(&self, now: Instant) -> Vec<ReadyBatch> {
         self.lock().drain_ready(now)
     }
 
