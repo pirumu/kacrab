@@ -17,6 +17,9 @@ pub enum ProducerError {
     /// Producer buffer memory is exhausted.
     #[error("producer buffer memory exhausted")]
     Backpressure,
+    /// The producer was closed forcefully while the record was still buffered.
+    #[error("producer was closed forcefully")]
+    ProducerClosed,
     /// Producer record field is invalid before serialization or append.
     #[error("invalid producer record {field}: {message}")]
     InvalidRecord {
