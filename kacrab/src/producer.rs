@@ -42,7 +42,7 @@ pub use self::{
         MetricValue, Metrics, MetricsError, ProducerMetricValue, ProducerMetricsSnapshot, SensorId,
         SensorRecordingLevel,
     },
-    partitioner::ProducerPartitioner,
+    partitioner::{ProducerPartitioner, RoundRobinPartitioner},
     record::{
         DeliveryCallback, Header, Headers, ProducerRecord, RecordHeader, RecordHeaders,
         RecordMetadata, SendFuture,

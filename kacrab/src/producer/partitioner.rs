@@ -1,8 +1,12 @@
 //! Rust-native producer partitioner hooks.
 
-use std::{fmt, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{Arc, Mutex},
+};
 
-use super::{ProducerRecord, Result};
+use super::{ProducerRecord, Result, error::ProducerError};
 use crate::wire::ClusterMetadata;
 
 /// Rust-native hook for selecting a partition for unassigned producer records.
@@ -25,6 +29,61 @@ pub trait ProducerPartitioner: Send + Sync + 'static {
 
     /// Release partitioner resources when the producer is closed.
     fn close(&self) {}
+}
+
+/// Built-in partitioner mirroring Kafka's `RoundRobinPartitioner`: it spreads
+/// records evenly across a topic's available partitions regardless of the record
+/// key, using a per-topic counter. Unlike the default sticky partitioner this
+/// switches partition on every record rather than per batch.
+///
+/// Install it with [`super::ProducerBuilder::partitioner`] /
+/// [`super::Producer::set_partitioner`].
+#[derive(Debug, Default)]
+pub struct RoundRobinPartitioner {
+    counters: Mutex<HashMap<String, u32>>,
+}
+
+impl RoundRobinPartitioner {
+    /// Create a new round-robin partitioner.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn next_counter(&self, topic: &str) -> u32 {
+        let mut counters = self
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let counter = counters.entry(topic.to_owned()).or_insert(0);
+        let current = *counter;
+        *counter = counter.wrapping_add(1);
+        current
+    }
+}
+
+impl ProducerPartitioner for RoundRobinPartitioner {
+    fn partition(&self, record: &ProducerRecord, metadata: &ClusterMetadata) -> Result<i32> {
+        let topic = metadata
+            .topic(&record.topic)
+            .filter(|topic| !topic.partitions.is_empty())
+            .ok_or_else(|| ProducerError::UnknownTopic(record.topic.to_string()))?;
+        let counter = self.next_counter(&record.topic) as usize;
+        // Prefer partitions with a live leader (Java availablePartitions); fall
+        // back to all partitions when none are currently available.
+        let available: Vec<i32> = topic
+            .partitions
+            .iter()
+            .filter(|partition| partition.leader_id >= 0)
+            .map(|partition| partition.partition_index)
+            .collect();
+        if available.is_empty() {
+            let index = counter % topic.partitions.len();
+            Ok(topic.partitions[index].partition_index)
+        } else {
+            Ok(available[counter % available.len()])
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -65,5 +124,77 @@ impl fmt::Debug for ProducerPartitionerHandle {
         f.debug_struct("ProducerPartitionerHandle")
             .field("installed", &self.inner.is_some())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::missing_assert_message,
+        reason = "Unit test fixtures fail fastest with contextual expect calls."
+    )]
+
+    use kacrab_protocol::KafkaUuid;
+
+    use super::{ProducerPartitioner, ProducerRecord, RoundRobinPartitioner};
+    use crate::wire::{ClusterMetadata, PartitionMetadata, TopicMetadata};
+
+    fn metadata(partitions: &[(i32, i32)]) -> ClusterMetadata {
+        ClusterMetadata {
+            cluster_id: None,
+            controller_id: 1,
+            brokers: Vec::new(),
+            topics: vec![TopicMetadata {
+                name: "orders".to_owned(),
+                topic_id: KafkaUuid::ZERO,
+                partitions: partitions
+                    .iter()
+                    .map(|&(partition_index, leader_id)| PartitionMetadata {
+                        partition_index,
+                        leader_id,
+                        leader_epoch: 0,
+                        replica_nodes: Vec::new(),
+                        isr_nodes: Vec::new(),
+                        offline_replicas: Vec::new(),
+                    })
+                    .collect(),
+            }],
+        }
+    }
+
+    #[test]
+    fn round_robin_partitioner_cycles_available_partitions_like_java() {
+        let partitioner = RoundRobinPartitioner::new();
+        let metadata = metadata(&[(0, 7), (1, 7), (2, 7)]);
+        let record = ProducerRecord::new("orders", 0);
+
+        let selected: Vec<i32> = (0..6)
+            .map(|_| {
+                partitioner
+                    .partition(&record, &metadata)
+                    .expect("round-robin partition")
+            })
+            .collect();
+
+        assert_eq!(selected, vec![0, 1, 2, 0, 1, 2]);
+    }
+
+    #[test]
+    fn round_robin_partitioner_skips_partitions_without_a_leader() {
+        let partitioner = RoundRobinPartitioner::new();
+        // Partition 1 has no live leader and must be skipped.
+        let metadata = metadata(&[(0, 7), (1, -1), (2, 7)]);
+        let record = ProducerRecord::new("orders", 0);
+
+        let selected: Vec<i32> = (0..4)
+            .map(|_| {
+                partitioner
+                    .partition(&record, &metadata)
+                    .expect("round-robin partition")
+            })
+            .collect();
+
+        assert_eq!(selected, vec![0, 2, 0, 2]);
     }
 }
