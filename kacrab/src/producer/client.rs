@@ -354,7 +354,11 @@ impl Producer {
     /// Returns producer backpressure or errors from pumping ready batches.
     pub async fn send(&self, record: ProducerRecord) -> Result<SendFuture> {
         self.ensure_background_sender_loop();
-        self.fail_if_send_transaction_error().await?;
+        // Avoid building/awaiting the async transaction guard future on the hot
+        // path for non-transactional producers — gate it with a sync check.
+        if self.control_dispatcher.is_transactional() {
+            self.fail_if_send_transaction_error().await?;
+        }
         let now = std::time::Instant::now();
         let mut record = self.intercept_on_send(record);
         let mut error_record = self.error_record_snapshot(&record);
@@ -426,7 +430,11 @@ impl Producer {
         F: FnOnce(Result<RecordMetadata>) + Send + 'static,
     {
         self.ensure_background_sender_loop();
-        self.fail_if_send_transaction_error().await?;
+        // Avoid building/awaiting the async transaction guard future on the hot
+        // path for non-transactional producers — gate it with a sync check.
+        if self.control_dispatcher.is_transactional() {
+            self.fail_if_send_transaction_error().await?;
+        }
         let now = std::time::Instant::now();
         let mut record = self.intercept_on_send(record);
         let mut error_record = self.error_record_snapshot(&record);
