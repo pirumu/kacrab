@@ -173,12 +173,18 @@ fn benchmark_producer_config(bootstrap: SocketAddr) -> ProducerConfig {
 }
 
 async fn build_producer(config: &ProducerConfig) -> Producer {
-    Producer::builder()
+    let mut builder = Producer::builder()
         .set(
             "bootstrap.servers",
             config.bootstrap_servers.as_slice().join(","),
         )
-        .set("client.id", config.client_id.as_str())
+        .set("client.id", config.client_id.as_str());
+    // KACRAB_BENCH_BATCH_SIZE overrides batch.size to confirm whether throughput is
+    // round-trip/pipelining bound (more records per request -> higher rate if so).
+    if let Ok(batch_size) = env::var("KACRAB_BENCH_BATCH_SIZE") {
+        builder = builder.set("batch.size", batch_size.as_str());
+    }
+    builder
         .build()
         .await
         .expect("benchmark producer config should build")
