@@ -561,7 +561,22 @@ impl Producer {
 
     async fn flush_inner(&mut self) -> Result<()> {
         self.ensure_background_sender_loop();
+        // Drain any records queued on the synchronous-send slow path so they are
+        // appended to the accumulator before the flush dispatches buffered batches
+        // (Java flush() waits for every prior send to complete).
+        self.wait_for_slow_send_drain().await;
         self.drive_flush_until_complete().await
+    }
+
+    /// Yield until every record handed to the synchronous-send slow drain has been
+    /// appended (or failed). A non-zero pending count also gates the fast path, so
+    /// waiting here lets `flush` reset both back to the inline append path.
+    async fn wait_for_slow_send_drain(&self) {
+        if let Some(handle) = self.slow_send.get() {
+            while handle.pending.load(Ordering::Acquire) > 0 {
+                tokio::task::yield_now().await;
+            }
+        }
     }
 
     /// Initialize transactional producer state with the transaction coordinator.
