@@ -23,7 +23,7 @@ use kacrab::{
         RecordMetadata,
         internals::{
             AccumulatorConfig, ProducerDispatcher, ProducerIdempotenceConfig,
-            ProducerRuntimeConfig, RecordAccumulator, SharedAccumulator,
+            ProducerRuntimeConfig, SharedAccumulator,
         },
     },
     wire::{BrokerEndpoint, ClusterMetadata, ConnectionConfig, WireClient},
@@ -219,7 +219,7 @@ async fn kafka_producer_background_sender_dispatches_after_linger_without_flush(
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -300,7 +300,7 @@ async fn kafka_producer_background_sender_dispatches_ready_batch_without_linger_
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()

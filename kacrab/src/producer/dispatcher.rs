@@ -5931,8 +5931,7 @@ mod tests {
     use crate::{
         producer::{
             AccumulatorConfig, ConsumerGroupMetadata, ProducerCompression, ProducerError,
-            ProducerIdempotenceConfig, ProducerIdentity, ProducerRecord, ProducerRuntimeConfig,
-            RecordAccumulator, RecordMetadata, compression_ratio::CompressionRatioEstimator,
+            ProducerIdempotenceConfig, ProducerIdentity, ProducerRecord, ProducerRuntimeConfig, RecordMetadata, compression_ratio::CompressionRatioEstimator,
         },
         wire::{
             BrokerEndpoint, BrokerMetadata, ClusterMetadata, ConnectionConfig, PartitionMetadata,

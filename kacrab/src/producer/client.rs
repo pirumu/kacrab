@@ -1272,21 +1272,37 @@ impl Producer {
     }
 
     #[cfg(test)]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "test mirror of the &mut self flush control-plane surface"
+    )]
     fn collect_finished(&mut self) -> Result<()> {
         self.handle_finished_dispatches(false)
     }
 
     #[cfg(test)]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "test mirror of the &mut self flush control-plane surface"
+    )]
     fn collect_finished_for_flush(&mut self) -> Result<()> {
         self.handle_finished_dispatches(true)
     }
 
     #[cfg(test)]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "test mirror of the &mut self flush control-plane surface"
+    )]
     async fn wait_for_one(&mut self) -> Result<()> {
         self.wait_for_handled_dispatch(false).await
     }
 
     #[cfg(test)]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "test mirror of the &mut self flush control-plane surface"
+    )]
     async fn wait_for_one_for_flush(&mut self) -> Result<()> {
         self.wait_for_handled_dispatch(true).await
     }
@@ -1426,7 +1442,7 @@ impl Producer {
 
     #[cfg(test)]
     fn dispatch_task_result(
-        &mut self,
+        &self,
         result: Result<TimedDispatchOutcome>,
         requeue_is_error: bool,
     ) -> Result<()> {
@@ -1452,7 +1468,7 @@ impl Producer {
     }
 
     #[cfg(test)]
-    fn handle_finished_dispatches(&mut self, requeue_is_error: bool) -> Result<()> {
+    fn handle_finished_dispatches(&self, requeue_is_error: bool) -> Result<()> {
         let dispatch_latency_samples = &self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
@@ -1475,7 +1491,7 @@ impl Producer {
     }
 
     #[cfg(test)]
-    async fn wait_for_handled_dispatch(&mut self, requeue_is_error: bool) -> Result<()> {
+    async fn wait_for_handled_dispatch(&self, requeue_is_error: bool) -> Result<()> {
         let dispatch_latency_samples = &self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
@@ -3340,7 +3356,7 @@ mod tests {
         let callback_error_sink = Arc::clone(&callback_error);
         let mut config = runtime_config(1);
         config.max_request_size = 8;
-        let mut producer = Producer::from_parts(test_wire(), config);
+        let producer = Producer::from_parts(test_wire(), config);
 
         let error = producer
             .send_with_callback(
@@ -3360,7 +3376,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_with_callback_without_interceptors_does_not_clone_successful_record() {
-        let mut producer = producer(1);
+        let producer = producer(1);
         ProducerRecord::reset_clone_count_for_test();
 
         let _delivery = producer
@@ -3832,7 +3848,7 @@ mod tests {
     fn dispatch_task_result_requeues_batches_or_errors_for_flush() {
         let mut producer = producer(1);
         let batch = {
-            let mut sender = producer.sender.try_lock().expect("sender");
+            let sender = producer.sender.try_lock().expect("sender");
             sender
                 .accumulator
                 .append_at(
@@ -4335,7 +4351,7 @@ mod tests {
 
     #[tokio::test]
     async fn close_now_aborts_buffered_records_with_producer_closed_like_java() {
-        let mut producer = producer(1);
+        let producer = producer(1);
         let delivery = producer
             .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")))
             .await
@@ -4379,7 +4395,7 @@ mod tests {
 
     #[tokio::test]
     async fn close_timeout_zero_drops_buffered_records_like_java() {
-        let mut producer = producer(1);
+        let producer = producer(1);
         let _delivery = producer
             .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")))
             .await
@@ -4486,7 +4502,7 @@ mod tests {
         // at the accumulator level.
         let mut config = runtime_config(1);
         config.accumulator = AccumulatorConfig::default().buffer_memory(1);
-        let mut producer = Producer::from_parts(test_wire(), config);
+        let producer = Producer::from_parts(test_wire(), config);
 
         assert!(matches!(
             producer
@@ -4500,7 +4516,7 @@ mod tests {
     async fn send_apis_reject_records_larger_than_max_request_size() {
         let mut config = runtime_config(1);
         config.max_request_size = 8;
-        let mut producer = Producer::from_parts(test_wire(), config);
+        let producer = Producer::from_parts(test_wire(), config);
 
         let error = producer
             .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")))
@@ -4524,7 +4540,7 @@ mod tests {
             .linger(Duration::from_mins(1))
             .buffer_memory(80);
         config.max_block = Duration::from_millis(10);
-        let mut producer = Producer::from_parts(test_wire(), config);
+        let producer = Producer::from_parts(test_wire(), config);
 
         let first = producer
             .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))

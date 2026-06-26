@@ -1511,7 +1511,7 @@ impl ProducerSender {
 
     #[cfg(test)]
     pub(crate) fn handle_completed_dispatch<LatencyObserver, RequeueObserver>(
-        &mut self,
+        &self,
         completed: CompletedDispatch,
         observe_latency: LatencyObserver,
         observe_requeue: RequeueObserver,
@@ -3810,7 +3810,7 @@ mod tests {
         producer::{
             ProducerError, ProducerRecord, ProducerRuntimeConfig,
             accumulator::{
-                AccumulatorConfig, AppendStatus, ReadyBatchIdentity, RecordAccumulator,
+                AccumulatorConfig, AppendStatus, ReadyBatchIdentity,
                 SharedAccumulator,
             },
             dispatcher::DispatchOutcome,
@@ -4227,7 +4227,7 @@ mod tests {
 
     #[test]
     fn producer_sender_owns_accumulator_and_state_queue_snapshot() {
-        let mut sender = ProducerSender::new(AccumulatorConfig::default(), 2);
+        let sender = ProducerSender::new(AccumulatorConfig::default(), 2);
         sender
             .accumulator
             .append_at(
@@ -4255,7 +4255,7 @@ mod tests {
         let before_ready = base
             .checked_add(Duration::from_millis(3))
             .expect("test before-ready instant should fit");
-        let mut sender = ProducerSender::new(
+        let sender = ProducerSender::new(
             AccumulatorConfig::default()
                 .batch_size(TEST_LARGE_BATCH_SIZE)
                 .linger(linger),
@@ -4520,7 +4520,7 @@ mod tests {
 
     #[test]
     fn producer_sender_discards_buffered_batches_for_abort_lifecycle() {
-        let mut sender = ProducerSender::new(
+        let sender = ProducerSender::new(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .linger(Duration::ZERO)
@@ -5371,7 +5371,7 @@ mod tests {
             AppendBackpressureAction::Backpressure
         );
 
-        let mut full_with_work = SharedAccumulator::with_config(
+        let full_with_work = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(128)
                 .buffer_memory(128),
@@ -6329,7 +6329,7 @@ mod tests {
 
         let result = state
             .wait_for_handled_dispatch(
-                &mut SharedAccumulator::with_config(AccumulatorConfig::default()),
+                &SharedAccumulator::with_config(AccumulatorConfig::default()),
                 false,
                 |_| {},
                 || {},
@@ -6444,7 +6444,7 @@ mod tests {
 
         let result = state
             .wait_for_handled_dispatch(
-                &mut SharedAccumulator::with_config(AccumulatorConfig::default()),
+                &SharedAccumulator::with_config(AccumulatorConfig::default()),
                 false,
                 |_| {},
                 || {},
@@ -6542,7 +6542,7 @@ mod tests {
             .expect("first dispatch should reserve identity");
         let result = state
             .wait_for_handled_dispatch(
-                &mut SharedAccumulator::with_config(AccumulatorConfig::default()),
+                &SharedAccumulator::with_config(AccumulatorConfig::default()),
                 false,
                 |_| {},
                 || {},
@@ -6701,7 +6701,7 @@ mod tests {
 
         let result = state
             .wait_for_handled_dispatch(
-                &mut SharedAccumulator::with_config(AccumulatorConfig::default()),
+                &SharedAccumulator::with_config(AccumulatorConfig::default()),
                 false,
                 |_| {},
                 || {},
@@ -6904,7 +6904,7 @@ mod tests {
         let mut empty_state = ProducerSenderState::new(1);
         let mut empty = SharedAccumulator::with_config(AccumulatorConfig::default());
         let idle = empty_state
-            .prepare_ready_dispatch_batches(&dispatcher, &mut empty, std::time::Instant::now())
+            .prepare_ready_dispatch_batches(&dispatcher, &empty, std::time::Instant::now())
             .await
             .expect("empty accumulator should not need prepare");
         assert!(matches!(idle, PreparedReadyDispatch::Idle));
@@ -6912,7 +6912,7 @@ mod tests {
         let mut ready_state = ProducerSenderState::new(1);
         let mut ready = ready_accumulator();
         let prepared = ready_state
-            .prepare_ready_dispatch_batches(&dispatcher, &mut ready, std::time::Instant::now())
+            .prepare_ready_dispatch_batches(&dispatcher, &ready, std::time::Instant::now())
             .await
             .expect("ready accumulator should prepare");
         assert!(matches!(prepared, PreparedReadyDispatch::Prepared(_)));
@@ -6928,7 +6928,7 @@ mod tests {
         });
         let mut blocked = ready_accumulator();
         let pending = blocked_state
-            .prepare_ready_dispatch_batches(&dispatcher, &mut blocked, std::time::Instant::now())
+            .prepare_ready_dispatch_batches(&dispatcher, &blocked, std::time::Instant::now())
             .await
             .expect("completed dispatch should be returned before draining");
         assert!(matches!(
@@ -6968,7 +6968,7 @@ mod tests {
         let mut empty_state = ProducerSenderState::new(1);
         let mut empty = SharedAccumulator::with_config(AccumulatorConfig::default());
         let idle = empty_state
-            .prepare_all_dispatch_batches(&dispatcher, &mut empty)
+            .prepare_all_dispatch_batches(&dispatcher, &empty)
             .await
             .expect("empty accumulator should not need prepare");
         assert!(matches!(idle, PreparedAllDispatch::Empty));
@@ -6976,7 +6976,7 @@ mod tests {
         let mut ready_state = ProducerSenderState::new(1);
         let mut ready = ready_accumulator();
         let prepared = ready_state
-            .prepare_all_dispatch_batches(&dispatcher, &mut ready)
+            .prepare_all_dispatch_batches(&dispatcher, &ready)
             .await
             .expect("buffered accumulator should prepare");
         assert!(matches!(prepared, PreparedAllDispatch::Prepared(_)));
@@ -6992,7 +6992,7 @@ mod tests {
         });
         let mut blocked = ready_accumulator();
         let pending = blocked_state
-            .prepare_all_dispatch_batches(&dispatcher, &mut blocked)
+            .prepare_all_dispatch_batches(&dispatcher, &blocked)
             .await
             .expect("completed dispatch should be returned before drain-all");
         assert!(matches!(
