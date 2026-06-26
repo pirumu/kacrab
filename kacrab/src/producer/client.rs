@@ -543,10 +543,11 @@ impl Producer {
             }
         };
         let append = AppendCallbackDeliveryRecord::new(record, now, deadline, None);
-        match self.sender.append_callback_now(append, before_dispatch) {
-            Some(result) => result,
-            None => panic!("send_with_callback_now hit the async slow path (sticky/backpressure)"),
-        }
+        self.sender
+            .append_callback_now(append, before_dispatch)
+            .unwrap_or_else(|| {
+                panic!("send_with_callback_now hit the async slow path (sticky/backpressure)")
+            })
     }
 
     /// Force-dispatch every buffered batch regardless of linger or batch size.

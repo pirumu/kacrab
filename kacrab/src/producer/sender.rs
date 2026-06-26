@@ -381,7 +381,7 @@ impl ProducerSenderRuntime {
 
     /// SYNC `send_now`: append one callback-delivery record with ZERO `.await` via
     /// the bypass (shared accumulator, NO sender async mutex, NO spin — only the
-    /// brief SharedAccumulator lock). Returns `None` when it would need to suspend
+    /// brief `SharedAccumulator` lock). Returns `None` when it would need to suspend
     /// (sticky rotation) or block (buffer full); the caller handles those.
     pub(crate) fn append_callback_now<BeforeDispatch>(
         &self,
@@ -408,7 +408,7 @@ impl ProducerSenderRuntime {
                 SyncCallbackAppend::WouldBlock(retry_append, retry_before_dispatch) => {
                     // buffer.memory full: the background loop drains on another
                     // worker; spin briefly until it frees space (rare, not per-record).
-                    SYNC_NOW_BUFFER_SPINS.fetch_add(1, Ordering::Relaxed);
+                    let _spins = SYNC_NOW_BUFFER_SPINS.fetch_add(1, Ordering::Relaxed);
                     append = retry_append;
                     before_dispatch = retry_before_dispatch;
                     std::hint::spin_loop();
@@ -2323,12 +2323,13 @@ impl ProducerSenderState {
             dispatcher.mark_sticky_batch_ready(topic).await;
         }
         if decision.should_drive_ready_dispatch() {
-            self.drive_ready_dispatch_until_blocked(
-                dispatcher,
-                accumulator,
-                ReadyDispatchObservers::new(&mut latency, &mut requeue, batches),
-            )
-            .await?;
+            let _dispatched = self
+                .drive_ready_dispatch_until_blocked(
+                    dispatcher,
+                    accumulator,
+                    ReadyDispatchObservers::new(&mut latency, &mut requeue, batches),
+                )
+                .await?;
         }
         self.handle_finished_dispatches(accumulator, requeue_is_error, latency, requeue)
     }
@@ -2495,8 +2496,8 @@ impl ProducerSenderState {
         !self.in_flight.is_empty()
     }
 
-    /// True when the connection is at its in-flight ProduceRequest capacity
-    /// (max.in.flight.requests.per.connection). The loop should keep dispatching
+    /// True when the connection is at its in-flight `ProduceRequest` capacity
+    /// (`max.in.flight.requests.per.connection`). The loop should keep dispatching
     /// newly-ready batches until this, instead of stopping at the first in-flight.
     pub(crate) fn at_in_flight_capacity(&self) -> bool {
         self.in_flight_dispatch_count() >= self.max_in_flight_requests
