@@ -907,6 +907,7 @@ fn store_delivery_error(state: &DeliveryState, error: ProducerError) {
 fn clone_producer_error_for_delivery(error: &ProducerError) -> ProducerError {
     match error {
         ProducerError::Backpressure => ProducerError::Backpressure,
+        ProducerError::ProducerClosed => ProducerError::ProducerClosed,
         ProducerError::InvalidRecord { field, message } => {
             ProducerError::InvalidRecord { field, message }
         },

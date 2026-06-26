@@ -306,6 +306,11 @@ impl ProducerDispatcher {
         self.wire.any_broker_id().map_err(ProducerError::from)
     }
 
+    /// Age of the currently cached cluster metadata (Kafka `metadata-age`).
+    pub(crate) fn metadata_age(&self) -> Option<Duration> {
+        self.wire.metadata_age()
+    }
+
     pub(crate) async fn send_control_request<Req, Resp>(
         &self,
         broker_id: i32,
@@ -1106,7 +1111,7 @@ impl ProducerDispatcher {
                     }
                     if attempts_remaining == 0 {
                         if self.metrics_are_enabled() {
-                            self.metrics.record_error();
+                            self.metrics.record_error_for_topic(Some(&topic));
                         }
                         self.release_idempotent_partition_after_definite_error(
                             &batches, &topic, partition,
@@ -1120,7 +1125,7 @@ impl ProducerDispatcher {
                     }
                     attempts_remaining = attempts_remaining.saturating_sub(1);
                     if self.metrics_are_enabled() {
-                        self.metrics.record_retry();
+                        self.metrics.record_retry_for_topic(Some(&topic));
                     }
                     // Leader changed for the ongoing retry -> retry immediately
                     // (Java skips backoff); otherwise back off normally.
@@ -1131,7 +1136,7 @@ impl ProducerDispatcher {
                     };
                     if let Some(error) = retry_wait {
                         if self.metrics_are_enabled() {
-                            self.metrics.record_error();
+                            self.metrics.record_error_for_topic(Some(&topic));
                         }
                         self.release_idempotent_partition_after_definite_error(
                             &batches, &topic, partition,
@@ -1156,13 +1161,13 @@ impl ProducerDispatcher {
                     };
                     if attempts_remaining == 0 {
                         if self.metrics_are_enabled() {
-                            self.metrics.record_error();
+                            self.metrics.record_error_for_topic(Some(&retry.topic));
                         }
                         return Err(retry.broker_error());
                     }
                     attempts_remaining = attempts_remaining.saturating_sub(1);
                     if self.metrics_are_enabled() {
-                        self.metrics.record_retry();
+                        self.metrics.record_retry_for_topic(Some(&retry.topic));
                     }
                     if retry.reset_sequence {
                         self.recover_idempotent_partition(
@@ -1176,7 +1181,7 @@ impl ProducerDispatcher {
                     if let Some(error) = self.wait_before_retry(&batches, &mut retry_backoff).await
                     {
                         if self.metrics_are_enabled() {
-                            self.metrics.record_error();
+                            self.metrics.record_error_for_topic(Some(&retry.topic));
                         }
                         self.recover_idempotent_partition_after_retry_timeout(&mut batches, &retry)
                             .await?;
@@ -1484,13 +1489,13 @@ impl ProducerDispatcher {
     ) -> Option<DispatchOutcome> {
         if *attempts_remaining == 0 {
             if self.metrics_are_enabled() {
-                self.metrics.record_error();
+                self.metrics.record_error_for_topic(Some(&retry.topic));
             }
             return Some(DispatchOutcome::Delivered(Err(retry.broker_error())));
         }
         *attempts_remaining = attempts_remaining.saturating_sub(1);
         if self.metrics_are_enabled() {
-            self.metrics.record_retry();
+            self.metrics.record_retry_for_topic(Some(&retry.topic));
         }
         if retry.reset_sequence
             && let Err(error) = self
@@ -1506,7 +1511,7 @@ impl ProducerDispatcher {
         }
         if let Some(error) = self.wait_before_retry(batches, retry_backoff).await {
             if self.metrics_are_enabled() {
-                self.metrics.record_error();
+                self.metrics.record_error_for_topic(Some(&retry.topic));
             }
             if let Err(recovery_error) = self
                 .recover_idempotent_partition_after_retry_timeout(batches, retry)
@@ -1532,7 +1537,7 @@ impl ProducerDispatcher {
         }
         if *attempts_remaining == 0 {
             if self.metrics_are_enabled() {
-                self.metrics.record_error();
+                self.metrics.record_error_for_topic(Some(&retry.topic));
             }
             self.release_idempotent_partition_after_definite_error(
                 batches,
@@ -1544,7 +1549,7 @@ impl ProducerDispatcher {
         }
         *attempts_remaining = attempts_remaining.saturating_sub(1);
         if self.metrics_are_enabled() {
-            self.metrics.record_retry();
+            self.metrics.record_retry_for_topic(Some(&retry.topic));
         }
         // Leader changed for the ongoing retry -> retry immediately (Java skips
         // backoff); otherwise back off normally.
@@ -1555,7 +1560,7 @@ impl ProducerDispatcher {
         };
         if let Some(error) = retry_wait {
             if self.metrics_are_enabled() {
-                self.metrics.record_error();
+                self.metrics.record_error_for_topic(Some(&retry.topic));
             }
             self.release_idempotent_partition_after_definite_error(
                 batches,
@@ -1612,7 +1617,7 @@ impl ProducerDispatcher {
     ) -> Option<ProducerError> {
         if *attempts_remaining == 0 {
             if self.metrics_are_enabled() {
-                self.metrics.record_error();
+                self.metrics.record_error_for_topic(Some(topic));
             }
             self.release_idempotent_partition_after_definite_error(batches, topic, partition)
                 .await;
@@ -1624,11 +1629,11 @@ impl ProducerDispatcher {
         }
         *attempts_remaining = attempts_remaining.saturating_sub(1);
         if self.metrics_are_enabled() {
-            self.metrics.record_retry();
+            self.metrics.record_retry_for_topic(Some(topic));
         }
         if let Some(timeout_error) = self.wait_before_retry(batches, retry_backoff).await {
             if self.metrics_are_enabled() {
-                self.metrics.record_error();
+                self.metrics.record_error_for_topic(Some(topic));
             }
             self.release_idempotent_partition_after_definite_error(batches, topic, partition)
                 .await;
@@ -1742,6 +1747,16 @@ impl ProducerDispatcher {
                         bytes: records.len(),
                         records: batch.records.len(),
                         queued: Instant::now().saturating_duration_since(batch.first_append_at),
+                        // Per-record serialized (uncompressed) sizes for Kafka's
+                        // record-size avg/max, mirroring Java's per-record metric.
+                        record_sizes: batch
+                            .records
+                            .iter()
+                            .map(|record| {
+                                record.key.as_ref().map_or(0, bytes::Bytes::len)
+                                    + record.value.as_ref().map_or(0, bytes::Bytes::len)
+                            })
+                            .collect(),
                         compression_ratio: self.actual_compression_ratio_for_encoded_batch(
                             batch,
                             request_base_offset,
@@ -1771,10 +1786,8 @@ impl ProducerDispatcher {
                     sample.compression_ratio,
                 );
                 self.metrics.record_queue_time(sample.queued);
-                if sample.records > 0 {
-                    // Average serialized size per record (Kafka record-size).
-                    self.metrics
-                        .record_record_size(sample.bytes, sample.records);
+                for size in &sample.record_sizes {
+                    self.metrics.record_record_size(*size);
                 }
             }
         }
@@ -5583,6 +5596,7 @@ struct ProduceBatchMetricSample {
     bytes: usize,
     records: usize,
     queued: Duration,
+    record_sizes: Vec<usize>,
     compression_ratio: f64,
 }
 

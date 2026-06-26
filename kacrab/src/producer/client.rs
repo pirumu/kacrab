@@ -701,9 +701,13 @@ impl Producer {
 
     /// Close immediately without waiting for buffered records or in-flight dispatches.
     ///
-    /// This mirrors Java producer close with a zero timeout: pending records may
-    /// be dropped by consuming the producer.
+    /// Mirrors Java producer close with a zero timeout: buffered records are
+    /// aborted with a [`ProducerError::ProducerClosed`] error (Java's forced
+    /// close fails incomplete batches) rather than silently dropped.
     pub fn close_now(self) {
+        if let Ok(mut sender) = self.sender.try_lock() {
+            let _aborted = sender.fail_buffered_batches(&ProducerError::ProducerClosed);
+        }
         drop(self);
     }
 
@@ -777,10 +781,13 @@ impl Producer {
     /// `producer-topic-metrics:record-send-total:topic=orders`).
     #[must_use]
     pub fn kafka_metrics(&self) -> BTreeMap<String, f64> {
-        // Refresh point-in-time gauges from the current sender queue snapshot.
+        // Refresh point-in-time gauges from the current sender queue + metadata.
         if let Ok(sender) = self.sender.try_lock() {
             self.metrics
                 .set_requests_in_flight(sender.queue_snapshot().in_flight_dispatches);
+        }
+        if let Some(age) = self.control_dispatcher.metadata_age() {
+            self.metrics.set_metadata_age(age);
         }
         self.metrics.kafka_metrics()
     }
@@ -1562,6 +1569,7 @@ const fn is_fatal_telemetry_error(error: ErrorCode) -> bool {
 fn producer_error_for_callback(error: &ProducerError) -> Option<ProducerError> {
     match error {
         ProducerError::Backpressure => Some(ProducerError::Backpressure),
+        ProducerError::ProducerClosed => Some(ProducerError::ProducerClosed),
         ProducerError::InvalidRecord { field, message } => {
             Some(ProducerError::InvalidRecord { field, message })
         },
@@ -4102,6 +4110,7 @@ mod tests {
             "producer-metrics:produce-throttle-time-avg",
             "producer-metrics:record-queue-time-avg",
             "producer-metrics:requests-in-flight",
+            "producer-metrics:metadata-age",
         ] {
             assert!(metrics.contains_key(name), "missing kafka metric {name}");
         }
@@ -4240,14 +4249,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn close_now_drops_buffered_records_without_flushing() {
+    async fn close_now_aborts_buffered_records_with_producer_closed_like_java() {
         let mut producer = producer(1);
-        let _delivery = producer
+        let delivery = producer
             .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")))
             .await
             .expect("send buffered record");
 
         producer.close_now();
+
+        // Java forceClose fails incomplete batches with an explicit error.
+        assert!(matches!(delivery.await, Err(ProducerError::ProducerClosed)));
     }
 
     #[test]

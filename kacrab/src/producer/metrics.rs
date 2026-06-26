@@ -693,19 +693,29 @@ impl ProducerMetrics {
     }
 
     pub(crate) fn record_retry(&self) {
+        self.record_retry_for_topic(None);
+    }
+
+    /// Record a record-send retry, attributing it to `topic` for per-topic metrics.
+    pub(crate) fn record_retry_for_topic(&self, topic: Option<&str>) {
         let _previous = self
             .inner
             .produce_retry_count
             .fetch_add(1, Ordering::Relaxed);
-        self.inner.sender_registry.record_retry(None);
+        self.inner.sender_registry.record_retry(topic);
     }
 
     pub(crate) fn record_error(&self) {
+        self.record_error_for_topic(None);
+    }
+
+    /// Record a record-send error, attributing it to `topic` for per-topic metrics.
+    pub(crate) fn record_error_for_topic(&self, topic: Option<&str>) {
         let _previous = self
             .inner
             .produce_error_count
             .fetch_add(1, Ordering::Relaxed);
-        self.inner.sender_registry.record_error(None);
+        self.inner.sender_registry.record_error(topic);
     }
 
     /// Snapshot the Java-named (Kafka `SenderMetricsRegistry`) producer metrics.
@@ -734,18 +744,22 @@ impl ProducerMetrics {
             .record_queue_time(duration_to_ms_f64(queued));
     }
 
-    /// Record the average serialized record size for a batch (Kafka record-size).
-    pub(crate) fn record_record_size(&self, batch_bytes: usize, records: usize) {
-        let Some(average) = batch_bytes.checked_div(records) else {
-            return;
-        };
-        let average = u32::try_from(average).map_or_else(|_| f64::from(u32::MAX), f64::from);
-        self.inner.sender_registry.record_record_size(average);
+    /// Record one record's serialized size in bytes (Kafka record-size).
+    pub(crate) fn record_record_size(&self, size: usize) {
+        let size = u32::try_from(size).map_or_else(|_| f64::from(u32::MAX), f64::from);
+        self.inner.sender_registry.record_record_size(size);
     }
 
     /// Update the in-flight request gauge (Kafka requests-in-flight).
     pub(crate) fn set_requests_in_flight(&self, in_flight: usize) {
         self.inner.sender_registry.set_requests_in_flight(in_flight);
+    }
+
+    /// Update the metadata-age gauge in seconds (Kafka metadata-age).
+    pub(crate) fn set_metadata_age(&self, age: Duration) {
+        self.inner
+            .sender_registry
+            .set_metadata_age(age.as_secs_f64());
     }
 
     pub(crate) fn record_requeue(&self) {

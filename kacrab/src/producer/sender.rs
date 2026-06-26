@@ -560,6 +560,20 @@ impl ProducerSender {
         ProducerSenderState::discard_buffered_batches(&mut self.accumulator)
     }
 
+    /// Fail every buffered record's delivery with `error` and drop the batches,
+    /// mirroring Java `RecordAccumulator.abortIncompleteBatches` on a forced
+    /// close. Returns the number of batches aborted.
+    pub(crate) fn fail_buffered_batches(&mut self, error: &ProducerError) -> usize {
+        let mut batches = self.accumulator.discard_all();
+        let count = batches.len();
+        for batch in &mut batches {
+            if let Some(delivery) = batch.delivery.take() {
+                delivery.send_error(error);
+            }
+        }
+        count
+    }
+
     pub(crate) fn buffer_wait_action(
         &self,
         now: std::time::Instant,
