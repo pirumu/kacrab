@@ -2322,7 +2322,7 @@ mod tests {
 
     #[test]
     fn producer_built_outside_runtime_starts_sender_loop_lazily() {
-        let mut producer = producer(5);
+        let producer = producer(5);
         assert!(!producer.sender.loop_is_running());
 
         let runtime = tokio::runtime::Builder::new_current_thread()

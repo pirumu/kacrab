@@ -17,7 +17,7 @@ use bytes::{Bytes, BytesMut};
 use kacrab::{
     producer::{
         ProducerRecord,
-        internals::{AccumulatorConfig, ProducerDispatcher, RecordAccumulator},
+        internals::{AccumulatorConfig, ProducerDispatcher, SharedAccumulator},
     },
     wire::{BrokerEndpoint, ConnectionConfig, WireClient},
 };
@@ -99,7 +99,7 @@ async fn run_scenario(scenario: Scenario) {
         let batch_messages = scenario
             .batch_messages
             .min(scenario.messages.saturating_sub(sent));
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(16 * 1024)
                 .buffer_memory(batch_buffer_memory(batch_messages, scenario.value_size)),
@@ -115,7 +115,7 @@ async fn run_scenario(scenario: Scenario) {
                 .expect("benchmark append should fit");
         }
         let receipts = dispatcher
-            .dispatch_ready(&mut accumulator, now)
+            .dispatch_ready(&accumulator, now)
             .await
             .expect("benchmark dispatch should succeed");
         assert!(

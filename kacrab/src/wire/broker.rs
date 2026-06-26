@@ -121,7 +121,10 @@ pub(crate) struct BrokerHandle {
     /// the control plane can read the broker's advertised version for an API
     /// (for example, gating client-side epoch bumps on the coordinator's
     /// `InitProducerId` support). `None` until the first connection negotiates.
-    #[cfg_attr(not(feature = "producer"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "producer"),
+        expect(dead_code, reason = "only read by the producer control plane")
+    )]
     capabilities: Arc<std::sync::RwLock<Option<BrokerCapabilities>>>,
 }
 

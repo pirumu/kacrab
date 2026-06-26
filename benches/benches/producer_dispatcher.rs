@@ -15,7 +15,7 @@ use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_mai
 use kacrab::{
     producer::{
         ProducerRecord,
-        internals::{AccumulatorConfig, ProducerDispatcher, RecordAccumulator},
+        internals::{AccumulatorConfig, ProducerDispatcher, SharedAccumulator},
     },
     wire::{BrokerEndpoint, ConnectionConfig, WireClient},
 };
@@ -85,7 +85,7 @@ async fn run_dispatcher_sample(iterations: usize) {
     let dispatcher = ProducerDispatcher::new(wire);
     let records = records_for_iteration();
     for _ in 0..iterations {
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(128 * 1024 * 1024),
@@ -97,7 +97,7 @@ async fn run_dispatcher_sample(iterations: usize) {
                 .expect("benchmark append should fit");
         }
         let receipts = dispatcher
-            .dispatch_ready(&mut accumulator, now)
+            .dispatch_ready(&accumulator, now)
             .await
             .expect("benchmark dispatch should succeed");
         let _receipts = black_box(receipts);
