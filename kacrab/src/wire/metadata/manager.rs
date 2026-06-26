@@ -114,6 +114,8 @@ impl MetadataManager {
 
     /// Age of the currently cached metadata snapshot, or `None` when no
     /// metadata has been stored yet. Mirrors Kafka's `metadata-age` metric.
+    /// Only the producer control plane reads this (via `WireClient::metadata_age`).
+    #[cfg(feature = "producer")]
     pub(crate) fn current_age(&self, now: Instant) -> Option<Duration> {
         self.snapshot
             .as_ref()

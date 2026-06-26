@@ -887,7 +887,8 @@ impl ProducerSender {
                 Ok(SenderWakeStep::WaitedForDispatch)
             },
             SenderWakeAction::DispatchReady => {
-                let _dispatched = self.state
+                let _dispatched = self
+                    .state
                     .drive_ready_dispatch_until_blocked(
                         &self.dispatcher,
                         &self.accumulator,
@@ -2287,7 +2288,8 @@ impl ProducerSenderState {
             dispatcher.mark_sticky_batch_ready(topic).await;
         }
         if decision.should_drive_ready_dispatch() {
-            let _dispatched = self.drive_ready_dispatch_until_blocked(dispatcher, accumulator, observers)
+            let _dispatched = self
+                .drive_ready_dispatch_until_blocked(dispatcher, accumulator, observers)
                 .await?;
         }
         Ok(())
@@ -2569,16 +2571,17 @@ impl ProducerSenderState {
                 .await?;
             },
             BufferWaitAction::PollReady => {
-                let _dispatched = self.drive_ready_dispatch_until_blocked(
-                    dispatcher,
-                    accumulator,
-                    ReadyDispatchObservers::new(
-                        &mut observe_latency,
-                        &mut observe_requeue,
-                        &mut observe_batches,
-                    ),
-                )
-                .await?;
+                let _dispatched = self
+                    .drive_ready_dispatch_until_blocked(
+                        dispatcher,
+                        accumulator,
+                        ReadyDispatchObservers::new(
+                            &mut observe_latency,
+                            &mut observe_requeue,
+                            &mut observe_batches,
+                        ),
+                    )
+                    .await?;
             },
             BufferWaitAction::Sleep(wait) => tokio::time::sleep(wait).await,
             BufferWaitAction::DeadlineElapsed => {},
@@ -3809,10 +3812,7 @@ mod tests {
     use crate::{
         producer::{
             ProducerError, ProducerRecord, ProducerRuntimeConfig,
-            accumulator::{
-                AccumulatorConfig, AppendStatus, ReadyBatchIdentity,
-                SharedAccumulator,
-            },
+            accumulator::{AccumulatorConfig, AppendStatus, ReadyBatchIdentity, SharedAccumulator},
             dispatcher::DispatchOutcome,
             metrics::{ProducerMetricValue, ProducerQueueMetrics},
         },

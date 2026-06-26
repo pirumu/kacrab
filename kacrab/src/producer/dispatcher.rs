@@ -1761,8 +1761,13 @@ impl ProducerDispatcher {
                             .records
                             .iter()
                             .map(|record| {
-                                record.key.as_ref().map_or(0, bytes::Bytes::len)
-                                    + record.value.as_ref().map_or(0, bytes::Bytes::len)
+                                record
+                                    .key
+                                    .as_ref()
+                                    .map_or(0, bytes::Bytes::len)
+                                    .saturating_add(
+                                        record.value.as_ref().map_or(0, bytes::Bytes::len),
+                                    )
                             })
                             .collect(),
                         compression_ratio: self.actual_compression_ratio_for_encoded_batch(
@@ -5931,7 +5936,8 @@ mod tests {
     use crate::{
         producer::{
             AccumulatorConfig, ConsumerGroupMetadata, ProducerCompression, ProducerError,
-            ProducerIdempotenceConfig, ProducerIdentity, ProducerRecord, ProducerRuntimeConfig, RecordMetadata, compression_ratio::CompressionRatioEstimator,
+            ProducerIdempotenceConfig, ProducerIdentity, ProducerRecord, ProducerRuntimeConfig,
+            RecordMetadata, compression_ratio::CompressionRatioEstimator,
         },
         wire::{
             BrokerEndpoint, BrokerMetadata, ClusterMetadata, ConnectionConfig, PartitionMetadata,
