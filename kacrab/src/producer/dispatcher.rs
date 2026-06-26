@@ -501,17 +501,46 @@ impl ProducerDispatcher {
         &self,
         record: &mut super::ProducerRecord,
     ) -> bool {
-        if !self.uses_sticky_partitioner(record) {
-            return false;
+        if record.has_assigned_partition() {
+            return true;
         }
         let Ok(mut state) = self.partitioner_state.try_lock() else {
             return false;
         };
-        state.try_assign_cached_sticky_partition(
+        let compression_ratio = self.compression_ratio_estimation(record.topic.as_ref());
+        // Fast sticky reuse: no metadata lookup needed while the current sticky
+        // batch still has budget (the common steady-state case).
+        if self.uses_sticky_partitioner(record)
+            && state.try_assign_cached_sticky_partition(
+                record,
+                self.partition_sticky_batch_size,
+                compression_ratio,
+            )
+        {
+            return true;
+        }
+        // Full assignment (sticky rotation OR keyed) via synchronously cached
+        // cluster metadata — `cached_metadata_for` reads an `RwLock` with no
+        // `.await`, so rotation stays on the lock-free sync send path instead of
+        // falling back to the async assignment path every sticky-batch boundary.
+        let topic = record.topic.to_string();
+        let Some(metadata) = self.wire.cached_metadata_for(std::slice::from_ref(&topic)) else {
+            return false;
+        };
+        match state.partition_for_record(
+            &metadata,
             record,
+            self.partitioner_ignore_keys,
+            self.partitioner_adaptive_partitioning_enable,
             self.partition_sticky_batch_size,
-            self.compression_ratio_estimation(record.topic.as_ref()),
-        )
+            compression_ratio,
+        ) {
+            Ok(partition) => {
+                record.partition = partition;
+                true
+            },
+            Err(_) => false,
+        }
     }
 
     pub(crate) fn compression_ratio_estimation(&self, topic: &str) -> f32 {

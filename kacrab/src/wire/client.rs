@@ -307,7 +307,7 @@ impl WireClient {
         Ok(result)
     }
 
-    fn cached_metadata_for(&self, topics: &[String]) -> Option<Arc<ClusterMetadata>> {
+    pub(crate) fn cached_metadata_for(&self, topics: &[String]) -> Option<Arc<ClusterMetadata>> {
         let mut manager = self
             .inner
             .metadata
