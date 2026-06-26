@@ -18,15 +18,15 @@ mod sender;
 mod serializer;
 mod transaction;
 
+pub(crate) use self::{
+    accumulator::{AccumulatorConfig, ReadyBatch},
+    config::ProducerRuntimeConfig,
+};
 #[cfg(test)]
 pub(crate) use self::{
     accumulator::{RecordAccumulator, SharedAccumulator},
     config::ProducerIdempotenceConfig,
     transaction::{ProducerBatchState, ProducerIdentity},
-};
-pub(crate) use self::{
-    accumulator::{AccumulatorConfig, ReadyBatch},
-    config::ProducerRuntimeConfig,
 };
 pub use self::{
     api::{

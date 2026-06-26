@@ -603,13 +603,15 @@ impl ProducerSender {
 
     fn note_append_status_for_sender_loop(&self, status: AppendStatus) {
         if Self::should_notify_sender_loop_after_append(status) {
-            self.background_dispatch_paused.store(false, Ordering::Relaxed);
+            self.background_dispatch_paused
+                .store(false, Ordering::Relaxed);
             self.notify_sender_loop();
         }
     }
 
     fn pause_background_dispatch_after_requeue(&self) {
-        self.background_dispatch_paused.store(true, Ordering::Relaxed);
+        self.background_dispatch_paused
+            .store(true, Ordering::Relaxed);
     }
 
     const fn should_notify_sender_loop_after_append(status: AppendStatus) -> bool {
@@ -3807,7 +3809,10 @@ mod tests {
     use crate::{
         producer::{
             ProducerError, ProducerRecord, ProducerRuntimeConfig,
-            accumulator::{AccumulatorConfig, AppendStatus, ReadyBatchIdentity, RecordAccumulator, SharedAccumulator},
+            accumulator::{
+                AccumulatorConfig, AppendStatus, ReadyBatchIdentity, RecordAccumulator,
+                SharedAccumulator,
+            },
             dispatcher::DispatchOutcome,
             metrics::{ProducerMetricValue, ProducerQueueMetrics},
         },

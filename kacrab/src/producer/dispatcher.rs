@@ -1275,8 +1275,9 @@ impl ProducerDispatcher {
 
     #[expect(
         clippy::too_many_lines,
-        reason = "Single drain loop handles every dispatch outcome (split, leadership, idempotent, \
-                  retriable broker, wire) in one place to mirror Java's Sender.runOnce."
+        reason = "Single drain loop handles every dispatch outcome (split, leadership, \
+                  idempotent, retriable broker, wire) in one place to mirror Java's \
+                  Sender.runOnce."
     )]
     pub(crate) async fn dispatch_drained(
         &self,
@@ -1804,8 +1805,7 @@ impl ProducerDispatcher {
                 .dispatch_broker_requests(broker_id, requests, version)
                 .await?;
             if let Some(started) = request_started {
-                self.metrics
-                    .record_request_latency(started.elapsed());
+                self.metrics.record_request_latency(started.elapsed());
             }
             receipts.append(&mut broker_receipts);
         }
@@ -4689,7 +4689,10 @@ impl ProducerIdempotenceState {
                 entry.unresolved_next_sequence.is_some(),
                 // isNextSequence: lastAcked + 1 == nextSequence => fully acked.
                 entry.last_acked_sequence != NO_LAST_ACKED_SEQUENCE
-                    && entry.next_sequence.saturating_sub(entry.last_acked_sequence) == 1,
+                    && entry
+                        .next_sequence
+                        .saturating_sub(entry.last_acked_sequence)
+                        == 1,
             ),
             None => return,
         };
@@ -4792,10 +4795,13 @@ impl ProducerIdempotenceState {
             topic: topic.to_owned(),
             partition,
         };
-        let entry = self.partitions.entry(key).or_insert_with(|| IdempotentPartitionEntry {
-            next_sequence: base_sequence,
-            ..IdempotentPartitionEntry::default()
-        });
+        let entry = self
+            .partitions
+            .entry(key)
+            .or_insert_with(|| IdempotentPartitionEntry {
+                next_sequence: base_sequence,
+                ..IdempotentPartitionEntry::default()
+            });
         entry.unresolved_next_sequence = None;
         if entry.next_sequence >= base_sequence {
             entry.next_sequence = base_sequence;
@@ -5880,7 +5886,8 @@ mod tests {
         clippy::missing_assert_message,
         clippy::significant_drop_tightening,
         clippy::unwrap_used,
-        reason = "Unit test fixtures fail fastest with contextual unwrap/expect and direct state setup."
+        reason = "Unit test fixtures fail fastest with contextual unwrap/expect and direct state \
+                  setup."
     )]
 
     use std::{
@@ -5911,14 +5918,15 @@ mod tests {
         IdempotentRetryDecision, PartitionLoadRefresh, PendingTransactionOperationGuard,
         ProduceRequestSizing, ProducerDispatcher, ProducerIdempotenceState,
         ProducerPartitionerState, RECORD_BATCH_OVERHEAD_BYTES, RecordBufferRelease,
-        SharedAccumulator, TopicPartitionKey, TransactionOperation, TransactionPendingOperationStart,
-        broker_dispatch_completed_result, broker_request_placement_for_batch,
-        build_partition_load_stats, choose_coordinator_addr, complete_deliveries, end_txn_version,
-        estimate_record_batch_bytes, estimate_sticky_record_bytes,
-        fail_pending_transaction_operation, init_producer_id_version, is_fatal_transaction_error,
-        is_leadership_error, no_ack_receipts, pop_dispatchable_broker_request, produce_version,
-        txn_offset_commit_version, uniform_partition_for_random, unique_topics,
-        unique_unassigned_record_topics, validate_consumer_group_metadata,
+        SharedAccumulator, TopicPartitionKey, TransactionOperation,
+        TransactionPendingOperationStart, broker_dispatch_completed_result,
+        broker_request_placement_for_batch, build_partition_load_stats, choose_coordinator_addr,
+        complete_deliveries, end_txn_version, estimate_record_batch_bytes,
+        estimate_sticky_record_bytes, fail_pending_transaction_operation, init_producer_id_version,
+        is_fatal_transaction_error, is_leadership_error, no_ack_receipts,
+        pop_dispatchable_broker_request, produce_version, txn_offset_commit_version,
+        uniform_partition_for_random, unique_topics, unique_unassigned_record_topics,
+        validate_consumer_group_metadata,
     };
     use crate::{
         producer::{
@@ -6647,7 +6655,8 @@ mod tests {
     fn adaptive_sticky_updates_load_stats_from_accumulator_queues() {
         let metadata = metadata_with_partitions("orders", 3);
         let topic_metadata = metadata.topic("orders").expect("topic metadata");
-        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default().batch_size(1));
+        let accumulator =
+            SharedAccumulator::with_config(AccumulatorConfig::default().batch_size(1));
         let now = Instant::now();
         accumulator
             .append_at(ProducerRecord::new("orders", 0), now)
@@ -6715,7 +6724,8 @@ mod tests {
         metadata.topics[0].partitions[1].leader_id = 8;
         metadata.topics[0].partitions[2].leader_id = 9;
         let topic_metadata = metadata.topic("orders").expect("topic metadata");
-        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default().batch_size(1024));
+        let accumulator =
+            SharedAccumulator::with_config(AccumulatorConfig::default().batch_size(1024));
         let now = Instant::now();
         for partition in 0..3 {
             accumulator
@@ -6753,7 +6763,8 @@ mod tests {
         metadata.topics[0].partitions[1].leader_id = 8;
         metadata.topics[0].partitions[2].leader_id = 9;
         let topic_metadata = metadata.topic("orders").expect("topic metadata");
-        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default().batch_size(1024));
+        let accumulator =
+            SharedAccumulator::with_config(AccumulatorConfig::default().batch_size(1024));
         let now = Instant::now();
         for partition in 0..3 {
             accumulator
@@ -8574,10 +8585,7 @@ mod tests {
 
         assert!(state.epoch_bump_required);
         // Marker cleared, so the partition no longer blocks (epoch bump resets it).
-        assert_eq!(
-            state.next_sequence("orders", 0, 1).expect("unblocked"),
-            3
-        );
+        assert_eq!(state.next_sequence("orders", 0, 1).expect("unblocked"), 3);
     }
 
     #[test]
@@ -8618,10 +8626,7 @@ mod tests {
         state.resolve_unresolved_sequence_after_drain("orders", 0, false);
 
         assert!(!state.epoch_bump_required);
-        assert_eq!(
-            state.next_sequence("orders", 0, 1).expect("unblocked"),
-            3
-        );
+        assert_eq!(state.next_sequence("orders", 0, 1).expect("unblocked"), 3);
     }
 
     #[test]

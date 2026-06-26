@@ -394,7 +394,9 @@ async fn run_per_record_tracked_send_loop_concurrent(
         }));
     }
     for handle in handles {
-        handle.await.expect("benchmark concurrent send task should finish");
+        handle
+            .await
+            .expect("benchmark concurrent send task should finish");
     }
     let mut producer =
         Arc::into_inner(producer).expect("producer should be unique after concurrent send join");

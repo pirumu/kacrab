@@ -3,8 +3,6 @@
 mod registry;
 mod sender_registry;
 
-pub(crate) use sender_registry::SenderMetricsRegistry;
-
 use std::{
     collections::BTreeMap,
     sync::{
@@ -19,6 +17,7 @@ pub use registry::{
     KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
     MetricValue, Metrics, MetricsError, SensorId, SensorRecordingLevel,
 };
+pub(crate) use sender_registry::SenderMetricsRegistry;
 
 /// Typed value for a named producer metric.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -630,13 +629,18 @@ impl ProducerMetrics {
         records: usize,
     ) {
         self.record_produce_batch_with_compression_ratio(
-            "test", batch_bytes, batch_size, records, 1.0,
+            "test",
+            batch_bytes,
+            batch_size,
+            records,
+            1.0,
         );
     }
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "Mirrors Java handleProduceResponse batch metrics (topic, bytes, size, count, ratio)."
+        reason = "Mirrors Java handleProduceResponse batch metrics (topic, bytes, size, count, \
+                  ratio)."
     )]
     pub(crate) fn record_produce_batch_with_compression_ratio(
         &self,

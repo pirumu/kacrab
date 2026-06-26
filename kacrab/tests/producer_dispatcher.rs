@@ -6529,14 +6529,8 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_lik
             .expect("append record");
     }
 
-    let first = dispatcher
-        .dispatch_ready(&accumulator, now)
-        .await
-        .unwrap();
-    let second = dispatcher
-        .dispatch_ready(&accumulator, now)
-        .await
-        .unwrap();
+    let first = dispatcher.dispatch_ready(&accumulator, now).await.unwrap();
+    let second = dispatcher.dispatch_ready(&accumulator, now).await.unwrap();
 
     assert!(first.is_empty());
     assert_eq!(second.len(), 2);

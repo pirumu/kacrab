@@ -1328,8 +1328,8 @@ impl Producer {
 
     #[expect(
         clippy::needless_pass_by_ref_mut,
-        reason = "part of the &mut self flush control-plane surface; dispatch latency samples \
-                  are now interior-mutable so no field is mutated directly here"
+        reason = "part of the &mut self flush control-plane surface; dispatch latency samples are \
+                  now interior-mutable so no field is mutated directly here"
     )]
     async fn drive_flush_until_complete(&mut self) -> Result<()> {
         let dispatch_latency_samples = &self.dispatch_latency_samples;

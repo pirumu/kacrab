@@ -1,13 +1,14 @@
 #![expect(
     clippy::cast_precision_loss,
-    reason = "Metric counts/bytes are coarse observability samples; f64 mantissa loss is acceptable."
+    reason = "Metric counts/bytes are coarse observability samples; f64 mantissa loss is \
+              acceptable."
 )]
 //! Java-compatible producer metrics, mirroring Kafka's `SenderMetricsRegistry`.
 //!
-//! The producer's primary metrics facade is the lock-free [`super::super::metrics::ProducerMetrics`]
-//! atomic counter set, exposed under Rust-native names. This registry additionally
-//! publishes the same measurements under Kafka's metric names and semantics
-//! (windowed Rate, Avg, Max) on the `producer-metrics` group plus per-topic
+//! The producer's primary metrics facade is the lock-free
+//! [`super::super::metrics::ProducerMetrics`] atomic counter set, exposed under Rust-native names.
+//! This registry additionally publishes the same measurements under Kafka's metric names and
+//! semantics (windowed Rate, Avg, Max) on the `producer-metrics` group plus per-topic
 //! instances on the `producer-topic-metrics` group, so applications that query by
 //! Kafka metric name see the expected sensors.
 
@@ -293,7 +294,13 @@ impl SenderMetricsRegistry {
     }
 
     /// Record a sent batch (records, bytes, compression) for the client and topic.
-    pub(crate) fn record_batch(&self, topic: &str, records: u64, bytes: u64, compression_ratio: f64) {
+    pub(crate) fn record_batch(
+        &self,
+        topic: &str,
+        records: u64,
+        bytes: u64,
+        compression_ratio: f64,
+    ) {
         let now = now_ms();
         let mut inner = self
             .inner
@@ -349,7 +356,6 @@ impl SenderMetricsRegistry {
             let _ignored = inner.metrics.record_at_ms(sensor, size as f64, now);
         }
     }
-
 
     /// Record a broker-imposed throttle window in milliseconds.
     pub(crate) fn record_throttle_time(&self, throttle_ms: f64) {
@@ -542,7 +548,10 @@ mod tests {
         let metrics = registry.kafka_metrics();
 
         // Client-level cumulative totals (Java Meter total = sum of recorded values).
-        assert_eq!(metrics.get("producer-metrics:record-send-total"), Some(&5.0));
+        assert_eq!(
+            metrics.get("producer-metrics:record-send-total"),
+            Some(&5.0)
+        );
         assert_eq!(metrics.get("producer-metrics:byte-total"), Some(&500.0));
         assert_eq!(
             metrics.get("producer-metrics:record-error-total"),

@@ -466,8 +466,7 @@ impl RecordAccumulator {
             .or_insert_with(|| PartitionQueue {
                 batches: VecDeque::new(),
             });
-        let target =
-            planned_append_target(Some(&*queue), &record, batch_size, compression_sizing);
+        let target = planned_append_target(Some(&*queue), &record, batch_size, compression_sizing);
         if target.reserved_buffer_bytes > available {
             return Err(ProducerError::Backpressure);
         }
@@ -523,8 +522,7 @@ impl RecordAccumulator {
             .or_insert_with(|| PartitionQueue {
                 batches: VecDeque::new(),
             });
-        let target =
-            planned_append_target(Some(&*queue), &record, batch_size, compression_sizing);
+        let target = planned_append_target(Some(&*queue), &record, batch_size, compression_sizing);
         if target.reserved_buffer_bytes > available {
             return Err(ProducerError::Backpressure);
         }
@@ -903,11 +901,12 @@ impl SharedAccumulator {
         reserved_bytes: usize,
         compression_ratio: f32,
     ) -> bool {
-        self.lock().has_available_memory_for_reserved_with_compression_ratio(
-            record,
-            reserved_bytes,
-            compression_ratio,
-        )
+        self.lock()
+            .has_available_memory_for_reserved_with_compression_ratio(
+                record,
+                reserved_bytes,
+                compression_ratio,
+            )
     }
 
     pub(crate) fn next_ready_at(&self, now: Instant) -> Option<Instant> {
