@@ -2351,6 +2351,7 @@ impl ProducerSenderState {
     {
         self.drive_ready_dispatch_until_blocked(dispatcher, accumulator, observers)
             .await
+            .map(|_dispatched| ())
     }
 
     #[cfg(test)]
@@ -4312,6 +4313,23 @@ mod tests {
             }
         });
 
+        // One in-flight request but max.in.flight=2 -> still below the connection
+        // capacity, so the loop keeps dispatching newly-ready batches (cross-partition
+        // pipelining) instead of stopping at the first in-flight.
+        assert_eq!(
+            sender.next_wake_action(expected_ready_at),
+            SenderWakeAction::DispatchReady
+        );
+
+        let _in_flight_2 = sender.state.spawn_in_flight(async {
+            TimedDispatchOutcome {
+                outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
+                latency: Duration::ZERO,
+                partitions: Vec::new(),
+            }
+        });
+
+        // Now at the in-flight capacity (2) -> wait for a completion.
         assert_eq!(
             sender.next_wake_action(expected_ready_at),
             SenderWakeAction::WaitForDispatch
