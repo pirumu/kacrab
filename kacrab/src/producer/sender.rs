@@ -887,7 +887,7 @@ impl ProducerSender {
                 Ok(SenderWakeStep::WaitedForDispatch)
             },
             SenderWakeAction::DispatchReady => {
-                self.state
+                let _dispatched = self.state
                     .drive_ready_dispatch_until_blocked(
                         &self.dispatcher,
                         &self.accumulator,
@@ -2287,7 +2287,7 @@ impl ProducerSenderState {
             dispatcher.mark_sticky_batch_ready(topic).await;
         }
         if decision.should_drive_ready_dispatch() {
-            self.drive_ready_dispatch_until_blocked(dispatcher, accumulator, observers)
+            let _dispatched = self.drive_ready_dispatch_until_blocked(dispatcher, accumulator, observers)
                 .await?;
         }
         Ok(())
@@ -2569,7 +2569,7 @@ impl ProducerSenderState {
                 .await?;
             },
             BufferWaitAction::PollReady => {
-                self.drive_ready_dispatch_until_blocked(
+                let _dispatched = self.drive_ready_dispatch_until_blocked(
                     dispatcher,
                     accumulator,
                     ReadyDispatchObservers::new(
@@ -6902,7 +6902,7 @@ mod tests {
         );
 
         let mut empty_state = ProducerSenderState::new(1);
-        let mut empty = SharedAccumulator::with_config(AccumulatorConfig::default());
+        let empty = SharedAccumulator::with_config(AccumulatorConfig::default());
         let idle = empty_state
             .prepare_ready_dispatch_batches(&dispatcher, &empty, std::time::Instant::now())
             .await
@@ -6910,7 +6910,7 @@ mod tests {
         assert!(matches!(idle, PreparedReadyDispatch::Idle));
 
         let mut ready_state = ProducerSenderState::new(1);
-        let mut ready = ready_accumulator();
+        let ready = ready_accumulator();
         let prepared = ready_state
             .prepare_ready_dispatch_batches(&dispatcher, &ready, std::time::Instant::now())
             .await
@@ -6926,7 +6926,7 @@ mod tests {
                 partitions: Vec::new(),
             }
         });
-        let mut blocked = ready_accumulator();
+        let blocked = ready_accumulator();
         let pending = blocked_state
             .prepare_ready_dispatch_batches(&dispatcher, &blocked, std::time::Instant::now())
             .await
@@ -6966,7 +6966,7 @@ mod tests {
         );
 
         let mut empty_state = ProducerSenderState::new(1);
-        let mut empty = SharedAccumulator::with_config(AccumulatorConfig::default());
+        let empty = SharedAccumulator::with_config(AccumulatorConfig::default());
         let idle = empty_state
             .prepare_all_dispatch_batches(&dispatcher, &empty)
             .await
@@ -6974,7 +6974,7 @@ mod tests {
         assert!(matches!(idle, PreparedAllDispatch::Empty));
 
         let mut ready_state = ProducerSenderState::new(1);
-        let mut ready = ready_accumulator();
+        let ready = ready_accumulator();
         let prepared = ready_state
             .prepare_all_dispatch_batches(&dispatcher, &ready)
             .await
@@ -6990,7 +6990,7 @@ mod tests {
                 partitions: Vec::new(),
             }
         });
-        let mut blocked = ready_accumulator();
+        let blocked = ready_accumulator();
         let pending = blocked_state
             .prepare_all_dispatch_batches(&dispatcher, &blocked)
             .await
@@ -7440,7 +7440,7 @@ mod tests {
             }
         });
 
-        state
+        let _dispatched = state
             .drive_ready_dispatch_until_blocked(
                 &test_dispatcher(),
                 &accumulator,
@@ -7489,7 +7489,7 @@ mod tests {
             }
         });
 
-        sender
+        let _dispatched = sender
             .drive_ready_dispatch_until_blocked(ReadyDispatchObservers::new(
                 |observed_latency| observed_latencies.push(observed_latency),
                 || observed_requeues += 1,
@@ -7790,7 +7790,7 @@ mod tests {
 
     #[test]
     fn producer_sender_handles_completed_dispatch_without_exposing_accumulator() {
-        let mut sender = ProducerSender::new(AccumulatorConfig::default(), 1);
+        let sender = ProducerSender::new(AccumulatorConfig::default(), 1);
         let batch = ready_batch("orders", 0);
         let mut observed_latency = None;
         let mut observed_requeues = 0;

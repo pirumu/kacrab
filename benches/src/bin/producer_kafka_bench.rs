@@ -284,7 +284,7 @@ async fn run_per_record_tracked_send_loop(
             }
         };
         if sync_send {
-            producer
+            let _delivery = producer
                 .send_with_callback_now(
                     ProducerRecord::new(Arc::clone(&topic), sticky_partition).value(value.clone()),
                     callback,
@@ -296,7 +296,7 @@ async fn run_per_record_tracked_send_loop(
                 sticky_bytes = 0;
             }
         } else {
-            producer
+            let _delivery = producer
                 .send_with_callback(
                     benchmark_record(Arc::clone(&topic), sent).value(value.clone()),
                     callback,

@@ -543,11 +543,12 @@ impl Producer {
             }
         };
         let append = AppendCallbackDeliveryRecord::new(record, now, deadline, None);
+        // `None` means the record needs the async slow path (sticky rotation or
+        // buffer-full); the synchronous API surfaces that as backpressure so the
+        // caller can fall back to `send`/`send_with_callback`.
         self.sender
             .append_callback_now(append, before_dispatch)
-            .unwrap_or_else(|| {
-                panic!("send_with_callback_now hit the async slow path (sticky/backpressure)")
-            })
+            .unwrap_or(Err(ProducerError::Backpressure))
     }
 
     /// Force-dispatch every buffered batch regardless of linger or batch size.
@@ -1449,7 +1450,7 @@ impl Producer {
         let dispatch_latency_samples = &self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
-        let Ok(mut sender) = self.sender.try_lock() else {
+        let Ok(sender) = self.sender.try_lock() else {
             return Err(ProducerError::DispatchTask(
                 "producer sender is busy".to_owned(),
             ));
@@ -3846,7 +3847,7 @@ mod tests {
 
     #[test]
     fn dispatch_task_result_requeues_batches_or_errors_for_flush() {
-        let mut producer = producer(1);
+        let producer = producer(1);
         let batch = {
             let sender = producer.sender.try_lock().expect("sender");
             sender
