@@ -212,6 +212,19 @@ impl ProducerDispatcher {
         fail_transaction_state_if_needed(&state, false)
     }
 
+    /// Non-blocking transaction-error guard for the synchronous send path. Reads
+    /// the producer state via `try_lock` so a transactional send can stay on the
+    /// fast synchronous append path (Java throws fatal transaction errors
+    /// synchronously). Returns `None` on momentary lock contention, in which case
+    /// the caller takes the slow drain (which performs the awaiting guard).
+    pub(crate) fn try_fail_if_transaction_error_now(&self) -> Option<Result<()>> {
+        if self.idempotence.transactional_id.is_none() {
+            return Some(Ok(()));
+        }
+        let state = self.producer_state.try_lock().ok()?;
+        Some(fail_transaction_state_if_needed(&state, false))
+    }
+
     pub(crate) async fn fail_if_fatal_transaction_error_for_abort(&self) -> Result<()> {
         if self.idempotence.transactional_id.is_none() {
             return Ok(());
@@ -557,6 +570,19 @@ impl ProducerDispatcher {
     pub(crate) async fn mark_sticky_batch_ready(&self, topic: &str) {
         let mut state = self.partitioner_state.lock().await;
         state.mark_sticky_batch_ready(topic, self.partition_sticky_batch_size);
+    }
+
+    /// Non-blocking sticky-batch-ready mark for the synchronous send path: flips
+    /// `switch_on_next` via `try_lock` so the next record rotates the sticky
+    /// partition. Returns `false` on momentary lock contention, in which case the
+    /// sticky budget check (`>= 2x batch size`) rotates a little later instead —
+    /// the record that triggered this has already been appended either way.
+    pub(crate) fn try_mark_sticky_batch_ready_now(&self, topic: &str) -> bool {
+        let Ok(mut state) = self.partitioner_state.try_lock() else {
+            return false;
+        };
+        state.mark_sticky_batch_ready(topic, self.partition_sticky_batch_size);
+        true
     }
 
     /// Fetch cached or refreshed metadata for the supplied topic set.

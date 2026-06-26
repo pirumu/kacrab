@@ -269,28 +269,14 @@ async fn run_per_record_tracked_send_loop(
                 eprintln!("producer callback reported delivery error: {result:?}");
             }
         };
-        if sync_send {
-            let mut record = benchmark_record(Arc::clone(&topic), sent).value(value.clone());
-            if producer.try_assign_partition_now(&mut record) {
-                let _delivery = producer
-                    .send_with_callback_now(record, callback)
-                    .expect("benchmark sync send should fit and dispatch");
-            } else {
-                // Sticky rotation / cold metadata: take the async assignment path.
-                let _delivery = producer
-                    .send_with_callback(record, callback)
-                    .await
-                    .expect("benchmark sync-send rotation fallback should dispatch");
-            }
-        } else {
-            let _delivery = producer
-                .send_with_callback(
-                    benchmark_record(Arc::clone(&topic), sent).value(value.clone()),
-                    callback,
-                )
-                .await
-                .expect("benchmark per-record callback send should fit and dispatch");
-        }
+        // `send_with_callback` is now synchronous (Java-style): it appends inline
+        // when the partition resolves synchronously and only hands the rare record
+        // (cold metadata / buffer-full) to the internal FIFO drain. No per-record
+        // `.await`, no manual partition assignment.
+        let record = benchmark_record(Arc::clone(&topic), sent).value(value.clone());
+        let _delivery = producer
+            .send_with_callback(record, callback)
+            .expect("benchmark send should fit and dispatch");
         sent = sent.saturating_add(1);
     }
     if sync_send {
@@ -375,7 +361,6 @@ async fn run_per_record_tracked_send_loop_concurrent(
                             }
                         },
                     )
-                    .await
                     .expect("benchmark concurrent send should fit and dispatch");
             }
         }));
@@ -439,7 +424,6 @@ async fn warm_up_producer(producer: &mut Producer, run: &BenchmarkRun<'_>, value
                 benchmark_record(Arc::clone(&topic), index).value(value.clone()),
                 |_result| {},
             )
-            .await
             .expect("benchmark per-record warmup send should dispatch");
     }
     producer

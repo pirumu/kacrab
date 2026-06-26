@@ -399,18 +399,32 @@ impl ProducerSenderRuntime {
                     delivery,
                     sticky_ready_topic,
                 } => {
-                    if sticky_ready_topic.is_some() {
-                        return None; // would need an async sticky-batch mark
+                    if let Some(topic) = sticky_ready_topic {
+                        // The record is already appended; mark the now-full sticky
+                        // batch ready synchronously (best effort) so the next record
+                        // rotates. On lock contention the sticky budget check rotates
+                        // a little later — never drop the delivery handle.
+                        let _marked = self
+                            .bypass_dispatcher
+                            .try_mark_sticky_batch_ready_now(&topic);
                     }
                     return Some(Ok(delivery));
                 },
                 SyncCallbackAppend::Failed(error) => return Some(Err(error)),
                 SyncCallbackAppend::WouldBlock(retry_append, retry_before_dispatch) => {
-                    // buffer.memory full: the background loop drains on another
-                    // worker; spin briefly until it frees space (rare, not per-record).
+                    // buffer.memory full. On a multi-threaded runtime the background
+                    // loop drains on another worker, so spin until it frees space.
+                    // Bound the wait by the record's max.block deadline (like Java's
+                    // BufferPool wait) so a single-threaded runtime — where no other
+                    // worker can drain while we spin — reports backpressure instead
+                    // of spinning forever.
+                    if std::time::Instant::now() >= retry_append.deadline {
+                        return Some(Err(ProducerError::Backpressure));
+                    }
                     let _spins = SYNC_NOW_BUFFER_SPINS.fetch_add(1, Ordering::Relaxed);
                     append = retry_append;
                     before_dispatch = retry_before_dispatch;
+                    std::thread::yield_now();
                     std::hint::spin_loop();
                 },
             }
@@ -467,6 +481,14 @@ impl ProducerSenderRuntime {
         &self,
     ) -> Result<tokio::sync::MutexGuard<'_, ProducerSender>, tokio::sync::TryLockError> {
         self.sender.try_lock()
+    }
+
+    /// Clone the shared `ProducerSender` handle so the rare synchronous-send slow
+    /// path (cold metadata / buffer-full / transactional / custom partitioner) can
+    /// drive the awaiting append from a dedicated drain task without owning the
+    /// (non-`Clone`) runtime.
+    pub(crate) fn shared_sender(&self) -> Arc<AsyncMutex<ProducerSender>> {
+        Arc::clone(&self.sender)
     }
 
     pub(crate) fn enable_loop_metrics(&self) {

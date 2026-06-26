@@ -167,7 +167,6 @@ async fn kafka_producer_send_buffers_until_flush() {
 
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     assert!(wait_for_buffered_bytes(&producer).await > 0);
 
@@ -249,7 +248,6 @@ async fn kafka_producer_background_sender_dispatches_after_linger_without_flush(
             ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
             |_| {},
         )
-        .await
         .unwrap();
 
     let receipt = tokio::time::timeout(Duration::from_millis(250), delivery)
@@ -330,7 +328,6 @@ async fn kafka_producer_background_sender_dispatches_ready_batch_without_linger_
             ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
             |_| {},
         )
-        .await
         .unwrap();
 
     let receipt = tokio::time::timeout(Duration::from_millis(250), delivery)
@@ -411,7 +408,6 @@ async fn kafka_producer_send_with_callback_invokes_callback_and_returns_delivery
                     .push(result.expect("callback receipt"));
             },
         )
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -466,7 +462,6 @@ async fn kafka_producer_builder_accepts_java_style_config() {
 
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -916,12 +911,16 @@ async fn kafka_producer_interceptor_send_error_uses_assigned_partition_like_java
         metadata: Arc::clone(&captured),
     });
 
+    // A keyed, unassigned record on a cold-metadata topic resolves its partition
+    // asynchronously, so the too-large error surfaces on the returned delivery
+    // future (after the partition is assigned) rather than from the sync send call.
     let error = producer
         .send(
             ProducerRecord::unassigned("orders")
                 .key(Bytes::from_static(b"customer-42"))
                 .value(Bytes::from_static(b"value")),
         )
+        .expect("oversized record is enqueued for async partition assignment")
         .await
         .expect_err("record should exceed max.request.size");
     let metadata = captured
@@ -993,7 +992,6 @@ async fn kafka_producer_builder_uses_native_partitioner_instead_of_jvm_class_loa
 
     let delivery = producer
         .send(ProducerRecord::unassigned("orders").value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -1084,11 +1082,9 @@ async fn kafka_producer_send_auto_batches_per_record_sends_until_flush() {
 
     let first = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     let second = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -1202,7 +1198,6 @@ async fn kafka_producer_send_with_callback_auto_batches_until_flush() {
                 let _previous = first_delivered.fetch_add(1, Ordering::Relaxed);
             },
         )
-        .await
         .unwrap();
     let second_delivered = Arc::clone(&delivered);
     let _second_delivery = producer
@@ -1213,7 +1208,6 @@ async fn kafka_producer_send_with_callback_auto_batches_until_flush() {
                 let _previous = second_delivered.fetch_add(1, Ordering::Relaxed);
             },
         )
-        .await
         .unwrap();
     producer.flush().await.unwrap();
 
@@ -1272,20 +1266,12 @@ async fn kafka_producer_pipelines_ready_batches_until_flush() {
         },
     );
 
-    let first_delivery = tokio::time::timeout(
-        Duration::from_millis(200),
-        producer.send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a"))),
-    )
-    .await
-    .expect("first send should not wait for broker ack")
-    .unwrap();
-    let second_delivery = tokio::time::timeout(
-        Duration::from_millis(200),
-        producer.send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b"))),
-    )
-    .await
-    .expect("second send should not wait for broker ack")
-    .unwrap();
+    let first_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .unwrap();
+    let second_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
+        .unwrap();
 
     producer.flush().await.unwrap();
     let mut receipts = [
@@ -1376,7 +1362,6 @@ async fn kafka_producer_single_send_budget_coalesces_ready_partitions() {
             ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
             |_| {},
         )
-        .await
         .unwrap();
     assert_eq!(producer.metrics().produce_request_count, 0);
 
@@ -1385,7 +1370,6 @@ async fn kafka_producer_single_send_budget_coalesces_ready_partitions() {
             ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")),
             |_| {},
         )
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -1486,7 +1470,6 @@ async fn kafka_producer_10kib_records_keep_observed_requests_under_max_request_s
         let partition = i32::try_from(partition).expect("partition id should fit i32");
         let delivery = producer
             .send(ProducerRecord::new("orders", partition).value(value.clone()))
-            .await
             .expect("send 10KiB record");
         deliveries.push(delivery);
     }
@@ -1597,20 +1580,12 @@ async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() 
     let partitions = producer.partitions_for("orders").await.unwrap();
     assert_eq!(partitions.len(), 2);
 
-    let first_delivery = tokio::time::timeout(
-        Duration::from_millis(200),
-        producer.send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a"))),
-    )
-    .await
-    .expect("first send should not wait for broker ack")
-    .unwrap();
-    let second_delivery = tokio::time::timeout(
-        Duration::from_millis(200),
-        producer.send(ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b"))),
-    )
-    .await
-    .expect("second send should not wait for broker ack")
-    .unwrap();
+    let first_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .unwrap();
+    let second_delivery = producer
+        .send(ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")))
+        .unwrap();
 
     producer.flush().await.unwrap();
     let mut receipts = [
@@ -1686,11 +1661,9 @@ async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correla
 
     let first_delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     let second_delivery = producer
         .send(ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")))
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -1761,7 +1734,6 @@ async fn idempotent_kafka_producer_retries_disconnected_in_flight_batch_with_sam
 
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -1829,7 +1801,6 @@ async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_t
 
     let first_delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     let first_error = producer
         .flush()
@@ -1843,7 +1814,6 @@ async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_t
 
     let second_delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
     let receipt = second_delivery.await.unwrap();
@@ -1941,7 +1911,6 @@ async fn idempotent_kafka_producer_retries_leadership_error_with_current_leader_
 
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -2004,7 +1973,6 @@ async fn kafka_producer_requeues_in_flight_batch_when_metadata_is_missing() {
 
     let _delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
 
     let error = producer.flush().await.unwrap_err();
@@ -2075,7 +2043,6 @@ async fn kafka_producer_metrics_snapshot_reports_queue_and_dispatch_counters() {
 
     let _delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     let queued = producer.metrics();
     assert_eq!(queued.records_appended, 1);
@@ -2318,7 +2285,6 @@ async fn kafka_producer_commits_transactional_send() {
     assert!(metrics.transaction_begin_total_latency >= Duration::ZERO);
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
     assert_eq!(producer.metrics().transaction_commit_count, 0);
@@ -2435,7 +2401,6 @@ async fn kafka_producer_commit_timeout_can_retry_same_operation_like_java() {
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
 
@@ -2569,7 +2534,6 @@ async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
 
@@ -2716,7 +2680,6 @@ async fn kafka_producer_abort_holds_end_txn_until_in_flight_batches_drain_like_j
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
 
     producer.abort_transaction().await.unwrap();
@@ -2830,7 +2793,6 @@ async fn kafka_producer_transaction_v2_skips_add_partitions_to_txn_like_java() {
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
     producer.commit_transaction().await.unwrap();
@@ -2946,7 +2908,6 @@ async fn kafka_producer_transaction_v2_installs_end_txn_epoch_like_java() {
     producer.begin_transaction().unwrap();
     let first_delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
     producer.commit_transaction().await.unwrap();
@@ -2954,7 +2915,6 @@ async fn kafka_producer_transaction_v2_installs_end_txn_epoch_like_java() {
     producer.begin_transaction().unwrap();
     let second_delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
     producer.commit_transaction().await.unwrap();
@@ -3068,7 +3028,6 @@ async fn kafka_producer_transactional_unknown_producer_id_is_abortable_like_java
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .expect("send returns a delivery future before the async produce response");
 
     let send_error = producer
@@ -3099,7 +3058,6 @@ async fn kafka_producer_transactional_unknown_producer_id_is_abortable_like_java
     producer.begin_transaction().unwrap();
     let recovered_delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
-        .await
         .expect("send after abort should use bumped epoch");
     producer.flush().await.unwrap();
     assert_eq!(recovered_delivery.await.unwrap().offset, 91);
@@ -3190,7 +3148,6 @@ async fn kafka_producer_transactional_unsupported_message_format_is_abortable_li
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .expect("send returns a delivery future before the async produce response");
 
     let send_error = producer
@@ -3277,7 +3234,6 @@ async fn kafka_producer_add_partitions_fatal_error_blocks_abort() {
     producer.begin_transaction().unwrap();
     let send_error = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap_err();
     assert!(matches!(
         send_error,
@@ -3359,7 +3315,6 @@ async fn kafka_producer_fatal_transaction_error_blocks_later_send_like_java() {
     producer.begin_transaction().unwrap();
     let _delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .expect("first send only buffers before flush");
     let flush_error = producer.flush().await.unwrap_err();
     assert!(matches!(
@@ -3370,12 +3325,8 @@ async fn kafka_producer_fatal_transaction_error_blocks_later_send_like_java() {
         }
     ));
 
-    let later_send = tokio::time::timeout(
-        Duration::from_millis(200),
-        producer.send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b"))),
-    )
-    .await
-    .expect("later send should fail locally");
+    let later_send =
+        producer.send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")));
     assert!(matches!(
         later_send,
         Err(kacrab::producer::ProducerError::Transaction {
@@ -3452,7 +3403,6 @@ async fn kafka_producer_retries_retriable_add_partitions_error() {
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
 
@@ -3527,7 +3477,6 @@ async fn kafka_producer_retries_concurrent_transactions_add_partitions_error_lik
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
 
@@ -3612,13 +3561,9 @@ async fn kafka_producer_add_partitions_reloads_transaction_coordinator() {
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
-    let delivery = tokio::time::timeout(
-        Duration::from_secs(1),
-        producer.send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a"))),
-    )
-    .await
-    .expect("send should reload transaction coordinator before timing out")
-    .unwrap();
+    let delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(1), producer.flush())
         .await
         .expect("flush should complete after add partitions retry")
@@ -4274,7 +4219,6 @@ async fn kafka_producer_add_offsets_unknown_producer_id_bumps_epoch_after_abort_
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"recovered")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
     producer.commit_transaction().await.unwrap();
@@ -7434,7 +7378,6 @@ async fn kafka_producer_delivery_future_receives_terminal_broker_error_like_java
 
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .expect("send should append before broker response");
     let flush_error = producer
         .flush()
@@ -7535,7 +7478,6 @@ async fn kafka_producer_send_with_callback_receives_terminal_broker_error_like_j
                 other => panic!("callback should receive broker error, got {other:?}"),
             },
         )
-        .await
         .expect("send should append before broker response");
     let flush_error = producer
         .flush()
@@ -7617,7 +7559,6 @@ async fn kafka_producer_delivery_future_preserves_terminal_wire_connection_close
 
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .expect("send should append before produce dispatch");
     let flush_error = producer
         .flush()

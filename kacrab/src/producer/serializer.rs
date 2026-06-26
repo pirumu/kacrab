@@ -853,7 +853,7 @@ where
             .as_ref()
             .unwrap_or_else(abort_missing_state)
             .serialize(&topic, &mut record.headers, value)?;
-        self.producer_mut().send(record).await
+        self.producer_mut().send(record)
     }
 
     fn close_serializers(&mut self) {
