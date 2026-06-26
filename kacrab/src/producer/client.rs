@@ -1273,38 +1273,22 @@ impl Producer {
     }
 
     #[cfg(test)]
-    #[expect(
-        clippy::needless_pass_by_ref_mut,
-        reason = "test mirror of the &mut self flush control-plane surface"
-    )]
-    fn collect_finished(&mut self) -> Result<()> {
+    fn collect_finished(&self) -> Result<()> {
         self.handle_finished_dispatches(false)
     }
 
     #[cfg(test)]
-    #[expect(
-        clippy::needless_pass_by_ref_mut,
-        reason = "test mirror of the &mut self flush control-plane surface"
-    )]
-    fn collect_finished_for_flush(&mut self) -> Result<()> {
+    fn collect_finished_for_flush(&self) -> Result<()> {
         self.handle_finished_dispatches(true)
     }
 
     #[cfg(test)]
-    #[expect(
-        clippy::needless_pass_by_ref_mut,
-        reason = "test mirror of the &mut self flush control-plane surface"
-    )]
-    async fn wait_for_one(&mut self) -> Result<()> {
+    async fn wait_for_one(&self) -> Result<()> {
         self.wait_for_handled_dispatch(false).await
     }
 
     #[cfg(test)]
-    #[expect(
-        clippy::needless_pass_by_ref_mut,
-        reason = "test mirror of the &mut self flush control-plane surface"
-    )]
-    async fn wait_for_one_for_flush(&mut self) -> Result<()> {
+    async fn wait_for_one_for_flush(&self) -> Result<()> {
         self.wait_for_handled_dispatch(true).await
     }
 
@@ -3759,7 +3743,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_one_helpers_return_ok_when_no_task_exists() {
-        let mut producer = producer(1);
+        let producer = producer(1);
 
         producer.wait_for_one().await.expect("empty wait is ok");
         producer
@@ -3770,7 +3754,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_one_helpers_process_completed_tasks() {
-        let mut producer = producer(1);
+        let producer = producer(1);
         let _abort = {
             let mut sender = producer.sender.lock().await;
             sender
@@ -3794,7 +3778,7 @@ mod tests {
 
     #[tokio::test]
     async fn collect_finished_for_flush_consumes_completed_tasks() {
-        let mut producer = producer(1);
+        let producer = producer(1);
         let _abort = {
             let mut sender = producer.sender.lock().await;
             sender
@@ -3810,7 +3794,7 @@ mod tests {
 
     #[tokio::test]
     async fn collect_finished_consumes_successful_and_panicked_tasks() {
-        let mut producer = producer(1);
+        let producer = producer(1);
         let _abort = {
             let mut sender = producer.sender.lock().await;
             sender
