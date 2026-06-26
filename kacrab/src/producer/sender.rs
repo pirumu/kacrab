@@ -32,7 +32,11 @@ const COMPLETED_BATCH_IDENTITY_TOMBSTONE_LIMIT: usize = 4096;
 #[derive(Debug)]
 pub(crate) struct ProducerSenderState {
     in_flight: JoinSet<TimedDispatchOutcome>,
-    in_flight_partitions: AHashSet<InFlightPartitionKey>,
+    // Per-partition in-flight ProduceRequest COUNT (was a presence-only set that
+    // capped each partition to ONE in-flight request -> serialized the sticky
+    // single-partition path to in-flight=1. Java pipelines up to
+    // max.in.flight.requests.per.connection per partition via idempotent sequences).
+    in_flight_partitions: AHashMap<InFlightPartitionKey, usize>,
     in_flight_batch_identities: AHashSet<ReadyBatchIdentity>,
     completed_batch_identities: AHashSet<ReadyBatchIdentity>,
     completed_batch_identity_order: VecDeque<ReadyBatchIdentity>,
@@ -656,7 +660,10 @@ impl ProducerSender {
     }
 
     pub(crate) fn next_wake_action(&self, now: std::time::Instant) -> SenderWakeAction {
-        if self.state.has_in_flight_dispatches() {
+        // Only stop dispatching when AT the in-flight capacity (Java pipelines up to
+        // max.in.flight); previously this stopped at the first in-flight request,
+        // serializing the sticky single-partition path to in-flight=1.
+        if self.state.at_in_flight_capacity() {
             return SenderWakeAction::WaitForDispatch;
         }
         match self.next_ready_at(now) {
@@ -2159,7 +2166,7 @@ impl ProducerSenderState {
             AppendPollBudget::for_callback_sender(max_in_flight_requests);
         Self {
             in_flight: JoinSet::new(),
-            in_flight_partitions: AHashSet::new(),
+            in_flight_partitions: AHashMap::new(),
             in_flight_batch_identities: AHashSet::new(),
             completed_batch_identities: AHashSet::new(),
             completed_batch_identity_order: VecDeque::new(),
@@ -2474,6 +2481,13 @@ impl ProducerSenderState {
 
     pub(crate) fn has_in_flight_dispatches(&self) -> bool {
         !self.in_flight.is_empty()
+    }
+
+    /// True when the connection is at its in-flight ProduceRequest capacity
+    /// (max.in.flight.requests.per.connection). The loop should keep dispatching
+    /// newly-ready batches until this, instead of stopping at the first in-flight.
+    pub(crate) fn at_in_flight_capacity(&self) -> bool {
+        self.in_flight_dispatch_count() >= self.max_in_flight_requests
     }
 
     pub(crate) fn flush_completion_progress(&self) -> FlushDispatchProgress {
@@ -3461,22 +3475,28 @@ impl ProducerSenderState {
 
     pub(crate) fn reserve_dispatch_partitions(&mut self, partitions: &[InFlightPartitionKey]) {
         for partition in partitions {
-            let _inserted = self.in_flight_partitions.insert(partition.clone());
+            *self.in_flight_partitions.entry(partition.clone()).or_insert(0) += 1;
         }
     }
 
     #[cfg(test)]
     pub(crate) fn reserve_partitions_for_dispatch(&mut self, batches: &[ReadyBatch]) {
         for batch in batches {
-            let _inserted = self
+            *self
                 .in_flight_partitions
-                .insert(InFlightPartitionKey::from(batch));
+                .entry(InFlightPartitionKey::from(batch))
+                .or_insert(0) += 1;
         }
     }
 
     pub(crate) fn release_dispatch_partitions(&mut self, partitions: Vec<InFlightPartitionKey>) {
         for partition in partitions {
-            let _removed = self.in_flight_partitions.remove(&partition);
+            if let Some(count) = self.in_flight_partitions.get_mut(&partition) {
+                *count -= 1;
+                if *count == 0 {
+                    let _removed = self.in_flight_partitions.remove(&partition);
+                }
+            }
         }
     }
 
@@ -3591,7 +3611,16 @@ impl ProducerSenderState {
         let mut reserved = AHashSet::new();
         for batch in batches {
             let key = InFlightPartitionKey::from(&batch);
-            if self.in_flight_partitions.contains(&key) {
+            // Pipeline up to max.in.flight per partition (Java parity) instead of 1.
+            // Count already-in-flight for this partition plus what we've reserved in
+            // THIS selection (one ProduceRequest per partition per selection).
+            let already = self
+                .in_flight_partitions
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(usize::from(reserved.contains(&key)));
+            if already >= self.max_in_flight_requests {
                 deferred.push(batch);
                 continue;
             }

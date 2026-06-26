@@ -184,6 +184,9 @@ async fn build_producer(config: &ProducerConfig) -> Producer {
     if let Ok(batch_size) = env::var("KACRAB_BENCH_BATCH_SIZE") {
         builder = builder.set("batch.size", batch_size.as_str());
     }
+    if env::var("KACRAB_BENCH_ACKS1").is_ok() {
+        builder = builder.set("acks", "1").set("enable.idempotence", "false");
+    }
     builder
         .build()
         .await
