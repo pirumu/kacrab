@@ -244,25 +244,11 @@ async fn run_per_record_tracked_send_loop(
         run.reporting_interval,
         false,
     ));
-    // KACRAB_BENCH_SYNC_SEND=1 routes through the synchronous bypass send
-    // (send_with_callback_now, no per-record .await, no sender mutex) with a
-    // pre-assigned partition, to measure the full Java-faithful sync path.
+    // KACRAB_BENCH_SYNC_SEND=1 routes through the synchronous send
+    // (send_with_callback_now, no per-record .await, no sender mutex). The record's
+    // partition is assigned by the REAL sticky partitioner via try_assign_partition_now
+    // (sync, non-blocking); the ~1-in-900 rotation records fall back to the async path.
     let sync_send = env::var("KACRAB_BENCH_SYNC_SEND").is_ok();
-    // Bench-level sticky for the sync path: concentrate on one partition until a
-    // batch fills, then rotate (Java sticky). KACRAB_BENCH_STICKY_PARTITIONS=N
-    // spreads across N partitions -> N partitions x 1-in-flight pipelined (the
-    // idempotent-SAFE realistic win), vs default 1 (single partition).
-    let sticky_partitions: i32 = env::var("KACRAB_BENCH_STICKY_PARTITIONS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value: &i32| *value > 0)
-        .unwrap_or(1);
-    let sticky_batch_bytes: usize = env::var("KACRAB_BENCH_BATCH_SIZE")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(16384);
-    let mut sticky_partition = 0i32;
-    let mut sticky_bytes = 0usize;
     let mut sent = 0usize;
     while sent < run.scenario.messages {
         let send_started = Instant::now();
@@ -284,16 +270,17 @@ async fn run_per_record_tracked_send_loop(
             }
         };
         if sync_send {
-            let _delivery = producer
-                .send_with_callback_now(
-                    ProducerRecord::new(Arc::clone(&topic), sticky_partition).value(value.clone()),
-                    callback,
-                )
-                .expect("benchmark sync send should fit and dispatch");
-            sticky_bytes = sticky_bytes.saturating_add(value_size.saturating_add(64));
-            if sticky_bytes >= sticky_batch_bytes {
-                sticky_partition = (sticky_partition + 1) % sticky_partitions;
-                sticky_bytes = 0;
+            let mut record = benchmark_record(Arc::clone(&topic), sent).value(value.clone());
+            if producer.try_assign_partition_now(&mut record) {
+                let _delivery = producer
+                    .send_with_callback_now(record, callback)
+                    .expect("benchmark sync send should fit and dispatch");
+            } else {
+                // Sticky rotation / cold metadata: take the async assignment path.
+                let _delivery = producer
+                    .send_with_callback(record, callback)
+                    .await
+                    .expect("benchmark sync-send rotation fallback should dispatch");
             }
         } else {
             let _delivery = producer

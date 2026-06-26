@@ -499,6 +499,21 @@ impl Producer {
         Ok(delivery)
     }
 
+    /// Synchronously assign this record's partition using the real sticky
+    /// partitioner, without blocking (reads the cached sticky partition via
+    /// `try_lock`). Returns `true` if a partition was assigned; `false` when the
+    /// record needs the async assignment path (sticky rotation, momentary lock
+    /// contention, a keyed/custom-partitioner record, or cold metadata). Pairs with
+    /// [`Self::send_with_callback_now`] so the caller can take the rare async path
+    /// for the ~1-in-900 rotation records and stay synchronous for the rest.
+    #[must_use]
+    pub fn try_assign_partition_now(&self, record: &mut ProducerRecord) -> bool {
+        record.has_assigned_partition()
+            || self
+                .control_dispatcher
+                .try_assign_cached_sticky_partition_now(record)
+    }
+
     /// SYNC send (Java-faithful spike): NOT an `async fn`. Appends via the bypass
     /// (shared accumulator, no sender async mutex, no spin) and returns the
     /// delivery future immediately — zero per-record `.await`/task-scheduling.

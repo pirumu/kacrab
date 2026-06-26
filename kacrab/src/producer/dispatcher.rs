@@ -492,7 +492,34 @@ impl ProducerDispatcher {
         )
     }
 
+    /// Synchronous (non-blocking) sticky-partition assignment for `send_now`: reads
+    /// the cached sticky partition via `try_lock` (no `.await`, no OS-thread block).
+    /// Returns `false` when the record isn't sticky-eligible, the partitioner lock is
+    /// momentarily contended, or the sticky batch budget is exhausted (rotation) — the
+    /// caller then takes the async assignment path for that one record.
+    pub(crate) fn try_assign_cached_sticky_partition_now(
+        &self,
+        record: &mut super::ProducerRecord,
+    ) -> bool {
+        if !self.uses_sticky_partitioner(record) {
+            return false;
+        }
+        let Ok(mut state) = self.partitioner_state.try_lock() else {
+            return false;
+        };
+        state.try_assign_cached_sticky_partition(
+            record,
+            self.partition_sticky_batch_size,
+            self.compression_ratio_estimation(record.topic.as_ref()),
+        )
+    }
+
     pub(crate) fn compression_ratio_estimation(&self, topic: &str) -> f32 {
+        // No compression -> ratio is always 1.0; skip the shared estimator lock so
+        // the per-record partition-assign path doesn't serialize on it.
+        if matches!(self.compression.codec, Compression::None) {
+            return 1.0;
+        }
         self.compression_ratios.lock().map_or(1.0, |ratios| {
             ratios.estimation(topic, self.compression.codec)
         })
