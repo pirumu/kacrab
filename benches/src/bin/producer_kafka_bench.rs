@@ -235,33 +235,53 @@ async fn run_per_record_tracked_send_loop(
         run.reporting_interval,
         false,
     ));
+    // KACRAB_BENCH_SYNC_SEND=1 routes through the synchronous bypass send
+    // (send_with_callback_now, no per-record .await, no sender mutex) with a
+    // pre-assigned partition, to measure the full Java-faithful sync path.
+    let sync_send = env::var("KACRAB_BENCH_SYNC_SEND").is_ok();
     let mut sent = 0usize;
     while sent < run.scenario.messages {
         let send_started = Instant::now();
         let stats = java_perf.clone();
         let value_size = value.len();
-        let _delivery = producer
-            .send_with_callback(
-                benchmark_record(Arc::clone(&topic), sent).value(value.clone()),
-                move |result| {
-                    let completed = Instant::now();
-                    if let Some(line) = record_tracked_callback_completion(
-                        &result,
-                        TrackedCompletionStart::Single(send_started),
-                        &stats,
-                        completed,
-                        value_size,
-                    ) {
-                        println!("{line}");
-                    }
-                    if result.is_err() {
-                        eprintln!("producer callback reported delivery error: {result:?}");
-                    }
-                },
-            )
-            .await
-            .expect("benchmark per-record callback send should fit and dispatch");
+        let callback = move |result: kacrab::producer::Result<RecordMetadata>| {
+            let completed = Instant::now();
+            if let Some(line) = record_tracked_callback_completion(
+                &result,
+                TrackedCompletionStart::Single(send_started),
+                &stats,
+                completed,
+                value_size,
+            ) {
+                println!("{line}");
+            }
+            if result.is_err() {
+                eprintln!("producer callback reported delivery error: {result:?}");
+            }
+        };
+        if sync_send {
+            producer
+                .send_with_callback_now(
+                    ProducerRecord::new(Arc::clone(&topic), 0).value(value.clone()),
+                    callback,
+                )
+                .expect("benchmark sync send should fit and dispatch");
+        } else {
+            producer
+                .send_with_callback(
+                    benchmark_record(Arc::clone(&topic), sent).value(value.clone()),
+                    callback,
+                )
+                .await
+                .expect("benchmark per-record callback send should fit and dispatch");
+        }
         sent = sent.saturating_add(1);
+    }
+    if sync_send {
+        eprintln!(
+            "sync-now buffer spins: {}",
+            kacrab::producer::SYNC_NOW_BUFFER_SPINS.load(Ordering::Relaxed)
+        );
     }
     producer
         .flush()

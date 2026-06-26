@@ -499,6 +499,56 @@ impl Producer {
         Ok(delivery)
     }
 
+    /// SYNC send (Java-faithful spike): NOT an `async fn`. Appends via the bypass
+    /// (shared accumulator, no sender async mutex, no spin) and returns the
+    /// delivery future immediately — zero per-record `.await`/task-scheduling.
+    /// Requires a PRE-ASSIGNED partition (no sticky/partitioner on the hot path)
+    /// and a non-transactional producer. Panics if the append would need to
+    /// suspend (sticky rotation) or block (buffer full) — the bench steady state
+    /// never hits that.
+    ///
+    /// # Errors
+    ///
+    /// Returns record-size validation errors or append failures.
+    pub fn send_with_callback_now<F>(
+        &self,
+        record: ProducerRecord,
+        callback: F,
+    ) -> Result<SendFuture>
+    where
+        F: FnOnce(Result<RecordMetadata>) + Send + 'static,
+    {
+        self.ensure_background_sender_loop();
+        let now = std::time::Instant::now();
+        let record = self.intercept_on_send(record);
+        debug_assert!(
+            record.has_assigned_partition(),
+            "send_with_callback_now requires a pre-assigned partition"
+        );
+        self.validate_record_size(&record)?;
+        let deadline = now.checked_add(self.max_block).unwrap_or(now);
+        let ack_headers = self.interceptor_headers(&record);
+        let interceptors = self.interceptors.clone();
+        let mut callback = Some(callback);
+        let before_dispatch = |delivery: &SendFuture| {
+            if let Some(headers) = ack_headers {
+                let interceptors = interceptors.clone();
+                delivery.register_callback(Box::new(move |result| match result {
+                    Ok(metadata) => interceptors.on_ack(Some(&metadata), None, &headers),
+                    Err(error) => interceptors.on_ack(None, Some(&error), &headers),
+                }));
+            }
+            if let Some(callback) = callback.take() {
+                delivery.register_callback(Box::new(callback));
+            }
+        };
+        let append = AppendCallbackDeliveryRecord::new(record, now, deadline, None);
+        match self.sender.append_callback_now(append, before_dispatch) {
+            Some(result) => result,
+            None => panic!("send_with_callback_now hit the async slow path (sticky/backpressure)"),
+        }
+    }
+
     /// Force-dispatch every buffered batch regardless of linger or batch size.
     ///
     /// # Errors

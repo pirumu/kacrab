@@ -55,6 +55,12 @@ pub(crate) struct ProducerSender {
     background_dispatch_paused: Arc<AtomicBool>,
 }
 
+/// SPIKE diagnostic: total spins waiting for buffer.memory in the sync `send_now`
+/// path (background loop draining on another worker). Tells the bench whether a
+/// slow sync run is loop-drain-bound.
+pub static SYNC_NOW_BUFFER_SPINS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Debug)]
 pub(crate) struct ProducerSenderRuntime {
     sender: Arc<AsyncMutex<ProducerSender>>,
@@ -366,6 +372,44 @@ impl ProducerSenderRuntime {
         if status.starts_new_batch || status.batch_ready {
             self.bypass_paused.store(false, Ordering::Relaxed);
             self.bypass_notify.notify_one();
+        }
+    }
+
+    /// SYNC `send_now`: append one callback-delivery record with ZERO `.await` via
+    /// the bypass (shared accumulator, NO sender async mutex, NO spin — only the
+    /// brief SharedAccumulator lock). Returns `None` when it would need to suspend
+    /// (sticky rotation) or block (buffer full); the caller handles those.
+    pub(crate) fn append_callback_now<BeforeDispatch>(
+        &self,
+        append: AppendCallbackDeliveryRecord<'_>,
+        before_dispatch: BeforeDispatch,
+    ) -> Option<Result<SendFuture, ProducerError>>
+    where
+        BeforeDispatch: FnOnce(&SendFuture),
+    {
+        let mut append = append;
+        let mut before_dispatch = before_dispatch;
+        loop {
+            match self.try_bypass_append_callback(append, before_dispatch) {
+                SyncCallbackAppend::Appended {
+                    delivery,
+                    sticky_ready_topic,
+                } => {
+                    if sticky_ready_topic.is_some() {
+                        return None; // would need an async sticky-batch mark
+                    }
+                    return Some(Ok(delivery));
+                },
+                SyncCallbackAppend::Failed(error) => return Some(Err(error)),
+                SyncCallbackAppend::WouldBlock(retry_append, retry_before_dispatch) => {
+                    // buffer.memory full: the background loop drains on another
+                    // worker; spin briefly until it frees space (rare, not per-record).
+                    SYNC_NOW_BUFFER_SPINS.fetch_add(1, Ordering::Relaxed);
+                    append = retry_append;
+                    before_dispatch = retry_before_dispatch;
+                    std::hint::spin_loop();
+                },
+            }
         }
     }
 

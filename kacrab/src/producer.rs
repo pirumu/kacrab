@@ -47,6 +47,7 @@ pub use self::{
         DeliveryCallback, Header, Headers, ProducerRecord, RecordHeader, RecordHeaders,
         RecordMetadata, SendFuture,
     },
+    sender::SYNC_NOW_BUFFER_SPINS,
     serializer::{
         BooleanSerializer, ByteArraySerializer, BytesSerializer, ConfiguredProducerSerializer,
         DoubleSerializer, FloatSerializer, IntegerSerializer, ListInnerSerializer,
