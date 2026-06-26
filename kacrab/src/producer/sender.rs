@@ -32,11 +32,11 @@ const COMPLETED_BATCH_IDENTITY_TOMBSTONE_LIMIT: usize = 4096;
 #[derive(Debug)]
 pub(crate) struct ProducerSenderState {
     in_flight: JoinSet<TimedDispatchOutcome>,
-    // Per-partition in-flight ProduceRequest COUNT (was a presence-only set that
-    // capped each partition to ONE in-flight request -> serialized the sticky
-    // single-partition path to in-flight=1. Java pipelines up to
-    // max.in.flight.requests.per.connection per partition via idempotent sequences).
-    in_flight_partitions: AHashMap<InFlightPartitionKey, usize>,
+    // ONE in-flight ProduceRequest per partition (idempotent ordering: never two
+    // outstanding requests to the same partition -> no out-of-sequence reorder).
+    // Cross-partition pipelining up to max.in.flight is via the connection-capacity
+    // gate (at_in_flight_capacity), NOT by relaxing this per-partition set.
+    in_flight_partitions: AHashSet<InFlightPartitionKey>,
     in_flight_batch_identities: AHashSet<ReadyBatchIdentity>,
     completed_batch_identities: AHashSet<ReadyBatchIdentity>,
     completed_batch_identity_order: VecDeque<ReadyBatchIdentity>,
@@ -940,7 +940,8 @@ impl ProducerSender {
                     return Ok(SenderLoopWait::DispatchCompletion);
                 },
                 SenderWakeAction::DispatchReady => {
-                    self.state
+                    let dispatched_any = self
+                        .state
                         .drive_ready_dispatch_until_blocked(
                             &self.dispatcher,
                             &self.accumulator,
@@ -951,6 +952,16 @@ impl ProducerSender {
                             ),
                         )
                         .await?;
+                    // Ready batches existed but none were dispatchable (each is for a
+                    // partition that already has an in-flight request). Wait for a
+                    // completion to free a partition instead of re-polling forever.
+                    if !dispatched_any {
+                        return Ok(if self.state.has_in_flight_dispatches() {
+                            SenderLoopWait::DispatchCompletion
+                        } else {
+                            SenderLoopWait::Parked
+                        });
+                    }
                 },
                 SenderWakeAction::SleepUntil(ready_at) => {
                     return Ok(SenderLoopWait::SleepUntil(ready_at));
@@ -1443,7 +1454,7 @@ impl ProducerSender {
     >(
         &mut self,
         observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
-    ) -> Result<(), ProducerError>
+    ) -> Result<bool, ProducerError>
     where
         LatencyObserver: FnMut(std::time::Duration),
         RequeueObserver: FnMut(),
@@ -2166,7 +2177,7 @@ impl ProducerSenderState {
             AppendPollBudget::for_callback_sender(max_in_flight_requests);
         Self {
             in_flight: JoinSet::new(),
-            in_flight_partitions: AHashMap::new(),
+            in_flight_partitions: AHashSet::new(),
             in_flight_batch_identities: AHashSet::new(),
             completed_batch_identities: AHashSet::new(),
             completed_batch_identity_order: VecDeque::new(),
@@ -3227,6 +3238,10 @@ impl ProducerSenderState {
         )
     }
 
+    /// Returns `true` if at least one batch was dispatched. `false` means nothing
+    /// was dispatchable right now (nothing ready, or every ready batch is for a
+    /// partition that already has an in-flight request) — the caller must WAIT for
+    /// an in-flight completion rather than re-poll, or it livelocks.
     pub(crate) async fn drive_ready_dispatch_until_blocked<
         LatencyObserver,
         RequeueObserver,
@@ -3236,7 +3251,7 @@ impl ProducerSenderState {
         dispatcher: &ProducerDispatcher,
         accumulator: &SharedAccumulator,
         observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
-    ) -> Result<(), ProducerError>
+    ) -> Result<bool, ProducerError>
     where
         LatencyObserver: FnMut(std::time::Duration),
         RequeueObserver: FnMut(),
@@ -3247,6 +3262,7 @@ impl ProducerSenderState {
             requeue: mut observe_requeue,
             batches: mut observe_batches,
         } = observers;
+        let mut dispatched_any = false;
         loop {
             self.handle_finished_dispatches(
                 accumulator,
@@ -3267,8 +3283,9 @@ impl ProducerSenderState {
                 )
                 .await?;
             match progress {
-                ReadyDispatchProgress::Idle | ReadyDispatchProgress::Started(_) => return Ok(()),
-                ReadyDispatchProgress::Continue => {},
+                ReadyDispatchProgress::Idle => return Ok(dispatched_any),
+                ReadyDispatchProgress::Started(_) => return Ok(true),
+                ReadyDispatchProgress::Continue => dispatched_any = true,
             }
         }
     }
@@ -3475,28 +3492,22 @@ impl ProducerSenderState {
 
     pub(crate) fn reserve_dispatch_partitions(&mut self, partitions: &[InFlightPartitionKey]) {
         for partition in partitions {
-            *self.in_flight_partitions.entry(partition.clone()).or_insert(0) += 1;
+            let _inserted = self.in_flight_partitions.insert(partition.clone());
         }
     }
 
     #[cfg(test)]
     pub(crate) fn reserve_partitions_for_dispatch(&mut self, batches: &[ReadyBatch]) {
         for batch in batches {
-            *self
+            let _inserted = self
                 .in_flight_partitions
-                .entry(InFlightPartitionKey::from(batch))
-                .or_insert(0) += 1;
+                .insert(InFlightPartitionKey::from(batch));
         }
     }
 
     pub(crate) fn release_dispatch_partitions(&mut self, partitions: Vec<InFlightPartitionKey>) {
         for partition in partitions {
-            if let Some(count) = self.in_flight_partitions.get_mut(&partition) {
-                *count -= 1;
-                if *count == 0 {
-                    let _removed = self.in_flight_partitions.remove(&partition);
-                }
-            }
+            let _removed = self.in_flight_partitions.remove(&partition);
         }
     }
 
@@ -3611,16 +3622,9 @@ impl ProducerSenderState {
         let mut reserved = AHashSet::new();
         for batch in batches {
             let key = InFlightPartitionKey::from(&batch);
-            // Pipeline up to max.in.flight per partition (Java parity) instead of 1.
-            // Count already-in-flight for this partition plus what we've reserved in
-            // THIS selection (one ProduceRequest per partition per selection).
-            let already = self
-                .in_flight_partitions
-                .get(&key)
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(usize::from(reserved.contains(&key)));
-            if already >= self.max_in_flight_requests {
+            // One in-flight request per partition (ordering); cross-partition
+            // pipelining is allowed by the connection capacity gate, not here.
+            if self.in_flight_partitions.contains(&key) {
                 deferred.push(batch);
                 continue;
             }
