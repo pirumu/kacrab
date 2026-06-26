@@ -272,22 +272,27 @@ untracked dispatch checkpoints.
 
 ### Synchronous send + cross-partition pipelining (current — branch `perf/sync-rewrite`)
 
-Per-record public API (`Producer::try_assign_partition_now` + `send_with_callback_now`),
-the real Kafka-default producer config (`acks=all`, `enable.idempotence=true`), the
+The plain public API — `Producer::send` / `send_with_callback` are now synchronous
+`fn`s (Java's `Producer.send` shape), no special fast-path method — the real
+Kafka-default producer config (`acks=all`, `enable.idempotence=true`), the
 producer's real sticky partitioner, measured against Apache Kafka's Java
 `kafka-producer-perf-test.sh` on the **same** native broker and the **same**
 16-partition topic (`kacrab-16p`), 5,000,000 × 10 bytes, 5 runs each:
 
 | acks | kacrab (5-run range) | Java | kacrab vs Java |
 | --- | ---: | ---: | ---: |
-| all + idempotence (default) | ~4.34M rec/sec (4.21–4.50M); retries=0; errors=0; ~1 ms avg latency | 3.38M rec/sec | **+28%** |
-| 1 (idempotence off) | ~4.78M rec/sec (4.74–4.81M) | 4.30M rec/sec | **+11%** |
+| all + idempotence (default) | ~4.6M rec/sec (4.28–4.74M); retries=0; errors=0; ~1 ms avg latency | 3.38M rec/sec | **+37%** |
+| 1 (idempotence off) | ~4.83M rec/sec (4.74–4.88M) | 4.30M rec/sec | **+12%** |
 
 This is the **tracked per-record** path — one `SendFuture` per record, fully
 idempotent-safe, per-partition order-preserving. The gain comes from a synchronous
-send (no per-record `async fn` / Tokio task-scheduling) plus cross-partition
-pipelining (up to `max.in.flight.requests.per.connection` ProduceRequests outstanding,
-exactly one per partition so idempotent sequences never reorder). Reproduce with
+send (no per-record `async fn` / Tokio task-scheduling): a record whose partition
+resolves synchronously (cached sticky reuse, sticky rotation, or keyed via cached
+metadata) is appended inline through the lock-free bypass, while cold-metadata /
+custom-partitioner records take a FIFO drain that preserves per-partition order.
+Combined with cross-partition pipelining (up to
+`max.in.flight.requests.per.connection` ProduceRequests outstanding, one per
+partition so idempotent sequences never reorder). Reproduce with
 `KACRAB_BENCH_SYNC_SEND=1 KACRAB_BENCH_TOPIC=kacrab-16p`.
 
 > The **7.9M msg/sec** figures further below are from the **removed** untracked
