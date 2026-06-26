@@ -99,9 +99,7 @@ async fn write_records(
 ) -> Result<Vec<SendFuture>, Box<dyn Error>> {
     let mut deliveries = Vec::with_capacity(args.messages.saturating_add(2));
 
-    let first = producer
-        .send(record(&args.topic, args.partition, 0, "single-send"))
-        .await?;
+    let first = producer.send(record(&args.topic, args.partition, 0, "single-send"))?;
     deliveries.push(first);
 
     let callback_sequence = args.messages.saturating_add(1);
@@ -114,19 +112,16 @@ async fn write_records(
                 "callback-send",
             ),
             |_result| {},
-        )
-        .await?;
+        )?;
     deliveries.push(callback_delivery);
 
     for sequence in 1..=args.messages {
-        let delivery = producer
-            .send(record(
-                &args.topic,
-                args.partition,
-                sequence,
-                "tracked-send",
-            ))
-            .await?;
+        let delivery = producer.send(record(
+            &args.topic,
+            args.partition,
+            sequence,
+            "tracked-send",
+        ))?;
         deliveries.push(delivery);
     }
     producer.flush().await?;

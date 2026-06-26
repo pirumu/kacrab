@@ -44,7 +44,7 @@ use super::{
         clone_producer_error_for_delivery,
     },
     sender::{
-        AppendCallbackDeliveryRecord, AppendDeliveryRecord, ProducerSender, ProducerSenderRuntime,
+        AppendCallbackDeliveryRecord, ProducerSender, ProducerSenderRuntime,
         ReadyDispatchObservers, SenderQueueSnapshot,
     },
     serializer::{ConfiguredProducerSerializer, ProducerSerializer, TypedProducer},
@@ -65,7 +65,6 @@ pub struct Producer {
     max_block: std::time::Duration,
     max_request_size: usize,
     buffer_memory: usize,
-    partitioner_ignore_keys: bool,
     metrics: ProducerMetrics,
     metrics_enabled: bool,
     dispatch_latency_samples: std::sync::Mutex<Option<Vec<std::time::Duration>>>,
@@ -105,7 +104,6 @@ impl Producer {
         let buffer_memory = accumulator_config.buffer_memory;
         let max_in_flight_requests = config.max_in_flight_requests_per_connection;
         let idempotent_ordering = config.idempotence.enabled;
-        let partitioner_ignore_keys = config.partitioner_ignore_keys;
         let dispatcher = ProducerDispatcher::with_config(wire, config);
         let (sender, metrics) = ProducerSenderRuntime::with_dispatcher(
             accumulator_config,
@@ -119,7 +117,6 @@ impl Producer {
             max_block,
             max_request_size,
             buffer_memory,
-            partitioner_ignore_keys,
             metrics,
             metrics_enabled: false,
             dispatch_latency_samples: std::sync::Mutex::new(None),
@@ -1311,16 +1308,6 @@ impl Producer {
             .await
     }
 
-    async fn fail_if_send_transaction_error(&self) -> Result<()> {
-        // Fast path for non-transactional producers: skip building/awaiting the
-        // async transaction-error guard future entirely. Only transactional
-        // producers pay for the lock-protected state check.
-        if !self.control_dispatcher.is_transactional() {
-            return Ok(());
-        }
-        self.control_dispatcher.fail_if_transaction_error().await
-    }
-
     #[expect(
         clippy::needless_pass_by_ref_mut,
         reason = "part of the &mut self flush control-plane surface; dispatch latency samples are \
@@ -1344,78 +1331,6 @@ impl Producer {
                 },
                 |_: &[super::ReadyBatch]| {},
             ))
-            .await
-    }
-
-    async fn append_for_delivery_with_max_block<BeforeDispatch>(
-        &self,
-        record: ProducerRecord,
-        now: std::time::Instant,
-        sticky_topic: Option<&str>,
-        before_dispatch: BeforeDispatch,
-    ) -> Result<SendFuture>
-    where
-        BeforeDispatch: FnOnce(&SendFuture),
-    {
-        self.validate_record_size(&record)?;
-        let deadline = std::time::Instant::now()
-            .checked_add(self.max_block)
-            .unwrap_or_else(std::time::Instant::now);
-        let dispatch_latency_samples = &self.dispatch_latency_samples;
-        let metrics_enabled = self.metrics_enabled;
-        let metrics = &self.metrics;
-        self.sender
-            .append_delivery_record_then_apply_dispatch(
-                AppendDeliveryRecord::new(record, now, deadline, sticky_topic),
-                before_dispatch,
-                ReadyDispatchObservers::new(
-                    |latency| {
-                        push_dispatch_latency_sample(dispatch_latency_samples, latency);
-                    },
-                    || {
-                        if metrics_enabled {
-                            metrics.record_requeue();
-                        }
-                    },
-                    |_: &[super::ReadyBatch]| {},
-                ),
-            )
-            .await
-    }
-
-    async fn append_callback_for_delivery_with_max_block<BeforeDispatch>(
-        &self,
-        record: ProducerRecord,
-        now: std::time::Instant,
-        sticky_topic: Option<&str>,
-        before_dispatch: BeforeDispatch,
-    ) -> Result<SendFuture>
-    where
-        BeforeDispatch: FnOnce(&SendFuture),
-    {
-        self.validate_record_size(&record)?;
-        let deadline = std::time::Instant::now()
-            .checked_add(self.max_block)
-            .unwrap_or_else(std::time::Instant::now);
-        let dispatch_latency_samples = &self.dispatch_latency_samples;
-        let metrics_enabled = self.metrics_enabled;
-        let metrics = &self.metrics;
-        self.sender
-            .append_callback_delivery_record_then_apply_dispatch(
-                AppendCallbackDeliveryRecord::new(record, now, deadline, sticky_topic),
-                before_dispatch,
-                ReadyDispatchObservers::new(
-                    |latency| {
-                        push_dispatch_latency_sample(dispatch_latency_samples, latency);
-                    },
-                    || {
-                        if metrics_enabled {
-                            metrics.record_requeue();
-                        }
-                    },
-                    |_: &[super::ReadyBatch]| {},
-                ),
-            )
             .await
     }
 
@@ -1526,68 +1441,6 @@ impl Producer {
                 buffer_memory: self.buffer_memory,
             });
         }
-        Ok(())
-    }
-
-    const fn uses_sticky_partitioner(&self, record: &ProducerRecord) -> bool {
-        !self.partitioner.is_some()
-            && !record.has_assigned_partition()
-            && (self.partitioner_ignore_keys || record.key.is_none())
-    }
-
-    async fn assign_partition(&self, record: &mut ProducerRecord) -> Result<()> {
-        if record.has_assigned_partition() {
-            return Ok(());
-        }
-        if !self.partitioner.is_some() {
-            return self
-                .sender
-                .lock()
-                .await
-                .assign_partition_with_accumulator(record)
-                .await;
-        }
-        let metadata = self
-            .sender
-            .lock()
-            .await
-            .metadata_for_topics([record.topic.as_ref()])
-            .await?;
-        self.assign_partition_with_metadata(&metadata, record).await
-    }
-
-    async fn assign_partition_with_metadata(
-        &self,
-        metadata: &ClusterMetadata,
-        record: &mut ProducerRecord,
-    ) -> Result<()> {
-        if record.has_assigned_partition() {
-            return Ok(());
-        }
-        self.assign_custom_partition_with_metadata(metadata, record)?;
-        if record.has_assigned_partition() {
-            return Ok(());
-        }
-        self.sender
-            .lock()
-            .await
-            .assign_partition_with_metadata(metadata, record)
-            .await
-    }
-
-    fn assign_custom_partition_with_metadata(
-        &self,
-        metadata: &ClusterMetadata,
-        record: &mut ProducerRecord,
-    ) -> Result<()> {
-        if record.has_assigned_partition() {
-            return Ok(());
-        }
-        let Some(partition) = self.partitioner.partition(record, metadata).transpose()? else {
-            return Ok(());
-        };
-        validate_selected_partition(metadata, record, partition)?;
-        record.partition = partition;
         Ok(())
     }
 }
@@ -2736,27 +2589,6 @@ mod tests {
             !source.contains(concat!("pub async fn ", "send_with_java_callback")),
             "producer public API should expose the Java send(record, callback) overload as \
              send_with_callback only"
-        );
-    }
-
-    #[test]
-    fn sticky_partitioner_policy_does_not_read_dispatcher_from_client_hot_path() {
-        let source = include_str!("client.rs");
-        let (_, after_start) = source
-            .split_once("fn uses_sticky_partitioner(&self, record: &ProducerRecord) -> bool {")
-            .expect("sticky partitioner helper should exist");
-        let (body, _) = after_start
-            .split_once("\n    }\n\n    async fn assign_partition")
-            .expect("sticky partitioner helper should end before partition assignment");
-
-        assert!(
-            !body.contains("self.dispatcher"),
-            "sticky partitioner policy should not read Producer::dispatcher from the client hot \
-             path"
-        );
-        assert!(
-            body.contains("self.partitioner_ignore_keys"),
-            "sticky partitioner policy should use the producer-owned config snapshot"
         );
     }
 

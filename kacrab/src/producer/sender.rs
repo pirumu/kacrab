@@ -231,45 +231,6 @@ impl ProducerSenderRuntime {
         self.sender.lock().await
     }
 
-    pub(crate) async fn append_delivery_record_then_apply_dispatch<
-        LatencyObserver,
-        RequeueObserver,
-        BatchObserver,
-        BeforeDispatch,
-    >(
-        &self,
-        append: AppendDeliveryRecord<'_>,
-        before_dispatch: BeforeDispatch,
-        observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
-    ) -> Result<SendFuture, ProducerError>
-    where
-        LatencyObserver: FnMut(std::time::Duration),
-        RequeueObserver: FnMut(),
-        BatchObserver: FnMut(&[ReadyBatch]),
-        BeforeDispatch: FnOnce(&SendFuture),
-    {
-        // Lock-free fast path mirroring the callback variant (no sender mutex).
-        match self.try_bypass_append_delivery(append, before_dispatch) {
-            SyncDeliveryAppend::Appended {
-                delivery,
-                sticky_ready_topic,
-            } => {
-                if let Some(topic) = sticky_ready_topic {
-                    self.bypass_dispatcher.mark_sticky_batch_ready(&topic).await;
-                }
-                Ok(delivery)
-            },
-            SyncDeliveryAppend::Failed(error) => Err(error),
-            SyncDeliveryAppend::WouldBlock(append, before_dispatch) => {
-                self.sender
-                    .lock()
-                    .await
-                    .append_delivery_record_then_apply_dispatch(append, before_dispatch, observers)
-                    .await
-            },
-        }
-    }
-
     /// Lock-free callback append using the bypass handles (no sender mutex).
     fn try_bypass_append_callback<'a, BeforeDispatch>(
         &self,
@@ -316,55 +277,6 @@ impl ProducerSenderRuntime {
             None
         };
         SyncCallbackAppend::Appended {
-            delivery,
-            sticky_ready_topic,
-        }
-    }
-
-    /// Lock-free delivery append using the bypass handles (no sender mutex).
-    fn try_bypass_append_delivery<'a, BeforeDispatch>(
-        &self,
-        append: AppendDeliveryRecord<'a>,
-        before_dispatch: BeforeDispatch,
-    ) -> SyncDeliveryAppend<'a, BeforeDispatch>
-    where
-        BeforeDispatch: FnOnce(&SendFuture),
-    {
-        let compression_ratio = self
-            .bypass_dispatcher
-            .compression_ratio_estimation(append.record.topic.as_ref());
-        if !self
-            .bypass_accumulator
-            .has_available_memory_for_reserved_with_compression_ratio(
-                &append.record,
-                0,
-                compression_ratio,
-            )
-        {
-            return SyncDeliveryAppend::WouldBlock(append, before_dispatch);
-        }
-        let AppendDeliveryRecord {
-            record,
-            now,
-            sticky_topic,
-            ..
-        } = append;
-        let (delivery, status) = match self
-            .bypass_accumulator
-            .append_for_delivery_with_status_at_compression_ratio(record, now, compression_ratio)
-        {
-            Ok(appended) => appended,
-            Err(error) => return SyncDeliveryAppend::Failed(error),
-        };
-        before_dispatch(&delivery);
-        let decision = ProducerSenderState::single_append_dispatch_decision(status);
-        self.note_bypass_append(status);
-        let sticky_ready_topic = if decision.should_mark_sticky_batch_ready() {
-            sticky_topic.map(str::to_owned)
-        } else {
-            None
-        };
-        SyncDeliveryAppend::Appended {
             delivery,
             sticky_ready_topic,
         }
@@ -428,52 +340,6 @@ impl ProducerSenderRuntime {
                     std::hint::spin_loop();
                 },
             }
-        }
-    }
-
-    pub(crate) async fn append_callback_delivery_record_then_apply_dispatch<
-        LatencyObserver,
-        RequeueObserver,
-        BatchObserver,
-        BeforeDispatch,
-    >(
-        &self,
-        append: AppendCallbackDeliveryRecord<'_>,
-        before_dispatch: BeforeDispatch,
-        observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
-    ) -> Result<SendFuture, ProducerError>
-    where
-        LatencyObserver: FnMut(std::time::Duration),
-        RequeueObserver: FnMut(),
-        BatchObserver: FnMut(&[ReadyBatch]),
-        BeforeDispatch: FnOnce(&SendFuture),
-    {
-        // Lock-free fast path: append to the shared accumulator WITHOUT the sender
-        // async mutex, so concurrent send(&self) calls don't serialize. Only the
-        // rare sticky-batch rotation awaits. Falls back to the awaiting slow path
-        // on backpressure (which counts in-flight bytes and may wait for buffer).
-        match self.try_bypass_append_callback(append, before_dispatch) {
-            SyncCallbackAppend::Appended {
-                delivery,
-                sticky_ready_topic,
-            } => {
-                if let Some(topic) = sticky_ready_topic {
-                    self.bypass_dispatcher.mark_sticky_batch_ready(&topic).await;
-                }
-                Ok(delivery)
-            },
-            SyncCallbackAppend::Failed(error) => Err(error),
-            SyncCallbackAppend::WouldBlock(append, before_dispatch) => {
-                self.sender
-                    .lock()
-                    .await
-                    .append_callback_delivery_record_then_apply_dispatch(
-                        append,
-                        before_dispatch,
-                        observers,
-                    )
-                    .await
-            },
         }
     }
 
@@ -813,12 +679,6 @@ impl ProducerSender {
     #[cfg(test)]
     pub(crate) const fn append_poll_budget(&self) -> AppendPollBudget {
         self.state.append_poll_budget()
-    }
-
-    pub(crate) const fn single_append_dispatch_decision(
-        status: AppendStatus,
-    ) -> AppendDispatchDecision {
-        ProducerSenderState::single_append_dispatch_decision(status)
     }
 
     pub(crate) const fn callback_append_dispatch_decision(
@@ -1250,57 +1110,6 @@ impl ProducerSender {
             .append_for_delivery_with_status_at_compression_ratio(record, now, compression_ratio)?;
         self.note_append_status_for_sender_loop(appended.1);
         Ok(appended)
-    }
-
-    pub(crate) async fn append_delivery_record_then_apply_dispatch<
-        LatencyObserver,
-        RequeueObserver,
-        BatchObserver,
-        BeforeDispatch,
-    >(
-        &mut self,
-        append: AppendDeliveryRecord<'_>,
-        before_dispatch: BeforeDispatch,
-        observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
-    ) -> Result<SendFuture, ProducerError>
-    where
-        LatencyObserver: FnMut(std::time::Duration),
-        RequeueObserver: FnMut(),
-        BatchObserver: FnMut(&[ReadyBatch]),
-        BeforeDispatch: FnOnce(&SendFuture),
-    {
-        let ReadyDispatchObservers {
-            latency: mut observe_latency,
-            requeue: mut observe_requeue,
-            batches: mut observe_batches,
-        } = observers;
-        let AppendDeliveryRecord {
-            record,
-            now,
-            deadline,
-            sticky_topic,
-        } = append;
-        let (delivery, status) = self
-            .append_delivery_record_with_capacity_wait(
-                record,
-                now,
-                deadline,
-                ReadyDispatchObservers::new(
-                    &mut observe_latency,
-                    &mut observe_requeue,
-                    &mut observe_batches,
-                ),
-            )
-            .await?;
-        before_dispatch(&delivery);
-        self.apply_append_dispatch_decision_then_collect_finished(
-            Self::single_append_dispatch_decision(status),
-            sticky_topic,
-            false,
-            ReadyDispatchObservers::new(observe_latency, observe_requeue, observe_batches),
-        )
-        .await?;
-        Ok(delivery)
     }
 
     pub(crate) async fn append_callback_delivery_record_with_capacity_wait<
@@ -1832,30 +1641,6 @@ impl<'a> AppendUntrackedBatchApply<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct AppendDeliveryRecord<'a> {
-    record: ProducerRecord,
-    now: std::time::Instant,
-    deadline: std::time::Instant,
-    sticky_topic: Option<&'a str>,
-}
-
-impl<'a> AppendDeliveryRecord<'a> {
-    pub(crate) const fn new(
-        record: ProducerRecord,
-        now: std::time::Instant,
-        deadline: std::time::Instant,
-        sticky_topic: Option<&'a str>,
-    ) -> Self {
-        Self {
-            record,
-            now,
-            deadline,
-            sticky_topic,
-        }
-    }
-}
-
-#[derive(Debug)]
 pub(crate) struct AppendCallbackDeliveryRecord<'a> {
     record: ProducerRecord,
     now: std::time::Instant,
@@ -2078,16 +1863,6 @@ pub(crate) enum SyncCallbackAppend<'a, BeforeDispatch> {
     /// returned record and callback.
     WouldBlock(AppendCallbackDeliveryRecord<'a>, BeforeDispatch),
     /// The append itself failed.
-    Failed(ProducerError),
-}
-
-/// Outcome of the synchronous delivery-append fast path (non-callback `send()`).
-pub(crate) enum SyncDeliveryAppend<'a, BeforeDispatch> {
-    Appended {
-        delivery: SendFuture,
-        sticky_ready_topic: Option<String>,
-    },
-    WouldBlock(AppendDeliveryRecord<'a>, BeforeDispatch),
     Failed(ProducerError),
 }
 
@@ -3821,7 +3596,7 @@ mod tests {
 
     use super::{
         AllDispatchApplication, AllDispatchProgress, AppendBackpressureAction,
-        AppendCallbackDeliveryRecord, AppendCapacityWait, AppendDelivery, AppendDeliveryRecord,
+        AppendCallbackDeliveryRecord, AppendCapacityWait, AppendDelivery,
         AppendDispatchApplication, AppendDispatchDecision, AppendUntracked,
         AppendUntrackedBatchApply, AppendUntrackedRecord, BatchAppendStatusApplication,
         BufferWaitAction, CALLBACK_READY_BATCH_POLL_THRESHOLD, CallbackAppendFastPath,
@@ -4860,7 +4635,7 @@ mod tests {
         };
 
         assert_eq!(
-            ProducerSender::single_append_dispatch_decision(pending),
+            ProducerSenderState::single_append_dispatch_decision(pending),
             AppendDispatchDecision::Idle
         );
         assert_eq!(
@@ -5175,48 +4950,6 @@ mod tests {
             )
             .await
             .expect("second ready batch should drive dispatch at budget threshold");
-
-        assert_eq!(observed_batches, vec![1]);
-        assert_eq!(sender.accumulator.buffered_records(), 0);
-        assert_eq!(sender.state.in_flight_len(), 1);
-    }
-
-    #[tokio::test]
-    async fn producer_sender_appends_delivery_and_applies_dispatch_status() {
-        let now = std::time::Instant::now();
-        let deadline = now + Duration::from_millis(5);
-        let mut sender = ProducerSender::new(
-            AccumulatorConfig::default()
-                .batch_size(1)
-                .linger(Duration::ZERO)
-                .buffer_memory(16 * 1024),
-            1,
-        );
-        let registered_before_dispatch = std::cell::Cell::new(false);
-        let mut observed_batches = Vec::new();
-
-        let _delivery = sender
-            .append_delivery_record_then_apply_dispatch(
-                AppendDeliveryRecord::new(
-                    ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")),
-                    now,
-                    deadline,
-                    None,
-                ),
-                |_delivery| {
-                    registered_before_dispatch.set(true);
-                },
-                ReadyDispatchObservers::new(
-                    |_| {},
-                    || {},
-                    |batches: &[crate::producer::ReadyBatch]| {
-                        assert!(registered_before_dispatch.get());
-                        observed_batches.push(batches.len());
-                    },
-                ),
-            )
-            .await
-            .expect("delivery append should dispatch ready batch");
 
         assert_eq!(observed_batches, vec![1]);
         assert_eq!(sender.accumulator.buffered_records(), 0);
@@ -5855,48 +5588,6 @@ mod tests {
         assert!(matches!(result, Err(ProducerError::Wire(_))));
         assert_eq!(sender.accumulator.buffered_records(), 0);
         assert_eq!(sender.state.in_flight_len(), 0);
-    }
-
-    #[tokio::test]
-    async fn producer_sender_appends_delivery_and_applies_dispatch_decision() {
-        let now = std::time::Instant::now();
-        let deadline = now + Duration::from_millis(5);
-        let mut sender = ProducerSender::new(
-            AccumulatorConfig::default()
-                .batch_size(1)
-                .linger(Duration::ZERO)
-                .buffer_memory(16 * 1024),
-            5,
-        );
-        let registered_before_dispatch = std::cell::Cell::new(false);
-        let mut observed_batches = Vec::new();
-
-        let _delivery = sender
-            .append_delivery_record_then_apply_dispatch(
-                AppendDeliveryRecord::new(
-                    ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")),
-                    now,
-                    deadline,
-                    None,
-                ),
-                |_| {
-                    registered_before_dispatch.set(true);
-                },
-                ReadyDispatchObservers::new(
-                    |_| {},
-                    || {},
-                    |batches: &[crate::producer::ReadyBatch]| {
-                        assert!(registered_before_dispatch.get());
-                        observed_batches.push(batches.len());
-                    },
-                ),
-            )
-            .await
-            .expect("delivery append should dispatch ready batch");
-
-        assert_eq!(observed_batches, vec![1]);
-        assert_eq!(sender.accumulator.buffered_records(), 0);
-        assert_eq!(sender.state.in_flight_len(), 1);
     }
 
     #[tokio::test]

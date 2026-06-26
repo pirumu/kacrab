@@ -836,7 +836,7 @@ where
     /// # Errors
     ///
     /// Returns serializer, backpressure, routing, or dispatch errors.
-    pub async fn send(
+    pub fn send(
         &mut self,
         mut record: ProducerRecord,
         key: Option<&K>,
@@ -1271,7 +1271,6 @@ mod tests {
                 Some(&Bytes::from_static(b"customer")),
                 Some(&Bytes::from_static(b"value")),
             )
-            .await
             .expect("typed send");
 
         assert!(key_seen.load(Ordering::Relaxed));
