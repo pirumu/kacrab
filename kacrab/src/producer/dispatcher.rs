@@ -1989,12 +1989,18 @@ impl ProducerDispatcher {
         let mut completed = Vec::new();
         let mut in_flight_routes = AHashSet::new();
         let max_in_flight = self.broker_dispatch_in_flight_limit();
+        // Only idempotent/transactional producers must serialize same-partition
+        // requests; non-idempotent producers pipeline them up to max.in.flight.
+        let enforce_partition_ordering = self.idempotence.enabled;
         let mut enqueue_guard = Some(self.produce_enqueue_order.lock().await);
 
         loop {
             while in_flight.len() < max_in_flight {
-                let Some((index, request)) =
-                    pop_dispatchable_broker_request(&mut pending, &in_flight_routes)
+                let Some((index, request)) = pop_dispatchable_broker_request(
+                    &mut pending,
+                    &in_flight_routes,
+                    enforce_partition_ordering,
+                )
                 else {
                     break;
                 };
@@ -5518,10 +5524,23 @@ fn apply_produce_options(request_data: &mut ProduceRequestData, options: BrokerP
 fn pop_dispatchable_broker_request(
     pending: &mut VecDeque<(usize, BrokerProduceRequest)>,
     in_flight_routes: &AHashSet<TopicPartitionKey>,
+    enforce_partition_ordering: bool,
 ) -> Option<(usize, BrokerProduceRequest)> {
-    let dispatch_index = pending.iter().position(|(_index, request)| {
-        !request_conflicts_with_in_flight(request, in_flight_routes)
-    })?;
+    // Idempotent/transactional producers keep at most one in-flight request per
+    // partition so broker-side sequence numbers can never reorder. Non-idempotent
+    // producers may pipeline several requests to the same partition (up to
+    // max.in.flight.requests.per.connection), matching Java, so they take requests
+    // in FIFO order regardless of which partitions are already in flight.
+    let dispatch_index = if enforce_partition_ordering {
+        pending.iter().position(|(_index, request)| {
+            !request_conflicts_with_in_flight(request, in_flight_routes)
+        })?
+    } else {
+        if pending.is_empty() {
+            return None;
+        }
+        0
+    };
     pending.remove(dispatch_index)
 }
 
@@ -6346,7 +6365,7 @@ mod tests {
         });
 
         let Some((index, request)) =
-            pop_dispatchable_broker_request(&mut pending, &in_flight_routes)
+            pop_dispatchable_broker_request(&mut pending, &in_flight_routes, true)
         else {
             panic!("other partition should remain dispatchable");
         };
@@ -6362,7 +6381,7 @@ mod tests {
 
         in_flight_routes.clear();
         let Some((index, request)) =
-            pop_dispatchable_broker_request(&mut pending, &in_flight_routes)
+            pop_dispatchable_broker_request(&mut pending, &in_flight_routes, true)
         else {
             panic!("first partition should dispatch after in-flight completion");
         };
