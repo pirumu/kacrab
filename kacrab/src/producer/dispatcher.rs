@@ -5,7 +5,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -70,6 +70,90 @@ const PENDING_TRANSACTION_OPERATION_MESSAGE: &str =
     "previous transaction operation is pending and must be retried";
 const COMPRESSION_RATE_ESTIMATION_FACTOR: f32 = 1.05;
 
+/// Serializes `ProduceRequest` enqueues in spawn order so idempotent producers can keep
+/// multiple in-flight requests per partition without reordering record-batch sequence numbers
+/// on the wire. The sender assigns each dispatch a monotonically increasing ticket (in
+/// single-threaded drain/sequence order). A dispatch waits for its ticket's turn before
+/// enqueuing, then advances the turn once its requests are enqueued — so the broker observes
+/// ascending base sequences per partition even though the response waits run concurrently.
+/// This replaces Java's single Sender thread, which is the in-order enqueuer by construction.
+struct EnqueueSequencer {
+    next_ticket: AtomicU64,
+    serving: AtomicU64,
+    notify: Notify,
+}
+
+impl EnqueueSequencer {
+    fn new() -> Self {
+        Self {
+            next_ticket: AtomicU64::new(0),
+            serving: AtomicU64::new(0),
+            notify: Notify::new(),
+        }
+    }
+
+    /// Reserve the next enqueue ticket. MUST be called from the single-threaded sender loop
+    /// (or any sequential flush path) so tickets are handed out in drain/sequence order.
+    fn reserve_ticket(&self) -> u64 {
+        self.next_ticket.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Wait until it is `ticket`'s turn to enqueue. Returns immediately for a ticket whose
+    /// turn has already passed (an in-task retry reusing its ticket), so retries never block.
+    async fn wait_turn(&self, ticket: u64) {
+        loop {
+            let notified = self.notify.notified();
+            if self.serving.load(Ordering::Acquire) >= ticket {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Advance the turn past `ticket`. Idempotent (monotonic) so an in-task retry reusing its
+    /// ticket cannot rewind the turn.
+    fn advance_past(&self, ticket: u64) {
+        let _previous = self
+            .serving
+            .fetch_max(ticket.saturating_add(1), Ordering::AcqRel);
+        self.notify.notify_waiters();
+    }
+}
+
+impl std::fmt::Debug for EnqueueSequencer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EnqueueSequencer")
+            .field("next_ticket", &self.next_ticket.load(Ordering::Relaxed))
+            .field("serving", &self.serving.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+/// RAII guard that advances the enqueue turn exactly once — explicitly after a dispatch's
+/// requests are enqueued (to release the turn before the concurrent response waits) and, as a
+/// safety net, on drop if a dispatch returns early before reaching the explicit advance.
+struct EnqueueTurn<'a> {
+    sequencer: &'a EnqueueSequencer,
+    ticket: u64,
+    advanced: bool,
+}
+
+impl EnqueueTurn<'_> {
+    fn advance(&mut self) {
+        if !self.advanced {
+            self.sequencer.advance_past(self.ticket);
+            self.advanced = true;
+        }
+    }
+}
+
+impl Drop for EnqueueTurn<'_> {
+    fn drop(&mut self) {
+        self.advance();
+    }
+}
+
 /// Dispatches ready accumulator batches to broker leaders through [`WireClient`].
 #[derive(Debug, Clone)]
 pub struct ProducerDispatcher {
@@ -90,7 +174,7 @@ pub struct ProducerDispatcher {
     idempotence: ProducerIdempotenceConfig,
     producer_state: Arc<Mutex<ProducerIdempotenceState>>,
     producer_identity_init: Arc<Mutex<()>>,
-    produce_enqueue_order: Arc<Mutex<()>>,
+    enqueue_sequencer: Arc<EnqueueSequencer>,
     partitioner_state: Arc<Mutex<ProducerPartitionerState>>,
     compression_ratios: Arc<StdMutex<CompressionRatioEstimator>>,
     metrics: ProducerMetrics,
@@ -128,7 +212,7 @@ impl ProducerDispatcher {
             },
             producer_state: Arc::new(Mutex::new(ProducerIdempotenceState::default())),
             producer_identity_init: Arc::new(Mutex::new(())),
-            produce_enqueue_order: Arc::new(Mutex::new(())),
+            enqueue_sequencer: Arc::new(EnqueueSequencer::new()),
             partitioner_state: Arc::new(Mutex::new(ProducerPartitionerState::default())),
             compression_ratios: Arc::new(StdMutex::new(CompressionRatioEstimator::default())),
             metrics: ProducerMetrics::default(),
@@ -158,7 +242,7 @@ impl ProducerDispatcher {
             idempotence: config.idempotence,
             producer_state: Arc::new(Mutex::new(ProducerIdempotenceState::default())),
             producer_identity_init: Arc::new(Mutex::new(())),
-            produce_enqueue_order: Arc::new(Mutex::new(())),
+            enqueue_sequencer: Arc::new(EnqueueSequencer::new()),
             partitioner_state: Arc::new(Mutex::new(ProducerPartitionerState::default())),
             compression_ratios: Arc::new(StdMutex::new(CompressionRatioEstimator::default())),
             metrics: ProducerMetrics::default(),
@@ -1153,8 +1237,9 @@ impl ProducerDispatcher {
 
         let mut attempts_remaining = self.retry_attempts;
         let mut retry_backoff = self.retry_backoff_state();
+        let enqueue_ticket = self.enqueue_sequencer.reserve_ticket();
         loop {
-            match self.dispatch_batches(&mut batches).await {
+            match self.dispatch_batches(&mut batches, enqueue_ticket).await {
                 Ok(receipts) => return Ok(receipts),
                 Err(DispatchError::Requeue) => {
                     if self.metrics_are_enabled() {
@@ -1331,7 +1416,8 @@ impl ProducerDispatcher {
         if batches.is_empty() {
             return Ok(Vec::new());
         }
-        match self.dispatch_drained(batches, now).await {
+        let enqueue_ticket = self.enqueue_sequencer.reserve_ticket();
+        match self.dispatch_drained(batches, now, enqueue_ticket).await {
             DispatchOutcome::Delivered(result) => result,
             DispatchOutcome::Requeue(_batches) => Err(ProducerError::FlushIncomplete),
         }
@@ -1346,7 +1432,11 @@ impl ProducerDispatcher {
         if batches.is_empty() {
             return Ok(Vec::new());
         }
-        match self.dispatch_drained(batches, Instant::now()).await {
+        let enqueue_ticket = self.enqueue_sequencer.reserve_ticket();
+        match self
+            .dispatch_drained(batches, Instant::now(), enqueue_ticket)
+            .await
+        {
             DispatchOutcome::Delivered(result) => result,
             DispatchOutcome::Requeue(batches) => {
                 accumulator.requeue_front(batches)?;
@@ -1355,16 +1445,42 @@ impl ProducerDispatcher {
         }
     }
 
+    /// Reserve a spawn-order enqueue ticket. The sender calls this in its single-threaded
+    /// loop before spawning a dispatch task so concurrent same-partition requests enqueue in
+    /// ascending base-sequence order (see [`EnqueueSequencer`]).
+    pub(crate) fn next_enqueue_ticket(&self) -> u64 {
+        self.enqueue_sequencer.reserve_ticket()
+    }
+
+    pub(crate) async fn dispatch_drained(
+        &self,
+        batches: Vec<ReadyBatch>,
+        now: Instant,
+        enqueue_ticket: u64,
+    ) -> DispatchOutcome {
+        let outcome = self
+            .dispatch_drained_inner(batches, now, enqueue_ticket)
+            .await;
+        // Guarantee the enqueue turn is always advanced, even when the dispatch returned
+        // before reaching `dispatch_broker_requests` (e.g. a local RecordTooLarge or an
+        // expired batch never enqueued). Wait for this ticket's turn first so earlier tickets
+        // are not skipped, then advance — idempotent if the enqueue path already advanced.
+        self.enqueue_sequencer.wait_turn(enqueue_ticket).await;
+        self.enqueue_sequencer.advance_past(enqueue_ticket);
+        outcome
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "Single drain loop handles every dispatch outcome (split, leadership, \
                   idempotent, retriable broker, wire) in one place to mirror Java's \
                   Sender.runOnce."
     )]
-    pub(crate) async fn dispatch_drained(
+    async fn dispatch_drained_inner(
         &self,
         mut batches: Vec<ReadyBatch>,
         now: Instant,
+        enqueue_ticket: u64,
     ) -> DispatchOutcome {
         if let Some(batch) = self.expired_batch(&batches, now) {
             let error = ProducerError::DeliveryTimeout {
@@ -1378,7 +1494,7 @@ impl ProducerDispatcher {
         let mut attempts_remaining = self.retry_attempts;
         let mut retry_backoff = self.retry_backoff_state();
         loop {
-            match self.dispatch_batches(&mut batches).await {
+            match self.dispatch_batches(&mut batches, enqueue_ticket).await {
                 Ok(receipts) => {
                     return self
                         .deliver_successful_batches(&mut batches, receipts)
@@ -1743,6 +1859,7 @@ impl ProducerDispatcher {
     async fn dispatch_batches(
         &self,
         batches: &mut [ReadyBatch],
+        enqueue_ticket: u64,
     ) -> std::result::Result<Vec<RecordMetadata>, DispatchError> {
         let topics = unique_topics(batches);
         let metadata = self
@@ -1892,7 +2009,7 @@ impl ProducerDispatcher {
         for (broker_id, requests) in by_broker {
             let request_started = self.metrics_are_enabled().then(Instant::now);
             let mut broker_receipts = self
-                .dispatch_broker_requests(broker_id, requests, version)
+                .dispatch_broker_requests(broker_id, requests, version, enqueue_ticket)
                 .await?;
             if let Some(started) = request_started {
                 self.metrics.record_request_latency(started.elapsed());
@@ -1986,6 +2103,7 @@ impl ProducerDispatcher {
         broker_id: i32,
         requests: Vec<BrokerProduceRequest>,
         version: i16,
+        enqueue_ticket: u64,
     ) -> std::result::Result<Vec<RecordMetadata>, DispatchError> {
         let mut pending: VecDeque<_> = requests.into_iter().enumerate().collect();
         let mut in_flight = JoinSet::new();
@@ -1995,7 +2113,16 @@ impl ProducerDispatcher {
         // Only idempotent/transactional producers must serialize same-partition
         // requests; non-idempotent producers pipeline them up to max.in.flight.
         let enforce_partition_ordering = self.idempotence.enabled;
-        let mut enqueue_guard = Some(self.produce_enqueue_order.lock().await);
+        // Wait for this dispatch's spawn-order turn before enqueuing, so concurrent
+        // same-partition requests reach the broker in ascending base-sequence order. The
+        // turn is released (advanced) as soon as this dispatch's requests are enqueued
+        // (pending drained), letting the concurrent response waits overlap the next turn.
+        self.enqueue_sequencer.wait_turn(enqueue_ticket).await;
+        let mut enqueue_turn = EnqueueTurn {
+            sequencer: &self.enqueue_sequencer,
+            ticket: enqueue_ticket,
+            advanced: false,
+        };
 
         loop {
             while in_flight.len() < max_in_flight {
@@ -2085,7 +2212,7 @@ impl ProducerDispatcher {
                 drop(abort_handle);
             }
             if pending.is_empty() {
-                drop(enqueue_guard.take());
+                enqueue_turn.advance();
             }
 
             let Some(result) = in_flight.join_next().await else {
@@ -7658,7 +7785,7 @@ mod tests {
         let before_error = wire.buffer_pool_stats();
 
         let result = dispatcher
-            .dispatch_broker_requests(7, vec![request], i16::MAX)
+            .dispatch_broker_requests(7, vec![request], i16::MAX, 0)
             .await;
 
         assert!(matches!(
@@ -7721,7 +7848,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(100),
-            dispatcher.dispatch_broker_requests(7, vec![request], version),
+            dispatcher.dispatch_broker_requests(7, vec![request], version, 0),
         )
         .await
         .expect("backpressure retry should be bounded by delivery timeout");
@@ -8475,7 +8602,7 @@ mod tests {
         let dispatcher = ProducerDispatcher::new(test_wire()).delivery_timeout(Duration::ZERO);
 
         let outcome = dispatcher
-            .dispatch_drained(vec![ready_batch("orders", 0)], Instant::now())
+            .dispatch_drained(vec![ready_batch("orders", 0)], Instant::now(), 0)
             .await;
 
         assert!(matches!(

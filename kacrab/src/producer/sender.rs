@@ -32,11 +32,12 @@ const COMPLETED_BATCH_IDENTITY_TOMBSTONE_LIMIT: usize = 4096;
 #[derive(Debug)]
 pub(crate) struct ProducerSenderState {
     in_flight: JoinSet<TimedDispatchOutcome>,
-    // ONE in-flight ProduceRequest per partition (idempotent ordering: never two
-    // outstanding requests to the same partition -> no out-of-sequence reorder).
-    // Cross-partition pipelining up to max.in.flight is via the connection-capacity
-    // gate (at_in_flight_capacity), NOT by relaxing this per-partition set.
-    in_flight_partitions: AHashSet<InFlightPartitionKey>,
+    // Per-partition in-flight DEPTH (number of outstanding ProduceRequests for each
+    // partition). Idempotent producers pipeline up to max.in.flight.requests.per.connection
+    // requests per partition (Java parity); `select_dispatchable_batches` emits at most one
+    // new request per partition per cycle so each becomes its own concurrent dispatch task
+    // (pipelining across the outer in-flight JoinSet) and the depth here bounds the pipeline.
+    in_flight_partitions: AHashMap<InFlightPartitionKey, usize>,
     in_flight_batch_identities: AHashSet<ReadyBatchIdentity>,
     completed_batch_identities: AHashSet<ReadyBatchIdentity>,
     completed_batch_identity_order: VecDeque<ReadyBatchIdentity>,
@@ -1977,7 +1978,7 @@ impl ProducerSenderState {
             AppendPollBudget::for_callback_sender(max_in_flight_requests);
         Self {
             in_flight: JoinSet::new(),
-            in_flight_partitions: AHashSet::new(),
+            in_flight_partitions: AHashMap::new(),
             in_flight_batch_identities: AHashSet::new(),
             completed_batch_identities: AHashSet::new(),
             completed_batch_identity_order: VecDeque::new(),
@@ -2607,6 +2608,10 @@ impl ProducerSenderState {
             .map(|batch| batch.first_append_at)
             .min()
             .unwrap_or(now);
+        // Reserve the enqueue ticket in the single-threaded sender loop (before spawning the
+        // concurrent task) so same-partition requests enqueue in ascending base-sequence
+        // order even when several are in flight per partition (idempotent pipelining).
+        let enqueue_ticket = dispatcher.next_enqueue_ticket();
         self.spawn_dispatch_task_with_buffered_bytes(
             &reserved_partitions,
             identities,
@@ -2615,7 +2620,9 @@ impl ProducerSenderState {
                 incomplete_batches,
             },
             async move {
-                let outcome = dispatcher.dispatch_drained(batches, now).await;
+                let outcome = dispatcher
+                    .dispatch_drained(batches, now, enqueue_ticket)
+                    .await;
                 TimedDispatchOutcome {
                     outcome,
                     latency: started_at.elapsed(),
@@ -2755,14 +2762,17 @@ impl ProducerSenderState {
     ) -> Result<TimedDispatchOutcome, JoinError> {
         match &result {
             Ok(outcome) => {
+                // Release the per-partition depth exactly once: via the matched reservations
+                // when present, otherwise (tests that reserved depth directly) release here.
                 let reservations =
                     self.release_in_flight_reservations_for_partitions(&outcome.partitions);
-                if matches!(&outcome.outcome, DispatchOutcome::Delivered(_)) {
+                if reservations.is_empty() {
+                    self.release_dispatch_partitions(outcome.partitions.clone());
+                } else if matches!(&outcome.outcome, DispatchOutcome::Delivered(_)) {
                     for reservation in reservations {
                         self.mark_completed_batch_identities(reservation.identities);
                     }
                 }
-                self.release_dispatch_partitions(outcome.partitions.clone());
             },
             Err(error) => {
                 if let Some(reservation) = self.release_in_flight_reservation(error.id()) {
@@ -2779,13 +2789,19 @@ impl ProducerSenderState {
     ) -> Result<TimedDispatchOutcome, JoinError> {
         match result {
             Ok((task_id, outcome)) => {
-                let reservation = self.release_in_flight_reservation(task_id);
-                if matches!(&outcome.outcome, DispatchOutcome::Delivered(_))
-                    && let Some(reservation) = reservation
-                {
-                    self.mark_completed_batch_identities(reservation.identities);
+                // `release_in_flight_reservation` already decrements the per-partition
+                // in-flight depth via `release_dispatch_partitions`; releasing again here
+                // would double-decrement and under-count when a partition has more than one
+                // in-flight request (idempotent pipelining). Only fall back to a direct
+                // release when no reservation was registered (defensive).
+                match self.release_in_flight_reservation(task_id) {
+                    Some(reservation) => {
+                        if matches!(&outcome.outcome, DispatchOutcome::Delivered(_)) {
+                            self.mark_completed_batch_identities(reservation.identities);
+                        }
+                    },
+                    None => self.release_dispatch_partitions(outcome.partitions.clone()),
                 }
-                self.release_dispatch_partitions(outcome.partitions.clone());
                 Ok(outcome)
             },
             Err(error) => {
@@ -3296,22 +3312,30 @@ impl ProducerSenderState {
 
     pub(crate) fn reserve_dispatch_partitions(&mut self, partitions: &[InFlightPartitionKey]) {
         for partition in partitions {
-            let _inserted = self.in_flight_partitions.insert(partition.clone());
+            let depth = self.in_flight_partitions.entry(partition.clone()).or_insert(0);
+            *depth = depth.saturating_add(1);
         }
     }
 
     #[cfg(test)]
     pub(crate) fn reserve_partitions_for_dispatch(&mut self, batches: &[ReadyBatch]) {
         for batch in batches {
-            let _inserted = self
+            let depth = self
                 .in_flight_partitions
-                .insert(InFlightPartitionKey::from(batch));
+                .entry(InFlightPartitionKey::from(batch))
+                .or_insert(0);
+            *depth = depth.saturating_add(1);
         }
     }
 
     pub(crate) fn release_dispatch_partitions(&mut self, partitions: Vec<InFlightPartitionKey>) {
         for partition in partitions {
-            let _removed = self.in_flight_partitions.remove(&partition);
+            if let Some(depth) = self.in_flight_partitions.get_mut(&partition) {
+                *depth = depth.saturating_sub(1);
+                if *depth == 0 {
+                    let _removed = self.in_flight_partitions.remove(&partition);
+                }
+            }
         }
     }
 
@@ -3426,15 +3450,17 @@ impl ProducerSenderState {
         let mut reserved = AHashSet::new();
         for batch in batches {
             let key = InFlightPartitionKey::from(&batch);
-            // One in-flight request per partition (ordering); cross-partition
-            // pipelining is allowed by the connection capacity gate, not here.
-            if self.in_flight_partitions.contains(&key) {
+            // Up to max.in.flight.requests.per.connection in-flight requests per partition
+            // (Java parity), but at most ONE new request per partition per selection so each
+            // becomes its own concurrent dispatch task (pipelining across the outer
+            // in-flight JoinSet). Additional same-partition batches defer to the next cycle.
+            let in_flight_depth = self.in_flight_partitions.get(&key).copied().unwrap_or(0);
+            if reserved.contains(&key) || in_flight_depth >= self.max_in_flight_requests {
                 deferred.push(batch);
                 continue;
             }
-            if reserved.insert(key.clone()) {
-                partitions.push(key);
-            }
+            let _inserted = reserved.insert(key.clone());
+            partitions.push(key);
             dispatchable.push(batch);
         }
         DispatchSelection {
@@ -3565,10 +3591,7 @@ impl ProducerSenderState {
         accumulator: &SharedAccumulator,
         error: DispatchPrepareError,
     ) -> ProducerError {
-        let DispatchPrepareError {
-            error,
-            mut batches,
-        } = error;
+        let DispatchPrepareError { error, mut batches } = error;
         if matches!(
             error,
             ProducerError::Transaction { .. } | ProducerError::InvalidTransactionState(_)
@@ -7434,7 +7457,9 @@ mod tests {
 
     #[tokio::test]
     async fn drive_flush_dispatch_step_waits_for_deferred_in_flight_partition() {
-        let mut state = ProducerSenderState::new(2);
+        // max.in.flight=1 so the single in-flight request fills the partition's pipeline
+        // depth and the next same-partition batch is deferred (the flush must wait).
+        let mut state = ProducerSenderState::new(1);
         state.idempotent_ordering = true;
         let accumulator = ready_accumulator();
         let blocked = ready_batch("orders", 0);

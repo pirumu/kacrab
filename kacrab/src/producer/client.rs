@@ -8,8 +8,6 @@ use std::{
     },
 };
 
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-
 use bytes::Bytes;
 use kacrab_protocol::{
     KafkaUuid,
@@ -19,6 +17,7 @@ use kacrab_protocol::{
     },
     version::client_api_info,
 };
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 #[cfg(test)]
 use super::dispatcher::DispatchOutcome;
@@ -2512,8 +2511,8 @@ mod tests {
         );
         assert!(
             source.contains("self.sender.shared_sender()"),
-            "the synchronous-send slow drain should obtain the shared ProducerSender \
-             from the runtime, not construct it"
+            "the synchronous-send slow drain should obtain the shared ProducerSender from the \
+             runtime, not construct it"
         );
     }
 
@@ -2548,13 +2547,13 @@ mod tests {
 
         assert!(
             source.contains(".append_callback_now("),
-            "the hot synchronous send path should append through the sender runtime's \
-             lock-free bypass"
+            "the hot synchronous send path should append through the sender runtime's lock-free \
+             bypass"
         );
         assert!(
             source.contains(".append_callback_delivery_record_then_apply_dispatch("),
-            "the slow-send drain should append callback delivery records through the \
-             shared sender's awaiting path"
+            "the slow-send drain should append callback delivery records through the shared \
+             sender's awaiting path"
         );
     }
 
@@ -2570,13 +2569,13 @@ mod tests {
 
         assert!(
             !body.contains("self.dispatcher.fail_if_transaction_error()"),
-            "the synchronous send path should not guard transactions through \
-             Producer::dispatcher directly"
+            "the synchronous send path should not guard transactions through Producer::dispatcher \
+             directly"
         );
         assert!(
             body.contains("self.control_dispatcher.try_fail_if_transaction_error_now()"),
-            "the synchronous send path should guard fatal transaction errors \
-             synchronously before appending, like Java's send()"
+            "the synchronous send path should guard fatal transaction errors synchronously before \
+             appending, like Java's send()"
         );
     }
 
@@ -2779,7 +2778,7 @@ mod tests {
             },
         );
 
-        let (max_in_flight_requests, uses_idempotent_ordering, deferred_same_partition) = {
+        let (max_in_flight_requests, uses_idempotent_ordering, pipelined_same_partition) = {
             let mut sender = producer.sender.try_lock().expect("sender");
             let in_flight = ReadyBatch {
                 identity: ReadyBatchIdentity::test(0),
@@ -2810,12 +2809,13 @@ mod tests {
             (
                 sender.state.max_in_flight_requests(),
                 sender.state.uses_idempotent_ordering(),
-                selection.dispatchable.is_empty() && selection.deferred.len() == 1,
+                // depth 1 < max.in.flight=5 -> the same partition pipelines another request.
+                selection.dispatchable.len() == 1 && selection.deferred.is_empty(),
             )
         };
         assert_eq!(max_in_flight_requests, 5);
         assert!(uses_idempotent_ordering);
-        assert!(deferred_same_partition);
+        assert!(pipelined_same_partition);
     }
 
     #[test]
@@ -3681,39 +3681,58 @@ mod tests {
     }
 
     #[test]
-    fn idempotent_selection_defers_same_partition_at_pipeline_depth_above_one() {
+    fn idempotent_selection_pipelines_same_partition_up_to_max_in_flight() {
         let mut config = runtime_config(5);
         config.idempotence = ProducerIdempotenceConfig {
             enabled: true,
             ..ProducerIdempotenceConfig::default()
         };
         let producer = Producer::from_parts(test_wire(), config);
-        let selection = {
+        // A partition with one in-flight request (depth 1 < max.in.flight=5) still pipelines
+        // another request — Java parity for idempotent producers.
+        let pipelined = {
             let mut sender = producer.sender.try_lock().expect("sender");
             sender
                 .state
                 .reserve_partitions_for_dispatch(&[ready_batch_for_partition("orders", 0)]);
-            sender.state.select_dispatchable_batches(vec![
+            sender
+                .state
+                .select_dispatchable_batches(vec![ready_batch_for_partition("orders", 0)])
+        };
+        // Reserve up to the max in-flight depth (5 total); now the partition defers.
+        let deferred = {
+            let mut sender = producer.sender.try_lock().expect("sender");
+            sender.state.reserve_partitions_for_dispatch(&[
                 ready_batch_for_partition("orders", 0),
-                ready_batch_for_partition("orders", 1),
-            ])
+                ready_batch_for_partition("orders", 0),
+                ready_batch_for_partition("orders", 0),
+                ready_batch_for_partition("orders", 0),
+            ]);
+            sender
+                .state
+                .select_dispatchable_batches(vec![ready_batch_for_partition("orders", 0)])
         };
 
-        assert_eq!(selection.dispatchable.len(), 1);
-        assert_eq!(selection.dispatchable[0].partition, 1);
-        assert_eq!(selection.deferred.len(), 1);
-        assert_eq!(selection.deferred[0].partition, 0);
+        assert_eq!(pipelined.dispatchable.len(), 1);
+        assert_eq!(pipelined.dispatchable[0].partition, 0);
+        assert!(pipelined.deferred.is_empty());
+        assert!(deferred.dispatchable.is_empty());
+        assert_eq!(deferred.deferred.len(), 1);
+        assert_eq!(deferred.deferred[0].partition, 0);
     }
 
     #[test]
-    fn guaranteed_order_selection_keeps_same_partition_batches_in_one_dispatch() {
-        let mut config = runtime_config(1);
+    fn guaranteed_order_selection_emits_one_batch_per_partition_per_cycle() {
+        let mut config = runtime_config(5);
         config.idempotence = ProducerIdempotenceConfig {
             enabled: true,
             ..ProducerIdempotenceConfig::default()
         };
         let producer = Producer::from_parts(test_wire(), config);
 
+        // Two ready batches for the same partition are split across cycles: at most one new
+        // request per partition per selection, so each becomes its own concurrent dispatch
+        // task (pipelining across the outer in-flight JoinSet) rather than one coalesced task.
         let selection = {
             let sender = producer.sender.try_lock().expect("sender");
             sender.state.select_dispatchable_batches(vec![
@@ -3722,8 +3741,10 @@ mod tests {
             ])
         };
 
-        assert_eq!(selection.dispatchable.len(), 2);
-        assert!(selection.deferred.is_empty());
+        assert_eq!(selection.dispatchable.len(), 1);
+        assert_eq!(selection.dispatchable[0].partition, 0);
+        assert_eq!(selection.deferred.len(), 1);
+        assert_eq!(selection.deferred[0].partition, 0);
         assert_eq!(selection.partitions.len(), 1);
     }
 
