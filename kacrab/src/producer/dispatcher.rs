@@ -1219,9 +1219,9 @@ impl ProducerDispatcher {
                     // Leader changed for the ongoing retry -> retry immediately
                     // (Java skips backoff); otherwise back off normally.
                     let retry_wait = if metadata_updated {
-                        self.check_delivery_timeout_before_retry(&batches).await
+                        self.check_delivery_timeout_before_retry(&batches, false).await
                     } else {
-                        self.wait_before_retry(&batches, &mut retry_backoff).await
+                        self.wait_before_retry(&batches, &mut retry_backoff, false).await
                     };
                     if let Some(error) = retry_wait {
                         if self.metrics_are_enabled() {
@@ -1267,7 +1267,7 @@ impl ProducerDispatcher {
                         )
                         .await?;
                     }
-                    if let Some(error) = self.wait_before_retry(&batches, &mut retry_backoff).await
+                    if let Some(error) = self.wait_before_retry(&batches, &mut retry_backoff, false).await
                     {
                         if self.metrics_are_enabled() {
                             self.metrics.record_error_for_topic(Some(&retry.topic));
@@ -1599,7 +1599,7 @@ impl ProducerDispatcher {
         {
             return Some(DispatchOutcome::Delivered(Err(error)));
         }
-        if let Some(error) = self.wait_before_retry(batches, retry_backoff).await {
+        if let Some(error) = self.wait_before_retry(batches, retry_backoff, false).await {
             if self.metrics_are_enabled() {
                 self.metrics.record_error_for_topic(Some(&retry.topic));
             }
@@ -1644,9 +1644,9 @@ impl ProducerDispatcher {
         // Leader changed for the ongoing retry -> retry immediately (Java skips
         // backoff); otherwise back off normally.
         let retry_wait = if retry.metadata_updated {
-            self.check_delivery_timeout_before_retry(batches).await
+            self.check_delivery_timeout_before_retry(batches, false).await
         } else {
-            self.wait_before_retry(batches, retry_backoff).await
+            self.wait_before_retry(batches, retry_backoff, false).await
         };
         if let Some(error) = retry_wait {
             if self.metrics_are_enabled() {
@@ -1680,7 +1680,10 @@ impl ProducerDispatcher {
         if self.metrics_are_enabled() {
             self.metrics.record_retry();
         }
-        if let Some(error) = self.wait_before_retry(batches, retry_backoff).await {
+        // A wire/connection failure left no broker response, so a final delivery
+        // timeout here is an AMBIGUOUS loss (the records may have been written) and
+        // must bump the idempotent epoch before the next produce.
+        if let Some(error) = self.wait_before_retry(batches, retry_backoff, true).await {
             if self.metrics_are_enabled() {
                 self.metrics.record_error();
             }
@@ -1721,7 +1724,7 @@ impl ProducerDispatcher {
         if self.metrics_are_enabled() {
             self.metrics.record_retry_for_topic(Some(topic));
         }
-        if let Some(timeout_error) = self.wait_before_retry(batches, retry_backoff).await {
+        if let Some(timeout_error) = self.wait_before_retry(batches, retry_backoff, false).await {
             if self.metrics_are_enabled() {
                 self.metrics.record_error_for_topic(Some(topic));
             }
@@ -2329,6 +2332,7 @@ impl ProducerDispatcher {
         &self,
         batches: &[ReadyBatch],
         retry_backoff: &mut BackoffState,
+        loss_is_ambiguous: bool,
     ) -> Option<ProducerError> {
         let now = Instant::now();
         let earliest = batches
@@ -2338,7 +2342,7 @@ impl ProducerDispatcher {
             .unwrap_or(now);
         let elapsed = now.duration_since(earliest);
         if elapsed >= self.delivery_timeout {
-            self.mark_expired_idempotent_batches_unresolved(batches, now)
+            self.mark_expired_idempotent_batches_unresolved(batches, now, loss_is_ambiguous)
                 .await;
             return batches.first().map(|batch| ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
@@ -2353,7 +2357,7 @@ impl ProducerDispatcher {
         tokio::time::sleep(delay.min(remaining)).await;
         let now = Instant::now();
         if let Some(batch) = self.expired_batch(batches, now) {
-            self.mark_expired_idempotent_batches_unresolved(batches, now)
+            self.mark_expired_idempotent_batches_unresolved(batches, now, loss_is_ambiguous)
                 .await;
             return Some(ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
@@ -2370,6 +2374,7 @@ impl ProducerDispatcher {
     async fn check_delivery_timeout_before_retry(
         &self,
         batches: &[ReadyBatch],
+        loss_is_ambiguous: bool,
     ) -> Option<ProducerError> {
         let now = Instant::now();
         let earliest = batches
@@ -2378,7 +2383,7 @@ impl ProducerDispatcher {
             .min()
             .unwrap_or(now);
         if now.duration_since(earliest) >= self.delivery_timeout {
-            self.mark_expired_idempotent_batches_unresolved(batches, now)
+            self.mark_expired_idempotent_batches_unresolved(batches, now, loss_is_ambiguous)
                 .await;
             return batches.first().map(|batch| ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
@@ -2405,6 +2410,7 @@ impl ProducerDispatcher {
         &self,
         batches: &[ReadyBatch],
         now: Instant,
+        loss_is_ambiguous: bool,
     ) {
         if !self.idempotence.enabled {
             return;
@@ -2438,7 +2444,12 @@ impl ProducerDispatcher {
         // Java maybeResolveSequences: these batches have now fully drained
         // (expired) for their partitions, so resolve or recover each.
         for (topic, partition) in expired_partitions {
-            state.resolve_unresolved_sequence_after_drain(&topic, partition, transactional);
+            state.resolve_unresolved_sequence_after_drain(
+                &topic,
+                partition,
+                transactional,
+                loss_is_ambiguous,
+            );
         }
     }
 
@@ -2450,12 +2461,32 @@ impl ProducerDispatcher {
         if !self.idempotence.enabled {
             return Ok(None);
         }
-        let identity = self.producer_identity(route.leader_id).await?;
         let record_count =
             i32::try_from(record_count).map_err(|_error| ProducerError::SequenceOverflow {
                 topic: route.topic.clone(),
                 partition: route.partition,
             })?;
+        // Idempotent (non-transactional) lost-sequence recovery: an ambiguous loss
+        // (a no-response/connection delivery timeout) sets `epoch_bump_required` while
+        // clearing the unresolved marker, so bump the producer epoch via InitProducerId
+        // and reset the per-partition sequences before the next produce — Java
+        // bumpIdempotentEpochAndResetIdIfNeeded. Definitive rejections never set the
+        // flag (see resolve_unresolved_sequence_after_drain), so leadership / unknown-
+        // producer-id recovery is left to their own retry paths.
+        if self.idempotence.transactional_id.is_none()
+            && self.producer_state.lock().await.epoch_bump_required
+        {
+            let identity = self.bump_producer_identity(route.leader_id).await?;
+            let mut state = self.producer_state.lock().await;
+            state.reset_sequences_after_epoch_bump();
+            let base_sequence = state.next_sequence(&route.topic, route.partition, record_count)?;
+            drop(state);
+            return Ok(Some(ProducerBatchState {
+                identity,
+                base_sequence,
+            }));
+        }
+        let identity = self.producer_identity(route.leader_id).await?;
         let mut state = self.producer_state.lock().await;
         let base_sequence = match state.next_sequence(&route.topic, route.partition, record_count) {
             Ok(base_sequence) => base_sequence,
@@ -4772,6 +4803,7 @@ impl ProducerIdempotenceState {
         topic: &str,
         partition: i32,
         transactional: bool,
+        loss_is_ambiguous: bool,
     ) {
         let key = TopicPartitionKey {
             topic: topic.to_owned(),
@@ -4802,7 +4834,13 @@ impl ProducerIdempotenceState {
                         self.epoch_bump_required = true;
                     }
                 }
-            } else {
+            } else if loss_is_ambiguous {
+                // An idempotent (non-transactional) batch whose final failure was a
+                // no-response/connection loss MIGHT have been written by the broker,
+                // so the per-producer sequence state is now ambiguous and the epoch
+                // must be bumped before the next produce. A definitive rejection
+                // (e.g. NotLeaderOrFollower) means the records were never written, so
+                // the sequence can simply be released/rewound without an epoch bump.
                 self.epoch_bump_required = true;
             }
         }
@@ -7721,7 +7759,7 @@ mod tests {
         let mut retry_backoff = dispatcher.retry_backoff_state();
 
         let error = dispatcher
-            .wait_before_retry(&batches, &mut retry_backoff)
+            .wait_before_retry(&batches, &mut retry_backoff, false)
             .await
             .expect("retry wait should expire delivery timeout");
 
@@ -7821,7 +7859,7 @@ mod tests {
         let batches = vec![ready_batch("orders", 0)];
         assert!(
             dispatcher
-                .check_delivery_timeout_before_retry(&batches)
+                .check_delivery_timeout_before_retry(&batches, false)
                 .await
                 .is_none()
         );
@@ -7830,7 +7868,7 @@ mod tests {
         let expired = ProducerDispatcher::new(test_wire()).delivery_timeout(Duration::ZERO);
         let batches = vec![ready_batch("orders", 0)];
         assert!(matches!(
-            expired.check_delivery_timeout_before_retry(&batches).await,
+            expired.check_delivery_timeout_before_retry(&batches, false).await,
             Some(ProducerError::DeliveryTimeout { topic, partition })
                 if topic == "orders" && partition == 0
         ));
@@ -8687,7 +8725,7 @@ mod tests {
         let _ = state.next_sequence("orders", 0, 3).expect("sequence");
         state.mark_sequence_unresolved("orders", 0, 0, 3);
 
-        state.resolve_unresolved_sequence_after_drain("orders", 0, false);
+        state.resolve_unresolved_sequence_after_drain("orders", 0, false, true);
 
         assert!(state.epoch_bump_required);
         // Marker cleared, so the partition no longer blocks (epoch bump resets it).
@@ -8703,7 +8741,7 @@ mod tests {
         let _ = state.next_sequence("orders", 0, 3).expect("sequence");
         state.mark_sequence_unresolved("orders", 0, 0, 3);
 
-        state.resolve_unresolved_sequence_after_drain("orders", 0, true);
+        state.resolve_unresolved_sequence_after_drain("orders", 0, true, true);
 
         assert_eq!(state.transaction_state, TransactionState::AbortableError);
         assert!(state.epoch_bump_required);
@@ -8715,7 +8753,7 @@ mod tests {
         let _ = fatal.next_sequence("orders", 0, 3).expect("sequence");
         fatal.mark_sequence_unresolved("orders", 0, 0, 3);
 
-        fatal.resolve_unresolved_sequence_after_drain("orders", 0, true);
+        fatal.resolve_unresolved_sequence_after_drain("orders", 0, true, true);
 
         assert_eq!(fatal.transaction_state, TransactionState::FatalError);
     }
@@ -8729,7 +8767,7 @@ mod tests {
         state.mark_sequence_unresolved("orders", 0, 0, 3);
         state.maybe_update_last_acked_sequence("orders", 0, 2); // next=3, lastAcked=2 => resolved
 
-        state.resolve_unresolved_sequence_after_drain("orders", 0, false);
+        state.resolve_unresolved_sequence_after_drain("orders", 0, false, false);
 
         assert!(!state.epoch_bump_required);
         assert_eq!(state.next_sequence("orders", 0, 1).expect("unblocked"), 3);
