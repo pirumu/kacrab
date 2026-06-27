@@ -1677,7 +1677,8 @@ async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correla
     assert_eq!(second.offset, 41);
     assert_eq!(producer.buffered_bytes(), 0);
     assert_eq!(bootstrap.join().await, 2);
-    assert_eq!(leader_7.join().await, 4);
+    // handshake + InitProducerId + one coalesced Produce request for both partitions.
+    assert_eq!(leader_7.join().await, 3);
 }
 
 #[tokio::test]
@@ -8932,43 +8933,45 @@ impl MockBroker {
                 .await
                 .unwrap();
 
-            let mut correlation_ids = Vec::with_capacity(partitions.len());
-            for expected_partition in &partitions {
-                let mut request = read_frame(&mut socket).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
-                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                    .expect("produce request");
-                assert_eq!(produce.acks, -1);
-                assert_eq!(produce.topic_data.len(), 1);
-                let topic_data = produce.topic_data.first().expect("topic produce data");
-                assert_eq!(topic_data.topic_id, TOPIC_ID);
-                assert_eq!(topic_data.partition_data.len(), 1);
+            // Both partitions coalesce into one ProduceRequest (Java groups a
+            // broker's batches into a single request), so the partition responses
+            // are mapped back to their per-partition deliveries inside one frame
+            // rather than across reordered separate responses.
+            let mut request = read_frame(&mut socket).await;
+            let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            assert_eq!(produce.acks, -1);
+            assert_eq!(produce.topic_data.len(), 1);
+            let topic_data = produce.topic_data.first().expect("topic produce data");
+            assert_eq!(topic_data.topic_id, TOPIC_ID);
+            assert_eq!(topic_data.partition_data.len(), partitions.len());
+            // Reverse the per-partition response order within the coalesced frame so
+            // the producer must still map each partition response to its delivery.
+            let mut offsets = Vec::with_capacity(partitions.len());
+            for expected_partition in partitions.iter().rev() {
                 let partition_data = topic_data
                     .partition_data
-                    .first()
+                    .iter()
+                    .find(|data| data.index == *expected_partition)
                     .expect("partition produce data");
-                assert_eq!(partition_data.index, *expected_partition);
                 let mut records = partition_data.records.clone().expect("records");
                 let batch = RecordBatch::decode(&mut records).expect("record batch");
                 assert_eq!(batch.producer_id, 42);
                 assert_eq!(batch.producer_epoch, 3);
                 assert_eq!(batch.base_sequence, 0);
-                correlation_ids.push((header.correlation_id, *expected_partition));
-            }
-            for (correlation_id, partition) in correlation_ids.into_iter().rev() {
                 let offset = 40_i64
-                    .checked_add(i64::from(partition))
+                    .checked_add(i64::from(*expected_partition))
                     .expect("offset should fit");
-                socket
-                    .write_all(&produce_response_frame(correlation_id, partition, offset))
-                    .await
-                    .unwrap();
+                offsets.push((*expected_partition, offset));
             }
-            partitions
-                .len()
-                .checked_add(2)
-                .expect("handled request count should fit")
+            socket
+                .write_all(&produce_response_frame_for_partitions(&header, &offsets))
+                .await
+                .unwrap();
+            // handshake + InitProducerId + one coalesced Produce.
+            3
         });
         Self { addr, join }
     }
