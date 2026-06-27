@@ -3253,8 +3253,13 @@ async fn kafka_producer_add_partitions_fatal_error_blocks_abort() {
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
+    // The synchronous send appends and returns a future; AddPartitionsToTxn runs
+    // during background dispatch (like Java's Sender thread), so its fatal
+    // InvalidTxnState surfaces on the delivery future rather than the send call.
     let send_error = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .expect("send appends before the background dispatch observes the fatal error")
+        .await
         .unwrap_err();
     assert!(matches!(
         send_error,

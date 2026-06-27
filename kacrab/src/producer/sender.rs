@@ -3565,10 +3565,31 @@ impl ProducerSenderState {
         accumulator: &SharedAccumulator,
         error: DispatchPrepareError,
     ) -> ProducerError {
-        if let Err(error) = accumulator.requeue_front(error.batches) {
+        let DispatchPrepareError {
+            error,
+            mut batches,
+        } = error;
+        if matches!(
+            error,
+            ProducerError::Transaction { .. } | ProducerError::InvalidTransactionState(_)
+        ) {
+            // A terminal transaction error (e.g. a fatal AddPartitionsToTxn response;
+            // its internal retries are already exhausted) can never succeed on retry,
+            // so requeuing the batches would spin in an infinite drain/prepare/fail
+            // loop and the delivery futures would never resolve. Fail the batches'
+            // deliveries instead. The old awaited inline send surfaced this error to
+            // the caller directly; the background dispatch loop must fail it here.
+            for batch in &mut batches {
+                if let Some(sender) = batch.delivery.take() {
+                    sender.send_error(&error);
+                }
+            }
             return error;
         }
-        error.error
+        if let Err(requeue_error) = accumulator.requeue_front(batches) {
+            return requeue_error;
+        }
+        error
     }
 }
 
