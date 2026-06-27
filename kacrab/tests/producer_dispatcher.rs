@@ -2684,6 +2684,25 @@ async fn kafka_producer_abort_holds_end_txn_until_in_flight_batches_drain_like_j
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
         .unwrap();
 
+    // The synchronous send appends the (batch.size=1, immediately full) batch but
+    // dispatch happens on the background loop, so drive it until the batch is in
+    // flight — its Produce request is sent and the broker holds the response for
+    // 80ms. This is the precondition the test exercises: abort must hold EndTxn
+    // until the already-in-flight batch drains (like Java's Sender thread sending
+    // the batch before the abort completes), rather than discarding a buffered
+    // batch that was never sent.
+    for _ in 0..1_000 {
+        if producer.buffered_bytes() == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        producer.buffered_bytes(),
+        0,
+        "record batch should be in flight before abort"
+    );
+
     producer.abort_transaction().await.unwrap();
 
     assert_eq!(delivery.await.unwrap().offset, 90);
