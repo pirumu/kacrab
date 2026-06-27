@@ -8908,7 +8908,7 @@ impl MockBroker {
                 let partition_data = topic_data
                     .partition_data
                     .iter()
-                    .find(|data| data.index == *expected_partition)
+                    .find(|entry| entry.index == *expected_partition)
                     .expect("partition produce data");
                 let mut records = partition_data.records.clone().expect("records");
                 let batch = RecordBatch::decode(&mut records).expect("record batch");
@@ -8978,7 +8978,7 @@ impl MockBroker {
                 let partition_data = topic_data
                     .partition_data
                     .iter()
-                    .find(|data| data.index == *expected_partition)
+                    .find(|entry| entry.index == *expected_partition)
                     .expect("partition produce data");
                 let mut records = partition_data.records.clone().expect("records");
                 let batch = RecordBatch::decode(&mut records).expect("record batch");
