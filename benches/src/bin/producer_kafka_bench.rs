@@ -73,14 +73,12 @@ fn main() {
              reporting_interval_ms={}",
             reporting_interval.as_millis()
         );
+        let runs = bench_runs();
         for scenario in scenarios {
-            let mut summaries = Vec::with_capacity(BENCH_RUNS);
-            let mut metrics = Vec::with_capacity(BENCH_RUNS);
-            for run_index in 1..=BENCH_RUNS {
-                println!(
-                    "scenario=\"{}\", run={run_index}/{BENCH_RUNS}",
-                    scenario.name
-                );
+            let mut summaries = Vec::with_capacity(runs);
+            let mut metrics = Vec::with_capacity(runs);
+            for run_index in 1..=runs {
+                println!("scenario=\"{}\", run={run_index}/{runs}", scenario.name);
                 let summary = run_scenario(BenchmarkRun {
                     bootstrap,
                     topic: &topic,
@@ -466,7 +464,26 @@ fn benchmark_record(topic: Arc<str>, _index: usize) -> ProducerRecord {
 }
 
 fn scenarios() -> Vec<Scenario> {
+    // KACRAB_BENCH_MESSAGES bounds the small-payload run to a fixed record count and
+    // skips the large-payload scenario — used to profile a single hot partition without
+    // the default 5,000,000-record flood overrunning delivery.timeout.ms.
+    if let Some(messages) = env::var("KACRAB_BENCH_MESSAGES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        let mut scenario = small_payload_scenario();
+        scenario.messages = messages;
+        return vec![scenario];
+    }
     vec![small_payload_scenario(), large_payload_scenario()]
+}
+
+fn bench_runs() -> usize {
+    env::var("KACRAB_BENCH_RUNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|runs| *runs > 0)
+        .unwrap_or(BENCH_RUNS)
 }
 
 const fn reporting_interval() -> Duration {
