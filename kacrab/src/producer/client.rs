@@ -860,8 +860,11 @@ impl Producer {
     pub fn kafka_metrics(&self) -> BTreeMap<String, f64> {
         // Refresh point-in-time gauges from the current sender queue + metadata.
         if let Ok(sender) = self.sender.try_lock() {
+            let snapshot = sender.queue_snapshot();
             self.metrics
-                .set_requests_in_flight(sender.queue_snapshot().in_flight_dispatches);
+                .set_requests_in_flight(snapshot.in_flight_dispatches);
+            self.metrics
+                .set_buffer_gauges(snapshot.buffer_available_bytes);
         }
         if let Some(age) = self.control_dispatcher.metadata_age() {
             self.metrics.set_metadata_age(age);

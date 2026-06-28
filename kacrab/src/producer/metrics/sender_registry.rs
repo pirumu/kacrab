@@ -62,6 +62,10 @@ struct ClientSensors {
     record_queue_time: SensorId,
     requests_in_flight: SensorId,
     metadata_age: SensorId,
+    buffer_available_bytes: SensorId,
+    waiting_threads: SensorId,
+    buffer_exhausted: SensorId,
+    bufferpool_wait_time: SensorId,
 }
 
 /// Per-topic (`producer-topic-metrics`) sensor handles.
@@ -198,6 +202,34 @@ impl ClientSensors {
             "metadata-age",
             "The age in seconds of the current producer metadata being used.",
         );
+        let buffer_available_bytes = value_only(
+            metrics,
+            "buffer-available-bytes",
+            "buffer-available-bytes",
+            "The total amount of buffer memory that is not being used.",
+        );
+        let waiting_threads = value_only(
+            metrics,
+            "waiting-threads",
+            "waiting-threads",
+            "The number of user threads blocked waiting for buffer memory to enqueue their records.",
+        );
+        let buffer_exhausted = meter(
+            metrics,
+            "buffer-exhausted",
+            "buffer-exhausted-rate",
+            "The average per-second number of record sends that are blocked on buffer memory exhaustion.",
+            "buffer-exhausted-total",
+            "The total number of record sends that are blocked on buffer memory exhaustion.",
+        );
+        let bufferpool_wait_time = avg_max(
+            metrics,
+            "bufferpool-wait-time",
+            "bufferpool-wait-time-avg",
+            "The average time in ms an appender waits for space allocation.",
+            "bufferpool-wait-time-max",
+            "The maximum time in ms an appender waits for space allocation.",
+        );
         Self {
             records_sent,
             record_errors,
@@ -213,6 +245,10 @@ impl ClientSensors {
             record_queue_time,
             requests_in_flight,
             metadata_age,
+            buffer_available_bytes,
+            waiting_threads,
+            buffer_exhausted,
+            bufferpool_wait_time,
         }
     }
 }
@@ -375,6 +411,30 @@ impl SenderMetricsRegistry {
     /// Update the metadata-age gauge in seconds.
     pub(crate) fn set_metadata_age(&self, age_seconds: f64) {
         self.record(|client| client.metadata_age, age_seconds);
+    }
+
+    /// Update the available-buffer-memory gauge.
+    pub(crate) fn set_buffer_available_bytes(&self, available: usize) {
+        self.record(|client| client.buffer_available_bytes, available as f64);
+    }
+
+    /// Update the gauge of user threads blocked waiting for buffer memory.
+    pub(crate) fn set_waiting_threads(&self, waiting: usize) {
+        self.record(|client| client.waiting_threads, waiting as f64);
+    }
+
+    /// Record one buffer-memory exhaustion event (an append blocked on buffer
+    /// memory) and the time it spent waiting for space allocation.
+    pub(crate) fn record_buffer_exhausted(&self, wait_ms: f64) {
+        let now = now_ms();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let exhausted = inner.client.buffer_exhausted;
+        let _ignored = inner.metrics.record_at_ms(exhausted, 1.0, now);
+        let wait = inner.client.bufferpool_wait_time;
+        let _ignored = inner.metrics.record_at_ms(wait, wait_ms, now);
     }
 
     /// Record a record-send error for the client and (optionally) a topic.
@@ -544,8 +604,34 @@ mod tests {
         registry.record_error(Some("orders"));
         registry.record_retry(Some("orders"));
         registry.record_split();
+        registry.record_buffer_exhausted(4.0);
+        registry.record_buffer_exhausted(6.0);
+        registry.set_buffer_available_bytes(2048);
+        registry.set_waiting_threads(2);
 
         let metrics = registry.kafka_metrics();
+
+        // Java BufferPool metrics: exhaustion count, wait-time avg/max, and gauges.
+        assert_eq!(
+            metrics.get("producer-metrics:buffer-exhausted-total"),
+            Some(&2.0)
+        );
+        assert_eq!(
+            metrics.get("producer-metrics:bufferpool-wait-time-avg"),
+            Some(&5.0)
+        );
+        assert_eq!(
+            metrics.get("producer-metrics:bufferpool-wait-time-max"),
+            Some(&6.0)
+        );
+        assert_eq!(
+            metrics.get("producer-metrics:buffer-available-bytes"),
+            Some(&2048.0)
+        );
+        assert_eq!(
+            metrics.get("producer-metrics:waiting-threads"),
+            Some(&2.0)
+        );
 
         // Client-level cumulative totals (Java Meter total = sum of recorded values).
         assert_eq!(

@@ -766,6 +766,17 @@ impl ProducerMetrics {
             .set_metadata_age(age.as_secs_f64());
     }
 
+    /// Update the available-buffer-memory + waiting-threads gauges (Kafka
+    /// buffer-available-bytes / waiting-threads).
+    pub(crate) fn set_buffer_gauges(&self, available_bytes: usize) {
+        self.inner
+            .sender_registry
+            .set_buffer_available_bytes(available_bytes);
+        self.inner
+            .sender_registry
+            .set_waiting_threads(self.inner.waiting_threads.load(Ordering::Relaxed));
+    }
+
     pub(crate) fn record_requeue(&self) {
         let _previous = self.inner.requeue_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -781,6 +792,7 @@ impl ProducerMetrics {
         let _previous = self.inner.waiting_threads.fetch_add(1, Ordering::Relaxed);
         ProducerBufferWaitGuard {
             metrics: self.clone(),
+            started_at: std::time::Instant::now(),
         }
     }
 
@@ -980,6 +992,7 @@ impl ProducerMetrics {
 
 pub(crate) struct ProducerBufferWaitGuard {
     metrics: ProducerMetrics,
+    started_at: std::time::Instant,
 }
 
 impl Drop for ProducerBufferWaitGuard {
@@ -989,6 +1002,13 @@ impl Drop for ProducerBufferWaitGuard {
             .inner
             .waiting_threads
             .fetch_sub(1, Ordering::Relaxed);
+        // Java BufferPool: a blocked append is a buffer-exhausted event; record it
+        // plus the time spent waiting for space allocation (bufferpool-wait-time).
+        let wait_ms = self.started_at.elapsed().as_secs_f64() * 1000.0;
+        self.metrics
+            .inner
+            .sender_registry
+            .record_buffer_exhausted(wait_ms);
     }
 }
 
