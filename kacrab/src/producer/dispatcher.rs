@@ -1,7 +1,7 @@
 //! Producer dispatcher that routes ready batches through the wire client.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     net::SocketAddr,
     sync::{
         Arc, Mutex as StdMutex,
@@ -1452,12 +1452,61 @@ impl ProducerDispatcher {
         self.enqueue_sequencer.reserve_ticket()
     }
 
+    /// Register a dispatch's idempotent batches as in flight (Java
+    /// `addInFlightBatch`, done at drain). Each batch already carries its assigned
+    /// `producer_state` from `prepare_drained_batches`; retried batches re-register
+    /// the sequence they kept (a no-op on the set).
+    async fn register_idempotent_inflight(&self, inflight: &[(String, i32, i32)]) {
+        if !self.idempotence.enabled || inflight.is_empty() {
+            return;
+        }
+        let mut state = self.producer_state.lock().await;
+        for (topic, partition, base_sequence) in inflight {
+            state.register_inflight_sequence(topic, *partition, *base_sequence);
+        }
+    }
+
+    /// Terminal completion of a dispatch (anything but a requeue): drop its batches
+    /// from the in-flight set (Java `removeInFlightBatch`) and re-attempt
+    /// `maybeResolveSequences` for each touched partition, which now succeeds for
+    /// any partition that has fully drained.
+    async fn release_idempotent_inflight_after_terminal(&self, inflight: &[(String, i32, i32)]) {
+        if !self.idempotence.enabled || inflight.is_empty() {
+            return;
+        }
+        let transactional = self.idempotence.transactional_id.is_some();
+        let mut state = self.producer_state.lock().await;
+        for (topic, partition, base_sequence) in inflight {
+            state.remove_inflight_sequence(topic, *partition, *base_sequence);
+        }
+        let mut resolved = AHashSet::new();
+        for (topic, partition, _) in inflight {
+            if !resolved.insert((topic.as_str(), *partition)) {
+                continue;
+            }
+            let ambiguous = state.unresolved_loss_ambiguous(topic, *partition);
+            state.resolve_unresolved_sequence_after_drain(
+                topic,
+                *partition,
+                transactional,
+                ambiguous,
+            );
+        }
+    }
+
     pub(crate) async fn dispatch_drained(
         &self,
         batches: Vec<ReadyBatch>,
         now: Instant,
         enqueue_ticket: u64,
     ) -> DispatchOutcome {
+        // Capture each idempotent batch's (topic, partition, base_sequence) before the
+        // batches move into the dispatch, then register them as in flight (Java
+        // addInFlightBatch). On a terminal outcome they are removed and the partition's
+        // unresolved sequence is re-resolved; on a requeue they stay tracked so a
+        // retried batch keeps gating `first_inflight_sequence`/`maybeResolveSequences`.
+        let inflight = idempotent_inflight_of(&batches);
+        self.register_idempotent_inflight(&inflight).await;
         let outcome = self
             .dispatch_drained_inner(batches, now, enqueue_ticket)
             .await;
@@ -1467,6 +1516,10 @@ impl ProducerDispatcher {
         // are not skipped, then advance — idempotent if the enqueue path already advanced.
         self.enqueue_sequencer.wait_turn(enqueue_ticket).await;
         self.enqueue_sequencer.advance_past(enqueue_ticket);
+        if !matches!(outcome, DispatchOutcome::Requeue(_)) {
+            self.release_idempotent_inflight_after_terminal(&inflight)
+                .await;
+        }
         outcome
     }
 
@@ -2561,6 +2614,14 @@ impl ProducerDispatcher {
                 producer_state.base_sequence,
                 record_count,
             );
+            // Remember the loss ambiguity with the marker so the resolve that runs
+            // once the partition drains bumps the epoch only for ambiguous losses,
+            // even when it is deferred past this call.
+            state.record_unresolved_loss_ambiguity(
+                &batch.topic,
+                batch.partition,
+                loss_is_ambiguous,
+            );
             if !expired_partitions
                 .iter()
                 .any(|(topic, partition)| topic == &batch.topic && *partition == batch.partition)
@@ -2568,14 +2629,19 @@ impl ProducerDispatcher {
                 expired_partitions.push((batch.topic.clone(), batch.partition));
             }
         }
-        // Java maybeResolveSequences: these batches have now fully drained
-        // (expired) for their partitions, so resolve or recover each.
+        // Java maybeResolveSequences: attempt to resolve each partition now. While
+        // this expiring request (or any sibling request) is still tracked in flight,
+        // `resolve_unresolved_sequence_after_drain` defers; the deferred resolve is
+        // retriggered from `release_idempotent_inflight_after_terminal` as each
+        // request terminally completes, so the epoch is bumped only after the
+        // partition has fully drained.
         for (topic, partition) in expired_partitions {
+            let ambiguous = state.unresolved_loss_ambiguous(&topic, partition);
             state.resolve_unresolved_sequence_after_drain(
                 &topic,
                 partition,
                 transactional,
-                loss_is_ambiguous,
+                ambiguous,
             );
         }
     }
@@ -4900,6 +4966,7 @@ impl ProducerIdempotenceState {
         // Java startSequencesAtBeginning: sequence restarts at 0 with no acks.
         let entry = self.partitions.entry(key).or_default();
         entry.unresolved_next_sequence = None;
+        entry.unresolved_loss_ambiguous = false;
         entry.next_sequence = 0;
         entry.last_acked_sequence = NO_LAST_ACKED_SEQUENCE;
         entry.last_acked_offset = INVALID_LAST_ACKED_OFFSET;
@@ -4919,6 +4986,69 @@ impl ProducerIdempotenceState {
         }
     }
 
+    /// Java `TxnPartitionEntry::addInflightBatch`: track a dispatched batch's base
+    /// sequence as in flight for its partition. Re-adding a retried batch's
+    /// sequence is a no-op (the set already holds it).
+    fn register_inflight_sequence(&mut self, topic: &str, partition: i32, base_sequence: i32) {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        let _inserted = self
+            .partitions
+            .entry(key)
+            .or_default()
+            .inflight_by_sequence
+            .insert(base_sequence);
+    }
+
+    /// Java `TxnPartitionEntry::removeInFlightBatch`: drop a base sequence once its
+    /// batch terminally completes (NOT on requeue).
+    fn remove_inflight_sequence(&mut self, topic: &str, partition: i32, base_sequence: i32) {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        if let Some(entry) = self.partitions.get_mut(&key) {
+            let _removed = entry.inflight_by_sequence.remove(&base_sequence);
+        }
+    }
+
+    /// Java `TransactionManager::hasInflightBatches`: whether the partition still
+    /// has any batch dispatched-but-not-terminally-completed. Gates
+    /// `resolve_unresolved_sequence_after_drain`.
+    fn has_inflight_batches(&self, topic: &str, partition: i32) -> bool {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        self.partitions
+            .get(&key)
+            .is_some_and(|entry| !entry.inflight_by_sequence.is_empty())
+    }
+
+    /// Record whether the loss that left a partition unresolved was ambiguous, so a
+    /// deferred resolve (run later, once the partition has drained) bumps the epoch
+    /// only for ambiguous losses. Sticky across multiple contributing losses.
+    fn record_unresolved_loss_ambiguity(&mut self, topic: &str, partition: i32, ambiguous: bool) {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        let entry = self.partitions.entry(key).or_default();
+        entry.unresolved_loss_ambiguous = entry.unresolved_loss_ambiguous || ambiguous;
+    }
+
+    fn unresolved_loss_ambiguous(&self, topic: &str, partition: i32) -> bool {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        self.partitions
+            .get(&key)
+            .is_some_and(|entry| entry.unresolved_loss_ambiguous)
+    }
+
     /// Java `maybeResolveSequences`: once a partition's in-flight batches have
     /// drained with its sequence still unresolved, either confirm it was fully
     /// acknowledged (drop the marker) or recover. When unacked messages remain,
@@ -4932,6 +5062,15 @@ impl ProducerIdempotenceState {
         transactional: bool,
         loss_is_ambiguous: bool,
     ) {
+        // Java `maybeResolveSequences` only resolves a partition once it has NO
+        // in-flight batches. With multiple in-flight requests per partition, an
+        // ambiguous timeout on one batch must NOT bump the epoch while later
+        // batches are still in flight under the current epoch — defer until the
+        // partition drains. The deferred resolve is retriggered from
+        // `release_idempotent_inflight_after_terminal` as each request completes.
+        if self.has_inflight_batches(topic, partition) {
+            return;
+        }
         let key = TopicPartitionKey {
             topic: topic.to_owned(),
             partition,
@@ -4973,6 +5112,7 @@ impl ProducerIdempotenceState {
         }
         if let Some(entry) = self.partitions.get_mut(&key) {
             entry.unresolved_next_sequence = None;
+            entry.unresolved_loss_ambiguous = false;
         }
     }
 
@@ -5073,9 +5213,6 @@ const NO_LAST_ACKED_SEQUENCE: i32 = -1;
 const INVALID_LAST_ACKED_OFFSET: i64 = -1;
 
 /// Per-partition idempotent bookkeeping, mirroring Java `TxnPartitionEntry`.
-/// In-flight batches themselves are not stored here: Rust rewrites their base
-/// sequences directly on the dispatch-path batch slices, so this entry only
-/// tracks the scalar sequence/offset state.
 #[derive(Debug, Clone)]
 struct IdempotentPartitionEntry {
     /// Base sequence of the next batch bound for this partition.
@@ -5088,6 +5225,21 @@ struct IdempotentPartitionEntry {
     /// When set, new sends to this partition block until the marked sequence is
     /// resolved (Java `partitionsWithUnresolvedSequences`).
     unresolved_next_sequence: Option<i32>,
+    /// Whether the loss that marked this partition unresolved was ambiguous (a
+    /// no-response timeout that MIGHT have been written), recorded so the deferred
+    /// resolve (run once the partition has no in-flight batches) bumps the epoch
+    /// only for ambiguous losses. Java carries this via the batch's last error.
+    unresolved_loss_ambiguous: bool,
+    /// Base sequences of this partition's batches that have been dispatched at
+    /// least once and not yet terminally completed (Java
+    /// `TxnPartitionEntry::inflightBatchesBySequence`). A sequence is added when
+    /// its batch is dispatched and removed only on terminal completion (NOT on
+    /// requeue), so `has_inflight_batches` gates `maybeResolveSequences`: an
+    /// unresolved sequence is only resolved (and the epoch bumped) once every
+    /// in-flight batch for the partition has drained — otherwise an ambiguous
+    /// timeout on one batch could bump the epoch while later batches are still in
+    /// flight under the old epoch.
+    inflight_by_sequence: BTreeSet<i32>,
 }
 
 impl Default for IdempotentPartitionEntry {
@@ -5097,6 +5249,8 @@ impl Default for IdempotentPartitionEntry {
             last_acked_sequence: NO_LAST_ACKED_SEQUENCE,
             last_acked_offset: INVALID_LAST_ACKED_OFFSET,
             unresolved_next_sequence: None,
+            unresolved_loss_ambiguous: false,
+            inflight_by_sequence: BTreeSet::new(),
         }
     }
 }
@@ -6050,6 +6204,20 @@ fn fail_deliveries(batches: &mut [ReadyBatch], error: &ProducerError) {
         };
         sender.send_error(error);
     }
+}
+
+/// The `(topic, partition, base_sequence)` of each idempotent batch in a dispatch,
+/// used to register/remove them from the per-partition in-flight set. Batches
+/// without an assigned `producer_state` (non-idempotent) contribute nothing.
+fn idempotent_inflight_of(batches: &[ReadyBatch]) -> Vec<(String, i32, i32)> {
+    batches
+        .iter()
+        .filter_map(|batch| {
+            batch
+                .producer_state
+                .map(|state| (batch.topic.clone(), batch.partition, state.base_sequence))
+        })
+        .collect()
 }
 
 fn terminal_error_delivered_to_futures(
@@ -8857,6 +9025,45 @@ mod tests {
         assert!(state.epoch_bump_required);
         // Marker cleared, so the partition no longer blocks (epoch bump resets it).
         assert_eq!(state.next_sequence("orders", 0, 1).expect("unblocked"), 3);
+    }
+
+    #[test]
+    fn resolve_defers_until_partition_has_no_inflight_batches_like_java() {
+        // Java maybeResolveSequences only resolves a partition once it has NO
+        // in-flight batches. Two batches are in flight (base sequence 0 and 3).
+        let mut state = ProducerIdempotenceState::default();
+        let seq0 = state.next_sequence("orders", 0, 3).expect("seq0");
+        let seq3 = state.next_sequence("orders", 0, 3).expect("seq3");
+        assert_eq!(seq0, 0);
+        assert_eq!(seq3, 3);
+        state.register_inflight_sequence("orders", 0, seq0);
+        state.register_inflight_sequence("orders", 0, seq3);
+
+        // Batch seq0 times out ambiguously and is marked unresolved. Resolving now
+        // must NOT bump the epoch: seq3 is still in flight under the current epoch,
+        // and bumping would re-send seq0 under a new epoch while seq3 could still
+        // be written, risking a duplicate.
+        state.mark_sequence_unresolved("orders", 0, seq0, 3);
+        state.record_unresolved_loss_ambiguity("orders", 0, true);
+        state.remove_inflight_sequence("orders", 0, seq0);
+        let ambiguous = state.unresolved_loss_ambiguous("orders", 0);
+        state.resolve_unresolved_sequence_after_drain("orders", 0, false, ambiguous);
+        assert!(
+            !state.epoch_bump_required,
+            "must not bump the epoch while seq3 is still in flight"
+        );
+        assert!(state.has_inflight_batches("orders", 0));
+
+        // seq3 drains → the partition has no in-flight batches, so the deferred
+        // resolve now bumps the epoch (the loss was ambiguous).
+        state.remove_inflight_sequence("orders", 0, seq3);
+        assert!(!state.has_inflight_batches("orders", 0));
+        let ambiguous = state.unresolved_loss_ambiguous("orders", 0);
+        state.resolve_unresolved_sequence_after_drain("orders", 0, false, ambiguous);
+        assert!(
+            state.epoch_bump_required,
+            "bump the epoch once the partition has fully drained"
+        );
     }
 
     #[test]
