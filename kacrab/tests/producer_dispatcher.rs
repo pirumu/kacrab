@@ -1828,6 +1828,85 @@ async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_t
 }
 
 #[tokio::test]
+async fn idempotent_kafka_producer_resends_multi_inflight_batches_in_sequence_order_after_retry() {
+    // End-to-end fault injection for the firstInFlightSequence gate: two batches are
+    // pipelined in flight to one partition (multi-in-flight), the connection drops, and
+    // the producer must re-send them strictly in base-sequence order on retry.
+    let leader_7 = MockBroker::serve_idempotent_two_inflight_disconnect_then_inorder_retry().await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response_same_leader(7, leader_7);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default()
+            .max_in_flight_requests_per_connection(5)
+            .broker_queue_capacity(8)
+            .request_timeout(Duration::from_secs(30)),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 5,
+            retry_backoff: Duration::from_millis(1),
+            retry_backoff_max: Duration::from_millis(1),
+            // Generous so the disconnect is a plain wire retry, not a delivery timeout
+            // (which would bump the epoch and reset the sequences).
+            delivery_timeout: Duration::from_secs(30),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 5,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: None,
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+
+    let first_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .unwrap();
+    let second_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
+        .unwrap();
+    producer.flush().await.unwrap();
+
+    let first_receipt = first_delivery.await.unwrap();
+    let second_receipt = second_delivery.await.unwrap();
+    assert_eq!(first_receipt.partition, 0);
+    assert_eq!(first_receipt.offset, 40);
+    assert_eq!(second_receipt.partition, 0);
+    assert_eq!(second_receipt.offset, 41);
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    // The mock asserts in-order base sequences (0 then 1) on BOTH the initial in-flight
+    // pair and the retry; reaching its full handler count proves the ordering held.
+    assert_eq!(leader_7.join().await, 6);
+}
+
+#[tokio::test]
 async fn idempotent_kafka_producer_retries_leadership_error_with_current_leader_same_sequence() {
     let leader_8 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -9056,6 +9135,78 @@ impl MockBroker {
                 .await
                 .unwrap();
             5
+        });
+        Self { addr, join }
+    }
+
+    /// Two idempotent batches (base sequence 0 and 1) are pipelined IN FLIGHT to one
+    /// partition, then the connection drops so both re-enqueue for retry. The retry
+    /// must re-send them strictly in base-sequence order (Java firstInFlightSequence):
+    /// seq 0 alone, ack it, THEN seq 1 — never seq 1 before seq 0.
+    async fn serve_idempotent_two_inflight_disconnect_then_inorder_retry() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let handshake = read_frame(&mut first).await;
+            first
+                .write_all(&api_versions_response_frame(handshake))
+                .await
+                .unwrap();
+
+            let mut init_request = read_frame(&mut first).await;
+            let init_header =
+                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+            first
+                .write_all(&init_producer_id_response_frame(
+                    init_header.correlation_id,
+                    42,
+                    3,
+                ))
+                .await
+                .unwrap();
+
+            // Two produce requests held in flight (not yet answered), in ascending
+            // base-sequence order: 0 then 1.
+            for expected_base_sequence in [0_i32, 1] {
+                let mut request = read_frame(&mut first).await;
+                let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+                let produce =
+                    ProduceRequestData::read(&mut request, header.request_api_version)
+                        .expect("produce request");
+                assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
+            }
+            // Drop both in-flight requests so the producer re-enqueues them.
+            drop(first);
+
+            // On retry the producer must re-send seq 0 first (alone), wait for its ack,
+            // then seq 1 — the firstInFlightSequence ordering gate. No re-InitProducerId
+            // (the producer id is cached) and the same epoch 3 (a plain wire retry does
+            // not bump the epoch).
+            let (mut retry, _) = listener.accept().await.unwrap();
+            let handshake = read_frame(&mut retry).await;
+            retry
+                .write_all(&api_versions_response_frame(handshake))
+                .await
+                .unwrap();
+            for (expected_base_sequence, offset) in [(0_i32, 40_i64), (1, 41)] {
+                let mut request = read_frame(&mut retry).await;
+                let header =
+                    RequestHeaderData::read(&mut request, 2).expect("retry produce header");
+                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+                let produce =
+                    ProduceRequestData::read(&mut request, header.request_api_version)
+                        .expect("retry produce request");
+                assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
+                retry
+                    .write_all(&produce_response_frame(header.correlation_id, 0, offset))
+                    .await
+                    .unwrap();
+            }
+            // handshake + InitProducerId + 2 produce (conn 1) + handshake + 2 produce (conn 2).
+            6
         });
         Self { addr, join }
     }
