@@ -1345,9 +1345,11 @@ impl ProducerDispatcher {
                     // Leader changed for the ongoing retry -> retry immediately
                     // (Java skips backoff); otherwise back off normally.
                     let retry_wait = if metadata_updated {
-                        self.check_delivery_timeout_before_retry(&batches, false).await
+                        self.check_delivery_timeout_before_retry(&batches, false)
+                            .await
                     } else {
-                        self.wait_before_retry(&batches, &mut retry_backoff, false).await
+                        self.wait_before_retry(&batches, &mut retry_backoff, false)
+                            .await
                     };
                     if let Some(error) = retry_wait {
                         if self.metrics_are_enabled() {
@@ -1393,7 +1395,9 @@ impl ProducerDispatcher {
                         )
                         .await?;
                     }
-                    if let Some(error) = self.wait_before_retry(&batches, &mut retry_backoff, false).await
+                    if let Some(error) = self
+                        .wait_before_retry(&batches, &mut retry_backoff, false)
+                        .await
                     {
                         if self.metrics_are_enabled() {
                             self.metrics.record_error_for_topic(Some(&retry.topic));
@@ -1864,7 +1868,8 @@ impl ProducerDispatcher {
         // Leader changed for the ongoing retry -> retry immediately (Java skips
         // backoff); otherwise back off normally.
         let retry_wait = if retry.metadata_updated {
-            self.check_delivery_timeout_before_retry(batches, false).await
+            self.check_delivery_timeout_before_retry(batches, false)
+                .await
         } else {
             self.wait_before_retry(batches, retry_backoff, false).await
         };
@@ -2258,8 +2263,7 @@ impl ProducerDispatcher {
                     &mut pending,
                     &in_flight_routes,
                     enforce_partition_ordering,
-                )
-                else {
+                ) else {
                     break;
                 };
                 for route in &request.routes {
@@ -3327,11 +3331,25 @@ impl ProducerDispatcher {
     }
 
     async fn bump_producer_identity(&self, broker_id: i32) -> Result<ProducerIdentity> {
-        let current = {
+        let expected = {
             let state = self.producer_state.lock().await;
             state.identity
         };
-        let response = self.init_producer_identity(broker_id, current).await?;
+        // Serialize bumps so concurrent recoveries (e.g. two sibling in-flight requests
+        // both failing with UNKNOWN_PRODUCER_ID) do not each send an InitProducerId.
+        let _init_guard = self.producer_identity_init.lock().await;
+        {
+            let state = self.producer_state.lock().await;
+            // A concurrent recovery already advanced the identity past what we read: the
+            // bump already happened, so reuse it instead of bumping again (Java's single
+            // epoch bump per recovery generation / reopened short-circuit).
+            if let Some(current) = state.identity
+                && Some(current) != expected
+            {
+                return Ok(current);
+            }
+        }
+        let response = self.init_producer_identity(broker_id, expected).await?;
         let identity = ProducerIdentity {
             producer_id: response.producer_id,
             producer_epoch: response.producer_epoch,
@@ -5214,10 +5232,7 @@ impl ProducerIdempotenceState {
                 // Java uses wrapping int subtraction so it stays correct across the
                 // i32::MAX sequence wraparound.
                 entry.last_acked_sequence != NO_LAST_ACKED_SEQUENCE
-                    && entry
-                        .next_sequence
-                        .wrapping_sub(entry.last_acked_sequence)
-                        == 1,
+                    && entry.next_sequence.wrapping_sub(entry.last_acked_sequence) == 1,
             ),
             None => return,
         };
@@ -9137,16 +9152,28 @@ mod tests {
             topic: "orders".to_owned(),
             partition: 0,
         };
-        state.partitions.entry(key.clone()).or_default().next_sequence = i32::MAX;
+        state
+            .partitions
+            .entry(key.clone())
+            .or_default()
+            .next_sequence = i32::MAX;
         assert_eq!(
-            state.next_sequence("orders", 0, 1).expect("wrapping base sequence"),
+            state
+                .next_sequence("orders", 0, 1)
+                .expect("wrapping base sequence"),
             i32::MAX
         );
         assert_eq!(state.partitions[&key].next_sequence, 0);
         // A 3-record batch straddling the boundary: base 2147483646 -> next wraps to 2.
-        state.partitions.entry(key.clone()).or_default().next_sequence = i32::MAX - 1;
+        state
+            .partitions
+            .entry(key.clone())
+            .or_default()
+            .next_sequence = i32::MAX - 1;
         assert_eq!(
-            state.next_sequence("orders", 0, 3).expect("straddling base sequence"),
+            state
+                .next_sequence("orders", 0, 3)
+                .expect("straddling base sequence"),
             i32::MAX - 1
         );
         assert_eq!(state.partitions[&key].next_sequence, 1);
@@ -9281,7 +9308,10 @@ mod tests {
         state.reset_sequences_after_epoch_bump();
         assert!(!state.epoch_bump_required);
         assert!(!state.has_inflight_batches("orders", 0));
-        assert_eq!(state.next_sequence("orders", 0, 1).expect("reset sequence"), 0);
+        assert_eq!(
+            state.next_sequence("orders", 0, 1).expect("reset sequence"),
+            0
+        );
     }
 
     #[test]

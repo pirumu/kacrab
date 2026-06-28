@@ -1907,6 +1907,88 @@ async fn idempotent_kafka_producer_resends_multi_inflight_batches_in_sequence_or
 }
 
 #[tokio::test]
+async fn idempotent_kafka_producer_restamps_sibling_inflight_batch_after_single_epoch_bump() {
+    // Cross-task re-stamp end-to-end: two batches in flight to one partition under
+    // epoch 3 both get UNKNOWN_PRODUCER_ID; the producer must bump the epoch ONCE and
+    // re-stamp BOTH (the sibling included) under the new epoch, then deliver them.
+    let leader_7 =
+        MockBroker::serve_idempotent_two_inflight_unknown_producer_then_single_rebump().await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response_same_leader(7, leader_7);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default()
+            .max_in_flight_requests_per_connection(5)
+            .broker_queue_capacity(8)
+            .request_timeout(Duration::from_secs(30)),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 10,
+            retry_backoff: Duration::from_millis(1),
+            retry_backoff_max: Duration::from_millis(1),
+            delivery_timeout: Duration::from_secs(30),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 5,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: None,
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+
+    let first_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .unwrap();
+    let second_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
+        .unwrap();
+    // Recovery (UNKNOWN_PRODUCER_ID -> epoch bump -> re-stamp) may span flush cycles;
+    // drive until both records are delivered.
+    for _ in 0..50 {
+        if producer.flush().await.is_ok() {
+            break;
+        }
+    }
+
+    let first_receipt = first_delivery.await.unwrap();
+    let second_receipt = second_delivery.await.unwrap();
+    assert_eq!(first_receipt.partition, 0);
+    assert_eq!(second_receipt.partition, 0);
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    // Exactly one initial InitProducerId + ONE epoch bump (no chained bump, gap A);
+    // the sibling batch was re-stamped under the bumped epoch and acked.
+    assert_eq!(leader_7.join().await, 2);
+}
+
+#[tokio::test]
 async fn idempotent_kafka_producer_retries_leadership_error_with_current_leader_same_sequence() {
     let leader_8 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -9139,6 +9221,86 @@ impl MockBroker {
         Self { addr, join }
     }
 
+    /// Two idempotent batches are in flight to one partition under epoch 3; BOTH get
+    /// `UNKNOWN_PRODUCER_ID`, forcing a producer-epoch bump. The mock is ADAPTIVE — it
+    /// answers whatever frame order the producer uses: epoch-3 produces are failed with
+    /// `UNKNOWN_PRODUCER_ID`, `InitProducerId` is answered (epoch 3 first, then 4), and
+    /// epoch-4 produces are acked until both records are delivered. The join handle
+    /// returns the number of `InitProducerId` calls: exactly 2 (one initial + ONE bump)
+    /// proves the sibling batch was re-stamped under the new epoch with a SINGLE bump
+    /// (no chained bump, gap A).
+    async fn serve_idempotent_two_inflight_unknown_producer_then_single_rebump() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let handshake = read_frame(&mut socket).await;
+            socket
+                .write_all(&api_versions_response_frame(handshake))
+                .await
+                .unwrap();
+
+            let mut init_calls = 0_usize;
+            let mut delivered = 0_usize;
+            let mut next_offset = 40_i64;
+            while delivered < 2 {
+                let mut request = read_frame(&mut socket).await;
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                if header.request_api_key == ApiKey::InitProducerId as i16 {
+                    init_calls = init_calls.saturating_add(1);
+                    // First call assigns epoch 3; the recovery bump assigns epoch 4.
+                    let epoch = if init_calls == 1 { 3 } else { 4 };
+                    socket
+                        .write_all(&init_producer_id_response_frame(
+                            header.correlation_id,
+                            42,
+                            epoch,
+                        ))
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+                let produce =
+                    ProduceRequestData::read(&mut request, header.request_api_version)
+                        .expect("produce request");
+                let mut records = produce
+                    .topic_data
+                    .first()
+                    .and_then(|topic| topic.partition_data.first())
+                    .and_then(|partition| partition.records.clone())
+                    .expect("records");
+                let batch = RecordBatch::decode(&mut records).expect("record batch");
+                assert_eq!(batch.producer_id, 42);
+                if batch.producer_epoch < 4 {
+                    // Stale epoch: fail with UNKNOWN_PRODUCER_ID to force the bump.
+                    socket
+                        .write_all(
+                            &produce_error_response_frame_with_log_start_offset_for_version(
+                                header.request_api_version,
+                                header.correlation_id,
+                                0,
+                                ErrorCode::UnknownProducerId,
+                                0,
+                            ),
+                        )
+                        .await
+                        .unwrap();
+                } else {
+                    // Re-stamped under the new epoch: ack it.
+                    socket
+                        .write_all(&produce_response_frame(header.correlation_id, 0, next_offset))
+                        .await
+                        .unwrap();
+                    next_offset = next_offset.saturating_add(1);
+                    delivered = delivered.saturating_add(1);
+                }
+            }
+            init_calls
+        });
+        Self { addr, join }
+    }
+
     /// Two idempotent batches (base sequence 0 and 1) are pipelined IN FLIGHT to one
     /// partition, then the connection drops so both re-enqueue for retry. The retry
     /// must re-send them strictly in base-sequence order (Java firstInFlightSequence):
@@ -9173,9 +9335,8 @@ impl MockBroker {
                 let mut request = read_frame(&mut first).await;
                 let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
                 assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce =
-                    ProduceRequestData::read(&mut request, header.request_api_version)
-                        .expect("produce request");
+                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                    .expect("produce request");
                 assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
             }
             // Drop both in-flight requests so the producer re-enqueues them.
@@ -9196,9 +9357,8 @@ impl MockBroker {
                 let header =
                     RequestHeaderData::read(&mut request, 2).expect("retry produce header");
                 assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce =
-                    ProduceRequestData::read(&mut request, header.request_api_version)
-                        .expect("retry produce request");
+                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                    .expect("retry produce request");
                 assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
                 retry
                     .write_all(&produce_response_frame(header.correlation_id, 0, offset))
