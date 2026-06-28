@@ -3328,7 +3328,10 @@ impl ProducerSenderState {
 
     pub(crate) fn reserve_dispatch_partitions(&mut self, partitions: &[InFlightPartitionKey]) {
         for partition in partitions {
-            let depth = self.in_flight_partitions.entry(partition.clone()).or_insert(0);
+            let depth = self
+                .in_flight_partitions
+                .entry(partition.clone())
+                .or_insert(0);
             *depth = depth.saturating_add(1);
         }
     }
@@ -3510,7 +3513,9 @@ impl ProducerSenderState {
                     if index < selection.partitions.len() {
                         let _dropped = selection.partitions.remove(index);
                     }
-                    selection.deferred.push(selection.dispatchable.remove(index));
+                    selection
+                        .deferred
+                        .push(selection.dispatchable.remove(index));
                 }
                 Ok(selection)
             },
@@ -3713,7 +3718,6 @@ mod tests {
             producer_state: None,
         }
     }
-
 
     fn ready_accumulator() -> SharedAccumulator {
         let accumulator = SharedAccumulator::with_config(
