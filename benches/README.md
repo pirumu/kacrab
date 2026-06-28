@@ -228,11 +228,24 @@ kafka-producer-perf-test.sh --topic kacrab-16p --num-records 5000000 \
 | retries / errors | 0 / 0 | 0 / 0 |
 
 kacrab wins throughput (about +12% over Java's best runs) while staying fully
-idempotent-correct, but Java has lower and steadier latency: the synchronous
-send fills the per-partition pipeline deep. On a single partition (`kacrab-1p`)
-kacrab latency is ~0.2 ms avg, close to Java. Lower
-`max.in.flight.requests.per.connection` / `linger.ms` trades throughput back for
-latency.
+idempotent-correct, but Java has lower typical latency. The gap is a tunable
+tradeoff plus a shared broker artifact, not a client cost:
+
+- **Pipeline depth.** kacrab's synchronous send fills the per-partition pipeline
+  toward `max.in.flight=5`. At `max.in.flight=1` kacrab's p99 drops to ~2 ms at
+  the same ~4.7M throughput, because on a single low-RTT broker the per-broker
+  request coalescing already saturates the connection and the extra depth only
+  adds queue latency. Depth pays off across multiple brokers / higher RTT.
+- **Broker-pause resilience.** The co-located single-node JVM broker pauses
+  periodically (GC/fsync); Java sees it too (max latency spiked to 129 ms in the
+  same runs). At depth 5 a pause on one in-flight request lets the others drain
+  (kacrab p99.9 ~10 ms); at depth 1 the single slot blocks and p99.9 jumps to
+  ~100 ms.
+
+On a single partition (`kacrab-1p`) kacrab latency is ~0.2 ms avg, close to Java.
+Lower `max.in.flight.requests.per.connection` / `linger.ms` for lower
+single-broker latency; the gap shrinks in production (broker off the client
+machine, real network RTT).
 
 ### CPU + peak memory (same 5M x 10B run, `/usr/bin/time -l`)
 

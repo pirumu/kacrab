@@ -343,20 +343,35 @@ Head-to-head on the same single-node broker, topic, and config (`acks=all` +
 
 | Scenario | kacrab `producer_kafka_bench` | Java `kafka-producer-perf-test.sh` |
 | --- | ---: | ---: |
-| 5M x 10B, 16 partitions | **4.70M rec/sec**; 44.8 MiB/sec; lat avg ~1.7 ms, p99 ~15 ms; retries 0, errors 0, in-flight stalls 0 | 4.21M records/sec; 40.1 MB/sec; lat avg **0.27 ms**, p99 **1 ms** |
+| 5M x 10B, 16 partitions | **4.70M rec/sec**; 44.8 MiB/sec; lat avg ~1.3 ms, p99 ~8 ms (depth 5; see below); retries 0, errors 0, in-flight stalls 0 | 4.21M records/sec; 40.1 MB/sec; lat avg **0.27 ms**, p99 **1 ms** |
 | 2M x 10B, 1 partition | **4.69M rec/sec**; 44.7 MiB/sec; lat avg ~0.2 ms, p99 ~5 ms; retries 0, errors 0 | -- |
 
-Throughput vs latency, honestly: kacrab is ~12% faster than the Java client on
-the 16-partition workload while staying fully idempotent-correct (zero
-retries/errors), **but Java has lower latency**. kacrab's synchronous send fills
-the per-partition pipeline deep (up to `max.in.flight=5`) to maximize throughput,
-so its 16-partition tail latency (~15 ms p99, occasionally higher) sits above
-Java's (~1 ms p99). Latency uses the same accounting as Java's perf tool
-(per-record send-to-ack via the callback). For latency-sensitive workloads,
-lower `max.in.flight.requests.per.connection` / `linger.ms` to trade some
-throughput back for latency; single-partition steady-state latency (~0.2 ms avg)
-is already close to Java's. The first 1-partition run includes a cold
-metadata/connection warmup (~15 ms) that the steady-state runs do not.
+Throughput vs latency, honestly: kacrab is ~12% faster on the 16-partition
+workload while staying fully idempotent-correct (zero retries/errors), **but Java
+has a lower typical latency** (avg ~0.3 ms, p99 ~1 ms vs kacrab avg ~1.3 ms,
+p99 ~8 ms; same accounting — per-record send-to-ack via the callback). We dug
+into the gap, and it is **a tunable tradeoff plus a shared broker artifact, not a
+client cost**:
+
+- **Most of it is pipeline depth.** kacrab's synchronous send keeps the
+  per-partition pipeline filled toward `max.in.flight=5`. Drop it to
+  `max.in.flight=1` and kacrab's p99 falls to **~2 ms at the same ~4.7M
+  throughput** — on a single low-RTT broker the per-broker request coalescing
+  already saturates the connection, so the extra depth only adds queue latency
+  here. It pays off across multiple brokers / higher RTT, where depth hides
+  round-trip time.
+- **The depth buys broker-pause resilience.** The co-located single-node JVM
+  broker periodically pauses (GC/fsync) — Java sees it too (its max latency
+  spiked to 129 ms in the same runs). At depth 5 a pause on one in-flight
+  request lets the others drain, so kacrab's p99.9 stays ~10 ms; at depth 1 the
+  single slot blocks behind the pause and p99.9 jumps to ~100 ms.
+
+The gap shrinks in production (real broker off the client machine, real network
+RTT). For latency-sensitive single-broker use, lower
+`max.in.flight.requests.per.connection` / `linger.ms`. Single-partition
+steady-state latency is ~0.2 ms avg, already close to Java's; the first
+1-partition run includes a cold metadata/connection warmup (~15 ms) that the
+steady-state runs do not.
 
 CPU + peak memory for the same 5M-record run (`/usr/bin/time -l`):
 
