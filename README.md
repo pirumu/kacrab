@@ -42,6 +42,12 @@ workload (at higher latency — see [Benchmarks](#benchmarks)). The current focu
 before consumer work: multi-broker behavior, bounded hot paths, routing refresh,
 and sustained stress testing.
 
+Producer module test coverage is **~92% line** (`cargo llvm-cov`, 600+ unit and
+integration tests). The append/dispatch/idempotent-recovery hot paths, the
+murmur2 partitioner (byte-exact against the Java client for every key length),
+transactions, interceptors, and metrics are covered; the remaining gaps are
+mechanical error-clone arms and rare defensive branches.
+
 Auth and producer are treated as **Java-compatible targets** for the
 implemented surface:
 

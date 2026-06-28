@@ -152,16 +152,18 @@ pub(crate) fn murmur2_java(input: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     #![allow(
+        clippy::cast_possible_wrap,
         clippy::expect_used,
         clippy::missing_assert_message,
         clippy::unwrap_used,
-        reason = "Unit test fixtures fail fastest with contextual unwrap/expect calls."
+        reason = "Unit test fixtures fail fastest with contextual unwrap/expect calls; \
+                  murmur2 hashes are reinterpreted as Java's signed int for comparison."
     )]
 
     use bytes::Bytes;
     use kacrab_protocol::KafkaUuid;
 
-    use super::{partition_for_record, route};
+    use super::{murmur2_java, partition_for_record, route};
     use crate::{
         producer::{ProducerError, ProducerRecord},
         wire::{BrokerMetadata, ClusterMetadata, PartitionMetadata, TopicMetadata},
@@ -257,5 +259,31 @@ mod tests {
                 .expect("second round-robin partition"),
             1
         );
+    }
+
+    #[test]
+    fn murmur2_matches_java_for_all_remainder_lengths() {
+        // Authoritative values from Apache Kafka 4.3.0 `Utils.murmur2` (UtilsTest
+        // vectors plus values computed from kafka-clients-4.3.0.jar), one per
+        // `chunks_exact` tail length: key length mod 4 == 0, 1, 2, and 3. Java
+        // returns a signed `int`, so the `u32` hash is reinterpreted with `as i32`.
+        let cases: [(&[u8], i32); 8] = [
+            (b"a-little-bit-long-string", -985_981_536), // len 24, %4 == 0
+            (b"lkjh234lh9fiuh90y23oiuhsafujhadof229phr9h19h89h8", -58_897_971), // len 48, %4 == 0
+            (b"a", -1_563_381_124),                      // len 1, %4 == 1
+            (b"hello", 2_132_663_229),                   // len 5, %4 == 1
+            (b"21", -973_932_308),                       // len 2, %4 == 2
+            (b"foobar", -790_332_482),                   // len 6, %4 == 2
+            (b"a-little-bit-longer-string", -1_486_304_829), // len 26, %4 == 2
+            (b"abc", 479_470_107),                       // len 3, %4 == 3
+        ];
+        for (key, expected) in cases {
+            assert_eq!(
+                murmur2_java(key) as i32,
+                expected,
+                "murmur2 mismatch for key of length {}",
+                key.len()
+            );
+        }
     }
 }
