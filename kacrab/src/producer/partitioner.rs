@@ -207,4 +207,34 @@ mod tests {
 
         assert_eq!(selected, vec![0, 2, 0, 2]);
     }
+
+    #[test]
+    fn round_robin_partitioner_falls_back_to_all_partitions_when_none_have_a_leader() {
+        let partitioner = RoundRobinPartitioner::new();
+        // No partition has a live leader; rather than failing, the partitioner
+        // cycles across all partitions by the per-topic counter.
+        let metadata = metadata(&[(0, -1), (1, -1), (2, -1)]);
+        let record = ProducerRecord::new("orders", 0);
+
+        let selected: Vec<i32> = (0..4)
+            .map(|_| {
+                partitioner
+                    .partition(&record, &metadata)
+                    .expect("fallback partition")
+            })
+            .collect();
+
+        assert_eq!(selected, vec![0, 1, 2, 0]);
+    }
+
+    #[test]
+    fn partitioner_handle_close_passes_through_and_is_noop_when_empty() {
+        let installed = super::ProducerPartitionerHandle::new(RoundRobinPartitioner::new());
+        assert!(installed.is_some());
+        installed.close(); // exercises the installed-partitioner close passthrough
+
+        let empty = super::ProducerPartitionerHandle::default();
+        assert!(!empty.is_some());
+        empty.close(); // no-op when nothing is installed
+    }
 }
