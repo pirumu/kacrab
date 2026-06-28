@@ -358,6 +358,20 @@ throughput back for latency; single-partition steady-state latency (~0.2 ms avg)
 is already close to Java's. The first 1-partition run includes a cold
 metadata/connection warmup (~15 ms) that the steady-state runs do not.
 
+CPU + peak memory for the same 5M-record run (`/usr/bin/time -l`):
+
+| Resource | kacrab | Java | Java overhead |
+| --- | ---: | ---: | ---: |
+| Peak RSS | ~68 MiB | ~268 MiB | ~3.9x more |
+| Total CPU (user+sys) | ~2.7 s | ~4.1 s | ~1.5x more |
+
+The ~12% throughput edge is modest because throughput here is **broker-bound** —
+both clients spend most of the run waiting on `acks=all` round-trips, so the
+client language barely moves that number. The native-vs-JVM advantage shows up
+instead in efficiency: kacrab uses **~4x less memory** (no JVM heap/metaspace)
+and **~1.5x less CPU per record**. (Java's CPU includes one-time JVM startup +
+JIT warmup; the peak-RSS gap is steady-state.)
+
 Bench knobs: `KACRAB_BENCH_TOPIC`, `KACRAB_BENCH_MESSAGES`, `KACRAB_BENCH_RUNS`,
 `KACRAB_BENCH_ACKS1` (acks=1), `KACRAB_BENCH_BATCH_SIZE`. The 16- and
 1-partition topics (`kacrab-16p`, `kacrab-1p`) must exist on the broker. The
