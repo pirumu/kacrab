@@ -469,14 +469,28 @@ impl ProducerDispatcher {
                 .route_for_batch(&metadata, batch, &first_record)
                 .await?;
             self.add_partition_to_transaction(&route).await?;
-            if batch.producer_state.is_none() {
-                match self
+            match batch.producer_state {
+                None => match self
                     .producer_batch_state(&route, batch.records.len())
                     .await?
                 {
                     ProducerBatchPrep::Ready(state) => batch.producer_state = state,
                     ProducerBatchPrep::DeferUnresolved => deferred.push(index),
-                }
+                },
+                // Retried batch (kept its assigned sequence): Java
+                // `shouldStopDrainBatchesForPartition` retry clause — only dispatch when
+                // its base sequence is the partition's first in-flight sequence; else an
+                // earlier-sequence batch is still unacked, so defer to keep retries in
+                // strict sequence order (reducing to one in-flight while retrying).
+                Some(producer_state) => {
+                    let first_inflight = {
+                        let state = self.producer_state.lock().await;
+                        state.first_inflight_sequence(&route.topic, route.partition)
+                    };
+                    if first_inflight.is_some_and(|first| producer_state.base_sequence != first) {
+                        deferred.push(index);
+                    }
+                },
             }
         }
         Ok(deferred)
@@ -5054,6 +5068,20 @@ impl ProducerIdempotenceState {
         self.partitions
             .get(&key)
             .is_some_and(|entry| !entry.inflight_by_sequence.is_empty())
+    }
+
+    /// Java `firstInFlightSequence`: the lowest in-flight base sequence for a
+    /// partition, or `None` when nothing is in flight. The drain gate defers a
+    /// retried batch whose base sequence is not this value, so retries re-send
+    /// strictly in sequence order.
+    fn first_inflight_sequence(&self, topic: &str, partition: i32) -> Option<i32> {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        self.partitions
+            .get(&key)
+            .and_then(|entry| entry.inflight_by_sequence.iter().next().copied())
     }
 
     /// Record whether the loss that left a partition unresolved was ambiguous, so a
