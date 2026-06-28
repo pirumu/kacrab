@@ -2837,18 +2837,17 @@ impl ProducerDispatcher {
             let Ok(record_count) = i32::try_from(batch.records.len()) else {
                 continue;
             };
-            let Some(next_sequence) = producer_state.base_sequence.checked_add(record_count) else {
+            if record_count < 1 {
                 continue;
-            };
+            }
+            let next_sequence = increment_sequence(producer_state.base_sequence, record_count);
             state.release_sequence(&batch.topic, batch.partition, next_sequence);
             // Java handleCompletedBatch: record the last acked sequence/offset for
             // this partition (used by maybeResolveSequences and UnknownProducerId
-            // disambiguation).
-            state.maybe_update_last_acked_sequence(
-                &batch.topic,
-                batch.partition,
-                next_sequence.saturating_sub(1),
-            );
+            // disambiguation). lastSequence = base + recordCount - 1 (wrapping).
+            let last_sequence =
+                increment_sequence(producer_state.base_sequence, record_count.saturating_sub(1));
+            state.maybe_update_last_acked_sequence(&batch.topic, batch.partition, last_sequence);
             if let Some(receipt) = receipts.iter().find(|receipt| {
                 receipt.topic.as_ref() == batch.topic && receipt.partition == batch.partition
             }) {
@@ -4964,13 +4963,7 @@ impl ProducerIdempotenceState {
             });
         }
         let base_sequence = entry.next_sequence;
-        let next_sequence = base_sequence.checked_add(record_count).ok_or_else(|| {
-            ProducerError::SequenceOverflow {
-                topic: topic.to_owned(),
-                partition,
-            }
-        })?;
-        entry.next_sequence = next_sequence;
+        entry.next_sequence = increment_sequence(base_sequence, record_count);
         Ok(base_sequence)
     }
 
@@ -4985,7 +4978,7 @@ impl ProducerIdempotenceState {
             topic: topic.to_owned(),
             partition,
         };
-        let next_sequence = base_sequence.saturating_add(record_count);
+        let next_sequence = increment_sequence(base_sequence, record_count);
         let entry = self.partitions.entry(key).or_default();
         entry.unresolved_next_sequence = Some(
             entry
@@ -5114,11 +5107,13 @@ impl ProducerIdempotenceState {
         let (has_unresolved, resolved) = match self.partitions.get(&key) {
             Some(entry) => (
                 entry.unresolved_next_sequence.is_some(),
-                // isNextSequence: lastAcked + 1 == nextSequence => fully acked.
+                // isNextSequence: nextSequence - lastAcked == 1 => fully acked.
+                // Java uses wrapping int subtraction so it stays correct across the
+                // i32::MAX sequence wraparound.
                 entry.last_acked_sequence != NO_LAST_ACKED_SEQUENCE
                     && entry
                         .next_sequence
-                        .saturating_sub(entry.last_acked_sequence)
+                        .wrapping_sub(entry.last_acked_sequence)
                         == 1,
             ),
             None => return,
@@ -5247,6 +5242,21 @@ impl ProducerIdempotenceState {
 const NO_LAST_ACKED_SEQUENCE: i32 = -1;
 /// Java `ProduceResponse::INVALID_OFFSET`.
 const INVALID_LAST_ACKED_OFFSET: i64 = -1;
+
+/// Java `DefaultRecordBatch.incrementSequence`: advance a non-negative idempotent
+/// base sequence by `increment`, wrapping at `i32::MAX` back to 0 (Kafka sequences
+/// are 31-bit and wrap rather than overflow). `increment` is a record count (>= 0).
+const fn increment_sequence(sequence: i32, increment: i32) -> i32 {
+    // All branches are provably non-overflowing for non-negative `sequence`/`increment`;
+    // wrapping ops also mirror Java's wrapping int arithmetic exactly.
+    if sequence > i32::MAX.wrapping_sub(increment) {
+        increment
+            .wrapping_sub(i32::MAX.wrapping_sub(sequence))
+            .wrapping_sub(1)
+    } else {
+        sequence.wrapping_add(increment)
+    }
+}
 
 /// Per-partition idempotent bookkeeping, mirroring Java `TxnPartitionEntry`.
 #[derive(Debug, Clone)]
@@ -9001,7 +9011,7 @@ mod tests {
     }
 
     #[test]
-    fn idempotence_state_tracks_sequences_and_reports_overflow() {
+    fn idempotence_state_tracks_sequences_and_wraps_at_max_like_java() {
         let mut state = ProducerIdempotenceState::default();
 
         assert_eq!(
@@ -9015,16 +9025,26 @@ mod tests {
             3
         );
 
+        // Java DefaultRecordBatch.incrementSequence wraps at i32::MAX rather than
+        // overflowing: base i32::MAX with a 1-record batch returns i32::MAX and the
+        // next base wraps to 0.
         let key = TopicPartitionKey {
             topic: "orders".to_owned(),
             partition: 0,
         };
-        state.partitions.entry(key).or_default().next_sequence = i32::MAX;
-        assert!(matches!(
-            state.next_sequence("orders", 0, 1),
-            Err(ProducerError::SequenceOverflow { topic, partition })
-                if topic == "orders" && partition == 0
-        ));
+        state.partitions.entry(key.clone()).or_default().next_sequence = i32::MAX;
+        assert_eq!(
+            state.next_sequence("orders", 0, 1).expect("wrapping base sequence"),
+            i32::MAX
+        );
+        assert_eq!(state.partitions[&key].next_sequence, 0);
+        // A 3-record batch straddling the boundary: base 2147483646 -> next wraps to 2.
+        state.partitions.entry(key.clone()).or_default().next_sequence = i32::MAX - 1;
+        assert_eq!(
+            state.next_sequence("orders", 0, 3).expect("straddling base sequence"),
+            i32::MAX - 1
+        );
+        assert_eq!(state.partitions[&key].next_sequence, 1);
     }
 
     #[test]
