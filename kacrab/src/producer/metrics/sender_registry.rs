@@ -212,13 +212,15 @@ impl ClientSensors {
             metrics,
             "waiting-threads",
             "waiting-threads",
-            "The number of user threads blocked waiting for buffer memory to enqueue their records.",
+            "The number of user threads blocked waiting for buffer memory to enqueue their \
+             records.",
         );
         let buffer_exhausted = meter(
             metrics,
             "buffer-exhausted",
             "buffer-exhausted-rate",
-            "The average per-second number of record sends that are blocked on buffer memory exhaustion.",
+            "The average per-second number of record sends that are blocked on buffer memory \
+             exhaustion.",
             "buffer-exhausted-total",
             "The total number of record sends that are blocked on buffer memory exhaustion.",
         );
@@ -628,10 +630,7 @@ mod tests {
             metrics.get("producer-metrics:buffer-available-bytes"),
             Some(&2048.0)
         );
-        assert_eq!(
-            metrics.get("producer-metrics:waiting-threads"),
-            Some(&2.0)
-        );
+        assert_eq!(metrics.get("producer-metrics:waiting-threads"), Some(&2.0));
 
         // Client-level cumulative totals (Java Meter total = sum of recorded values).
         assert_eq!(

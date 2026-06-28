@@ -32,9 +32,7 @@ use super::{
     config::ProducerRuntimeConfig,
     dispatcher::ProducerDispatcher,
     error::{ProducerError, Result},
-    interceptor::{
-        ClusterResource, InterceptorConfigs, ProducerInterceptor, ProducerInterceptors,
-    },
+    interceptor::{ClusterResource, InterceptorConfigs, ProducerInterceptor, ProducerInterceptors},
     metrics::{
         KafkaMetric, MetricName, MetricReporter, ProducerMetricValue, ProducerMetrics,
         ProducerMetricsSnapshot, ProducerQueueMetrics,

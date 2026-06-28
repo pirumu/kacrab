@@ -9261,9 +9261,8 @@ impl MockBroker {
                     continue;
                 }
                 assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce =
-                    ProduceRequestData::read(&mut request, header.request_api_version)
-                        .expect("produce request");
+                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                    .expect("produce request");
                 let mut records = produce
                     .topic_data
                     .first()
@@ -9289,7 +9288,11 @@ impl MockBroker {
                 } else {
                     // Re-stamped under the new epoch: ack it.
                     socket
-                        .write_all(&produce_response_frame(header.correlation_id, 0, next_offset))
+                        .write_all(&produce_response_frame(
+                            header.correlation_id,
+                            0,
+                            next_offset,
+                        ))
                         .await
                         .unwrap();
                     next_offset = next_offset.saturating_add(1);
