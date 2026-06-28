@@ -23,7 +23,7 @@ use kacrab::{
         RecordMetadata,
         internals::{
             AccumulatorConfig, ProducerDispatcher, ProducerIdempotenceConfig,
-            ProducerRuntimeConfig, RecordAccumulator,
+            ProducerRuntimeConfig, SharedAccumulator,
         },
     },
     wire::{BrokerEndpoint, ClusterMetadata, ConnectionConfig, WireClient},
@@ -167,7 +167,6 @@ async fn kafka_producer_send_buffers_until_flush() {
 
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     assert!(wait_for_buffered_bytes(&producer).await > 0);
 
@@ -219,7 +218,7 @@ async fn kafka_producer_background_sender_dispatches_after_linger_without_flush(
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -249,7 +248,6 @@ async fn kafka_producer_background_sender_dispatches_after_linger_without_flush(
             ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
             |_| {},
         )
-        .await
         .unwrap();
 
     let receipt = tokio::time::timeout(Duration::from_millis(250), delivery)
@@ -300,7 +298,7 @@ async fn kafka_producer_background_sender_dispatches_ready_batch_without_linger_
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -330,7 +328,6 @@ async fn kafka_producer_background_sender_dispatches_ready_batch_without_linger_
             ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
             |_| {},
         )
-        .await
         .unwrap();
 
     let receipt = tokio::time::timeout(Duration::from_millis(250), delivery)
@@ -411,7 +408,6 @@ async fn kafka_producer_send_with_callback_invokes_callback_and_returns_delivery
                     .push(result.expect("callback receipt"));
             },
         )
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -466,7 +462,6 @@ async fn kafka_producer_builder_accepts_java_style_config() {
 
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -916,12 +911,16 @@ async fn kafka_producer_interceptor_send_error_uses_assigned_partition_like_java
         metadata: Arc::clone(&captured),
     });
 
+    // A keyed, unassigned record on a cold-metadata topic resolves its partition
+    // asynchronously, so the too-large error surfaces on the returned delivery
+    // future (after the partition is assigned) rather than from the sync send call.
     let error = producer
         .send(
             ProducerRecord::unassigned("orders")
                 .key(Bytes::from_static(b"customer-42"))
                 .value(Bytes::from_static(b"value")),
         )
+        .expect("oversized record is enqueued for async partition assignment")
         .await
         .expect_err("record should exceed max.request.size");
     let metadata = captured
@@ -993,7 +992,6 @@ async fn kafka_producer_builder_uses_native_partitioner_instead_of_jvm_class_loa
 
     let delivery = producer
         .send(ProducerRecord::unassigned("orders").value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -1084,11 +1082,9 @@ async fn kafka_producer_send_auto_batches_per_record_sends_until_flush() {
 
     let first = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     let second = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -1202,7 +1198,6 @@ async fn kafka_producer_send_with_callback_auto_batches_until_flush() {
                 let _previous = first_delivered.fetch_add(1, Ordering::Relaxed);
             },
         )
-        .await
         .unwrap();
     let second_delivered = Arc::clone(&delivered);
     let _second_delivery = producer
@@ -1213,7 +1208,6 @@ async fn kafka_producer_send_with_callback_auto_batches_until_flush() {
                 let _previous = second_delivered.fetch_add(1, Ordering::Relaxed);
             },
         )
-        .await
         .unwrap();
     producer.flush().await.unwrap();
 
@@ -1272,20 +1266,12 @@ async fn kafka_producer_pipelines_ready_batches_until_flush() {
         },
     );
 
-    let first_delivery = tokio::time::timeout(
-        Duration::from_millis(200),
-        producer.send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a"))),
-    )
-    .await
-    .expect("first send should not wait for broker ack")
-    .unwrap();
-    let second_delivery = tokio::time::timeout(
-        Duration::from_millis(200),
-        producer.send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b"))),
-    )
-    .await
-    .expect("second send should not wait for broker ack")
-    .unwrap();
+    let first_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .unwrap();
+    let second_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
+        .unwrap();
 
     producer.flush().await.unwrap();
     let mut receipts = [
@@ -1376,7 +1362,6 @@ async fn kafka_producer_single_send_budget_coalesces_ready_partitions() {
             ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
             |_| {},
         )
-        .await
         .unwrap();
     assert_eq!(producer.metrics().produce_request_count, 0);
 
@@ -1385,7 +1370,6 @@ async fn kafka_producer_single_send_budget_coalesces_ready_partitions() {
             ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")),
             |_| {},
         )
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -1486,7 +1470,6 @@ async fn kafka_producer_10kib_records_keep_observed_requests_under_max_request_s
         let partition = i32::try_from(partition).expect("partition id should fit i32");
         let delivery = producer
             .send(ProducerRecord::new("orders", partition).value(value.clone()))
-            .await
             .expect("send 10KiB record");
         deliveries.push(delivery);
     }
@@ -1597,20 +1580,12 @@ async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() 
     let partitions = producer.partitions_for("orders").await.unwrap();
     assert_eq!(partitions.len(), 2);
 
-    let first_delivery = tokio::time::timeout(
-        Duration::from_millis(200),
-        producer.send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a"))),
-    )
-    .await
-    .expect("first send should not wait for broker ack")
-    .unwrap();
-    let second_delivery = tokio::time::timeout(
-        Duration::from_millis(200),
-        producer.send(ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b"))),
-    )
-    .await
-    .expect("second send should not wait for broker ack")
-    .unwrap();
+    let first_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .unwrap();
+    let second_delivery = producer
+        .send(ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")))
+        .unwrap();
 
     producer.flush().await.unwrap();
     let mut receipts = [
@@ -1625,7 +1600,8 @@ async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() 
     assert_eq!(receipts[1].offset, 41);
     assert_eq!(producer.buffered_bytes(), 0);
     assert_eq!(bootstrap.join().await, 2);
-    assert_eq!(leader_7.join().await, 4);
+    // handshake + InitProducerId + one coalesced Produce request for both partitions.
+    assert_eq!(leader_7.join().await, 3);
 }
 
 #[tokio::test]
@@ -1686,11 +1662,9 @@ async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correla
 
     let first_delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     let second_delivery = producer
         .send(ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")))
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -1703,7 +1677,8 @@ async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correla
     assert_eq!(second.offset, 41);
     assert_eq!(producer.buffered_bytes(), 0);
     assert_eq!(bootstrap.join().await, 2);
-    assert_eq!(leader_7.join().await, 4);
+    // handshake + InitProducerId + one coalesced Produce request for both partitions.
+    assert_eq!(leader_7.join().await, 3);
 }
 
 #[tokio::test]
@@ -1761,7 +1736,6 @@ async fn idempotent_kafka_producer_retries_disconnected_in_flight_batch_with_sam
 
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -1829,7 +1803,6 @@ async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_t
 
     let first_delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     let first_error = producer
         .flush()
@@ -1843,7 +1816,6 @@ async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_t
 
     let second_delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
     let receipt = second_delivery.await.unwrap();
@@ -1853,6 +1825,167 @@ async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_t
     assert_eq!(producer.buffered_bytes(), 0);
     assert_eq!(bootstrap.join().await, 2);
     assert_eq!(leader_7.join().await, 6);
+}
+
+#[tokio::test]
+async fn idempotent_kafka_producer_resends_multi_inflight_batches_in_sequence_order_after_retry() {
+    // End-to-end fault injection for the firstInFlightSequence gate: two batches are
+    // pipelined in flight to one partition (multi-in-flight), the connection drops, and
+    // the producer must re-send them strictly in base-sequence order on retry.
+    let leader_7 = MockBroker::serve_idempotent_two_inflight_disconnect_then_inorder_retry().await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response_same_leader(7, leader_7);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default()
+            .max_in_flight_requests_per_connection(5)
+            .broker_queue_capacity(8)
+            .request_timeout(Duration::from_secs(30)),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 5,
+            retry_backoff: Duration::from_millis(1),
+            retry_backoff_max: Duration::from_millis(1),
+            // Generous so the disconnect is a plain wire retry, not a delivery timeout
+            // (which would bump the epoch and reset the sequences).
+            delivery_timeout: Duration::from_secs(30),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 5,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: None,
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+
+    let first_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .unwrap();
+    let second_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
+        .unwrap();
+    producer.flush().await.unwrap();
+
+    let first_receipt = first_delivery.await.unwrap();
+    let second_receipt = second_delivery.await.unwrap();
+    assert_eq!(first_receipt.partition, 0);
+    assert_eq!(first_receipt.offset, 40);
+    assert_eq!(second_receipt.partition, 0);
+    assert_eq!(second_receipt.offset, 41);
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    // The mock asserts in-order base sequences (0 then 1) on BOTH the initial in-flight
+    // pair and the retry; reaching its full handler count proves the ordering held.
+    assert_eq!(leader_7.join().await, 6);
+}
+
+#[tokio::test]
+async fn idempotent_kafka_producer_restamps_sibling_inflight_batch_after_single_epoch_bump() {
+    // Cross-task re-stamp end-to-end: two batches in flight to one partition under
+    // epoch 3 both get UNKNOWN_PRODUCER_ID; the producer must bump the epoch ONCE and
+    // re-stamp BOTH (the sibling included) under the new epoch, then deliver them.
+    let leader_7 =
+        MockBroker::serve_idempotent_two_inflight_unknown_producer_then_single_rebump().await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response_same_leader(7, leader_7);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default()
+            .max_in_flight_requests_per_connection(5)
+            .broker_queue_capacity(8)
+            .request_timeout(Duration::from_secs(30)),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let mut producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 10,
+            retry_backoff: Duration::from_millis(1),
+            retry_backoff_max: Duration::from_millis(1),
+            delivery_timeout: Duration::from_secs(30),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 5,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: None,
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+
+    let first_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .unwrap();
+    let second_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
+        .unwrap();
+    // Recovery (UNKNOWN_PRODUCER_ID -> epoch bump -> re-stamp) may span flush cycles;
+    // drive until both records are delivered.
+    for _ in 0..50 {
+        if producer.flush().await.is_ok() {
+            break;
+        }
+    }
+
+    let first_receipt = first_delivery.await.unwrap();
+    let second_receipt = second_delivery.await.unwrap();
+    assert_eq!(first_receipt.partition, 0);
+    assert_eq!(second_receipt.partition, 0);
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    // Exactly one initial InitProducerId + ONE epoch bump (no chained bump, gap A);
+    // the sibling batch was re-stamped under the bumped epoch and acked.
+    assert_eq!(leader_7.join().await, 2);
 }
 
 #[tokio::test]
@@ -1941,7 +2074,6 @@ async fn idempotent_kafka_producer_retries_leadership_error_with_current_leader_
 
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
 
     producer.flush().await.unwrap();
@@ -2004,7 +2136,6 @@ async fn kafka_producer_requeues_in_flight_batch_when_metadata_is_missing() {
 
     let _delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
 
     let error = producer.flush().await.unwrap_err();
@@ -2075,7 +2206,6 @@ async fn kafka_producer_metrics_snapshot_reports_queue_and_dispatch_counters() {
 
     let _delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     let queued = producer.metrics();
     assert_eq!(queued.records_appended, 1);
@@ -2318,7 +2448,6 @@ async fn kafka_producer_commits_transactional_send() {
     assert!(metrics.transaction_begin_total_latency >= Duration::ZERO);
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
     assert_eq!(producer.metrics().transaction_commit_count, 0);
@@ -2435,7 +2564,6 @@ async fn kafka_producer_commit_timeout_can_retry_same_operation_like_java() {
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
 
@@ -2569,7 +2697,6 @@ async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
 
@@ -2716,8 +2843,26 @@ async fn kafka_producer_abort_holds_end_txn_until_in_flight_batches_drain_like_j
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
+
+    // The synchronous send appends the (batch.size=1, immediately full) batch but
+    // dispatch happens on the background loop, so drive it until the batch is in
+    // flight — its Produce request is sent and the broker holds the response for
+    // 80ms. This is the precondition the test exercises: abort must hold EndTxn
+    // until the already-in-flight batch drains (like Java's Sender thread sending
+    // the batch before the abort completes), rather than discarding a buffered
+    // batch that was never sent.
+    for _ in 0..1_000 {
+        if producer.buffered_bytes() == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        producer.buffered_bytes(),
+        0,
+        "record batch should be in flight before abort"
+    );
 
     producer.abort_transaction().await.unwrap();
 
@@ -2830,7 +2975,6 @@ async fn kafka_producer_transaction_v2_skips_add_partitions_to_txn_like_java() {
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
     producer.commit_transaction().await.unwrap();
@@ -2946,7 +3090,6 @@ async fn kafka_producer_transaction_v2_installs_end_txn_epoch_like_java() {
     producer.begin_transaction().unwrap();
     let first_delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
     producer.commit_transaction().await.unwrap();
@@ -2954,7 +3097,6 @@ async fn kafka_producer_transaction_v2_installs_end_txn_epoch_like_java() {
     producer.begin_transaction().unwrap();
     let second_delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
     producer.commit_transaction().await.unwrap();
@@ -3068,7 +3210,6 @@ async fn kafka_producer_transactional_unknown_producer_id_is_abortable_like_java
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .expect("send returns a delivery future before the async produce response");
 
     let send_error = producer
@@ -3099,7 +3240,6 @@ async fn kafka_producer_transactional_unknown_producer_id_is_abortable_like_java
     producer.begin_transaction().unwrap();
     let recovered_delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")))
-        .await
         .expect("send after abort should use bumped epoch");
     producer.flush().await.unwrap();
     assert_eq!(recovered_delivery.await.unwrap().offset, 91);
@@ -3190,7 +3330,6 @@ async fn kafka_producer_transactional_unsupported_message_format_is_abortable_li
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .expect("send returns a delivery future before the async produce response");
 
     let send_error = producer
@@ -3275,8 +3414,12 @@ async fn kafka_producer_add_partitions_fatal_error_blocks_abort() {
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
+    // The synchronous send appends and returns a future; AddPartitionsToTxn runs
+    // during background dispatch (like Java's Sender thread), so its fatal
+    // InvalidTxnState surfaces on the delivery future rather than the send call.
     let send_error = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .expect("send appends before the background dispatch observes the fatal error")
         .await
         .unwrap_err();
     assert!(matches!(
@@ -3359,7 +3502,6 @@ async fn kafka_producer_fatal_transaction_error_blocks_later_send_like_java() {
     producer.begin_transaction().unwrap();
     let _delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .expect("first send only buffers before flush");
     let flush_error = producer.flush().await.unwrap_err();
     assert!(matches!(
@@ -3370,12 +3512,8 @@ async fn kafka_producer_fatal_transaction_error_blocks_later_send_like_java() {
         }
     ));
 
-    let later_send = tokio::time::timeout(
-        Duration::from_millis(200),
-        producer.send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b"))),
-    )
-    .await
-    .expect("later send should fail locally");
+    let later_send =
+        producer.send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")));
     assert!(matches!(
         later_send,
         Err(kacrab::producer::ProducerError::Transaction {
@@ -3452,7 +3590,6 @@ async fn kafka_producer_retries_retriable_add_partitions_error() {
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
 
@@ -3527,7 +3664,6 @@ async fn kafka_producer_retries_concurrent_transactions_add_partitions_error_lik
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
 
@@ -3612,13 +3748,9 @@ async fn kafka_producer_add_partitions_reloads_transaction_coordinator() {
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
-    let delivery = tokio::time::timeout(
-        Duration::from_secs(1),
-        producer.send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a"))),
-    )
-    .await
-    .expect("send should reload transaction coordinator before timing out")
-    .unwrap();
+    let delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(1), producer.flush())
         .await
         .expect("flush should complete after add partitions retry")
@@ -4274,7 +4406,6 @@ async fn kafka_producer_add_offsets_unknown_producer_id_bumps_epoch_after_abort_
     producer.begin_transaction().unwrap();
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"recovered")))
-        .await
         .unwrap();
     producer.flush().await.unwrap();
     producer.commit_transaction().await.unwrap();
@@ -5974,7 +6105,7 @@ async fn dispatcher_drains_ready_batches_by_leader_broker() {
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
     let dispatcher = ProducerDispatcher::new(wire.clone());
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -5988,7 +6119,7 @@ async fn dispatcher_drains_ready_batches_by_leader_broker() {
 
     let before_dispatch = wire.buffer_pool_stats();
     let mut receipts = dispatcher
-        .dispatch_ready(&mut accumulator, Instant::now())
+        .dispatch_ready(&accumulator, Instant::now())
         .await
         .unwrap();
     receipts.sort_by_key(|receipt| receipt.partition);
@@ -6342,7 +6473,7 @@ async fn dispatcher_does_not_consume_sequence_after_local_record_too_large_error
         },
     );
     let now = Instant::now();
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -6421,7 +6552,7 @@ async fn dispatcher_releases_encoded_buffers_after_later_local_record_too_large_
         },
     );
     let now = Instant::now();
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -6514,7 +6645,7 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_lik
     );
     let dispatcher = ProducerDispatcher::new(wire);
     let now = Instant::now();
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(16 * 1024)
             .linger(Duration::ZERO)
@@ -6529,14 +6660,8 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_lik
             .expect("append record");
     }
 
-    let first = dispatcher
-        .dispatch_ready(&mut accumulator, now)
-        .await
-        .unwrap();
-    let second = dispatcher
-        .dispatch_ready(&mut accumulator, now)
-        .await
-        .unwrap();
+    let first = dispatcher.dispatch_ready(&accumulator, now).await.unwrap();
+    let second = dispatcher.dispatch_ready(&accumulator, now).await.unwrap();
 
     assert!(first.is_empty());
     assert_eq!(second.len(), 2);
@@ -7087,7 +7212,7 @@ async fn dispatcher_sends_compressed_record_batches_from_runtime_config() {
             idempotence: idempotence_disabled(),
         },
     );
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -7097,7 +7222,7 @@ async fn dispatcher_sends_compressed_record_batches_from_runtime_config() {
         .unwrap();
 
     let receipts = dispatcher
-        .dispatch_ready(&mut accumulator, Instant::now())
+        .dispatch_ready(&accumulator, Instant::now())
         .await
         .unwrap();
 
@@ -7149,7 +7274,7 @@ async fn dispatcher_invalidates_metadata_on_leadership_error() {
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
     let dispatcher = ProducerDispatcher::new(wire.clone());
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -7159,7 +7284,7 @@ async fn dispatcher_invalidates_metadata_on_leadership_error() {
         .unwrap();
 
     let error = dispatcher
-        .dispatch_ready(&mut accumulator, Instant::now())
+        .dispatch_ready(&accumulator, Instant::now())
         .await
         .unwrap_err();
     assert!(matches!(
@@ -7237,7 +7362,7 @@ async fn dispatcher_retries_leadership_error_after_metadata_refresh() {
     );
     let dispatcher = ProducerDispatcher::new(wire).retry_attempts(1);
     dispatcher.enable_metrics();
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -7247,7 +7372,7 @@ async fn dispatcher_retries_leadership_error_after_metadata_refresh() {
         .unwrap();
 
     let receipts = dispatcher
-        .dispatch_ready(&mut accumulator, Instant::now())
+        .dispatch_ready(&accumulator, Instant::now())
         .await
         .unwrap();
     let metrics = dispatcher.metrics();
@@ -7286,7 +7411,7 @@ async fn dispatcher_requeues_batch_when_metadata_is_missing() {
     );
     let dispatcher = ProducerDispatcher::new(wire);
     dispatcher.enable_metrics();
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -7296,7 +7421,7 @@ async fn dispatcher_requeues_batch_when_metadata_is_missing() {
         .unwrap();
 
     let receipts = dispatcher
-        .dispatch_ready(&mut accumulator, Instant::now())
+        .dispatch_ready(&accumulator, Instant::now())
         .await
         .unwrap();
     let metrics = dispatcher.metrics();
@@ -7366,7 +7491,7 @@ async fn dispatcher_dispatch_all_requeues_and_reports_flush_incomplete() {
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
     let dispatcher = ProducerDispatcher::new(wire);
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(16 * 1024)
             .buffer_memory(16 * 1024),
@@ -7375,7 +7500,7 @@ async fn dispatcher_dispatch_all_requeues_and_reports_flush_incomplete() {
         .append(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
         .unwrap();
 
-    let error = dispatcher.dispatch_all(&mut accumulator).await.unwrap_err();
+    let error = dispatcher.dispatch_all(&accumulator).await.unwrap_err();
 
     assert!(matches!(
         error,
@@ -7440,7 +7565,6 @@ async fn kafka_producer_delivery_future_receives_terminal_broker_error_like_java
 
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .expect("send should append before broker response");
     let flush_error = producer
         .flush()
@@ -7541,7 +7665,6 @@ async fn kafka_producer_send_with_callback_receives_terminal_broker_error_like_j
                 other => panic!("callback should receive broker error, got {other:?}"),
             },
         )
-        .await
         .expect("send should append before broker response");
     let flush_error = producer
         .flush()
@@ -7623,7 +7746,6 @@ async fn kafka_producer_delivery_future_preserves_terminal_wire_connection_close
 
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .await
         .expect("send should append before produce dispatch");
     let flush_error = producer
         .flush()
@@ -7708,7 +7830,7 @@ async fn dispatcher_fails_expired_batch_with_delivery_timeout() {
         [BrokerEndpoint::new(1, "127.0.0.1:1".parse().unwrap())],
     );
     let dispatcher = ProducerDispatcher::new(wire).delivery_timeout(Duration::from_millis(1));
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -7721,7 +7843,7 @@ async fn dispatcher_fails_expired_batch_with_delivery_timeout() {
         .unwrap();
 
     let error = dispatcher
-        .dispatch_ready(&mut accumulator, dispatch_at)
+        .dispatch_ready(&accumulator, dispatch_at)
         .await
         .unwrap_err();
 
@@ -8002,7 +8124,7 @@ fn ready_batches_for_value(
     value: &'static [u8],
     now: Instant,
 ) -> Vec<kacrab::producer::internals::ReadyBatch> {
-    let mut accumulator = RecordAccumulator::new(
+    let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(1)
             .buffer_memory(16 * 1024),
@@ -8928,43 +9050,43 @@ impl MockBroker {
                 .await
                 .unwrap();
 
-            let mut correlation_ids = Vec::with_capacity(partitions.len());
-            for expected_partition in &partitions {
-                let mut request = read_frame(&mut socket).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
-                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                    .expect("produce request");
-                assert_eq!(produce.acks, -1);
-                assert_eq!(produce.topic_data.len(), 1);
-                let topic_data = produce.topic_data.first().expect("topic produce data");
-                assert_eq!(topic_data.topic_id, TOPIC_ID);
-                assert_eq!(topic_data.partition_data.len(), 1);
+            // The producer groups all ready batches for a broker into ONE
+            // ProduceRequest carrying every partition (Java RecordAccumulator.drain
+            // -> one request per node), so the pipelined partitions arrive in a
+            // single coalesced request rather than one request per partition.
+            let mut request = read_frame(&mut socket).await;
+            let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            assert_eq!(produce.acks, -1);
+            assert_eq!(produce.topic_data.len(), 1);
+            let topic_data = produce.topic_data.first().expect("topic produce data");
+            assert_eq!(topic_data.topic_id, TOPIC_ID);
+            assert_eq!(topic_data.partition_data.len(), partitions.len());
+            let mut offsets = Vec::with_capacity(partitions.len());
+            for (index, expected_partition) in partitions.iter().enumerate() {
                 let partition_data = topic_data
                     .partition_data
-                    .first()
+                    .iter()
+                    .find(|entry| entry.index == *expected_partition)
                     .expect("partition produce data");
-                assert_eq!(partition_data.index, *expected_partition);
                 let mut records = partition_data.records.clone().expect("records");
                 let batch = RecordBatch::decode(&mut records).expect("record batch");
                 assert_eq!(batch.producer_id, 42);
                 assert_eq!(batch.producer_epoch, 3);
                 assert_eq!(batch.base_sequence, 0);
-                correlation_ids.push((header.correlation_id, *expected_partition));
-            }
-            for (index, (correlation_id, partition)) in correlation_ids.into_iter().enumerate() {
                 let offset = 40_i64
                     .checked_add(i64::try_from(index).expect("offset index"))
                     .expect("offset should fit");
-                socket
-                    .write_all(&produce_response_frame(correlation_id, partition, offset))
-                    .await
-                    .unwrap();
+                offsets.push((*expected_partition, offset));
             }
-            partitions
-                .len()
-                .checked_add(2)
-                .expect("handled request count should fit")
+            socket
+                .write_all(&produce_response_frame_for_partitions(&header, &offsets))
+                .await
+                .unwrap();
+            // handshake + InitProducerId + one coalesced Produce.
+            3
         });
         Self { addr, join }
     }
@@ -8996,43 +9118,45 @@ impl MockBroker {
                 .await
                 .unwrap();
 
-            let mut correlation_ids = Vec::with_capacity(partitions.len());
-            for expected_partition in &partitions {
-                let mut request = read_frame(&mut socket).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
-                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                    .expect("produce request");
-                assert_eq!(produce.acks, -1);
-                assert_eq!(produce.topic_data.len(), 1);
-                let topic_data = produce.topic_data.first().expect("topic produce data");
-                assert_eq!(topic_data.topic_id, TOPIC_ID);
-                assert_eq!(topic_data.partition_data.len(), 1);
+            // Both partitions coalesce into one ProduceRequest (Java groups a
+            // broker's batches into a single request), so the partition responses
+            // are mapped back to their per-partition deliveries inside one frame
+            // rather than across reordered separate responses.
+            let mut request = read_frame(&mut socket).await;
+            let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            assert_eq!(produce.acks, -1);
+            assert_eq!(produce.topic_data.len(), 1);
+            let topic_data = produce.topic_data.first().expect("topic produce data");
+            assert_eq!(topic_data.topic_id, TOPIC_ID);
+            assert_eq!(topic_data.partition_data.len(), partitions.len());
+            // Reverse the per-partition response order within the coalesced frame so
+            // the producer must still map each partition response to its delivery.
+            let mut offsets = Vec::with_capacity(partitions.len());
+            for expected_partition in partitions.iter().rev() {
                 let partition_data = topic_data
                     .partition_data
-                    .first()
+                    .iter()
+                    .find(|entry| entry.index == *expected_partition)
                     .expect("partition produce data");
-                assert_eq!(partition_data.index, *expected_partition);
                 let mut records = partition_data.records.clone().expect("records");
                 let batch = RecordBatch::decode(&mut records).expect("record batch");
                 assert_eq!(batch.producer_id, 42);
                 assert_eq!(batch.producer_epoch, 3);
                 assert_eq!(batch.base_sequence, 0);
-                correlation_ids.push((header.correlation_id, *expected_partition));
-            }
-            for (correlation_id, partition) in correlation_ids.into_iter().rev() {
                 let offset = 40_i64
-                    .checked_add(i64::from(partition))
+                    .checked_add(i64::from(*expected_partition))
                     .expect("offset should fit");
-                socket
-                    .write_all(&produce_response_frame(correlation_id, partition, offset))
-                    .await
-                    .unwrap();
+                offsets.push((*expected_partition, offset));
             }
-            partitions
-                .len()
-                .checked_add(2)
-                .expect("handled request count should fit")
+            socket
+                .write_all(&produce_response_frame_for_partitions(&header, &offsets))
+                .await
+                .unwrap();
+            // handshake + InitProducerId + one coalesced Produce.
+            3
         });
         Self { addr, join }
     }
@@ -9093,6 +9217,159 @@ impl MockBroker {
                 .await
                 .unwrap();
             5
+        });
+        Self { addr, join }
+    }
+
+    /// Two idempotent batches are in flight to one partition under epoch 3; BOTH get
+    /// `UNKNOWN_PRODUCER_ID`, forcing a producer-epoch bump. The mock is ADAPTIVE — it
+    /// answers whatever frame order the producer uses: epoch-3 produces are failed with
+    /// `UNKNOWN_PRODUCER_ID`, `InitProducerId` is answered (epoch 3 first, then 4), and
+    /// epoch-4 produces are acked until both records are delivered. The join handle
+    /// returns the number of `InitProducerId` calls: exactly 2 (one initial + ONE bump)
+    /// proves the sibling batch was re-stamped under the new epoch with a SINGLE bump
+    /// (no chained bump, gap A).
+    async fn serve_idempotent_two_inflight_unknown_producer_then_single_rebump() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let handshake = read_frame(&mut socket).await;
+            socket
+                .write_all(&api_versions_response_frame(handshake))
+                .await
+                .unwrap();
+
+            let mut init_calls = 0_usize;
+            let mut delivered = 0_usize;
+            let mut next_offset = 40_i64;
+            while delivered < 2 {
+                let mut request = read_frame(&mut socket).await;
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                if header.request_api_key == ApiKey::InitProducerId as i16 {
+                    init_calls = init_calls.saturating_add(1);
+                    // First call assigns epoch 3; the recovery bump assigns epoch 4.
+                    let epoch = if init_calls == 1 { 3 } else { 4 };
+                    socket
+                        .write_all(&init_producer_id_response_frame(
+                            header.correlation_id,
+                            42,
+                            epoch,
+                        ))
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                    .expect("produce request");
+                let mut records = produce
+                    .topic_data
+                    .first()
+                    .and_then(|topic| topic.partition_data.first())
+                    .and_then(|partition| partition.records.clone())
+                    .expect("records");
+                let batch = RecordBatch::decode(&mut records).expect("record batch");
+                assert_eq!(batch.producer_id, 42);
+                if batch.producer_epoch < 4 {
+                    // Stale epoch: fail with UNKNOWN_PRODUCER_ID to force the bump.
+                    socket
+                        .write_all(
+                            &produce_error_response_frame_with_log_start_offset_for_version(
+                                header.request_api_version,
+                                header.correlation_id,
+                                0,
+                                ErrorCode::UnknownProducerId,
+                                0,
+                            ),
+                        )
+                        .await
+                        .unwrap();
+                } else {
+                    // Re-stamped under the new epoch: ack it.
+                    socket
+                        .write_all(&produce_response_frame(
+                            header.correlation_id,
+                            0,
+                            next_offset,
+                        ))
+                        .await
+                        .unwrap();
+                    next_offset = next_offset.saturating_add(1);
+                    delivered = delivered.saturating_add(1);
+                }
+            }
+            init_calls
+        });
+        Self { addr, join }
+    }
+
+    /// Two idempotent batches (base sequence 0 and 1) are pipelined IN FLIGHT to one
+    /// partition, then the connection drops so both re-enqueue for retry. The retry
+    /// must re-send them strictly in base-sequence order (Java firstInFlightSequence):
+    /// seq 0 alone, ack it, THEN seq 1 — never seq 1 before seq 0.
+    async fn serve_idempotent_two_inflight_disconnect_then_inorder_retry() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let join = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let handshake = read_frame(&mut first).await;
+            first
+                .write_all(&api_versions_response_frame(handshake))
+                .await
+                .unwrap();
+
+            let mut init_request = read_frame(&mut first).await;
+            let init_header =
+                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+            first
+                .write_all(&init_producer_id_response_frame(
+                    init_header.correlation_id,
+                    42,
+                    3,
+                ))
+                .await
+                .unwrap();
+
+            // Two produce requests held in flight (not yet answered), in ascending
+            // base-sequence order: 0 then 1.
+            for expected_base_sequence in [0_i32, 1] {
+                let mut request = read_frame(&mut first).await;
+                let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                    .expect("produce request");
+                assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
+            }
+            // Drop both in-flight requests so the producer re-enqueues them.
+            drop(first);
+
+            // On retry the producer must re-send seq 0 first (alone), wait for its ack,
+            // then seq 1 — the firstInFlightSequence ordering gate. No re-InitProducerId
+            // (the producer id is cached) and the same epoch 3 (a plain wire retry does
+            // not bump the epoch).
+            let (mut retry, _) = listener.accept().await.unwrap();
+            let handshake = read_frame(&mut retry).await;
+            retry
+                .write_all(&api_versions_response_frame(handshake))
+                .await
+                .unwrap();
+            for (expected_base_sequence, offset) in [(0_i32, 40_i64), (1, 41)] {
+                let mut request = read_frame(&mut retry).await;
+                let header =
+                    RequestHeaderData::read(&mut request, 2).expect("retry produce header");
+                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                    .expect("retry produce request");
+                assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
+                retry
+                    .write_all(&produce_response_frame(header.correlation_id, 0, offset))
+                    .await
+                    .unwrap();
+            }
+            // handshake + InitProducerId + 2 produce (conn 1) + handshake + 2 produce (conn 2).
+            6
         });
         Self { addr, join }
     }

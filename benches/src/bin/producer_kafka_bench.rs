@@ -37,11 +37,30 @@ const TRACKED_API_CHUNK_RECORDS: usize = 16_384;
 const BENCH_RUNS: usize = 5;
 
 fn main() {
-    let runtime = Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("benchmark runtime");
+    // Default to a multi-thread runtime so the background sender + in-flight
+    // produce tasks can run concurrently with the send loop (better pipelining).
+    // Set KACRAB_BENCH_CURRENT_THREAD=1 to force the old single-thread runtime.
+    let current_thread = env::var("KACRAB_BENCH_CURRENT_THREAD")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    let runtime = if current_thread {
+        Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("benchmark runtime")
+    } else {
+        let workers = env::var("KACRAB_BENCH_WORKERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(4);
+        Builder::new_multi_thread()
+            .worker_threads(workers)
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("benchmark runtime")
+    };
     runtime.block_on(async {
         let bootstrap = bootstrap_addr();
         let topic = topic();
@@ -54,14 +73,12 @@ fn main() {
              reporting_interval_ms={}",
             reporting_interval.as_millis()
         );
+        let runs = bench_runs();
         for scenario in scenarios {
-            let mut summaries = Vec::with_capacity(BENCH_RUNS);
-            let mut metrics = Vec::with_capacity(BENCH_RUNS);
-            for run_index in 1..=BENCH_RUNS {
-                println!(
-                    "scenario=\"{}\", run={run_index}/{BENCH_RUNS}",
-                    scenario.name
-                );
+            let mut summaries = Vec::with_capacity(runs);
+            let mut metrics = Vec::with_capacity(runs);
+            for run_index in 1..=runs {
+                println!("scenario=\"{}\", run={run_index}/{runs}", scenario.name);
                 let summary = run_scenario(BenchmarkRun {
                     bootstrap,
                     topic: &topic,
@@ -108,10 +125,20 @@ async fn run_scenario(run: BenchmarkRun<'_>) -> BenchmarkRunSummary {
     let producer_config = benchmark_producer_config(run.bootstrap);
     println!("{}", format_effective_config_snapshot(&producer_config));
     let mut producer = build_producer(&producer_config).await;
-    producer.enable_metrics();
+    if env::var("KACRAB_BENCH_NO_METRICS").is_err() {
+        producer.enable_metrics();
+    }
     warm_up_producer(&mut producer, &run, value.clone()).await;
     let warmup_metrics = producer.metrics();
-    let send = run_per_record_tracked_send_loop(&mut producer, &run, value).await;
+    let concurrency = send_concurrency();
+    let send = if concurrency > 1 {
+        let (result, recovered) =
+            run_per_record_tracked_send_loop_concurrent(producer, &run, value, concurrency).await;
+        producer = recovered;
+        result
+    } else {
+        run_per_record_tracked_send_loop(&mut producer, &run, value).await
+    };
     let current_metrics = producer.metrics();
     let metrics = metrics_delta(&current_metrics, &warmup_metrics);
     let java_perf = send
@@ -144,12 +171,21 @@ fn benchmark_producer_config(bootstrap: SocketAddr) -> ProducerConfig {
 }
 
 async fn build_producer(config: &ProducerConfig) -> Producer {
-    Producer::builder()
+    let mut builder = Producer::builder()
         .set(
             "bootstrap.servers",
             config.bootstrap_servers.as_slice().join(","),
         )
-        .set("client.id", config.client_id.as_str())
+        .set("client.id", config.client_id.as_str());
+    // KACRAB_BENCH_BATCH_SIZE overrides batch.size to confirm whether throughput is
+    // round-trip/pipelining bound (more records per request -> higher rate if so).
+    if let Ok(batch_size) = env::var("KACRAB_BENCH_BATCH_SIZE") {
+        builder = builder.set("batch.size", batch_size.as_str());
+    }
+    if env::var("KACRAB_BENCH_ACKS1").is_ok() {
+        builder = builder.set("acks", "1").set("enable.idempotence", "false");
+    }
+    builder
         .build()
         .await
         .expect("benchmark producer config should build")
@@ -206,33 +242,46 @@ async fn run_per_record_tracked_send_loop(
         run.reporting_interval,
         false,
     ));
+    // KACRAB_BENCH_SYNC_SEND=1 routes through the synchronous send
+    // (send_with_callback_now, no per-record .await, no sender mutex). The record's
+    // partition is assigned by the REAL sticky partitioner via try_assign_partition_now
+    // (sync, non-blocking); the ~1-in-900 rotation records fall back to the async path.
+    let sync_send = env::var("KACRAB_BENCH_SYNC_SEND").is_ok();
     let mut sent = 0usize;
     while sent < run.scenario.messages {
         let send_started = Instant::now();
         let stats = java_perf.clone();
         let value_size = value.len();
+        let callback = move |result: kacrab::producer::Result<RecordMetadata>| {
+            let completed = Instant::now();
+            if let Some(line) = record_tracked_callback_completion(
+                &result,
+                TrackedCompletionStart::Single(send_started),
+                &stats,
+                completed,
+                value_size,
+            ) {
+                println!("{line}");
+            }
+            if result.is_err() {
+                eprintln!("producer callback reported delivery error: {result:?}");
+            }
+        };
+        // `send_with_callback` is now synchronous (Java-style): it appends inline
+        // when the partition resolves synchronously and only hands the rare record
+        // (cold metadata / buffer-full) to the internal FIFO drain. No per-record
+        // `.await`, no manual partition assignment.
+        let record = benchmark_record(Arc::clone(&topic), sent).value(value.clone());
         let _delivery = producer
-            .send_with_callback(
-                benchmark_record(Arc::clone(&topic), sent).value(value.clone()),
-                move |result| {
-                    let completed = Instant::now();
-                    if let Some(line) = record_tracked_callback_completion(
-                        &result,
-                        TrackedCompletionStart::Single(send_started),
-                        &stats,
-                        completed,
-                        value_size,
-                    ) {
-                        println!("{line}");
-                    }
-                    if result.is_err() {
-                        eprintln!("producer callback reported delivery error: {result:?}");
-                    }
-                },
-            )
-            .await
-            .expect("benchmark per-record callback send should fit and dispatch");
+            .send_with_callback(record, callback)
+            .expect("benchmark send should fit and dispatch");
         sent = sent.saturating_add(1);
+    }
+    if sync_send {
+        eprintln!(
+            "sync-now buffer spins: {}",
+            kacrab::producer::SYNC_NOW_BUFFER_SPINS.load(Ordering::Relaxed)
+        );
     }
     producer
         .flush()
@@ -245,6 +294,96 @@ async fn run_per_record_tracked_send_loop(
         elapsed,
         java_perf: Some(java_perf),
     }
+}
+
+fn send_concurrency() -> usize {
+    env::var("KACRAB_BENCH_SEND_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1)
+}
+
+/// Drive the per-record tracked send path from `concurrency` concurrent tasks
+/// that share one `Producer` through `Arc`. This exercises the Java-style
+/// thread-safe `send(&self)` surface to measure whether concurrent appends lift
+/// the single-send-loop throughput ceiling.
+async fn run_per_record_tracked_send_loop_concurrent(
+    producer: Producer,
+    run: &BenchmarkRun<'_>,
+    value: Bytes,
+    concurrency: usize,
+) -> (SendLoopResult, Producer) {
+    let producer = Arc::new(producer);
+    let topic = Arc::<str>::from(run.topic);
+    let total = run.scenario.messages;
+    let per_task = total.div_ceil(concurrency);
+    let started = Instant::now();
+    let java_perf = ProducerPerformanceStatsHandle::new(ProducerPerformanceStats::new(
+        total,
+        run.reporting_interval,
+        false,
+    ));
+    let mut handles = Vec::with_capacity(concurrency);
+    for task in 0..concurrency {
+        let start_index = task.saturating_mul(per_task);
+        let end_index = start_index.saturating_add(per_task).min(total);
+        if start_index >= end_index {
+            break;
+        }
+        let producer = Arc::clone(&producer);
+        let topic = Arc::clone(&topic);
+        let value = value.clone();
+        let java_perf = java_perf.clone();
+        handles.push(tokio::spawn(async move {
+            let value_size = value.len();
+            for index in start_index..end_index {
+                let send_started = Instant::now();
+                let stats = java_perf.clone();
+                let _delivery = producer
+                    .send_with_callback(
+                        benchmark_record(Arc::clone(&topic), index).value(value.clone()),
+                        move |result| {
+                            let completed = Instant::now();
+                            if let Some(line) = record_tracked_callback_completion(
+                                &result,
+                                TrackedCompletionStart::Single(send_started),
+                                &stats,
+                                completed,
+                                value_size,
+                            ) {
+                                println!("{line}");
+                            }
+                            if result.is_err() {
+                                eprintln!("producer callback reported delivery error: {result:?}");
+                            }
+                        },
+                    )
+                    .expect("benchmark concurrent send should fit and dispatch");
+            }
+        }));
+    }
+    for handle in handles {
+        handle
+            .await
+            .expect("benchmark concurrent send task should finish");
+    }
+    let mut producer =
+        Arc::into_inner(producer).expect("producer should be unique after concurrent send join");
+    producer
+        .flush()
+        .await
+        .expect("benchmark concurrent final flush should succeed");
+    let elapsed = started.elapsed();
+    let java_perf = java_perf.summary(elapsed);
+    (
+        SendLoopResult {
+            outer_chunks: total,
+            elapsed,
+            java_perf: Some(java_perf),
+        },
+        producer,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -283,7 +422,6 @@ async fn warm_up_producer(producer: &mut Producer, run: &BenchmarkRun<'_>, value
                 benchmark_record(Arc::clone(&topic), index).value(value.clone()),
                 |_result| {},
             )
-            .await
             .expect("benchmark per-record warmup send should dispatch");
     }
     producer
@@ -326,7 +464,26 @@ fn benchmark_record(topic: Arc<str>, _index: usize) -> ProducerRecord {
 }
 
 fn scenarios() -> Vec<Scenario> {
+    // KACRAB_BENCH_MESSAGES bounds the small-payload run to a fixed record count and
+    // skips the large-payload scenario — used to profile a single hot partition without
+    // the default 5,000,000-record flood overrunning delivery.timeout.ms.
+    if let Some(messages) = env::var("KACRAB_BENCH_MESSAGES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        let mut scenario = small_payload_scenario();
+        scenario.messages = messages;
+        return vec![scenario];
+    }
     vec![small_payload_scenario(), large_payload_scenario()]
+}
+
+fn bench_runs() -> usize {
+    env::var("KACRAB_BENCH_RUNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|runs| *runs > 0)
+        .unwrap_or(BENCH_RUNS)
 }
 
 const fn reporting_interval() -> Duration {

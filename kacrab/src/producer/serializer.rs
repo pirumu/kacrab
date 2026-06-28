@@ -836,7 +836,7 @@ where
     /// # Errors
     ///
     /// Returns serializer, backpressure, routing, or dispatch errors.
-    pub async fn send(
+    pub fn send(
         &mut self,
         mut record: ProducerRecord,
         key: Option<&K>,
@@ -853,7 +853,7 @@ where
             .as_ref()
             .unwrap_or_else(abort_missing_state)
             .serialize(&topic, &mut record.headers, value)?;
-        self.producer_mut().send(record).await
+        self.producer_mut().send(record)
     }
 
     fn close_serializers(&mut self) {
@@ -1271,7 +1271,6 @@ mod tests {
                 Some(&Bytes::from_static(b"customer")),
                 Some(&Bytes::from_static(b"value")),
             )
-            .await
             .expect("typed send");
 
         assert!(key_seen.load(Ordering::Relaxed));

@@ -55,7 +55,6 @@ async fn real_kafka_commits_transactional_send() {
 
     let delivery = producer
         .send(ProducerRecord::new(topic, 0).value(Bytes::from_static(b"kacrab-txn-smoke")))
-        .await
         .expect("transactional send should enqueue and dispatch");
 
     producer

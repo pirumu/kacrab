@@ -1,11 +1,11 @@
 //! Producer dispatcher that routes ready batches through the wire client.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     net::SocketAddr,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -34,7 +34,7 @@ use tokio::{
 use super::batch::encode_record_batch_with_producer_state_at_offset_into;
 use super::{
     accumulator::{
-        RECORD_BATCH_OVERHEAD_BYTES, ReadyBatch, RecordAccumulator, estimate_record_batch_bytes,
+        RECORD_BATCH_OVERHEAD_BYTES, ReadyBatch, SharedAccumulator, estimate_record_batch_bytes,
     },
     api::{ConsumerGroupMetadata, OffsetAndMetadata, TopicPartition},
     batch::{
@@ -70,6 +70,90 @@ const PENDING_TRANSACTION_OPERATION_MESSAGE: &str =
     "previous transaction operation is pending and must be retried";
 const COMPRESSION_RATE_ESTIMATION_FACTOR: f32 = 1.05;
 
+/// Serializes `ProduceRequest` enqueues in spawn order so idempotent producers can keep
+/// multiple in-flight requests per partition without reordering record-batch sequence numbers
+/// on the wire. The sender assigns each dispatch a monotonically increasing ticket (in
+/// single-threaded drain/sequence order). A dispatch waits for its ticket's turn before
+/// enqueuing, then advances the turn once its requests are enqueued — so the broker observes
+/// ascending base sequences per partition even though the response waits run concurrently.
+/// This replaces Java's single Sender thread, which is the in-order enqueuer by construction.
+struct EnqueueSequencer {
+    next_ticket: AtomicU64,
+    serving: AtomicU64,
+    notify: Notify,
+}
+
+impl EnqueueSequencer {
+    fn new() -> Self {
+        Self {
+            next_ticket: AtomicU64::new(0),
+            serving: AtomicU64::new(0),
+            notify: Notify::new(),
+        }
+    }
+
+    /// Reserve the next enqueue ticket. MUST be called from the single-threaded sender loop
+    /// (or any sequential flush path) so tickets are handed out in drain/sequence order.
+    fn reserve_ticket(&self) -> u64 {
+        self.next_ticket.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Wait until it is `ticket`'s turn to enqueue. Returns immediately for a ticket whose
+    /// turn has already passed (an in-task retry reusing its ticket), so retries never block.
+    async fn wait_turn(&self, ticket: u64) {
+        loop {
+            let notified = self.notify.notified();
+            if self.serving.load(Ordering::Acquire) >= ticket {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Advance the turn past `ticket`. Idempotent (monotonic) so an in-task retry reusing its
+    /// ticket cannot rewind the turn.
+    fn advance_past(&self, ticket: u64) {
+        let _previous = self
+            .serving
+            .fetch_max(ticket.saturating_add(1), Ordering::AcqRel);
+        self.notify.notify_waiters();
+    }
+}
+
+impl std::fmt::Debug for EnqueueSequencer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EnqueueSequencer")
+            .field("next_ticket", &self.next_ticket.load(Ordering::Relaxed))
+            .field("serving", &self.serving.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+/// RAII guard that advances the enqueue turn exactly once — explicitly after a dispatch's
+/// requests are enqueued (to release the turn before the concurrent response waits) and, as a
+/// safety net, on drop if a dispatch returns early before reaching the explicit advance.
+struct EnqueueTurn<'a> {
+    sequencer: &'a EnqueueSequencer,
+    ticket: u64,
+    advanced: bool,
+}
+
+impl EnqueueTurn<'_> {
+    fn advance(&mut self) {
+        if !self.advanced {
+            self.sequencer.advance_past(self.ticket);
+            self.advanced = true;
+        }
+    }
+}
+
+impl Drop for EnqueueTurn<'_> {
+    fn drop(&mut self) {
+        self.advance();
+    }
+}
+
 /// Dispatches ready accumulator batches to broker leaders through [`WireClient`].
 #[derive(Debug, Clone)]
 pub struct ProducerDispatcher {
@@ -90,7 +174,7 @@ pub struct ProducerDispatcher {
     idempotence: ProducerIdempotenceConfig,
     producer_state: Arc<Mutex<ProducerIdempotenceState>>,
     producer_identity_init: Arc<Mutex<()>>,
-    produce_enqueue_order: Arc<Mutex<()>>,
+    enqueue_sequencer: Arc<EnqueueSequencer>,
     partitioner_state: Arc<Mutex<ProducerPartitionerState>>,
     compression_ratios: Arc<StdMutex<CompressionRatioEstimator>>,
     metrics: ProducerMetrics,
@@ -128,7 +212,7 @@ impl ProducerDispatcher {
             },
             producer_state: Arc::new(Mutex::new(ProducerIdempotenceState::default())),
             producer_identity_init: Arc::new(Mutex::new(())),
-            produce_enqueue_order: Arc::new(Mutex::new(())),
+            enqueue_sequencer: Arc::new(EnqueueSequencer::new()),
             partitioner_state: Arc::new(Mutex::new(ProducerPartitionerState::default())),
             compression_ratios: Arc::new(StdMutex::new(CompressionRatioEstimator::default())),
             metrics: ProducerMetrics::default(),
@@ -158,7 +242,7 @@ impl ProducerDispatcher {
             idempotence: config.idempotence,
             producer_state: Arc::new(Mutex::new(ProducerIdempotenceState::default())),
             producer_identity_init: Arc::new(Mutex::new(())),
-            produce_enqueue_order: Arc::new(Mutex::new(())),
+            enqueue_sequencer: Arc::new(EnqueueSequencer::new()),
             partitioner_state: Arc::new(Mutex::new(ProducerPartitionerState::default())),
             compression_ratios: Arc::new(StdMutex::new(CompressionRatioEstimator::default())),
             metrics: ProducerMetrics::default(),
@@ -197,12 +281,32 @@ impl ProducerDispatcher {
             .estimation(topic, codec)
     }
 
+    /// Whether this producer was configured with a `transactional.id`. Cheap,
+    /// lock-free check used to skip the async transaction-error guard entirely
+    /// on the per-record send hot path for non-transactional producers.
+    pub(crate) const fn is_transactional(&self) -> bool {
+        self.idempotence.transactional_id.is_some()
+    }
+
     pub(crate) async fn fail_if_transaction_error(&self) -> Result<()> {
         if self.idempotence.transactional_id.is_none() {
             return Ok(());
         }
         let state = self.producer_state.lock().await;
         fail_transaction_state_if_needed(&state, false)
+    }
+
+    /// Non-blocking transaction-error guard for the synchronous send path. Reads
+    /// the producer state via `try_lock` so a transactional send can stay on the
+    /// fast synchronous append path (Java throws fatal transaction errors
+    /// synchronously). Returns `None` on momentary lock contention, in which case
+    /// the caller takes the slow drain (which performs the awaiting guard).
+    pub(crate) fn try_fail_if_transaction_error_now(&self) -> Option<Result<()>> {
+        if self.idempotence.transactional_id.is_none() {
+            return Some(Ok(()));
+        }
+        let state = self.producer_state.try_lock().ok()?;
+        Some(fail_transaction_state_if_needed(&state, false))
     }
 
     pub(crate) async fn fail_if_fatal_transaction_error_for_abort(&self) -> Result<()> {
@@ -337,16 +441,27 @@ impl ProducerDispatcher {
         self.metrics_enabled.load(Ordering::Relaxed)
     }
 
-    pub(crate) async fn prepare_drained_batches(&self, batches: &mut [ReadyBatch]) -> Result<()> {
+    /// Assign idempotent sequences to freshly drained batches. Returns the indices
+    /// of batches that must be DEFERRED (re-enqueued, not dispatched) this cycle —
+    /// Java `shouldStopDrainBatchesForPartition`'s unresolved-sequence clause: a
+    /// partition with an unresolved sequence and still-in-flight batches stops
+    /// draining new batches until it resolves. The returned indices are positions
+    /// into `batches`; the caller removes them (and their parallel partition keys).
+    /// On error `batches` is left untouched so the caller can re-enqueue them all.
+    pub(crate) async fn prepare_drained_batches(
+        &self,
+        batches: &mut [ReadyBatch],
+    ) -> Result<Vec<usize>> {
         if !self.idempotence.enabled && self.idempotence.transactional_id.is_none() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let topics = unique_topics(batches);
         let metadata = self
             .wire
             .metadata_for_topics(topics.iter().map(String::as_str))
             .await?;
-        for batch in &mut *batches {
+        let mut deferred = Vec::new();
+        for (index, batch) in batches.iter_mut().enumerate() {
             let Some(first_record) = batch.records.first().cloned() else {
                 continue;
             };
@@ -354,13 +469,43 @@ impl ProducerDispatcher {
                 .route_for_batch(&metadata, batch, &first_record)
                 .await?;
             self.add_partition_to_transaction(&route).await?;
-            if batch.producer_state.is_none() {
-                batch.producer_state = self
+            // A batch whose stamped epoch was bumped since (stale) must be re-stamped
+            // under the new epoch with a fresh sequence (Java startSequencesAtBeginning):
+            // clear it so it preps as fresh below.
+            if let Some(producer_state) = batch.producer_state
+                && self
+                    .producer_state
+                    .lock()
+                    .await
+                    .is_stale_identity(producer_state.identity)
+            {
+                batch.producer_state = None;
+            }
+            match batch.producer_state {
+                None => match self
                     .producer_batch_state(&route, batch.records.len())
-                    .await?;
+                    .await?
+                {
+                    ProducerBatchPrep::Ready(state) => batch.producer_state = state,
+                    ProducerBatchPrep::DeferUnresolved => deferred.push(index),
+                },
+                // Retried batch (kept its assigned sequence): Java
+                // `shouldStopDrainBatchesForPartition` retry clause — only dispatch when
+                // its base sequence is the partition's first in-flight sequence; else an
+                // earlier-sequence batch is still unacked, so defer to keep retries in
+                // strict sequence order (reducing to one in-flight while retrying).
+                Some(producer_state) => {
+                    let first_inflight = {
+                        let state = self.producer_state.lock().await;
+                        state.first_inflight_sequence(&route.topic, route.partition)
+                    };
+                    if first_inflight.is_some_and(|first| producer_state.base_sequence != first) {
+                        deferred.push(index);
+                    }
+                },
             }
         }
-        Ok(())
+        Ok(deferred)
     }
 
     /// Set the number of retry attempts for retryable leadership errors.
@@ -405,7 +550,7 @@ impl ProducerDispatcher {
     /// to reuse its current sticky partition without a metadata lookup.
     pub(crate) async fn assign_partition_with_accumulator(
         &self,
-        accumulator: &RecordAccumulator,
+        accumulator: &SharedAccumulator,
         record: &mut super::ProducerRecord,
     ) -> Result<()> {
         if record.has_assigned_partition() {
@@ -485,7 +630,63 @@ impl ProducerDispatcher {
         )
     }
 
+    /// Synchronous (non-blocking) sticky-partition assignment for `send_now`: reads
+    /// the cached sticky partition via `try_lock` (no `.await`, no OS-thread block).
+    /// Returns `false` when the record isn't sticky-eligible, the partitioner lock is
+    /// momentarily contended, or the sticky batch budget is exhausted (rotation) — the
+    /// caller then takes the async assignment path for that one record.
+    pub(crate) fn try_assign_cached_sticky_partition_now(
+        &self,
+        record: &mut super::ProducerRecord,
+    ) -> bool {
+        if record.has_assigned_partition() {
+            return true;
+        }
+        let Ok(mut state) = self.partitioner_state.try_lock() else {
+            return false;
+        };
+        let compression_ratio = self.compression_ratio_estimation(record.topic.as_ref());
+        // Fast sticky reuse: no metadata lookup needed while the current sticky
+        // batch still has budget (the common steady-state case).
+        if self.uses_sticky_partitioner(record)
+            && state.try_assign_cached_sticky_partition(
+                record,
+                self.partition_sticky_batch_size,
+                compression_ratio,
+            )
+        {
+            return true;
+        }
+        // Full assignment (sticky rotation OR keyed) via synchronously cached
+        // cluster metadata — `cached_metadata_for` reads an `RwLock` with no
+        // `.await`, so rotation stays on the lock-free sync send path instead of
+        // falling back to the async assignment path every sticky-batch boundary.
+        let topic = record.topic.to_string();
+        let Some(metadata) = self.wire.cached_metadata_for(std::slice::from_ref(&topic)) else {
+            return false;
+        };
+        match state.partition_for_record(
+            &metadata,
+            record,
+            self.partitioner_ignore_keys,
+            self.partitioner_adaptive_partitioning_enable,
+            self.partition_sticky_batch_size,
+            compression_ratio,
+        ) {
+            Ok(partition) => {
+                record.partition = partition;
+                true
+            },
+            Err(_) => false,
+        }
+    }
+
     pub(crate) fn compression_ratio_estimation(&self, topic: &str) -> f32 {
+        // No compression -> ratio is always 1.0; skip the shared estimator lock so
+        // the per-record partition-assign path doesn't serialize on it.
+        if matches!(self.compression.codec, Compression::None) {
+            return 1.0;
+        }
         self.compression_ratios.lock().map_or(1.0, |ratios| {
             ratios.estimation(topic, self.compression.codec)
         })
@@ -494,6 +695,19 @@ impl ProducerDispatcher {
     pub(crate) async fn mark_sticky_batch_ready(&self, topic: &str) {
         let mut state = self.partitioner_state.lock().await;
         state.mark_sticky_batch_ready(topic, self.partition_sticky_batch_size);
+    }
+
+    /// Non-blocking sticky-batch-ready mark for the synchronous send path: flips
+    /// `switch_on_next` via `try_lock` so the next record rotates the sticky
+    /// partition. Returns `false` on momentary lock contention, in which case the
+    /// sticky budget check (`>= 2x batch size`) rotates a little later instead —
+    /// the record that triggered this has already been appended either way.
+    pub(crate) fn try_mark_sticky_batch_ready_now(&self, topic: &str) -> bool {
+        let Ok(mut state) = self.partitioner_state.try_lock() else {
+            return false;
+        };
+        state.mark_sticky_batch_ready(topic, self.partition_sticky_batch_size);
+        true
     }
 
     /// Fetch cached or refreshed metadata for the supplied topic set.
@@ -629,7 +843,7 @@ impl ProducerDispatcher {
     /// Refresh adaptive sticky partition load stats from the current accumulator queues.
     pub async fn refresh_partition_load_stats<I, S>(
         &self,
-        accumulator: &RecordAccumulator,
+        accumulator: &SharedAccumulator,
         topics: I,
     ) -> Result<()>
     where
@@ -658,7 +872,7 @@ impl ProducerDispatcher {
     /// Refresh adaptive sticky partition load stats using a caller-provided metadata snapshot.
     pub(crate) async fn refresh_partition_load_stats_with_metadata<I, S>(
         &self,
-        accumulator: &RecordAccumulator,
+        accumulator: &SharedAccumulator,
         metadata: &crate::wire::ClusterMetadata,
         topics: I,
     ) -> Result<()>
@@ -693,7 +907,7 @@ impl ProducerDispatcher {
     #[cfg(test)]
     pub(crate) async fn refresh_topic_load_stats_with_metadata(
         &self,
-        accumulator: &RecordAccumulator,
+        accumulator: &SharedAccumulator,
         metadata: &crate::wire::ClusterMetadata,
         topic: &str,
     ) -> Result<()> {
@@ -1048,7 +1262,7 @@ impl ProducerDispatcher {
     )]
     pub async fn dispatch_ready(
         &self,
-        accumulator: &mut RecordAccumulator,
+        accumulator: &SharedAccumulator,
         now: Instant,
     ) -> Result<Vec<RecordMetadata>> {
         let mut batches = accumulator.drain_ready(now);
@@ -1064,8 +1278,9 @@ impl ProducerDispatcher {
 
         let mut attempts_remaining = self.retry_attempts;
         let mut retry_backoff = self.retry_backoff_state();
+        let enqueue_ticket = self.enqueue_sequencer.reserve_ticket();
         loop {
-            match self.dispatch_batches(&mut batches).await {
+            match self.dispatch_batches(&mut batches, enqueue_ticket).await {
                 Ok(receipts) => return Ok(receipts),
                 Err(DispatchError::Requeue) => {
                     if self.metrics_are_enabled() {
@@ -1130,9 +1345,11 @@ impl ProducerDispatcher {
                     // Leader changed for the ongoing retry -> retry immediately
                     // (Java skips backoff); otherwise back off normally.
                     let retry_wait = if metadata_updated {
-                        self.check_delivery_timeout_before_retry(&batches).await
+                        self.check_delivery_timeout_before_retry(&batches, false)
+                            .await
                     } else {
-                        self.wait_before_retry(&batches, &mut retry_backoff).await
+                        self.wait_before_retry(&batches, &mut retry_backoff, false)
+                            .await
                     };
                     if let Some(error) = retry_wait {
                         if self.metrics_are_enabled() {
@@ -1178,7 +1395,9 @@ impl ProducerDispatcher {
                         )
                         .await?;
                     }
-                    if let Some(error) = self.wait_before_retry(&batches, &mut retry_backoff).await
+                    if let Some(error) = self
+                        .wait_before_retry(&batches, &mut retry_backoff, false)
+                        .await
                     {
                         if self.metrics_are_enabled() {
                             self.metrics.record_error_for_topic(Some(&retry.topic));
@@ -1242,7 +1461,8 @@ impl ProducerDispatcher {
         if batches.is_empty() {
             return Ok(Vec::new());
         }
-        match self.dispatch_drained(batches, now).await {
+        let enqueue_ticket = self.enqueue_sequencer.reserve_ticket();
+        match self.dispatch_drained(batches, now, enqueue_ticket).await {
             DispatchOutcome::Delivered(result) => result,
             DispatchOutcome::Requeue(_batches) => Err(ProducerError::FlushIncomplete),
         }
@@ -1251,13 +1471,17 @@ impl ProducerDispatcher {
     /// Drain all accumulator batches and send them regardless of linger or size.
     pub async fn dispatch_all(
         &self,
-        accumulator: &mut RecordAccumulator,
+        accumulator: &SharedAccumulator,
     ) -> Result<Vec<RecordMetadata>> {
         let batches = accumulator.drain_all();
         if batches.is_empty() {
             return Ok(Vec::new());
         }
-        match self.dispatch_drained(batches, Instant::now()).await {
+        let enqueue_ticket = self.enqueue_sequencer.reserve_ticket();
+        match self
+            .dispatch_drained(batches, Instant::now(), enqueue_ticket)
+            .await
+        {
             DispatchOutcome::Delivered(result) => result,
             DispatchOutcome::Requeue(batches) => {
                 accumulator.requeue_front(batches)?;
@@ -1266,15 +1490,95 @@ impl ProducerDispatcher {
         }
     }
 
+    /// Reserve a spawn-order enqueue ticket. The sender calls this in its single-threaded
+    /// loop before spawning a dispatch task so concurrent same-partition requests enqueue in
+    /// ascending base-sequence order (see [`EnqueueSequencer`]).
+    pub(crate) fn next_enqueue_ticket(&self) -> u64 {
+        self.enqueue_sequencer.reserve_ticket()
+    }
+
+    /// Register a dispatch's idempotent batches as in flight (Java
+    /// `addInFlightBatch`, done at drain). Each batch already carries its assigned
+    /// `producer_state` from `prepare_drained_batches`; retried batches re-register
+    /// the sequence they kept (a no-op on the set).
+    async fn register_idempotent_inflight(&self, inflight: &[(String, i32, i32)]) {
+        if !self.idempotence.enabled || inflight.is_empty() {
+            return;
+        }
+        let mut state = self.producer_state.lock().await;
+        for (topic, partition, base_sequence) in inflight {
+            state.register_inflight_sequence(topic, *partition, *base_sequence);
+        }
+    }
+
+    /// Terminal completion of a dispatch (anything but a requeue): drop its batches
+    /// from the in-flight set (Java `removeInFlightBatch`) and re-attempt
+    /// `maybeResolveSequences` for each touched partition, which now succeeds for
+    /// any partition that has fully drained.
+    async fn release_idempotent_inflight_after_terminal(&self, inflight: &[(String, i32, i32)]) {
+        if !self.idempotence.enabled || inflight.is_empty() {
+            return;
+        }
+        let transactional = self.idempotence.transactional_id.is_some();
+        let mut state = self.producer_state.lock().await;
+        for (topic, partition, base_sequence) in inflight {
+            state.remove_inflight_sequence(topic, *partition, *base_sequence);
+        }
+        let mut resolved = AHashSet::new();
+        for (topic, partition, _) in inflight {
+            if !resolved.insert((topic.as_str(), *partition)) {
+                continue;
+            }
+            let ambiguous = state.unresolved_loss_ambiguous(topic, *partition);
+            state.resolve_unresolved_sequence_after_drain(
+                topic,
+                *partition,
+                transactional,
+                ambiguous,
+            );
+        }
+    }
+
+    pub(crate) async fn dispatch_drained(
+        &self,
+        batches: Vec<ReadyBatch>,
+        now: Instant,
+        enqueue_ticket: u64,
+    ) -> DispatchOutcome {
+        // Capture each idempotent batch's (topic, partition, base_sequence) before the
+        // batches move into the dispatch, then register them as in flight (Java
+        // addInFlightBatch). On a terminal outcome they are removed and the partition's
+        // unresolved sequence is re-resolved; on a requeue they stay tracked so a
+        // retried batch keeps gating `first_inflight_sequence`/`maybeResolveSequences`.
+        let inflight = idempotent_inflight_of(&batches);
+        self.register_idempotent_inflight(&inflight).await;
+        let outcome = self
+            .dispatch_drained_inner(batches, now, enqueue_ticket)
+            .await;
+        // Guarantee the enqueue turn is always advanced, even when the dispatch returned
+        // before reaching `dispatch_broker_requests` (e.g. a local RecordTooLarge or an
+        // expired batch never enqueued). Wait for this ticket's turn first so earlier tickets
+        // are not skipped, then advance — idempotent if the enqueue path already advanced.
+        self.enqueue_sequencer.wait_turn(enqueue_ticket).await;
+        self.enqueue_sequencer.advance_past(enqueue_ticket);
+        if !matches!(outcome, DispatchOutcome::Requeue(_)) {
+            self.release_idempotent_inflight_after_terminal(&inflight)
+                .await;
+        }
+        outcome
+    }
+
     #[expect(
         clippy::too_many_lines,
-        reason = "Single drain loop handles every dispatch outcome (split, leadership, idempotent, \
-                  retriable broker, wire) in one place to mirror Java's Sender.runOnce."
+        reason = "Single drain loop handles every dispatch outcome (split, leadership, \
+                  idempotent, retriable broker, wire) in one place to mirror Java's \
+                  Sender.runOnce."
     )]
-    pub(crate) async fn dispatch_drained(
+    async fn dispatch_drained_inner(
         &self,
         mut batches: Vec<ReadyBatch>,
         now: Instant,
+        enqueue_ticket: u64,
     ) -> DispatchOutcome {
         if let Some(batch) = self.expired_batch(&batches, now) {
             let error = ProducerError::DeliveryTimeout {
@@ -1288,7 +1592,7 @@ impl ProducerDispatcher {
         let mut attempts_remaining = self.retry_attempts;
         let mut retry_backoff = self.retry_backoff_state();
         loop {
-            match self.dispatch_batches(&mut batches).await {
+            match self.dispatch_batches(&mut batches, enqueue_ticket).await {
                 Ok(receipts) => {
                     return self
                         .deliver_successful_batches(&mut batches, receipts)
@@ -1296,7 +1600,9 @@ impl ProducerDispatcher {
                 },
                 Err(DispatchError::Requeue) => return DispatchOutcome::Requeue(batches),
                 Err(DispatchError::SplitAndRequeue { topic, partition }) => {
-                    return self.message_too_large_split_outcome(batches, topic, partition);
+                    return self
+                        .message_too_large_split_outcome(batches, topic, partition)
+                        .await;
                 },
                 Err(DispatchError::RetryableLeadership {
                     topic,
@@ -1393,7 +1699,7 @@ impl ProducerDispatcher {
         }
     }
 
-    fn message_too_large_split_outcome(
+    async fn message_too_large_split_outcome(
         &self,
         batches: Vec<ReadyBatch>,
         topic: String,
@@ -1408,6 +1714,14 @@ impl ProducerDispatcher {
             self.partition_sticky_batch_size,
             compression_ratio,
         ) else {
+            // A single-record batch that still exceeds max.request.size cannot be split
+            // and fails terminally, leaving a hole in the partition's sequence. Java
+            // failBatch(adjustSequenceNumbers=true) -> requestIdempotentEpochBumpForPartition
+            // requests an epoch bump so the next produce restarts the sequence and heals
+            // the gap rather than wedging later batches on OUT_OF_ORDER.
+            if self.idempotence.enabled && self.idempotence.transactional_id.is_none() {
+                self.producer_state.lock().await.request_epoch_bump();
+            }
             return DispatchOutcome::Delivered(Err(ProducerError::Broker {
                 topic,
                 partition,
@@ -1509,7 +1823,7 @@ impl ProducerDispatcher {
         {
             return Some(DispatchOutcome::Delivered(Err(error)));
         }
-        if let Some(error) = self.wait_before_retry(batches, retry_backoff).await {
+        if let Some(error) = self.wait_before_retry(batches, retry_backoff, false).await {
             if self.metrics_are_enabled() {
                 self.metrics.record_error_for_topic(Some(&retry.topic));
             }
@@ -1554,9 +1868,10 @@ impl ProducerDispatcher {
         // Leader changed for the ongoing retry -> retry immediately (Java skips
         // backoff); otherwise back off normally.
         let retry_wait = if retry.metadata_updated {
-            self.check_delivery_timeout_before_retry(batches).await
+            self.check_delivery_timeout_before_retry(batches, false)
+                .await
         } else {
-            self.wait_before_retry(batches, retry_backoff).await
+            self.wait_before_retry(batches, retry_backoff, false).await
         };
         if let Some(error) = retry_wait {
             if self.metrics_are_enabled() {
@@ -1590,7 +1905,10 @@ impl ProducerDispatcher {
         if self.metrics_are_enabled() {
             self.metrics.record_retry();
         }
-        if let Some(error) = self.wait_before_retry(batches, retry_backoff).await {
+        // A wire/connection failure left no broker response, so a final delivery
+        // timeout here is an AMBIGUOUS loss (the records may have been written) and
+        // must bump the idempotent epoch before the next produce.
+        if let Some(error) = self.wait_before_retry(batches, retry_backoff, true).await {
             if self.metrics_are_enabled() {
                 self.metrics.record_error();
             }
@@ -1631,7 +1949,7 @@ impl ProducerDispatcher {
         if self.metrics_are_enabled() {
             self.metrics.record_retry_for_topic(Some(topic));
         }
-        if let Some(timeout_error) = self.wait_before_retry(batches, retry_backoff).await {
+        if let Some(timeout_error) = self.wait_before_retry(batches, retry_backoff, false).await {
             if self.metrics_are_enabled() {
                 self.metrics.record_error_for_topic(Some(topic));
             }
@@ -1650,6 +1968,7 @@ impl ProducerDispatcher {
     async fn dispatch_batches(
         &self,
         batches: &mut [ReadyBatch],
+        enqueue_ticket: u64,
     ) -> std::result::Result<Vec<RecordMetadata>, DispatchError> {
         let topics = unique_topics(batches);
         let metadata = self
@@ -1679,9 +1998,33 @@ impl ProducerDispatcher {
                 self.rewind_unsent_idempotent_sequences(batches).await;
                 return Err(DispatchError::from(error));
             }
+            // A batch whose epoch was bumped since it was stamped (stale) must not be sent
+            // under the fenced old epoch. Re-enqueue the whole dispatch so it is re-stamped
+            // (fresh sequence under the new epoch) on the next drain via prepare_drained_
+            // batches, where the in-flight registration is rebuilt consistently.
+            if let Some(producer_state) = batch.producer_state
+                && self
+                    .producer_state
+                    .lock()
+                    .await
+                    .is_stale_identity(producer_state.identity)
+            {
+                self.rewind_unsent_idempotent_sequences(batches).await;
+                return Err(DispatchError::Requeue);
+            }
             if batch.producer_state.is_none() {
                 match self.producer_batch_state(&route, batch.records.len()).await {
-                    Ok(producer_state) => batch.producer_state = producer_state,
+                    Ok(ProducerBatchPrep::Ready(producer_state)) => {
+                        batch.producer_state = producer_state;
+                    },
+                    // The partition entered unresolved-sequence recovery with in-flight
+                    // batches between selection and encoding (Java stop-drain): re-enqueue
+                    // the whole dispatch so these batches are re-evaluated (and deferred)
+                    // on the next drain instead of being sent out of order.
+                    Ok(ProducerBatchPrep::DeferUnresolved) => {
+                        self.rewind_unsent_idempotent_sequences(batches).await;
+                        return Err(DispatchError::Requeue);
+                    },
                     Err(error) => {
                         self.rewind_unsent_idempotent_sequences(batches).await;
                         return Err(DispatchError::from(error));
@@ -1753,8 +2096,13 @@ impl ProducerDispatcher {
                             .records
                             .iter()
                             .map(|record| {
-                                record.key.as_ref().map_or(0, bytes::Bytes::len)
-                                    + record.value.as_ref().map_or(0, bytes::Bytes::len)
+                                record
+                                    .key
+                                    .as_ref()
+                                    .map_or(0, bytes::Bytes::len)
+                                    .saturating_add(
+                                        record.value.as_ref().map_or(0, bytes::Bytes::len),
+                                    )
                             })
                             .collect(),
                         compression_ratio: self.actual_compression_ratio_for_encoded_batch(
@@ -1786,9 +2134,7 @@ impl ProducerDispatcher {
                     sample.compression_ratio,
                 );
                 self.metrics.record_queue_time(sample.queued);
-                for size in &sample.record_sizes {
-                    self.metrics.record_record_size(*size);
-                }
+                self.metrics.record_record_sizes(&sample.record_sizes);
             }
         }
 
@@ -1796,11 +2142,10 @@ impl ProducerDispatcher {
         for (broker_id, requests) in by_broker {
             let request_started = self.metrics_are_enabled().then(Instant::now);
             let mut broker_receipts = self
-                .dispatch_broker_requests(broker_id, requests, version)
+                .dispatch_broker_requests(broker_id, requests, version, enqueue_ticket)
                 .await?;
             if let Some(started) = request_started {
-                self.metrics
-                    .record_request_latency(started.elapsed());
+                self.metrics.record_request_latency(started.elapsed());
             }
             receipts.append(&mut broker_receipts);
         }
@@ -1891,19 +2236,34 @@ impl ProducerDispatcher {
         broker_id: i32,
         requests: Vec<BrokerProduceRequest>,
         version: i16,
+        enqueue_ticket: u64,
     ) -> std::result::Result<Vec<RecordMetadata>, DispatchError> {
         let mut pending: VecDeque<_> = requests.into_iter().enumerate().collect();
         let mut in_flight = JoinSet::new();
         let mut completed = Vec::new();
         let mut in_flight_routes = AHashSet::new();
         let max_in_flight = self.broker_dispatch_in_flight_limit();
-        let mut enqueue_guard = Some(self.produce_enqueue_order.lock().await);
+        // Only idempotent/transactional producers must serialize same-partition
+        // requests; non-idempotent producers pipeline them up to max.in.flight.
+        let enforce_partition_ordering = self.idempotence.enabled;
+        // Wait for this dispatch's spawn-order turn before enqueuing, so concurrent
+        // same-partition requests reach the broker in ascending base-sequence order. The
+        // turn is released (advanced) as soon as this dispatch's requests are enqueued
+        // (pending drained), letting the concurrent response waits overlap the next turn.
+        self.enqueue_sequencer.wait_turn(enqueue_ticket).await;
+        let mut enqueue_turn = EnqueueTurn {
+            sequencer: &self.enqueue_sequencer,
+            ticket: enqueue_ticket,
+            advanced: false,
+        };
 
         loop {
             while in_flight.len() < max_in_flight {
-                let Some((index, request)) =
-                    pop_dispatchable_broker_request(&mut pending, &in_flight_routes)
-                else {
+                let Some((index, request)) = pop_dispatchable_broker_request(
+                    &mut pending,
+                    &in_flight_routes,
+                    enforce_partition_ordering,
+                ) else {
                     break;
                 };
                 for route in &request.routes {
@@ -1984,7 +2344,7 @@ impl ProducerDispatcher {
                 drop(abort_handle);
             }
             if pending.is_empty() {
-                drop(enqueue_guard.take());
+                enqueue_turn.advance();
             }
 
             let Some(result) = in_flight.join_next().await else {
@@ -2231,6 +2591,7 @@ impl ProducerDispatcher {
         &self,
         batches: &[ReadyBatch],
         retry_backoff: &mut BackoffState,
+        loss_is_ambiguous: bool,
     ) -> Option<ProducerError> {
         let now = Instant::now();
         let earliest = batches
@@ -2240,7 +2601,7 @@ impl ProducerDispatcher {
             .unwrap_or(now);
         let elapsed = now.duration_since(earliest);
         if elapsed >= self.delivery_timeout {
-            self.mark_expired_idempotent_batches_unresolved(batches, now)
+            self.mark_expired_idempotent_batches_unresolved(batches, now, loss_is_ambiguous)
                 .await;
             return batches.first().map(|batch| ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
@@ -2255,7 +2616,7 @@ impl ProducerDispatcher {
         tokio::time::sleep(delay.min(remaining)).await;
         let now = Instant::now();
         if let Some(batch) = self.expired_batch(batches, now) {
-            self.mark_expired_idempotent_batches_unresolved(batches, now)
+            self.mark_expired_idempotent_batches_unresolved(batches, now, loss_is_ambiguous)
                 .await;
             return Some(ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
@@ -2272,6 +2633,7 @@ impl ProducerDispatcher {
     async fn check_delivery_timeout_before_retry(
         &self,
         batches: &[ReadyBatch],
+        loss_is_ambiguous: bool,
     ) -> Option<ProducerError> {
         let now = Instant::now();
         let earliest = batches
@@ -2280,7 +2642,7 @@ impl ProducerDispatcher {
             .min()
             .unwrap_or(now);
         if now.duration_since(earliest) >= self.delivery_timeout {
-            self.mark_expired_idempotent_batches_unresolved(batches, now)
+            self.mark_expired_idempotent_batches_unresolved(batches, now, loss_is_ambiguous)
                 .await;
             return batches.first().map(|batch| ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
@@ -2307,6 +2669,7 @@ impl ProducerDispatcher {
         &self,
         batches: &[ReadyBatch],
         now: Instant,
+        loss_is_ambiguous: bool,
     ) {
         if !self.idempotence.enabled {
             return;
@@ -2330,6 +2693,14 @@ impl ProducerDispatcher {
                 producer_state.base_sequence,
                 record_count,
             );
+            // Remember the loss ambiguity with the marker so the resolve that runs
+            // once the partition drains bumps the epoch only for ambiguous losses,
+            // even when it is deferred past this call.
+            state.record_unresolved_loss_ambiguity(
+                &batch.topic,
+                batch.partition,
+                loss_is_ambiguous,
+            );
             if !expired_partitions
                 .iter()
                 .any(|(topic, partition)| topic == &batch.topic && *partition == batch.partition)
@@ -2337,10 +2708,20 @@ impl ProducerDispatcher {
                 expired_partitions.push((batch.topic.clone(), batch.partition));
             }
         }
-        // Java maybeResolveSequences: these batches have now fully drained
-        // (expired) for their partitions, so resolve or recover each.
+        // Java maybeResolveSequences: attempt to resolve each partition now. While
+        // this expiring request (or any sibling request) is still tracked in flight,
+        // `resolve_unresolved_sequence_after_drain` defers; the deferred resolve is
+        // retriggered from `release_idempotent_inflight_after_terminal` as each
+        // request terminally completes, so the epoch is bumped only after the
+        // partition has fully drained.
         for (topic, partition) in expired_partitions {
-            state.resolve_unresolved_sequence_after_drain(&topic, partition, transactional);
+            let ambiguous = state.unresolved_loss_ambiguous(&topic, partition);
+            state.resolve_unresolved_sequence_after_drain(
+                &topic,
+                partition,
+                transactional,
+                ambiguous,
+            );
         }
     }
 
@@ -2348,41 +2729,76 @@ impl ProducerDispatcher {
         &self,
         route: &ProduceRoute,
         record_count: usize,
-    ) -> Result<Option<ProducerBatchState>> {
+    ) -> Result<ProducerBatchPrep> {
         if !self.idempotence.enabled {
-            return Ok(None);
+            return Ok(ProducerBatchPrep::Ready(None));
         }
-        let identity = self.producer_identity(route.leader_id).await?;
         let record_count =
             i32::try_from(record_count).map_err(|_error| ProducerError::SequenceOverflow {
                 topic: route.topic.clone(),
                 partition: route.partition,
             })?;
+        // Idempotent (non-transactional) lost-sequence recovery: an ambiguous loss
+        // (a no-response/connection delivery timeout) sets `epoch_bump_required` while
+        // clearing the unresolved marker, so bump the producer epoch via InitProducerId
+        // and reset the per-partition sequences before the next produce — Java
+        // bumpIdempotentEpochAndResetIdIfNeeded. Definitive rejections never set the
+        // flag (see resolve_unresolved_sequence_after_drain), so leadership / unknown-
+        // producer-id recovery is left to their own retry paths.
+        if self.idempotence.transactional_id.is_none()
+            && self.producer_state.lock().await.epoch_bump_required
+        {
+            let identity = self.bump_producer_identity(route.leader_id).await?;
+            let mut state = self.producer_state.lock().await;
+            state.reset_sequences_after_epoch_bump();
+            let base_sequence = state.next_sequence(&route.topic, route.partition, record_count)?;
+            drop(state);
+            return Ok(ProducerBatchPrep::Ready(Some(ProducerBatchState {
+                identity,
+                base_sequence,
+            })));
+        }
+        let identity = self.producer_identity(route.leader_id).await?;
         let mut state = self.producer_state.lock().await;
         let base_sequence = match state.next_sequence(&route.topic, route.partition, record_count) {
             Ok(base_sequence) => base_sequence,
             Err(ProducerError::UnresolvedSequence { .. })
                 if self.idempotence.transactional_id.is_none() =>
             {
+                // Java `shouldStopDrainBatchesForPartition`: while the partition has
+                // an unresolved sequence AND still has in-flight batches, do NOT drain
+                // this fresh batch — defer it until the in-flight requests drain and
+                // `maybeResolveSequences` resolves the marker (which may clear it with
+                // no epoch bump if the gap was filled). Only bump+reset when the
+                // partition has fully drained yet is still unresolved (a genuine gap),
+                // matching `bumpIdempotentEpochAndResetIdIfNeeded`.
+                if state.has_inflight_batches(&route.topic, route.partition) {
+                    drop(state);
+                    return Ok(ProducerBatchPrep::DeferUnresolved);
+                }
                 drop(state);
                 let identity = self.bump_producer_identity(route.leader_id).await?;
                 let mut state = self.producer_state.lock().await;
-                state.reset_sequence(&route.topic, route.partition);
+                // A producer-epoch bump invalidates EVERY partition's old sequences, so
+                // restart them all at 0 under the new epoch (Java startSequencesAtBeginning
+                // applies per-partition as each drains; kacrab's global reset is equivalent
+                // because stale in-flight batches are re-stamped, not renumbered in place).
+                state.reset_sequences_after_epoch_bump();
                 let base_sequence =
                     state.next_sequence(&route.topic, route.partition, record_count)?;
                 drop(state);
-                return Ok(Some(ProducerBatchState {
+                return Ok(ProducerBatchPrep::Ready(Some(ProducerBatchState {
                     identity,
                     base_sequence,
-                }));
+                })));
             },
             Err(error) => return Err(error),
         };
         drop(state);
-        Ok(Some(ProducerBatchState {
+        Ok(ProducerBatchPrep::Ready(Some(ProducerBatchState {
             identity,
             base_sequence,
-        }))
+        })))
     }
 
     async fn recover_idempotent_partition(
@@ -2392,10 +2808,28 @@ impl ProducerDispatcher {
         partition: i32,
         leader_id: i32,
     ) -> Result<()> {
-        let _identity = self.bump_producer_identity(leader_id).await?;
-        {
-            let mut state = self.producer_state.lock().await;
-            state.reset_sequence(topic, partition);
+        // Java `sequenceHasBeenReset`/`reopened` short-circuit: if the producer epoch was
+        // already bumped (e.g. by a sibling in-flight request's recovery), these batches
+        // are already stale — re-stamping them under the current epoch is enough; do NOT
+        // bump the epoch a second time (which would churn through InitProducerId and reset
+        // every partition again).
+        let already_bumped = {
+            let state = self.producer_state.lock().await;
+            batches
+                .iter()
+                .filter(|batch| batch.topic == topic && batch.partition == partition)
+                .filter_map(|batch| batch.producer_state)
+                .any(|producer_state| state.is_stale_identity(producer_state.identity))
+        };
+        if !already_bumped {
+            let _identity = self.bump_producer_identity(leader_id).await?;
+            // A producer-epoch bump invalidates every partition's sequences, so restart
+            // them all at 0 under the new epoch (not just this one). Stale in-flight
+            // batches on other partitions are re-stamped on their next drain.
+            self.producer_state
+                .lock()
+                .await
+                .reset_sequences_after_epoch_bump();
         }
         for batch in batches {
             if batch.topic == topic && batch.partition == partition {
@@ -2479,18 +2913,17 @@ impl ProducerDispatcher {
             let Ok(record_count) = i32::try_from(batch.records.len()) else {
                 continue;
             };
-            let Some(next_sequence) = producer_state.base_sequence.checked_add(record_count) else {
+            if record_count < 1 {
                 continue;
-            };
+            }
+            let next_sequence = increment_sequence(producer_state.base_sequence, record_count);
             state.release_sequence(&batch.topic, batch.partition, next_sequence);
             // Java handleCompletedBatch: record the last acked sequence/offset for
             // this partition (used by maybeResolveSequences and UnknownProducerId
-            // disambiguation).
-            state.maybe_update_last_acked_sequence(
-                &batch.topic,
-                batch.partition,
-                next_sequence.saturating_sub(1),
-            );
+            // disambiguation). lastSequence = base + recordCount - 1 (wrapping).
+            let last_sequence =
+                increment_sequence(producer_state.base_sequence, record_count.saturating_sub(1));
+            state.maybe_update_last_acked_sequence(&batch.topic, batch.partition, last_sequence);
             if let Some(receipt) = receipts.iter().find(|receipt| {
                 receipt.topic.as_ref() == batch.topic && receipt.partition == batch.partition
             }) {
@@ -2898,11 +3331,25 @@ impl ProducerDispatcher {
     }
 
     async fn bump_producer_identity(&self, broker_id: i32) -> Result<ProducerIdentity> {
-        let current = {
+        let expected = {
             let state = self.producer_state.lock().await;
             state.identity
         };
-        let response = self.init_producer_identity(broker_id, current).await?;
+        // Serialize bumps so concurrent recoveries (e.g. two sibling in-flight requests
+        // both failing with UNKNOWN_PRODUCER_ID) do not each send an InitProducerId.
+        let _init_guard = self.producer_identity_init.lock().await;
+        {
+            let state = self.producer_state.lock().await;
+            // A concurrent recovery already advanced the identity past what we read: the
+            // bump already happened, so reuse it instead of bumping again (Java's single
+            // epoch bump per recovery generation / reopened short-circuit).
+            if let Some(current) = state.identity
+                && Some(current) != expected
+            {
+                return Ok(current);
+            }
+        }
+        let response = self.init_producer_identity(broker_id, expected).await?;
         let identity = ProducerIdentity {
             producer_id: response.producer_id,
             producer_epoch: response.producer_epoch,
@@ -3598,7 +4045,7 @@ struct TopicPartitionAssignment<'a> {
 struct PartitionLoadRefresh<'a> {
     topic: &'a str,
     topic_metadata: &'a TopicMetadata,
-    accumulator: &'a RecordAccumulator,
+    accumulator: &'a SharedAccumulator,
     now: Instant,
     availability_timeout: Duration,
 }
@@ -3938,7 +4385,7 @@ impl ProducerPartitionerState {
         &mut self,
         topic: &str,
         topic_metadata: &TopicMetadata,
-        accumulator: &RecordAccumulator,
+        accumulator: &SharedAccumulator,
     ) {
         self.update_partition_load_stats_from_accumulator_at(PartitionLoadRefresh {
             topic,
@@ -4593,6 +5040,13 @@ impl ProducerIdempotenceState {
         self.epoch_bump_required = false;
     }
 
+    /// Java `requestIdempotentEpochBumpForPartition`: flag that the producer epoch
+    /// must be bumped before the next produce (applied in `producer_batch_state`),
+    /// healing a sequence gap left by a terminally failed batch.
+    const fn request_epoch_bump(&mut self) {
+        self.epoch_bump_required = true;
+    }
+
     fn next_sequence(&mut self, topic: &str, partition: i32, record_count: i32) -> Result<i32> {
         let key = TopicPartitionKey {
             topic: topic.to_owned(),
@@ -4606,13 +5060,7 @@ impl ProducerIdempotenceState {
             });
         }
         let base_sequence = entry.next_sequence;
-        let next_sequence = base_sequence.checked_add(record_count).ok_or_else(|| {
-            ProducerError::SequenceOverflow {
-                topic: topic.to_owned(),
-                partition,
-            }
-        })?;
-        entry.next_sequence = next_sequence;
+        entry.next_sequence = increment_sequence(base_sequence, record_count);
         Ok(base_sequence)
     }
 
@@ -4627,7 +5075,7 @@ impl ProducerIdempotenceState {
             topic: topic.to_owned(),
             partition,
         };
-        let next_sequence = base_sequence.saturating_add(record_count);
+        let next_sequence = increment_sequence(base_sequence, record_count);
         let entry = self.partitions.entry(key).or_default();
         entry.unresolved_next_sequence = Some(
             entry
@@ -4644,6 +5092,7 @@ impl ProducerIdempotenceState {
         // Java startSequencesAtBeginning: sequence restarts at 0 with no acks.
         let entry = self.partitions.entry(key).or_default();
         entry.unresolved_next_sequence = None;
+        entry.unresolved_loss_ambiguous = false;
         entry.next_sequence = 0;
         entry.last_acked_sequence = NO_LAST_ACKED_SEQUENCE;
         entry.last_acked_offset = INVALID_LAST_ACKED_OFFSET;
@@ -4663,6 +5112,93 @@ impl ProducerIdempotenceState {
         }
     }
 
+    /// Java `TxnPartitionEntry::addInflightBatch`: track a dispatched batch's base
+    /// sequence as in flight for its partition. Re-adding a retried batch's
+    /// sequence is a no-op (the set already holds it).
+    fn register_inflight_sequence(&mut self, topic: &str, partition: i32, base_sequence: i32) {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        let _inserted = self
+            .partitions
+            .entry(key)
+            .or_default()
+            .inflight_by_sequence
+            .insert(base_sequence);
+    }
+
+    /// Java `TxnPartitionEntry::removeInFlightBatch`: drop a base sequence once its
+    /// batch terminally completes (NOT on requeue).
+    fn remove_inflight_sequence(&mut self, topic: &str, partition: i32, base_sequence: i32) {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        if let Some(entry) = self.partitions.get_mut(&key) {
+            let _removed = entry.inflight_by_sequence.remove(&base_sequence);
+        }
+    }
+
+    /// Java `TransactionManager::hasInflightBatches`: whether the partition still
+    /// has any batch dispatched-but-not-terminally-completed. Gates
+    /// `resolve_unresolved_sequence_after_drain`.
+    fn has_inflight_batches(&self, topic: &str, partition: i32) -> bool {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        self.partitions
+            .get(&key)
+            .is_some_and(|entry| !entry.inflight_by_sequence.is_empty())
+    }
+
+    /// Whether a batch's stamped producer id/epoch is stale relative to the current
+    /// producer identity (Java `hasStaleProducerIdAndEpoch`). True after an epoch
+    /// bump for any batch still carrying the old epoch — such a batch must be
+    /// re-stamped (fresh sequence under the new epoch) before it is sent, which is
+    /// kacrab's equivalent of Java `startSequencesAtBeginning` renumbering an
+    /// in-flight batch in place.
+    fn is_stale_identity(&self, identity: ProducerIdentity) -> bool {
+        self.identity.is_some_and(|current| current != identity)
+    }
+
+    /// Java `firstInFlightSequence`: the lowest in-flight base sequence for a
+    /// partition, or `None` when nothing is in flight. The drain gate defers a
+    /// retried batch whose base sequence is not this value, so retries re-send
+    /// strictly in sequence order.
+    fn first_inflight_sequence(&self, topic: &str, partition: i32) -> Option<i32> {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        self.partitions
+            .get(&key)
+            .and_then(|entry| entry.inflight_by_sequence.iter().next().copied())
+    }
+
+    /// Record whether the loss that left a partition unresolved was ambiguous, so a
+    /// deferred resolve (run later, once the partition has drained) bumps the epoch
+    /// only for ambiguous losses. Sticky across multiple contributing losses.
+    fn record_unresolved_loss_ambiguity(&mut self, topic: &str, partition: i32, ambiguous: bool) {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        let entry = self.partitions.entry(key).or_default();
+        entry.unresolved_loss_ambiguous = entry.unresolved_loss_ambiguous || ambiguous;
+    }
+
+    fn unresolved_loss_ambiguous(&self, topic: &str, partition: i32) -> bool {
+        let key = TopicPartitionKey {
+            topic: topic.to_owned(),
+            partition,
+        };
+        self.partitions
+            .get(&key)
+            .is_some_and(|entry| entry.unresolved_loss_ambiguous)
+    }
+
     /// Java `maybeResolveSequences`: once a partition's in-flight batches have
     /// drained with its sequence still unresolved, either confirm it was fully
     /// acknowledged (drop the marker) or recover. When unacked messages remain,
@@ -4674,7 +5210,17 @@ impl ProducerIdempotenceState {
         topic: &str,
         partition: i32,
         transactional: bool,
+        loss_is_ambiguous: bool,
     ) {
+        // Java `maybeResolveSequences` only resolves a partition once it has NO
+        // in-flight batches. With multiple in-flight requests per partition, an
+        // ambiguous timeout on one batch must NOT bump the epoch while later
+        // batches are still in flight under the current epoch — defer until the
+        // partition drains. The deferred resolve is retriggered from
+        // `release_idempotent_inflight_after_terminal` as each request completes.
+        if self.has_inflight_batches(topic, partition) {
+            return;
+        }
         let key = TopicPartitionKey {
             topic: topic.to_owned(),
             partition,
@@ -4682,9 +5228,11 @@ impl ProducerIdempotenceState {
         let (has_unresolved, resolved) = match self.partitions.get(&key) {
             Some(entry) => (
                 entry.unresolved_next_sequence.is_some(),
-                // isNextSequence: lastAcked + 1 == nextSequence => fully acked.
+                // isNextSequence: nextSequence - lastAcked == 1 => fully acked.
+                // Java uses wrapping int subtraction so it stays correct across the
+                // i32::MAX sequence wraparound.
                 entry.last_acked_sequence != NO_LAST_ACKED_SEQUENCE
-                    && entry.next_sequence.saturating_sub(entry.last_acked_sequence) == 1,
+                    && entry.next_sequence.wrapping_sub(entry.last_acked_sequence) == 1,
             ),
             None => return,
         };
@@ -4701,12 +5249,19 @@ impl ProducerIdempotenceState {
                         self.epoch_bump_required = true;
                     }
                 }
-            } else {
+            } else if loss_is_ambiguous {
+                // An idempotent (non-transactional) batch whose final failure was a
+                // no-response/connection loss MIGHT have been written by the broker,
+                // so the per-producer sequence state is now ambiguous and the epoch
+                // must be bumped before the next produce. A definitive rejection
+                // (e.g. NotLeaderOrFollower) means the records were never written, so
+                // the sequence can simply be released/rewound without an epoch bump.
                 self.epoch_bump_required = true;
             }
         }
         if let Some(entry) = self.partitions.get_mut(&key) {
             entry.unresolved_next_sequence = None;
+            entry.unresolved_loss_ambiguous = false;
         }
     }
 
@@ -4787,10 +5342,13 @@ impl ProducerIdempotenceState {
             topic: topic.to_owned(),
             partition,
         };
-        let entry = self.partitions.entry(key).or_insert_with(|| IdempotentPartitionEntry {
-            next_sequence: base_sequence,
-            ..IdempotentPartitionEntry::default()
-        });
+        let entry = self
+            .partitions
+            .entry(key)
+            .or_insert_with(|| IdempotentPartitionEntry {
+                next_sequence: base_sequence,
+                ..IdempotentPartitionEntry::default()
+            });
         entry.unresolved_next_sequence = None;
         if entry.next_sequence >= base_sequence {
             entry.next_sequence = base_sequence;
@@ -4803,10 +5361,22 @@ const NO_LAST_ACKED_SEQUENCE: i32 = -1;
 /// Java `ProduceResponse::INVALID_OFFSET`.
 const INVALID_LAST_ACKED_OFFSET: i64 = -1;
 
+/// Java `DefaultRecordBatch.incrementSequence`: advance a non-negative idempotent
+/// base sequence by `increment`, wrapping at `i32::MAX` back to 0 (Kafka sequences
+/// are 31-bit and wrap rather than overflow). `increment` is a record count (>= 0).
+const fn increment_sequence(sequence: i32, increment: i32) -> i32 {
+    // All branches are provably non-overflowing for non-negative `sequence`/`increment`;
+    // wrapping ops also mirror Java's wrapping int arithmetic exactly.
+    if sequence > i32::MAX.wrapping_sub(increment) {
+        increment
+            .wrapping_sub(i32::MAX.wrapping_sub(sequence))
+            .wrapping_sub(1)
+    } else {
+        sequence.wrapping_add(increment)
+    }
+}
+
 /// Per-partition idempotent bookkeeping, mirroring Java `TxnPartitionEntry`.
-/// In-flight batches themselves are not stored here: Rust rewrites their base
-/// sequences directly on the dispatch-path batch slices, so this entry only
-/// tracks the scalar sequence/offset state.
 #[derive(Debug, Clone)]
 struct IdempotentPartitionEntry {
     /// Base sequence of the next batch bound for this partition.
@@ -4819,6 +5389,21 @@ struct IdempotentPartitionEntry {
     /// When set, new sends to this partition block until the marked sequence is
     /// resolved (Java `partitionsWithUnresolvedSequences`).
     unresolved_next_sequence: Option<i32>,
+    /// Whether the loss that marked this partition unresolved was ambiguous (a
+    /// no-response timeout that MIGHT have been written), recorded so the deferred
+    /// resolve (run once the partition has no in-flight batches) bumps the epoch
+    /// only for ambiguous losses. Java carries this via the batch's last error.
+    unresolved_loss_ambiguous: bool,
+    /// Base sequences of this partition's batches that have been dispatched at
+    /// least once and not yet terminally completed (Java
+    /// `TxnPartitionEntry::inflightBatchesBySequence`). A sequence is added when
+    /// its batch is dispatched and removed only on terminal completion (NOT on
+    /// requeue), so `has_inflight_batches` gates `maybeResolveSequences`: an
+    /// unresolved sequence is only resolved (and the epoch bumped) once every
+    /// in-flight batch for the partition has drained — otherwise an ambiguous
+    /// timeout on one batch could bump the epoch while later batches are still in
+    /// flight under the old epoch.
+    inflight_by_sequence: BTreeSet<i32>,
 }
 
 impl Default for IdempotentPartitionEntry {
@@ -4828,6 +5413,8 @@ impl Default for IdempotentPartitionEntry {
             last_acked_sequence: NO_LAST_ACKED_SEQUENCE,
             last_acked_offset: INVALID_LAST_ACKED_OFFSET,
             unresolved_next_sequence: None,
+            unresolved_loss_ambiguous: false,
+            inflight_by_sequence: BTreeSet::new(),
         }
     }
 }
@@ -4851,6 +5438,17 @@ impl From<&ProduceRoute> for TopicPartitionKey {
 pub(crate) enum DispatchOutcome {
     Delivered(Result<Vec<RecordMetadata>>),
     Requeue(Vec<ReadyBatch>),
+}
+
+/// Outcome of assigning idempotent state to one freshly drained batch.
+#[derive(Debug)]
+enum ProducerBatchPrep {
+    /// Sequence assigned (`Some` for idempotent, `None` for non-idempotent).
+    Ready(Option<ProducerBatchState>),
+    /// The partition has an unresolved sequence with in-flight batches: stop
+    /// draining this batch until the partition resolves (Java
+    /// `shouldStopDrainBatchesForPartition`).
+    DeferUnresolved,
 }
 
 #[derive(Debug)]
@@ -5420,10 +6018,23 @@ fn apply_produce_options(request_data: &mut ProduceRequestData, options: BrokerP
 fn pop_dispatchable_broker_request(
     pending: &mut VecDeque<(usize, BrokerProduceRequest)>,
     in_flight_routes: &AHashSet<TopicPartitionKey>,
+    enforce_partition_ordering: bool,
 ) -> Option<(usize, BrokerProduceRequest)> {
-    let dispatch_index = pending.iter().position(|(_index, request)| {
-        !request_conflicts_with_in_flight(request, in_flight_routes)
-    })?;
+    // Idempotent/transactional producers keep at most one in-flight request per
+    // partition so broker-side sequence numbers can never reorder. Non-idempotent
+    // producers may pipeline several requests to the same partition (up to
+    // max.in.flight.requests.per.connection), matching Java, so they take requests
+    // in FIFO order regardless of which partitions are already in flight.
+    let dispatch_index = if enforce_partition_ordering {
+        pending.iter().position(|(_index, request)| {
+            !request_conflicts_with_in_flight(request, in_flight_routes)
+        })?
+    } else {
+        if pending.is_empty() {
+            return None;
+        }
+        0
+    };
     pending.remove(dispatch_index)
 }
 
@@ -5770,6 +6381,20 @@ fn fail_deliveries(batches: &mut [ReadyBatch], error: &ProducerError) {
     }
 }
 
+/// The `(topic, partition, base_sequence)` of each idempotent batch in a dispatch,
+/// used to register/remove them from the per-partition in-flight set. Batches
+/// without an assigned `producer_state` (non-idempotent) contribute nothing.
+fn idempotent_inflight_of(batches: &[ReadyBatch]) -> Vec<(String, i32, i32)> {
+    batches
+        .iter()
+        .filter_map(|batch| {
+            batch
+                .producer_state
+                .map(|state| (batch.topic.clone(), batch.partition, state.base_sequence))
+        })
+        .collect()
+}
+
 fn terminal_error_delivered_to_futures(
     batches: &mut [ReadyBatch],
     outcome: DispatchOutcome,
@@ -5875,7 +6500,8 @@ mod tests {
         clippy::missing_assert_message,
         clippy::significant_drop_tightening,
         clippy::unwrap_used,
-        reason = "Unit test fixtures fail fastest with contextual unwrap/expect and direct state setup."
+        reason = "Unit test fixtures fail fastest with contextual unwrap/expect and direct state \
+                  setup."
     )]
 
     use std::{
@@ -5906,20 +6532,21 @@ mod tests {
         IdempotentRetryDecision, PartitionLoadRefresh, PendingTransactionOperationGuard,
         ProduceRequestSizing, ProducerDispatcher, ProducerIdempotenceState,
         ProducerPartitionerState, RECORD_BATCH_OVERHEAD_BYTES, RecordBufferRelease,
-        TopicPartitionKey, TransactionOperation, TransactionPendingOperationStart,
-        broker_dispatch_completed_result, broker_request_placement_for_batch,
-        build_partition_load_stats, choose_coordinator_addr, complete_deliveries, end_txn_version,
-        estimate_record_batch_bytes, estimate_sticky_record_bytes,
-        fail_pending_transaction_operation, init_producer_id_version, is_fatal_transaction_error,
-        is_leadership_error, no_ack_receipts, pop_dispatchable_broker_request, produce_version,
-        txn_offset_commit_version, uniform_partition_for_random, unique_topics,
-        unique_unassigned_record_topics, validate_consumer_group_metadata,
+        SharedAccumulator, TopicPartitionKey, TransactionOperation,
+        TransactionPendingOperationStart, broker_dispatch_completed_result,
+        broker_request_placement_for_batch, build_partition_load_stats, choose_coordinator_addr,
+        complete_deliveries, end_txn_version, estimate_record_batch_bytes,
+        estimate_sticky_record_bytes, fail_pending_transaction_operation, init_producer_id_version,
+        is_fatal_transaction_error, is_leadership_error, no_ack_receipts,
+        pop_dispatchable_broker_request, produce_version, txn_offset_commit_version,
+        uniform_partition_for_random, unique_topics, unique_unassigned_record_topics,
+        validate_consumer_group_metadata,
     };
     use crate::{
         producer::{
             AccumulatorConfig, ConsumerGroupMetadata, ProducerCompression, ProducerError,
             ProducerIdempotenceConfig, ProducerIdentity, ProducerRecord, ProducerRuntimeConfig,
-            RecordAccumulator, RecordMetadata, compression_ratio::CompressionRatioEstimator,
+            RecordMetadata, compression_ratio::CompressionRatioEstimator,
         },
         wire::{
             BrokerEndpoint, BrokerMetadata, ClusterMetadata, ConnectionConfig, PartitionMetadata,
@@ -6246,7 +6873,7 @@ mod tests {
         });
 
         let Some((index, request)) =
-            pop_dispatchable_broker_request(&mut pending, &in_flight_routes)
+            pop_dispatchable_broker_request(&mut pending, &in_flight_routes, true)
         else {
             panic!("other partition should remain dispatchable");
         };
@@ -6262,7 +6889,7 @@ mod tests {
 
         in_flight_routes.clear();
         let Some((index, request)) =
-            pop_dispatchable_broker_request(&mut pending, &in_flight_routes)
+            pop_dispatchable_broker_request(&mut pending, &in_flight_routes, true)
         else {
             panic!("first partition should dispatch after in-flight completion");
         };
@@ -6642,7 +7269,8 @@ mod tests {
     fn adaptive_sticky_updates_load_stats_from_accumulator_queues() {
         let metadata = metadata_with_partitions("orders", 3);
         let topic_metadata = metadata.topic("orders").expect("topic metadata");
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default().batch_size(1));
+        let accumulator =
+            SharedAccumulator::with_config(AccumulatorConfig::default().batch_size(1));
         let now = Instant::now();
         accumulator
             .append_at(ProducerRecord::new("orders", 0), now)
@@ -6670,7 +7298,7 @@ mod tests {
     fn adaptive_sticky_keeps_drained_empty_partition_queues_like_java() {
         let metadata = metadata_with_partitions("orders", 3);
         let topic_metadata = metadata.topic("orders").expect("topic metadata");
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(128)
                 .linger(Duration::from_mins(1)),
@@ -6710,7 +7338,8 @@ mod tests {
         metadata.topics[0].partitions[1].leader_id = 8;
         metadata.topics[0].partitions[2].leader_id = 9;
         let topic_metadata = metadata.topic("orders").expect("topic metadata");
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default().batch_size(1024));
+        let accumulator =
+            SharedAccumulator::with_config(AccumulatorConfig::default().batch_size(1024));
         let now = Instant::now();
         for partition in 0..3 {
             accumulator
@@ -6748,7 +7377,8 @@ mod tests {
         metadata.topics[0].partitions[1].leader_id = 8;
         metadata.topics[0].partitions[2].leader_id = 9;
         let topic_metadata = metadata.topic("orders").expect("topic metadata");
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default().batch_size(1024));
+        let accumulator =
+            SharedAccumulator::with_config(AccumulatorConfig::default().batch_size(1024));
         let now = Instant::now();
         for partition in 0..3 {
             accumulator
@@ -6834,8 +7464,8 @@ mod tests {
         assert_ratio_close(estimator.estimation("orders", Compression::Lz4), 1.25);
     }
 
-    #[test]
-    fn message_too_large_split_resets_compression_ratio_estimation() {
+    #[tokio::test]
+    async fn message_too_large_split_resets_compression_ratio_estimation() {
         let dispatcher = ProducerDispatcher::with_config(
             test_wire(),
             ProducerRuntimeConfig {
@@ -6849,7 +7479,9 @@ mod tests {
         dispatcher.set_compression_ratio_estimation_for_test("orders", Compression::None, 0.40);
         let batches = vec![ready_batch("orders", 0)];
 
-        let outcome = dispatcher.message_too_large_split_outcome(batches, "orders".to_owned(), 0);
+        let outcome = dispatcher
+            .message_too_large_split_outcome(batches, "orders".to_owned(), 0)
+            .await;
 
         assert!(matches!(
             outcome,
@@ -6868,7 +7500,7 @@ mod tests {
     #[test]
     fn message_too_large_split_uses_compression_ratio_estimation_for_split_groups() {
         let now = Instant::now();
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(TEST_LARGE_BATCH_SIZE)
                 .buffer_memory(TEST_LARGE_BATCH_SIZE * 4)
@@ -7498,7 +8130,7 @@ mod tests {
         let before_error = wire.buffer_pool_stats();
 
         let result = dispatcher
-            .dispatch_broker_requests(7, vec![request], i16::MAX)
+            .dispatch_broker_requests(7, vec![request], i16::MAX, 0)
             .await;
 
         assert!(matches!(
@@ -7561,7 +8193,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(100),
-            dispatcher.dispatch_broker_requests(7, vec![request], version),
+            dispatcher.dispatch_broker_requests(7, vec![request], version, 0),
         )
         .await
         .expect("backpressure retry should be bounded by delivery timeout");
@@ -7583,7 +8215,7 @@ mod tests {
     async fn retry_wait_returns_delivery_timeout_when_outer_deadline_expires() {
         let dispatcher =
             ProducerDispatcher::new(test_wire()).delivery_timeout(Duration::from_millis(1));
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
@@ -7599,7 +8231,7 @@ mod tests {
         let mut retry_backoff = dispatcher.retry_backoff_state();
 
         let error = dispatcher
-            .wait_before_retry(&batches, &mut retry_backoff)
+            .wait_before_retry(&batches, &mut retry_backoff, false)
             .await
             .expect("retry wait should expire delivery timeout");
 
@@ -7619,7 +8251,7 @@ mod tests {
         partition: i32,
         value: &'static [u8],
     ) -> super::ReadyBatch {
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .linger(Duration::from_secs(1)),
@@ -7699,7 +8331,7 @@ mod tests {
         let batches = vec![ready_batch("orders", 0)];
         assert!(
             dispatcher
-                .check_delivery_timeout_before_retry(&batches)
+                .check_delivery_timeout_before_retry(&batches, false)
                 .await
                 .is_none()
         );
@@ -7708,7 +8340,7 @@ mod tests {
         let expired = ProducerDispatcher::new(test_wire()).delivery_timeout(Duration::ZERO);
         let batches = vec![ready_batch("orders", 0)];
         assert!(matches!(
-            expired.check_delivery_timeout_before_retry(&batches).await,
+            expired.check_delivery_timeout_before_retry(&batches, false).await,
             Some(ProducerError::DeliveryTimeout { topic, partition })
                 if topic == "orders" && partition == 0
         ));
@@ -8259,11 +8891,11 @@ mod tests {
     #[tokio::test]
     async fn dispatch_entrypoints_return_immediately_for_empty_inputs() {
         let dispatcher = ProducerDispatcher::new(test_wire());
-        let mut accumulator = RecordAccumulator::new(AccumulatorConfig::default());
+        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
 
         assert!(
             dispatcher
-                .dispatch_ready(&mut accumulator, Instant::now())
+                .dispatch_ready(&accumulator, Instant::now())
                 .await
                 .expect("empty ready")
                 .is_empty()
@@ -8277,7 +8909,7 @@ mod tests {
         );
         assert!(
             dispatcher
-                .dispatch_all(&mut accumulator)
+                .dispatch_all(&accumulator)
                 .await
                 .expect("empty all")
                 .is_empty()
@@ -8288,7 +8920,7 @@ mod tests {
     async fn dispatch_ready_returns_producer_error_when_no_broker_is_available() {
         let wire = WireClient::connect_with_brokers(ConnectionConfig::default(), "client-a", []);
         let dispatcher = ProducerDispatcher::new(wire);
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
@@ -8302,7 +8934,7 @@ mod tests {
 
         assert!(matches!(
             dispatcher
-                .dispatch_ready(&mut accumulator, Instant::now())
+                .dispatch_ready(&accumulator, Instant::now())
                 .await,
             Err(ProducerError::Wire(
                 crate::wire::WireError::NoBrokerAvailable
@@ -8315,7 +8947,7 @@ mod tests {
         let dispatcher = ProducerDispatcher::new(test_wire()).delivery_timeout(Duration::ZERO);
 
         let outcome = dispatcher
-            .dispatch_drained(vec![ready_batch("orders", 0)], Instant::now())
+            .dispatch_drained(vec![ready_batch("orders", 0)], Instant::now(), 0)
             .await;
 
         assert!(matches!(
@@ -8499,7 +9131,7 @@ mod tests {
     }
 
     #[test]
-    fn idempotence_state_tracks_sequences_and_reports_overflow() {
+    fn idempotence_state_tracks_sequences_and_wraps_at_max_like_java() {
         let mut state = ProducerIdempotenceState::default();
 
         assert_eq!(
@@ -8513,16 +9145,38 @@ mod tests {
             3
         );
 
+        // Java DefaultRecordBatch.incrementSequence wraps at i32::MAX rather than
+        // overflowing: base i32::MAX with a 1-record batch returns i32::MAX and the
+        // next base wraps to 0.
         let key = TopicPartitionKey {
             topic: "orders".to_owned(),
             partition: 0,
         };
-        state.partitions.entry(key).or_default().next_sequence = i32::MAX;
-        assert!(matches!(
-            state.next_sequence("orders", 0, 1),
-            Err(ProducerError::SequenceOverflow { topic, partition })
-                if topic == "orders" && partition == 0
-        ));
+        state
+            .partitions
+            .entry(key.clone())
+            .or_default()
+            .next_sequence = i32::MAX;
+        assert_eq!(
+            state
+                .next_sequence("orders", 0, 1)
+                .expect("wrapping base sequence"),
+            i32::MAX
+        );
+        assert_eq!(state.partitions[&key].next_sequence, 0);
+        // A 3-record batch straddling the boundary: base 2147483646 -> next wraps to 2.
+        state
+            .partitions
+            .entry(key.clone())
+            .or_default()
+            .next_sequence = i32::MAX - 1;
+        assert_eq!(
+            state
+                .next_sequence("orders", 0, 3)
+                .expect("straddling base sequence"),
+            i32::MAX - 1
+        );
+        assert_eq!(state.partitions[&key].next_sequence, 1);
     }
 
     #[test]
@@ -8565,13 +9219,98 @@ mod tests {
         let _ = state.next_sequence("orders", 0, 3).expect("sequence");
         state.mark_sequence_unresolved("orders", 0, 0, 3);
 
-        state.resolve_unresolved_sequence_after_drain("orders", 0, false);
+        state.resolve_unresolved_sequence_after_drain("orders", 0, false, true);
 
         assert!(state.epoch_bump_required);
         // Marker cleared, so the partition no longer blocks (epoch bump resets it).
+        assert_eq!(state.next_sequence("orders", 0, 1).expect("unblocked"), 3);
+    }
+
+    #[test]
+    fn resolve_defers_until_partition_has_no_inflight_batches_like_java() {
+        // Java maybeResolveSequences only resolves a partition once it has NO
+        // in-flight batches. Two batches are in flight (base sequence 0 and 3).
+        let mut state = ProducerIdempotenceState::default();
+        let seq0 = state.next_sequence("orders", 0, 3).expect("seq0");
+        let seq3 = state.next_sequence("orders", 0, 3).expect("seq3");
+        assert_eq!(seq0, 0);
+        assert_eq!(seq3, 3);
+        state.register_inflight_sequence("orders", 0, seq0);
+        state.register_inflight_sequence("orders", 0, seq3);
+
+        // Batch seq0 times out ambiguously and is marked unresolved. Resolving now
+        // must NOT bump the epoch: seq3 is still in flight under the current epoch,
+        // and bumping would re-send seq0 under a new epoch while seq3 could still
+        // be written, risking a duplicate.
+        state.mark_sequence_unresolved("orders", 0, seq0, 3);
+        state.record_unresolved_loss_ambiguity("orders", 0, true);
+        state.remove_inflight_sequence("orders", 0, seq0);
+        let ambiguous = state.unresolved_loss_ambiguous("orders", 0);
+        state.resolve_unresolved_sequence_after_drain("orders", 0, false, ambiguous);
+        assert!(
+            !state.epoch_bump_required,
+            "must not bump the epoch while seq3 is still in flight"
+        );
+        assert!(state.has_inflight_batches("orders", 0));
+
+        // seq3 drains → the partition has no in-flight batches, so the deferred
+        // resolve now bumps the epoch (the loss was ambiguous).
+        state.remove_inflight_sequence("orders", 0, seq3);
+        assert!(!state.has_inflight_batches("orders", 0));
+        let ambiguous = state.unresolved_loss_ambiguous("orders", 0);
+        state.resolve_unresolved_sequence_after_drain("orders", 0, false, ambiguous);
+        assert!(
+            state.epoch_bump_required,
+            "bump the epoch once the partition has fully drained"
+        );
+    }
+
+    #[test]
+    fn detects_stale_producer_identity_after_epoch_bump_like_java() {
+        use super::super::transaction::ProducerIdentity;
+        // Java hasStaleProducerIdAndEpoch: a batch stamped under an older epoch is stale
+        // once the producer identity advances, so it is re-stamped before being sent.
+        let mut state = ProducerIdempotenceState::default();
+        // No identity yet -> nothing is stale (cannot compare).
+        assert!(!state.is_stale_identity(ProducerIdentity {
+            producer_id: 42,
+            producer_epoch: 3,
+        }));
+
+        state.identity = Some(ProducerIdentity {
+            producer_id: 42,
+            producer_epoch: 4,
+        });
+        // Same id, older epoch -> stale (epoch was bumped since).
+        assert!(state.is_stale_identity(ProducerIdentity {
+            producer_id: 42,
+            producer_epoch: 3,
+        }));
+        // Current identity -> not stale.
+        assert!(!state.is_stale_identity(ProducerIdentity {
+            producer_id: 42,
+            producer_epoch: 4,
+        }));
+        // Different producer id -> stale.
+        assert!(state.is_stale_identity(ProducerIdentity {
+            producer_id: 7,
+            producer_epoch: 4,
+        }));
+
+        // request_epoch_bump flags the deferred bump applied in producer_batch_state.
+        assert!(!state.epoch_bump_required);
+        state.request_epoch_bump();
+        assert!(state.epoch_bump_required);
+        // reset_sequences_after_epoch_bump clears every partition's sequence state so a
+        // global epoch bump restarts all partitions at 0 under the new epoch.
+        let _ = state.next_sequence("orders", 0, 3).expect("sequence");
+        state.register_inflight_sequence("orders", 0, 0);
+        state.reset_sequences_after_epoch_bump();
+        assert!(!state.epoch_bump_required);
+        assert!(!state.has_inflight_batches("orders", 0));
         assert_eq!(
-            state.next_sequence("orders", 0, 1).expect("unblocked"),
-            3
+            state.next_sequence("orders", 0, 1).expect("reset sequence"),
+            0
         );
     }
 
@@ -8584,7 +9323,7 @@ mod tests {
         let _ = state.next_sequence("orders", 0, 3).expect("sequence");
         state.mark_sequence_unresolved("orders", 0, 0, 3);
 
-        state.resolve_unresolved_sequence_after_drain("orders", 0, true);
+        state.resolve_unresolved_sequence_after_drain("orders", 0, true, true);
 
         assert_eq!(state.transaction_state, TransactionState::AbortableError);
         assert!(state.epoch_bump_required);
@@ -8596,7 +9335,7 @@ mod tests {
         let _ = fatal.next_sequence("orders", 0, 3).expect("sequence");
         fatal.mark_sequence_unresolved("orders", 0, 0, 3);
 
-        fatal.resolve_unresolved_sequence_after_drain("orders", 0, true);
+        fatal.resolve_unresolved_sequence_after_drain("orders", 0, true, true);
 
         assert_eq!(fatal.transaction_state, TransactionState::FatalError);
     }
@@ -8610,13 +9349,10 @@ mod tests {
         state.mark_sequence_unresolved("orders", 0, 0, 3);
         state.maybe_update_last_acked_sequence("orders", 0, 2); // next=3, lastAcked=2 => resolved
 
-        state.resolve_unresolved_sequence_after_drain("orders", 0, false);
+        state.resolve_unresolved_sequence_after_drain("orders", 0, false, false);
 
         assert!(!state.epoch_bump_required);
-        assert_eq!(
-            state.next_sequence("orders", 0, 1).expect("unblocked"),
-            3
-        );
+        assert_eq!(state.next_sequence("orders", 0, 1).expect("unblocked"), 3);
     }
 
     #[test]
@@ -8959,7 +9695,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_deliveries_skips_missing_receivers_and_missing_receipts() {
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .linger(Duration::from_secs(1)),
@@ -8981,7 +9717,7 @@ mod tests {
             Err(ProducerError::DeliveryDropped)
         ));
 
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(1)
                 .linger(Duration::from_secs(1)),
@@ -9006,7 +9742,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_deliveries_uses_later_split_receipts_for_original_delivery_handles() {
-        let mut accumulator = RecordAccumulator::new(
+        let accumulator = SharedAccumulator::with_config(
             AccumulatorConfig::default()
                 .batch_size(TEST_LARGE_BATCH_SIZE)
                 .buffer_memory(TEST_LARGE_BATCH_SIZE * 4)

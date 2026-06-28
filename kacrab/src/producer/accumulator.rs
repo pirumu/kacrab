@@ -452,26 +452,24 @@ impl RecordAccumulator {
             partition: record.partition,
         };
         let batch_size = self.config.batch_size.max(1);
-        let target = planned_append_target(
-            self.partitions.get(&key),
-            &record,
-            batch_size,
-            compression_sizing,
-        );
         let available = self
             .config
             .buffer_memory
             .saturating_sub(self.buffered_bytes);
-        if target.reserved_buffer_bytes > available {
-            return Err(ProducerError::Backpressure);
-        }
-
+        // Single hash lookup: take the (mutable) partition queue up front and
+        // compute the append target from it, instead of an immutable get()
+        // followed by a separate entry() — both hash the topic Arc<str> on every
+        // append. An empty queue plans the same target as a missing one.
         let queue = self
             .partitions
             .entry(key)
             .or_insert_with(|| PartitionQueue {
                 batches: VecDeque::new(),
             });
+        let target = planned_append_target(Some(&*queue), &record, batch_size, compression_sizing);
+        if target.reserved_buffer_bytes > available {
+            return Err(ProducerError::Backpressure);
+        }
         let next_identity = &mut self.next_batch_id;
         if let Some(identity) = apply_append_target(queue, now, batch_size, target, next_identity) {
             let _inserted = self.buffered_batch_identities.insert(identity);
@@ -510,26 +508,24 @@ impl RecordAccumulator {
             partition: record.partition,
         };
         let batch_size = self.config.batch_size.max(1);
-        let target = planned_append_target(
-            self.partitions.get(&key),
-            &record,
-            batch_size,
-            compression_sizing,
-        );
         let available = self
             .config
             .buffer_memory
             .saturating_sub(self.buffered_bytes);
-        if target.reserved_buffer_bytes > available {
-            return Err(ProducerError::Backpressure);
-        }
-
+        // Single hash lookup: take the (mutable) partition queue up front and
+        // compute the append target from it, instead of an immutable get()
+        // followed by a separate entry() — both hash the topic Arc<str> on every
+        // append. An empty queue plans the same target as a missing one.
         let queue = self
             .partitions
             .entry(key)
             .or_insert_with(|| PartitionQueue {
                 batches: VecDeque::new(),
             });
+        let target = planned_append_target(Some(&*queue), &record, batch_size, compression_sizing);
+        if target.reserved_buffer_bytes > available {
+            return Err(ProducerError::Backpressure);
+        }
         let next_identity = &mut self.next_batch_id;
         if let Some(identity) = apply_append_target(queue, now, batch_size, target, next_identity) {
             let _inserted = self.buffered_batch_identities.insert(identity);
@@ -765,6 +761,160 @@ impl RecordAccumulator {
             || identity
                 .split_parent()
                 .is_some_and(|parent| self.incomplete_batch_identities.contains(&parent))
+    }
+}
+
+/// Thread-safe wrapper around [`RecordAccumulator`].
+///
+/// The inner accumulator keeps its single-threaded logic unchanged; this wrapper
+/// guards it with a short `std::sync::Mutex` held only across synchronous
+/// accumulator operations. That lets concurrent `send(&self)` appends use the
+/// accumulator directly without going through the producer's async sender mutex
+/// (which serialized every append). All accumulator methods are synchronous, so
+/// the guard is never held across an `.await`.
+#[derive(Debug)]
+pub struct SharedAccumulator {
+    inner: std::sync::Mutex<RecordAccumulator>,
+}
+
+impl SharedAccumulator {
+    pub(crate) const fn new(accumulator: RecordAccumulator) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(accumulator),
+        }
+    }
+
+    /// Build a shared accumulator from a config.
+    pub fn with_config(config: AccumulatorConfig) -> Self {
+        Self::new(RecordAccumulator::new(config))
+    }
+
+    /// Append a record (delegates to the inner accumulator under the lock).
+    pub fn append(&self, record: ProducerRecord) -> Result<()> {
+        self.lock().append(record)
+    }
+
+    /// Append a record at a supplied timestamp.
+    pub fn append_at(&self, record: ProducerRecord, now: Instant) -> Result<()> {
+        self.lock().append_at(record, now)
+    }
+
+    /// Append a record and return its delivery future.
+    pub fn append_for_delivery(&self, record: ProducerRecord) -> Result<SendFuture> {
+        self.lock().append_for_delivery(record)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn append_with_status_at(
+        &self,
+        record: ProducerRecord,
+        now: Instant,
+    ) -> Result<AppendStatus> {
+        self.lock().append_with_status_at(record, now)
+    }
+
+    /// Lock the accumulator for a short synchronous critical section. Never hold
+    /// the returned guard across an `.await`.
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, RecordAccumulator> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    // --- Delegates: each acquires the short lock and forwards to the inner
+    // accumulator, so callers keep their existing call sites (only the parameter
+    // type changes from `&mut RecordAccumulator` to `&SharedAccumulator`). ---
+
+    pub(crate) fn append_for_delivery_with_status_at_compression_ratio(
+        &self,
+        record: ProducerRecord,
+        now: Instant,
+        compression_ratio: f32,
+    ) -> Result<(SendFuture, AppendStatus)> {
+        self.lock()
+            .append_for_delivery_with_status_at_compression_ratio(record, now, compression_ratio)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn append_with_status_at_compression_ratio(
+        &self,
+        record: ProducerRecord,
+        now: Instant,
+        compression_ratio: f32,
+    ) -> Result<AppendStatus> {
+        self.lock()
+            .append_with_status_at_compression_ratio(record, now, compression_ratio)
+    }
+
+    pub(crate) fn buffer_memory(&self) -> usize {
+        self.lock().buffer_memory()
+    }
+
+    pub(crate) fn partition_queue_load_with_availability<F>(
+        &self,
+        topic_metadata: &TopicMetadata,
+        is_partition_available: F,
+    ) -> Option<PartitionQueueLoad>
+    where
+        F: FnMut(&PartitionMetadata) -> bool,
+    {
+        self.lock()
+            .partition_queue_load_with_availability(topic_metadata, is_partition_available)
+    }
+
+    pub(crate) fn buffered_batches(&self) -> usize {
+        self.lock().buffered_batches()
+    }
+
+    /// Bytes currently buffered across all partitions.
+    pub fn buffered_bytes(&self) -> usize {
+        self.lock().buffered_bytes()
+    }
+
+    pub(crate) fn buffered_records(&self) -> usize {
+        self.lock().buffered_records()
+    }
+
+    pub(crate) fn complete_batch_identities<I>(&self, identities: I) -> usize
+    where
+        I: IntoIterator<Item = ReadyBatchIdentity>,
+    {
+        self.lock().complete_batch_identities(identities)
+    }
+
+    pub(crate) fn discard_all(&self) -> Vec<ReadyBatch> {
+        self.lock().discard_all()
+    }
+
+    pub(crate) fn drain_all(&self) -> Vec<ReadyBatch> {
+        self.lock().drain_all()
+    }
+
+    /// Drain all batches that are ready to dispatch.
+    pub fn drain_ready(&self, now: Instant) -> Vec<ReadyBatch> {
+        self.lock().drain_ready(now)
+    }
+
+    pub(crate) fn has_available_memory_for_reserved_with_compression_ratio(
+        &self,
+        record: &ProducerRecord,
+        reserved_bytes: usize,
+        compression_ratio: f32,
+    ) -> bool {
+        self.lock()
+            .has_available_memory_for_reserved_with_compression_ratio(
+                record,
+                reserved_bytes,
+                compression_ratio,
+            )
+    }
+
+    pub(crate) fn next_ready_at(&self, now: Instant) -> Option<Instant> {
+        self.lock().next_ready_at(now)
+    }
+
+    pub(crate) fn requeue_front(&self, batches: Vec<ReadyBatch>) -> Result<()> {
+        self.lock().requeue_front(batches)
     }
 }
 

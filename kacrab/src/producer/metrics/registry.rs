@@ -543,6 +543,10 @@ pub struct Metrics {
     recording_level: SensorRecordingLevel,
     default_tags: BTreeMap<String, String>,
     closed: bool,
+    /// True once any registered metric carries a quota. Lets `record_inner`
+    /// skip the per-record quota scan (a `BTreeMap<MetricName>` lookup per stat)
+    /// entirely when no quotas are configured — the common producer case.
+    any_quota: bool,
 }
 
 #[derive(Debug)]
@@ -1216,6 +1220,7 @@ impl Metrics {
             recording_level: SensorRecordingLevel::Info,
             default_tags: BTreeMap::new(),
             closed: false,
+            any_quota: false,
         }
     }
 
@@ -2023,6 +2028,9 @@ impl Metrics {
         if self.registered.contains_key(&metric_name) {
             return Err(MetricsError::DuplicateMetric(metric_name));
         }
+        if metric.quota().is_some() {
+            self.any_quota = true;
+        }
         for reporter in &self.reporters {
             reporter.metric_change(&metric);
         }
@@ -2161,7 +2169,7 @@ impl Metrics {
             }
             state.parents.clone()
         };
-        if check_quotas {
+        if check_quotas && self.any_quota {
             self.check_sensor_quotas_at_ms(sensor, time_ms)?;
         }
         for parent in parents {

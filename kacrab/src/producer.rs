@@ -18,15 +18,15 @@ mod sender;
 mod serializer;
 mod transaction;
 
-#[cfg(test)]
-pub(crate) use self::{
-    accumulator::RecordAccumulator,
-    config::ProducerIdempotenceConfig,
-    transaction::{ProducerBatchState, ProducerIdentity},
-};
 pub(crate) use self::{
     accumulator::{AccumulatorConfig, ReadyBatch},
     config::ProducerRuntimeConfig,
+};
+#[cfg(test)]
+pub(crate) use self::{
+    accumulator::{RecordAccumulator, SharedAccumulator},
+    config::ProducerIdempotenceConfig,
+    transaction::{ProducerBatchState, ProducerIdentity},
 };
 pub use self::{
     api::{
@@ -47,6 +47,7 @@ pub use self::{
         DeliveryCallback, Header, Headers, ProducerRecord, RecordHeader, RecordHeaders,
         RecordMetadata, SendFuture,
     },
+    sender::SYNC_NOW_BUFFER_SPINS,
     serializer::{
         BooleanSerializer, ByteArraySerializer, BytesSerializer, ConfiguredProducerSerializer,
         DoubleSerializer, FloatSerializer, IntegerSerializer, ListInnerSerializer,
@@ -61,7 +62,7 @@ pub use self::{
 #[doc(hidden)]
 pub mod internals {
     pub use super::{
-        accumulator::{AccumulatorConfig, ReadyBatch, RecordAccumulator},
+        accumulator::{AccumulatorConfig, ReadyBatch, RecordAccumulator, SharedAccumulator},
         config::{ProducerIdempotenceConfig, ProducerRuntimeConfig},
         dispatcher::ProducerDispatcher,
         transaction::{ProducerBatchState, ProducerIdentity},

@@ -3,8 +3,6 @@
 mod registry;
 mod sender_registry;
 
-pub(crate) use sender_registry::SenderMetricsRegistry;
-
 use std::{
     collections::BTreeMap,
     sync::{
@@ -19,6 +17,7 @@ pub use registry::{
     KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
     MetricValue, Metrics, MetricsError, SensorId, SensorRecordingLevel,
 };
+pub(crate) use sender_registry::SenderMetricsRegistry;
 
 /// Typed value for a named producer metric.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -630,13 +629,18 @@ impl ProducerMetrics {
         records: usize,
     ) {
         self.record_produce_batch_with_compression_ratio(
-            "test", batch_bytes, batch_size, records, 1.0,
+            "test",
+            batch_bytes,
+            batch_size,
+            records,
+            1.0,
         );
     }
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "Mirrors Java handleProduceResponse batch metrics (topic, bytes, size, count, ratio)."
+        reason = "Mirrors Java handleProduceResponse batch metrics (topic, bytes, size, count, \
+                  ratio)."
     )]
     pub(crate) fn record_produce_batch_with_compression_ratio(
         &self,
@@ -744,10 +748,10 @@ impl ProducerMetrics {
             .record_queue_time(duration_to_ms_f64(queued));
     }
 
-    /// Record one record's serialized size in bytes (Kafka record-size).
-    pub(crate) fn record_record_size(&self, size: usize) {
-        let size = u32::try_from(size).map_or_else(|_| f64::from(u32::MAX), f64::from);
-        self.inner.sender_registry.record_record_size(size);
+    /// Record all serialized record sizes for one produce batch in a single
+    /// locked pass (avoids per-record lock + clock overhead on the send path).
+    pub(crate) fn record_record_sizes(&self, sizes: &[usize]) {
+        self.inner.sender_registry.record_record_sizes(sizes);
     }
 
     /// Update the in-flight request gauge (Kafka requests-in-flight).
@@ -760,6 +764,17 @@ impl ProducerMetrics {
         self.inner
             .sender_registry
             .set_metadata_age(age.as_secs_f64());
+    }
+
+    /// Update the available-buffer-memory + waiting-threads gauges (Kafka
+    /// buffer-available-bytes / waiting-threads).
+    pub(crate) fn set_buffer_gauges(&self, available_bytes: usize) {
+        self.inner
+            .sender_registry
+            .set_buffer_available_bytes(available_bytes);
+        self.inner
+            .sender_registry
+            .set_waiting_threads(self.inner.waiting_threads.load(Ordering::Relaxed));
     }
 
     pub(crate) fn record_requeue(&self) {
@@ -777,6 +792,7 @@ impl ProducerMetrics {
         let _previous = self.inner.waiting_threads.fetch_add(1, Ordering::Relaxed);
         ProducerBufferWaitGuard {
             metrics: self.clone(),
+            started_at: std::time::Instant::now(),
         }
     }
 
@@ -976,6 +992,7 @@ impl ProducerMetrics {
 
 pub(crate) struct ProducerBufferWaitGuard {
     metrics: ProducerMetrics,
+    started_at: std::time::Instant,
 }
 
 impl Drop for ProducerBufferWaitGuard {
@@ -985,6 +1002,13 @@ impl Drop for ProducerBufferWaitGuard {
             .inner
             .waiting_threads
             .fetch_sub(1, Ordering::Relaxed);
+        // Java BufferPool: a blocked append is a buffer-exhausted event; record it
+        // plus the time spent waiting for space allocation (bufferpool-wait-time).
+        let wait_ms = self.started_at.elapsed().as_secs_f64() * 1000.0;
+        self.metrics
+            .inner
+            .sender_registry
+            .record_buffer_exhausted(wait_ms);
     }
 }
 

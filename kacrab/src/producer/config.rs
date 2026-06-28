@@ -142,6 +142,7 @@ impl ProducerRuntimeConfig {
     /// Build runtime producer settings from the public typed Kafka config.
     pub fn from_config(config: &crate::config::ProducerConfig) -> Result<Self> {
         validate_idempotence(config)?;
+        validate_delivery_timeout(config)?;
         let max_in_flight_requests_per_connection = positive_i32_to_usize(
             config.max_in_flight_requests_per_connection,
             crate::config::ProducerConfig::MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_CONFIG,
@@ -195,6 +196,24 @@ impl ProducerRuntimeConfig {
             },
         })
     }
+}
+
+fn validate_delivery_timeout(config: &crate::config::ProducerConfig) -> Result<()> {
+    // Java ProducerConfig.postProcessParsedConfig: delivery.timeout.ms must be at least
+    // linger.ms + request.timeout.ms, so every record gets at least one full request
+    // attempt before the delivery deadline expires.
+    let delivery = config.delivery_timeout_ms.duration();
+    let minimum = config
+        .linger_ms
+        .duration()
+        .saturating_add(config.request_timeout_ms.duration());
+    if delivery < minimum {
+        return Err(ProducerError::InvalidConfig {
+            key: crate::config::ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG,
+            value: format!("{} ms", delivery.as_millis()),
+        });
+    }
+    Ok(())
 }
 
 fn validate_idempotence(config: &crate::config::ProducerConfig) -> Result<()> {
@@ -424,6 +443,24 @@ mod tests {
             ProducerRuntimeConfig::from_config(&invalid_in_flight),
             Err(ProducerError::InvalidConfig {
                 key: ProducerConfig::MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_CONFIG,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_delivery_timeout_below_linger_plus_request_timeout() {
+        let invalid = ProducerConfig::builder()
+            .bootstrap_servers("localhost:9092")
+            .linger_ms(DurationMs::from_millis(100))
+            .request_timeout_ms(DurationMs::from_millis(30_000))
+            .delivery_timeout_ms(DurationMs::from_millis(1_000))
+            .build()
+            .expect("producer config");
+        assert!(matches!(
+            ProducerRuntimeConfig::from_config(&invalid),
+            Err(ProducerError::InvalidConfig {
+                key: ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG,
                 ..
             })
         ));

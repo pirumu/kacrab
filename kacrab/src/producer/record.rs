@@ -904,7 +904,7 @@ fn store_delivery_error(state: &DeliveryState, error: ProducerError) {
     reason = "Delivery errors need value semantics but several public error variants are not \
               Clone."
 )]
-fn clone_producer_error_for_delivery(error: &ProducerError) -> ProducerError {
+pub(crate) fn clone_producer_error_for_delivery(error: &ProducerError) -> ProducerError {
     match error {
         ProducerError::Backpressure => ProducerError::Backpressure,
         ProducerError::ProducerClosed => ProducerError::ProducerClosed,

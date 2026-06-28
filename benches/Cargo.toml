@@ -13,7 +13,7 @@ kacrab = { workspace = true, features = ["producer"] }
 kacrab-protocol = { workspace = true }
 bytes = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
-tokio = { workspace = true, features = ["io-util", "net", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 [[bench]]
 name = "producer_accumulator"
