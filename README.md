@@ -14,8 +14,9 @@ protocol up.
   idempotence (multi-in-flight per partition with Java-faithful sequence
   ordering and failure recovery), transactions, compression, metadata routing,
   interceptors, Kafka-named metrics, and multi-broker dispatch are first-class
-  design points. On a single-node broker it outruns the Java client on the same
-  workload (see [Benchmarks](#benchmarks)).
+  design points. On a single-node broker it outruns the Java client's
+  throughput on the same workload (trading some latency for it — see
+  [Benchmarks](#benchmarks)).
 * **Tokio-native wire layer**: async broker sessions, ApiVersions negotiation,
   metadata refresh, bounded in-flight requests, request timeouts, and explicit
   connection cleanup.
@@ -36,8 +37,8 @@ protocol up.
 
 Protocol, wire, auth, and producer now have a usable baseline. The producer is
 the most mature surface: on a single-node broker it sustains ~4.7M records/sec
-at `acks=all` + idempotence and beats the Java client on the same workload (see
-[Benchmarks](#benchmarks)). The current focus remains wire + producer hardening
+at `acks=all` + idempotence, beating the Java client's throughput on the same
+workload (at higher latency — see [Benchmarks](#benchmarks)). The current focus remains wire + producer hardening
 before consumer work: multi-broker behavior, bounded hot paths, routing refresh,
 and sustained stress testing.
 
@@ -342,13 +343,20 @@ Head-to-head on the same single-node broker, topic, and config (`acks=all` +
 
 | Scenario | kacrab `producer_kafka_bench` | Java `kafka-producer-perf-test.sh` |
 | --- | ---: | ---: |
-| 5M x 10B, 16 partitions | 4.70M rec/sec; 44.8 MiB/sec; retries 0, errors 0, in-flight stalls 0 | 4.21M records/sec; 40.1 MB/sec; avg 0.27 ms, p99 1 ms |
-| 2M x 10B, 1 partition | 4.69M rec/sec; 44.7 MiB/sec; retries 0, errors 0 | -- |
+| 5M x 10B, 16 partitions | **4.70M rec/sec**; 44.8 MiB/sec; lat avg ~1.7 ms, p99 ~15 ms; retries 0, errors 0, in-flight stalls 0 | 4.21M records/sec; 40.1 MB/sec; lat avg **0.27 ms**, p99 **1 ms** |
+| 2M x 10B, 1 partition | **4.69M rec/sec**; 44.7 MiB/sec; lat avg ~0.2 ms, p99 ~5 ms; retries 0, errors 0 | -- |
 
-kacrab is ~12% faster than the Java client on the 16-partition workload while
-staying fully idempotent-correct (zero retries/errors). The single-partition
-number shows the per-partition multi-in-flight pipeline keeps one hot partition
-saturated rather than stalling at one in-flight request.
+Throughput vs latency, honestly: kacrab is ~12% faster than the Java client on
+the 16-partition workload while staying fully idempotent-correct (zero
+retries/errors), **but Java has lower latency**. kacrab's synchronous send fills
+the per-partition pipeline deep (up to `max.in.flight=5`) to maximize throughput,
+so its 16-partition tail latency (~15 ms p99, occasionally higher) sits above
+Java's (~1 ms p99). Latency uses the same accounting as Java's perf tool
+(per-record send-to-ack via the callback). For latency-sensitive workloads,
+lower `max.in.flight.requests.per.connection` / `linger.ms` to trade some
+throughput back for latency; single-partition steady-state latency (~0.2 ms avg)
+is already close to Java's. The first 1-partition run includes a cold
+metadata/connection warmup (~15 ms) that the steady-state runs do not.
 
 Bench knobs: `KACRAB_BENCH_TOPIC`, `KACRAB_BENCH_MESSAGES`, `KACRAB_BENCH_RUNS`,
 `KACRAB_BENCH_ACKS1` (acks=1), `KACRAB_BENCH_BATCH_SIZE`. The 16- and
