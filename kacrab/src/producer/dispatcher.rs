@@ -9239,6 +9239,52 @@ mod tests {
     }
 
     #[test]
+    fn detects_stale_producer_identity_after_epoch_bump_like_java() {
+        use super::super::transaction::ProducerIdentity;
+        // Java hasStaleProducerIdAndEpoch: a batch stamped under an older epoch is stale
+        // once the producer identity advances, so it is re-stamped before being sent.
+        let mut state = ProducerIdempotenceState::default();
+        // No identity yet -> nothing is stale (cannot compare).
+        assert!(!state.is_stale_identity(ProducerIdentity {
+            producer_id: 42,
+            producer_epoch: 3,
+        }));
+
+        state.identity = Some(ProducerIdentity {
+            producer_id: 42,
+            producer_epoch: 4,
+        });
+        // Same id, older epoch -> stale (epoch was bumped since).
+        assert!(state.is_stale_identity(ProducerIdentity {
+            producer_id: 42,
+            producer_epoch: 3,
+        }));
+        // Current identity -> not stale.
+        assert!(!state.is_stale_identity(ProducerIdentity {
+            producer_id: 42,
+            producer_epoch: 4,
+        }));
+        // Different producer id -> stale.
+        assert!(state.is_stale_identity(ProducerIdentity {
+            producer_id: 7,
+            producer_epoch: 4,
+        }));
+
+        // request_epoch_bump flags the deferred bump applied in producer_batch_state.
+        assert!(!state.epoch_bump_required);
+        state.request_epoch_bump();
+        assert!(state.epoch_bump_required);
+        // reset_sequences_after_epoch_bump clears every partition's sequence state so a
+        // global epoch bump restarts all partitions at 0 under the new epoch.
+        let _ = state.next_sequence("orders", 0, 3).expect("sequence");
+        state.register_inflight_sequence("orders", 0, 0);
+        state.reset_sequences_after_epoch_bump();
+        assert!(!state.epoch_bump_required);
+        assert!(!state.has_inflight_batches("orders", 0));
+        assert_eq!(state.next_sequence("orders", 0, 1).expect("reset sequence"), 0);
+    }
+
+    #[test]
     fn resolve_unresolved_after_drain_aborts_transaction_like_java() {
         use super::super::transaction::TransactionState;
         // Transactional producer with a bump-capable coordinator: abortable error.
