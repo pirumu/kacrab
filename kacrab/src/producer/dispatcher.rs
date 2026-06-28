@@ -173,6 +173,15 @@ pub struct ProducerDispatcher {
     partition_sticky_batch_size: usize,
     idempotence: ProducerIdempotenceConfig,
     producer_state: Arc<Mutex<ProducerIdempotenceState>>,
+    /// Lock-free snapshot of whether any partition is mid idempotent recovery
+    /// (an unresolved sequence or a pending epoch bump). Published by
+    /// `ProducerIdempotenceState` under the `producer_state` lock and read by the
+    /// sync dispatch selection so a recovering partition falls back to the
+    /// verified single-in-flight path (option Y) instead of pipelining new
+    /// requests on top of an ambiguous in-flight loss. Shares the same allocation
+    /// as `producer_state`'s `recovering`, so dispatcher clones (e.g. the bypass
+    /// dispatcher) observe the same flag.
+    recovering: Arc<AtomicBool>,
     producer_identity_init: Arc<Mutex<()>>,
     enqueue_sequencer: Arc<EnqueueSequencer>,
     partitioner_state: Arc<Mutex<ProducerPartitionerState>>,
@@ -185,6 +194,7 @@ impl ProducerDispatcher {
     /// Create a dispatcher with Kafka producer defaults for acks and timeout.
     #[must_use]
     pub fn new(wire: WireClient) -> Self {
+        let recovering = Arc::new(AtomicBool::new(false));
         Self {
             wire,
             acks: DEFAULT_DISPATCHER_ACKS,
@@ -210,7 +220,10 @@ impl ProducerDispatcher {
                 transaction_timeout_ms: DEFAULT_TRANSACTION_TIMEOUT_MS,
                 transaction_two_phase_commit: false,
             },
-            producer_state: Arc::new(Mutex::new(ProducerIdempotenceState::default())),
+            producer_state: Arc::new(Mutex::new(ProducerIdempotenceState::with_recovering(
+                Arc::clone(&recovering),
+            ))),
+            recovering,
             producer_identity_init: Arc::new(Mutex::new(())),
             enqueue_sequencer: Arc::new(EnqueueSequencer::new()),
             partitioner_state: Arc::new(Mutex::new(ProducerPartitionerState::default())),
@@ -223,6 +236,7 @@ impl ProducerDispatcher {
     /// Create a dispatcher from explicit runtime producer config.
     #[must_use]
     pub fn with_config(wire: WireClient, config: ProducerRuntimeConfig) -> Self {
+        let recovering = Arc::new(AtomicBool::new(false));
         Self {
             wire,
             acks: config.acks,
@@ -240,7 +254,10 @@ impl ProducerDispatcher {
             partitioner_availability_timeout: config.partitioner_availability_timeout,
             partition_sticky_batch_size: config.accumulator.batch_size,
             idempotence: config.idempotence,
-            producer_state: Arc::new(Mutex::new(ProducerIdempotenceState::default())),
+            producer_state: Arc::new(Mutex::new(ProducerIdempotenceState::with_recovering(
+                Arc::clone(&recovering),
+            ))),
+            recovering,
             producer_identity_init: Arc::new(Mutex::new(())),
             enqueue_sequencer: Arc::new(EnqueueSequencer::new()),
             partitioner_state: Arc::new(Mutex::new(ProducerPartitionerState::default())),
@@ -258,6 +275,13 @@ impl ProducerDispatcher {
 
     pub(crate) fn metrics_handle(&self) -> ProducerMetrics {
         self.metrics.clone()
+    }
+
+    /// Shared lock-free handle to the idempotent-recovery flag (see the struct
+    /// field). The sender clones this once at wiring time so its synchronous
+    /// dispatch selection can serialize a partition while recovery is in flight.
+    pub(crate) fn recovering_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.recovering)
     }
 
     #[cfg(test)]
@@ -3070,6 +3094,7 @@ impl ProducerDispatcher {
                 }
             }
         }
+        state.publish_recovering();
     }
 
     async fn record_abortable_transaction_error(&self, error: ErrorCode) {
@@ -3108,6 +3133,7 @@ impl ProducerDispatcher {
                 state.reset_sequence(topic, partition);
             }
         }
+        state.publish_recovering();
     }
 
     async fn record_fatal_transaction_error(&self, error: ErrorCode) {
@@ -3404,6 +3430,12 @@ struct ProducerIdempotenceState {
     pending_result: Option<TransactionalRequestResult>,
     pending_operation_status: PendingTransactionOperationStatus,
     pending_requests: TransactionRequestQueue,
+    /// Published mirror of "is any partition mid-recovery" for the lock-free
+    /// dispatch-selection read (option Y). Recomputed under the producer-state
+    /// lock by [`Self::publish_recovering`] whenever an unresolved-sequence
+    /// marker or `epoch_bump_required` changes. Shares its allocation with
+    /// `ProducerDispatcher::recovering`.
+    recovering: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4728,6 +4760,34 @@ fn txn_offset_commit_error(response: &TxnOffsetCommitResponseData) -> Option<Err
 }
 
 impl ProducerIdempotenceState {
+    /// Build a state that publishes its recovery flag through `recovering`
+    /// (shared with the owning [`ProducerDispatcher`]). All other fields take
+    /// their `Default`.
+    fn with_recovering(recovering: Arc<AtomicBool>) -> Self {
+        Self {
+            recovering,
+            ..Self::default()
+        }
+    }
+
+    /// Republish whether any partition is mid idempotent recovery: a pending
+    /// epoch bump (resets every partition's sequence) or any partition with an
+    /// unresolved-sequence marker. The sender's synchronous dispatch selection
+    /// reads the published flag (option Y) to serialize a partition back to the
+    /// verified single-in-flight path during the rare recovery window, rather
+    /// than pipelining new requests on top of an ambiguous in-flight loss.
+    /// Called after every mutation of `epoch_bump_required` or an
+    /// `unresolved_next_sequence` marker, all of which happen under the
+    /// producer-state lock (off the hot path; recovery is rare).
+    fn publish_recovering(&self) {
+        let recovering = self.epoch_bump_required
+            || self
+                .partitions
+                .values()
+                .any(|entry| entry.unresolved_next_sequence.is_some());
+        self.recovering.store(recovering, Ordering::Relaxed);
+    }
+
     const fn transition_to(&mut self, target: TransactionState) -> Result<()> {
         if !self.transaction_state.is_transition_valid(target) {
             self.transaction_state = TransactionState::FatalError;
@@ -4847,6 +4907,7 @@ impl ProducerIdempotenceState {
     fn reset_sequences_after_epoch_bump(&mut self) {
         self.partitions.clear();
         self.epoch_bump_required = false;
+        self.publish_recovering();
     }
 
     fn next_sequence(&mut self, topic: &str, partition: i32, record_count: i32) -> Result<i32> {
@@ -4890,6 +4951,7 @@ impl ProducerIdempotenceState {
                 .unresolved_next_sequence
                 .map_or(next_sequence, |existing| existing.max(next_sequence)),
         );
+        self.publish_recovering();
     }
 
     fn reset_sequence(&mut self, topic: &str, partition: i32) {
@@ -4903,6 +4965,7 @@ impl ProducerIdempotenceState {
         entry.next_sequence = 0;
         entry.last_acked_sequence = NO_LAST_ACKED_SEQUENCE;
         entry.last_acked_offset = INVALID_LAST_ACKED_OFFSET;
+        self.publish_recovering();
     }
 
     fn release_sequence(&mut self, topic: &str, partition: i32, base_sequence: i32) {
@@ -4916,6 +4979,7 @@ impl ProducerIdempotenceState {
                 .is_some_and(|sequence| sequence <= base_sequence)
         {
             entry.unresolved_next_sequence = None;
+            self.publish_recovering();
         }
     }
 
@@ -4974,6 +5038,7 @@ impl ProducerIdempotenceState {
         if let Some(entry) = self.partitions.get_mut(&key) {
             entry.unresolved_next_sequence = None;
         }
+        self.publish_recovering();
     }
 
     /// Java `TxnPartitionEntry::maybeUpdateLastAckedSequence`: record the highest
@@ -5064,6 +5129,7 @@ impl ProducerIdempotenceState {
         if entry.next_sequence >= base_sequence {
             entry.next_sequence = base_sequence;
         }
+        self.publish_recovering();
     }
 }
 
@@ -8883,6 +8949,47 @@ mod tests {
         fatal.resolve_unresolved_sequence_after_drain("orders", 0, true, true);
 
         assert_eq!(fatal.transaction_state, TransactionState::FatalError);
+    }
+
+    #[test]
+    fn publishes_recovering_flag_across_unresolved_lifecycle() {
+        use std::sync::atomic::Ordering;
+        // The lock-free flag the sender reads (option Y) tracks the
+        // unresolved-sequence / epoch-bump lifecycle so dispatch serializes a
+        // partition only while it is actually recovering.
+        let mut state = ProducerIdempotenceState::default();
+        let recovering = Arc::clone(&state.recovering);
+        assert!(!recovering.load(Ordering::Relaxed));
+
+        let _ = state.next_sequence("orders", 0, 3).expect("sequence");
+        state.mark_sequence_unresolved("orders", 0, 0, 3);
+        assert!(recovering.load(Ordering::Relaxed));
+
+        // Ambiguous loss: resolve clears the marker but requests an epoch bump, so
+        // the partition is still recovering until the bump is applied.
+        state.resolve_unresolved_sequence_after_drain("orders", 0, false, true);
+        assert!(state.epoch_bump_required);
+        assert!(recovering.load(Ordering::Relaxed));
+
+        // Epoch bump applied: recovery complete, full pipelining may resume.
+        state.reset_sequences_after_epoch_bump();
+        assert!(!recovering.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn publishes_recovering_flag_cleared_on_definitive_rejection() {
+        use std::sync::atomic::Ordering;
+        // A definitive rejection (no epoch bump) resolves the marker and clears the
+        // flag without serializing future dispatch.
+        let mut state = ProducerIdempotenceState::default();
+        let recovering = Arc::clone(&state.recovering);
+        let _ = state.next_sequence("orders", 0, 3).expect("sequence");
+        state.mark_sequence_unresolved("orders", 0, 0, 3);
+        assert!(recovering.load(Ordering::Relaxed));
+
+        state.resolve_unresolved_sequence_after_drain("orders", 0, false, false);
+        assert!(!state.epoch_bump_required);
+        assert!(!recovering.load(Ordering::Relaxed));
     }
 
     #[test]

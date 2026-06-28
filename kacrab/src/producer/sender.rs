@@ -49,6 +49,13 @@ pub(crate) struct ProducerSenderState {
     max_in_flight_requests: usize,
     idempotent_ordering: bool,
     completion_notify: Option<Arc<Notify>>,
+    // Lock-free handle to the dispatcher's idempotent-recovery flag. While any
+    // partition is mid-recovery (an unresolved sequence or a pending epoch bump),
+    // `select_dispatchable_batches` caps the effective in-flight depth at 1 so a
+    // recovering partition falls back to the verified single-in-flight path
+    // (option Y) instead of pipelining new requests on top of an ambiguous
+    // in-flight loss. `None` for unit-test senders that never recover.
+    recovering: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Debug)]
@@ -395,6 +402,7 @@ impl ProducerSender {
             idempotent_ordering,
         );
         state.notify_on_dispatch_completion(Arc::clone(&sender_loop_notify));
+        state.track_recovering(dispatcher.recovering_handle());
         Self {
             accumulator: Arc::new(SharedAccumulator::with_config(accumulator_config)),
             state,
@@ -1990,11 +1998,18 @@ impl ProducerSenderState {
             max_in_flight_requests,
             idempotent_ordering: idempotent_ordering || max_in_flight_requests == 1,
             completion_notify: None,
+            recovering: None,
         }
     }
 
     pub(crate) fn notify_on_dispatch_completion(&mut self, notify: Arc<Notify>) {
         self.completion_notify = Some(notify);
+    }
+
+    /// Wire the lock-free idempotent-recovery flag published by the dispatcher so
+    /// dispatch selection can serialize a recovering partition (option Y).
+    pub(crate) fn track_recovering(&mut self, recovering: Arc<AtomicBool>) {
+        self.recovering = Some(recovering);
     }
 
     #[cfg(test)]
@@ -3444,6 +3459,24 @@ impl ProducerSenderState {
             };
         }
 
+        // While the idempotent producer is mid-recovery (an unresolved sequence or a
+        // pending epoch bump on any partition), cap the effective per-partition
+        // pipeline at one in-flight request so dispatch falls back to the verified
+        // single-in-flight path (option Y). Pipelining new requests on top of an
+        // ambiguous in-flight loss is the unverified multi-in-flight failure path;
+        // serializing here keeps recovery on the depth-1 behaviour already shipped.
+        // Recovery is rare, so the common case loads the published flag once and
+        // keeps the full max.in.flight pipeline.
+        let recovering = self
+            .recovering
+            .as_ref()
+            .is_some_and(|recovering| recovering.load(Ordering::Relaxed));
+        let max_in_flight = if recovering {
+            1
+        } else {
+            self.max_in_flight_requests
+        };
+
         let mut dispatchable = Vec::with_capacity(batches.len());
         let mut deferred = Vec::new();
         let mut partitions = Vec::new();
@@ -3455,7 +3488,7 @@ impl ProducerSenderState {
             // becomes its own concurrent dispatch task (pipelining across the outer
             // in-flight JoinSet). Additional same-partition batches defer to the next cycle.
             let in_flight_depth = self.in_flight_partitions.get(&key).copied().unwrap_or(0);
-            if reserved.contains(&key) || in_flight_depth >= self.max_in_flight_requests {
+            if reserved.contains(&key) || in_flight_depth >= max_in_flight {
                 deferred.push(batch);
                 continue;
             }
@@ -5828,6 +5861,47 @@ mod tests {
         assert_eq!(selection.deferred.len(), 1);
         assert_eq!(selection.deferred[0].partition, 0);
         assert_eq!(selection.partitions.len(), 1);
+    }
+
+    #[test]
+    fn idempotent_selection_serializes_partition_while_recovering() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        // max.in.flight=5 idempotent producer with one request already in flight
+        // for partition 0 (depth 1).
+        let mut state = ProducerSenderState::new_with_idempotent_ordering(5, true);
+        let recovering = Arc::new(AtomicBool::new(false));
+        state.track_recovering(Arc::clone(&recovering));
+        state.reserve_partitions_for_dispatch(&[ready_batch("orders", 0)]);
+
+        // Not recovering: the hot partition pipelines a second in-flight request
+        // (depth 1 < max.in.flight), the multi-in-flight happy path.
+        let pipelined = state.select_dispatchable_batches(vec![ready_batch("orders", 0)]);
+        assert_eq!(pipelined.dispatchable.len(), 1);
+        assert!(pipelined.deferred.is_empty());
+
+        // Recovering (option Y): the effective depth caps at 1, so the same
+        // partition-0 batch defers to the verified single-in-flight path instead of
+        // stacking a request on top of the ambiguous in-flight loss.
+        recovering.store(true, Ordering::Relaxed);
+        let serialized = state.select_dispatchable_batches(vec![ready_batch("orders", 0)]);
+        assert!(serialized.dispatchable.is_empty());
+        assert_eq!(serialized.deferred.len(), 1);
+        assert_eq!(serialized.deferred[0].partition, 0);
+
+        // An idle partition still dispatches its first request (depth 0 < 1).
+        let idle = state.select_dispatchable_batches(vec![ready_batch("orders", 1)]);
+        assert_eq!(idle.dispatchable.len(), 1);
+        assert_eq!(idle.dispatchable[0].partition, 1);
+
+        // Recovery cleared: full pipelining resumes.
+        recovering.store(false, Ordering::Relaxed);
+        let resumed = state.select_dispatchable_batches(vec![ready_batch("orders", 0)]);
+        assert_eq!(resumed.dispatchable.len(), 1);
+        assert!(resumed.deferred.is_empty());
     }
 
     #[tokio::test]
