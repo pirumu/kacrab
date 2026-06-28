@@ -32,7 +32,9 @@ use super::{
     config::ProducerRuntimeConfig,
     dispatcher::ProducerDispatcher,
     error::{ProducerError, Result},
-    interceptor::{ProducerInterceptor, ProducerInterceptors},
+    interceptor::{
+        ClusterResource, InterceptorConfigs, ProducerInterceptor, ProducerInterceptors,
+    },
     metrics::{
         KafkaMetric, MetricName, MetricReporter, ProducerMetricValue, ProducerMetrics,
         ProducerMetricsSnapshot, ProducerQueueMetrics,
@@ -74,6 +76,11 @@ pub struct Producer {
     metric_subscriptions: BTreeSet<String>,
     application_metrics: BTreeMap<MetricName, KafkaMetric>,
     interceptors: ProducerInterceptors,
+    // Producer config handed to interceptor `configure` (client.id), and the last
+    // cluster id reported to interceptor `on_update` (deduped so on_update fires only
+    // when the cluster id first resolves or changes — Java ClusterResourceListener).
+    interceptor_configs: InterceptorConfigs,
+    last_cluster_id: Arc<RwLock<Option<String>>>,
     partitioner: ProducerPartitionerHandle,
     metric_reporters: Vec<Arc<dyn MetricReporter>>,
     // Lazily-spawned FIFO drain for the rare synchronous-send slow path (cold
@@ -126,6 +133,8 @@ impl Producer {
             metric_subscriptions: BTreeSet::new(),
             application_metrics: BTreeMap::new(),
             interceptors: ProducerInterceptors::default(),
+            interceptor_configs: InterceptorConfigs::default(),
+            last_cluster_id: Arc::new(RwLock::new(None)),
             partitioner: ProducerPartitionerHandle::default(),
             metric_reporters: Vec::new(),
             slow_send: OnceLock::new(),
@@ -533,6 +542,7 @@ impl Producer {
             sender: self.sender.shared_sender(),
             partitioner: self.partitioner.clone(),
             interceptors: self.interceptors.clone(),
+            last_cluster_id: Arc::clone(&self.last_cluster_id),
             max_block: self.max_block,
             max_request_size: self.max_request_size,
             buffer_memory: self.buffer_memory,
@@ -884,6 +894,7 @@ impl Producer {
             .await?;
         self.metrics
             .record_metadata_wait(metadata_started_at.elapsed());
+        self.notify_cluster_metadata(&metadata);
         let topic_metadata = metadata
             .topic(topic)
             .ok_or_else(|| ProducerError::UnknownTopic(topic.to_owned()))?;
@@ -1249,9 +1260,19 @@ impl Producer {
         }
     }
 
-    /// Add a producer interceptor to this producer instance.
+    /// Add a producer interceptor to this producer instance. The interceptor is
+    /// `configure`d immediately with this producer's config (Java configures each
+    /// interceptor once when it is created).
     pub fn add_interceptor(&mut self, interceptor: impl ProducerInterceptor) {
-        self.interceptors.push(interceptor);
+        self.interceptors
+            .push_and_configure(interceptor, &self.interceptor_configs);
+    }
+
+    /// Notify interceptors of a cluster-metadata update (Java
+    /// `ClusterResourceListener.onUpdate`), deduplicated so it fires only when the
+    /// cluster id first resolves or changes. No-op when there are no interceptors.
+    fn notify_cluster_metadata(&self, metadata: &ClusterMetadata) {
+        notify_interceptors_cluster_update(&self.interceptors, &self.last_cluster_id, metadata);
     }
 
     /// Add a Rust-native metrics reporter.
@@ -1481,11 +1502,43 @@ struct SlowSend {
 
 /// Cloned handles the slow drain needs to assign + append without owning the
 /// (non-`Clone`) producer runtime.
+/// Deliver Java `ClusterResourceListener.onUpdate` to the interceptors, deduplicated
+/// against the last-seen cluster id so it fires only when the cluster id first
+/// resolves or changes. No-op when there are no interceptors.
+fn notify_interceptors_cluster_update(
+    interceptors: &ProducerInterceptors,
+    last_cluster_id: &RwLock<Option<String>>,
+    metadata: &ClusterMetadata,
+) {
+    if interceptors.is_empty() {
+        return;
+    }
+    let cluster_id = metadata.cluster_id.clone();
+    {
+        let last = last_cluster_id
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *last == cluster_id {
+            return;
+        }
+    }
+    let mut last = last_cluster_id
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *last == cluster_id {
+        return;
+    }
+    last.clone_from(&cluster_id);
+    drop(last);
+    interceptors.on_cluster_update(&ClusterResource { cluster_id });
+}
+
 struct SlowSendContext {
     control_dispatcher: ProducerDispatcher,
     sender: Arc<tokio::sync::Mutex<ProducerSender>>,
     partitioner: ProducerPartitionerHandle,
     interceptors: ProducerInterceptors,
+    last_cluster_id: Arc<RwLock<Option<String>>>,
     max_block: std::time::Duration,
     max_request_size: usize,
     buffer_memory: usize,
@@ -1601,6 +1654,7 @@ impl SlowSendContext {
             .await
             .metadata_for_topics([record.topic.as_ref()])
             .await?;
+        notify_interceptors_cluster_update(&self.interceptors, &self.last_cluster_id, &metadata);
         if let Some(partition) = self.partitioner.partition(record, &metadata).transpose()? {
             validate_selected_partition(&metadata, record, partition)?;
             record.partition = partition;
@@ -1954,9 +2008,16 @@ impl ProducerBuilder {
         let mut connection = config.to_connection_config();
         connection.sasl.client_authenticator = sasl_client_authenticator;
         connection.sasl.client_authenticator_factory = sasl_client_authenticator_factory;
+        let interceptor_configs = InterceptorConfigs {
+            client_id: Some(config.client_id.clone()),
+        };
         let wire = WireClient::connect_with_brokers(connection, config.client_id, endpoints);
         let mut producer = Producer::from_parts(wire, runtime);
         producer.interceptors = interceptors;
+        // Java Configurable.configure: configure each interceptor once at construction,
+        // passing the producer config (client.id).
+        producer.interceptors.configure(&interceptor_configs);
+        producer.interceptor_configs = interceptor_configs;
         producer.partitioner = partitioner;
         initialize_metric_reporters(&metric_reporters);
         producer.metric_reporters = metric_reporters;
