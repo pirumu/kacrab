@@ -1,7 +1,7 @@
 //! Sender-side dispatch scheduling state for the producer.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     future::Future,
     sync::{
         Arc,
@@ -38,6 +38,19 @@ pub(crate) struct ProducerSenderState {
     // new request per partition per cycle so each becomes its own concurrent dispatch task
     // (pipelining across the outer in-flight JoinSet) and the depth here bounds the pipeline.
     in_flight_partitions: AHashMap<InFlightPartitionKey, usize>,
+    // Java `TxnPartitionEntry.inflightBatchesBySequence`: the base sequences of the
+    // batches that have been dispatched at least once for a partition and have NOT yet
+    // terminally completed (a successful/duplicate ack or a fatal failure). A sequence is
+    // added when its batch is dispatched and removed only on terminal completion — a
+    // re-enqueued (retried) batch keeps its entry, so `first_inflight_sequence` (the set
+    // minimum) is the lowest unacked base sequence. `select_dispatchable_batches` uses it
+    // to reproduce Java `shouldStopDrainBatchesForPartition`'s retry clause: a retried
+    // batch (one that already carries `producer_state`) is only dispatched when its base
+    // sequence equals the partition's first in-flight sequence, so out-of-order responses
+    // during retry re-send strictly in sequence order (reducing to one in-flight per
+    // partition only while retrying). Fresh batches (no `producer_state` yet) are never
+    // gated, so the happy path keeps the full max.in.flight pipeline.
+    inflight_by_sequence: AHashMap<InFlightPartitionKey, BTreeSet<i32>>,
     in_flight_batch_identities: AHashSet<ReadyBatchIdentity>,
     completed_batch_identities: AHashSet<ReadyBatchIdentity>,
     completed_batch_identity_order: VecDeque<ReadyBatchIdentity>,
@@ -1412,6 +1425,9 @@ pub(crate) struct TimedDispatchOutcome {
 #[derive(Debug)]
 struct InFlightDispatchReservation {
     partitions: Vec<InFlightPartitionKey>,
+    // The `(partition, base_sequence)` pairs this dispatch added to `inflight_by_sequence`,
+    // so a terminal completion removes exactly them while a requeue keeps them tracked.
+    sequences: Vec<(InFlightPartitionKey, i32)>,
     identities: Vec<ReadyBatchIdentity>,
     bytes: usize,
     incomplete_batches: usize,
@@ -1421,6 +1437,16 @@ struct InFlightDispatchReservation {
 struct InFlightDispatchAccounting {
     bytes: usize,
     incomplete_batches: usize,
+}
+
+/// Per-dispatch reservation payload registered when a dispatch task is spawned: the
+/// idempotent base sequences it puts in flight, the batch identities it owns, and its
+/// buffer accounting. Bundled so spawning stays within the argument-count budget.
+#[derive(Debug, Default)]
+struct DispatchReservationInputs {
+    sequences: Vec<(InFlightPartitionKey, i32)>,
+    identities: Vec<ReadyBatchIdentity>,
+    accounting: InFlightDispatchAccounting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1979,6 +2005,7 @@ impl ProducerSenderState {
         Self {
             in_flight: JoinSet::new(),
             in_flight_partitions: AHashMap::new(),
+            inflight_by_sequence: AHashMap::new(),
             in_flight_batch_identities: AHashSet::new(),
             completed_batch_identities: AHashSet::new(),
             completed_batch_identity_order: VecDeque::new(),
@@ -2527,8 +2554,7 @@ impl ProducerSenderState {
     {
         self.spawn_dispatch_task_with_buffered_bytes(
             partitions,
-            Vec::new(),
-            InFlightDispatchAccounting::default(),
+            DispatchReservationInputs::default(),
             task,
         )
     }
@@ -2536,21 +2562,31 @@ impl ProducerSenderState {
     fn spawn_dispatch_task_with_buffered_bytes<F>(
         &mut self,
         partitions: &[InFlightPartitionKey],
-        identities: Vec<ReadyBatchIdentity>,
-        accounting: InFlightDispatchAccounting,
+        inputs: DispatchReservationInputs,
         task: F,
     ) -> Result<AbortHandle, ProducerError>
     where
         F: Future<Output = TimedDispatchOutcome> + Send + 'static,
     {
+        let DispatchReservationInputs {
+            sequences,
+            identities,
+            accounting,
+        } = inputs;
         self.reserve_in_flight_batch_identities(&identities)?;
         self.reserve_dispatch_partitions(partitions);
+        self.add_inflight_sequences(&sequences);
         let handle = self.spawn_in_flight(task);
-        if !partitions.is_empty() || accounting.bytes > 0 || !identities.is_empty() {
+        if !partitions.is_empty()
+            || !sequences.is_empty()
+            || accounting.bytes > 0
+            || !identities.is_empty()
+        {
             let previous = self.in_flight_reservations.insert(
                 handle.id(),
                 InFlightDispatchReservation {
                     partitions: partitions.to_vec(),
+                    sequences,
                     identities,
                     bytes: accounting.bytes,
                     incomplete_batches: accounting.incomplete_batches,
@@ -2558,6 +2594,7 @@ impl ProducerSenderState {
             );
             if let Some(previous) = previous {
                 self.release_in_flight_batch_identities(previous.identities);
+                self.remove_inflight_sequences(&previous.sequences);
                 self.in_flight_buffered_bytes =
                     self.in_flight_buffered_bytes.saturating_sub(previous.bytes);
                 self.in_flight_incomplete_batches = self
@@ -2602,6 +2639,11 @@ impl ProducerSenderState {
             bytes.saturating_add(batch.pooled_buffer_bytes())
         });
         let incomplete_batches = batches.len();
+        // Track each idempotent batch's assigned base sequence as in-flight (Java
+        // `addInFlightBatch`, post-`setProducerState`). Fresh batches have just been
+        // stamped by `prepare_drained_batches`; retried batches kept their sequence, so
+        // re-adding it is idempotent (the set already holds it).
+        let sequences = Self::inflight_sequences_of(&batches);
         let identities = batches.iter().map(|batch| batch.identity).collect();
         let started_at = batches
             .iter()
@@ -2614,10 +2656,13 @@ impl ProducerSenderState {
         let enqueue_ticket = dispatcher.next_enqueue_ticket();
         self.spawn_dispatch_task_with_buffered_bytes(
             &reserved_partitions,
-            identities,
-            InFlightDispatchAccounting {
-                bytes: buffered_bytes,
-                incomplete_batches,
+            DispatchReservationInputs {
+                sequences,
+                identities,
+                accounting: InFlightDispatchAccounting {
+                    bytes: buffered_bytes,
+                    incomplete_batches,
+                },
             },
             async move {
                 let outcome = dispatcher
@@ -2770,12 +2815,14 @@ impl ProducerSenderState {
                     self.release_dispatch_partitions(outcome.partitions.clone());
                 } else if matches!(&outcome.outcome, DispatchOutcome::Delivered(_)) {
                     for reservation in reservations {
+                        self.remove_inflight_sequences(&reservation.sequences);
                         self.mark_completed_batch_identities(reservation.identities);
                     }
                 }
             },
             Err(error) => {
                 if let Some(reservation) = self.release_in_flight_reservation(error.id()) {
+                    self.remove_inflight_sequences(&reservation.sequences);
                     self.mark_completed_batch_identities(reservation.identities);
                 }
             },
@@ -2797,6 +2844,12 @@ impl ProducerSenderState {
                 match self.release_in_flight_reservation(task_id) {
                     Some(reservation) => {
                         if matches!(&outcome.outcome, DispatchOutcome::Delivered(_)) {
+                            // Terminal completion (Java `handleCompletedBatch` /
+                            // fatal `handleFailedBatch`): the batches are done, so drop
+                            // their base sequences from the in-flight tracking. A
+                            // `Requeue` keeps the sequences so the retried batches stay
+                            // ordered behind their first in-flight sequence.
+                            self.remove_inflight_sequences(&reservation.sequences);
                             self.mark_completed_batch_identities(reservation.identities);
                         }
                     },
@@ -2806,6 +2859,10 @@ impl ProducerSenderState {
             },
             Err(error) => {
                 if let Some(reservation) = self.release_in_flight_reservation(error.id()) {
+                    // A panicked dispatch task is terminal: its batches will not be
+                    // retried, so release their in-flight sequences to avoid wedging the
+                    // partition's `first_inflight_sequence` gate.
+                    self.remove_inflight_sequences(&reservation.sequences);
                     self.mark_completed_batch_identities(reservation.identities);
                 }
                 Err(error)
@@ -3317,6 +3374,56 @@ impl ProducerSenderState {
         }
     }
 
+    /// The `(partition, base_sequence)` pairs of the idempotent batches in a dispatch, used
+    /// to register them as in-flight (Java `addInFlightBatch`). Batches without an assigned
+    /// `producer_state` (non-idempotent, or not yet stamped) contribute nothing.
+    fn inflight_sequences_of(batches: &[ReadyBatch]) -> Vec<(InFlightPartitionKey, i32)> {
+        batches
+            .iter()
+            .filter_map(|batch| {
+                batch
+                    .producer_state
+                    .map(|state| (InFlightPartitionKey::from(batch), state.base_sequence))
+            })
+            .collect()
+    }
+
+    /// Register base sequences as in-flight for their partitions (Java
+    /// `TxnPartitionEntry.addInflightBatch`). Re-adding an already-tracked sequence (a
+    /// retried batch being re-dispatched) is a no-op.
+    fn add_inflight_sequences(&mut self, sequences: &[(InFlightPartitionKey, i32)]) {
+        for (partition, base_sequence) in sequences {
+            let _inserted = self
+                .inflight_by_sequence
+                .entry(partition.clone())
+                .or_default()
+                .insert(*base_sequence);
+        }
+    }
+
+    /// Remove base sequences once their batches terminally complete (Java
+    /// `removeInFlightBatch`, only from `handleCompletedBatch` / fatal `handleFailedBatch` —
+    /// NOT on re-enqueue). Drops the partition entry when no sequences remain in flight.
+    fn remove_inflight_sequences(&mut self, sequences: &[(InFlightPartitionKey, i32)]) {
+        for (partition, base_sequence) in sequences {
+            if let Some(set) = self.inflight_by_sequence.get_mut(partition) {
+                let _removed = set.remove(base_sequence);
+                if set.is_empty() {
+                    let _dropped = self.inflight_by_sequence.remove(partition);
+                }
+            }
+        }
+    }
+
+    /// The lowest in-flight base sequence for a partition, or `None` when nothing is in
+    /// flight (Java `firstInFlightSequence`). `select_dispatchable_batches` defers a retried
+    /// batch whose base sequence is not this value, keeping retries strictly in order.
+    fn first_inflight_sequence(&self, partition: &InFlightPartitionKey) -> Option<i32> {
+        self.inflight_by_sequence
+            .get(partition)
+            .and_then(|set| set.iter().next().copied())
+    }
+
     #[cfg(test)]
     pub(crate) fn reserve_partitions_for_dispatch(&mut self, batches: &[ReadyBatch]) {
         for batch in batches {
@@ -3450,6 +3557,22 @@ impl ProducerSenderState {
         let mut reserved = AHashSet::new();
         for batch in batches {
             let key = InFlightPartitionKey::from(&batch);
+            // Java `shouldStopDrainBatchesForPartition` retry clause: a batch that already
+            // carries `producer_state` is being RETRIED (it kept its assigned base
+            // sequence). Only let it through when its base sequence is the partition's
+            // first in-flight sequence; otherwise an earlier-sequence batch is still
+            // unacked, so dispatching this one would arrive out of order. Deferring it
+            // re-sends the in-flight batches strictly in sequence order, reducing the
+            // partition to one in-flight request only while it is retrying. Fresh batches
+            // (no `producer_state` yet) skip this gate, so the happy path keeps the full
+            // max.in.flight pipeline.
+            if let Some(producer_state) = batch.producer_state
+                && let Some(first_inflight) = self.first_inflight_sequence(&key)
+                && producer_state.base_sequence != first_inflight
+            {
+                deferred.push(batch);
+                continue;
+            }
             // Up to max.in.flight.requests.per.connection in-flight requests per partition
             // (Java parity), but at most ONE new request per partition per selection so each
             // becomes its own concurrent dispatch task (pipelining across the outer
@@ -3677,6 +3800,25 @@ mod tests {
             first_append_at: std::time::Instant::now(),
             producer_state: None,
         }
+    }
+
+    /// A retried batch: it already carries an assigned idempotent `producer_state`
+    /// (base sequence), so it is subject to the `first_inflight_sequence` ordering gate.
+    fn ready_batch_with_sequence(
+        topic: &str,
+        partition: i32,
+        base_sequence: i32,
+    ) -> crate::producer::ReadyBatch {
+        use crate::producer::transaction::{ProducerBatchState, ProducerIdentity};
+        let mut batch = ready_batch(topic, partition);
+        batch.producer_state = Some(ProducerBatchState {
+            identity: ProducerIdentity {
+                producer_id: 7,
+                producer_epoch: 0,
+            },
+            base_sequence,
+        });
+        batch
     }
 
     fn ready_accumulator() -> SharedAccumulator {
@@ -5828,6 +5970,46 @@ mod tests {
         assert_eq!(selection.deferred.len(), 1);
         assert_eq!(selection.deferred[0].partition, 0);
         assert_eq!(selection.partitions.len(), 1);
+    }
+
+    #[test]
+    fn idempotent_selection_resends_retried_batches_in_first_inflight_sequence_order() {
+        // max.in.flight=5 idempotent producer. Two batches (base sequence 0 and 1) were
+        // dispatched for partition 0 and then requeued together (a retriable failure), so
+        // both stay tracked as in-flight by sequence. This mirrors Java's
+        // `inflightBatchesBySequence` after `reenqueue` (which does NOT remove them).
+        let mut state = ProducerSenderState::new_with_idempotent_ordering(5, true);
+        let partition = super::InFlightPartitionKey::from(&ready_batch("orders", 0));
+        state.add_inflight_sequences(&[(partition.clone(), 0), (partition.clone(), 1)]);
+        assert_eq!(state.first_inflight_sequence(&partition), Some(0));
+
+        // Both retried batches are ready again (in sequence order, as `insert_requeued_batch`
+        // keeps them). Only the one whose base sequence is the first in-flight sequence (0)
+        // may dispatch; sequence 1 defers so the broker never sees it out of order. This is
+        // Java `shouldStopDrainBatchesForPartition`'s "reduce to one in-flight during retry".
+        let selection = state.select_dispatchable_batches(vec![
+            ready_batch_with_sequence("orders", 0, 0),
+            ready_batch_with_sequence("orders", 0, 1),
+        ]);
+        assert_eq!(selection.dispatchable.len(), 1);
+        assert_eq!(selection.dispatchable[0].producer_state.unwrap().base_sequence, 0);
+        assert_eq!(selection.deferred.len(), 1);
+        assert_eq!(selection.deferred[0].producer_state.unwrap().base_sequence, 1);
+
+        // Sequence 0 acked (terminal) → removed; the first in-flight sequence advances to 1,
+        // which may now dispatch.
+        state.remove_inflight_sequences(&[(partition.clone(), 0)]);
+        assert_eq!(state.first_inflight_sequence(&partition), Some(1));
+        let next = state.select_dispatchable_batches(vec![ready_batch_with_sequence("orders", 0, 1)]);
+        assert_eq!(next.dispatchable.len(), 1);
+        assert_eq!(next.dispatchable[0].producer_state.unwrap().base_sequence, 1);
+        assert!(next.deferred.is_empty());
+
+        // Fresh batches (no producer_state yet) are NEVER gated by sequence ordering, so the
+        // happy path keeps pipelining across the connection's max.in.flight.
+        let fresh = state.select_dispatchable_batches(vec![ready_batch("billing", 4)]);
+        assert_eq!(fresh.dispatchable.len(), 1);
+        assert!(fresh.deferred.is_empty());
     }
 
     #[tokio::test]
