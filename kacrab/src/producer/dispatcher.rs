@@ -2794,13 +2794,28 @@ impl ProducerDispatcher {
         partition: i32,
         leader_id: i32,
     ) -> Result<()> {
-        let _identity = self.bump_producer_identity(leader_id).await?;
-        {
-            let mut state = self.producer_state.lock().await;
+        // Java `sequenceHasBeenReset`/`reopened` short-circuit: if the producer epoch was
+        // already bumped (e.g. by a sibling in-flight request's recovery), these batches
+        // are already stale — re-stamping them under the current epoch is enough; do NOT
+        // bump the epoch a second time (which would churn through InitProducerId and reset
+        // every partition again).
+        let already_bumped = {
+            let state = self.producer_state.lock().await;
+            batches
+                .iter()
+                .filter(|batch| batch.topic == topic && batch.partition == partition)
+                .filter_map(|batch| batch.producer_state)
+                .any(|producer_state| state.is_stale_identity(producer_state.identity))
+        };
+        if !already_bumped {
+            let _identity = self.bump_producer_identity(leader_id).await?;
             // A producer-epoch bump invalidates every partition's sequences, so restart
             // them all at 0 under the new epoch (not just this one). Stale in-flight
             // batches on other partitions are re-stamped on their next drain.
-            state.reset_sequences_after_epoch_bump();
+            self.producer_state
+                .lock()
+                .await
+                .reset_sequences_after_epoch_bump();
         }
         for batch in batches {
             if batch.topic == topic && batch.partition == partition {
