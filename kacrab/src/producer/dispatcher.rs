@@ -469,6 +469,18 @@ impl ProducerDispatcher {
                 .route_for_batch(&metadata, batch, &first_record)
                 .await?;
             self.add_partition_to_transaction(&route).await?;
+            // A batch whose stamped epoch was bumped since (stale) must be re-stamped
+            // under the new epoch with a fresh sequence (Java startSequencesAtBeginning):
+            // clear it so it preps as fresh below.
+            if let Some(producer_state) = batch.producer_state
+                && self
+                    .producer_state
+                    .lock()
+                    .await
+                    .is_stale_identity(producer_state.identity)
+            {
+                batch.producer_state = None;
+            }
             match batch.producer_state {
                 None => match self
                     .producer_batch_state(&route, batch.records.len())
@@ -1971,6 +1983,20 @@ impl ProducerDispatcher {
                 self.rewind_unsent_idempotent_sequences(batches).await;
                 return Err(DispatchError::from(error));
             }
+            // A batch whose epoch was bumped since it was stamped (stale) must not be sent
+            // under the fenced old epoch. Re-enqueue the whole dispatch so it is re-stamped
+            // (fresh sequence under the new epoch) on the next drain via prepare_drained_
+            // batches, where the in-flight registration is rebuilt consistently.
+            if let Some(producer_state) = batch.producer_state
+                && self
+                    .producer_state
+                    .lock()
+                    .await
+                    .is_stale_identity(producer_state.identity)
+            {
+                self.rewind_unsent_idempotent_sequences(batches).await;
+                return Err(DispatchError::Requeue);
+            }
             if batch.producer_state.is_none() {
                 match self.producer_batch_state(&route, batch.records.len()).await {
                     Ok(ProducerBatchPrep::Ready(producer_state)) => {
@@ -2739,7 +2765,11 @@ impl ProducerDispatcher {
                 drop(state);
                 let identity = self.bump_producer_identity(route.leader_id).await?;
                 let mut state = self.producer_state.lock().await;
-                state.reset_sequence(&route.topic, route.partition);
+                // A producer-epoch bump invalidates EVERY partition's old sequences, so
+                // restart them all at 0 under the new epoch (Java startSequencesAtBeginning
+                // applies per-partition as each drains; kacrab's global reset is equivalent
+                // because stale in-flight batches are re-stamped, not renumbered in place).
+                state.reset_sequences_after_epoch_bump();
                 let base_sequence =
                     state.next_sequence(&route.topic, route.partition, record_count)?;
                 drop(state);
@@ -2767,7 +2797,10 @@ impl ProducerDispatcher {
         let _identity = self.bump_producer_identity(leader_id).await?;
         {
             let mut state = self.producer_state.lock().await;
-            state.reset_sequence(topic, partition);
+            // A producer-epoch bump invalidates every partition's sequences, so restart
+            // them all at 0 under the new epoch (not just this one). Stale in-flight
+            // batches on other partitions are re-stamped on their next drain.
+            state.reset_sequences_after_epoch_bump();
         }
         for batch in batches {
             if batch.topic == topic && batch.partition == partition {
@@ -5068,6 +5101,16 @@ impl ProducerIdempotenceState {
         self.partitions
             .get(&key)
             .is_some_and(|entry| !entry.inflight_by_sequence.is_empty())
+    }
+
+    /// Whether a batch's stamped producer id/epoch is stale relative to the current
+    /// producer identity (Java `hasStaleProducerIdAndEpoch`). True after an epoch
+    /// bump for any batch still carrying the old epoch — such a batch must be
+    /// re-stamped (fresh sequence under the new epoch) before it is sent, which is
+    /// kacrab's equivalent of Java `startSequencesAtBeginning` renumbering an
+    /// in-flight batch in place.
+    fn is_stale_identity(&self, identity: ProducerIdentity) -> bool {
+        self.identity.is_some_and(|current| current != identity)
     }
 
     /// Java `firstInFlightSequence`: the lowest in-flight base sequence for a
