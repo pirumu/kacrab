@@ -1596,7 +1596,9 @@ impl ProducerDispatcher {
                 },
                 Err(DispatchError::Requeue) => return DispatchOutcome::Requeue(batches),
                 Err(DispatchError::SplitAndRequeue { topic, partition }) => {
-                    return self.message_too_large_split_outcome(batches, topic, partition);
+                    return self
+                        .message_too_large_split_outcome(batches, topic, partition)
+                        .await;
                 },
                 Err(DispatchError::RetryableLeadership {
                     topic,
@@ -1693,7 +1695,7 @@ impl ProducerDispatcher {
         }
     }
 
-    fn message_too_large_split_outcome(
+    async fn message_too_large_split_outcome(
         &self,
         batches: Vec<ReadyBatch>,
         topic: String,
@@ -1708,6 +1710,14 @@ impl ProducerDispatcher {
             self.partition_sticky_batch_size,
             compression_ratio,
         ) else {
+            // A single-record batch that still exceeds max.request.size cannot be split
+            // and fails terminally, leaving a hole in the partition's sequence. Java
+            // failBatch(adjustSequenceNumbers=true) -> requestIdempotentEpochBumpForPartition
+            // requests an epoch bump so the next produce restarts the sequence and heals
+            // the gap rather than wedging later batches on OUT_OF_ORDER.
+            if self.idempotence.enabled && self.idempotence.transactional_id.is_none() {
+                self.producer_state.lock().await.request_epoch_bump();
+            }
             return DispatchOutcome::Delivered(Err(ProducerError::Broker {
                 topic,
                 partition,
@@ -5012,6 +5022,13 @@ impl ProducerIdempotenceState {
         self.epoch_bump_required = false;
     }
 
+    /// Java `requestIdempotentEpochBumpForPartition`: flag that the producer epoch
+    /// must be bumped before the next produce (applied in `producer_batch_state`),
+    /// healing a sequence gap left by a terminally failed batch.
+    const fn request_epoch_bump(&mut self) {
+        self.epoch_bump_required = true;
+    }
+
     fn next_sequence(&mut self, topic: &str, partition: i32, record_count: i32) -> Result<i32> {
         let key = TopicPartitionKey {
             topic: topic.to_owned(),
@@ -7432,8 +7449,8 @@ mod tests {
         assert_ratio_close(estimator.estimation("orders", Compression::Lz4), 1.25);
     }
 
-    #[test]
-    fn message_too_large_split_resets_compression_ratio_estimation() {
+    #[tokio::test]
+    async fn message_too_large_split_resets_compression_ratio_estimation() {
         let dispatcher = ProducerDispatcher::with_config(
             test_wire(),
             ProducerRuntimeConfig {
@@ -7447,7 +7464,9 @@ mod tests {
         dispatcher.set_compression_ratio_estimation_for_test("orders", Compression::None, 0.40);
         let batches = vec![ready_batch("orders", 0)];
 
-        let outcome = dispatcher.message_too_large_split_outcome(batches, "orders".to_owned(), 0);
+        let outcome = dispatcher
+            .message_too_large_split_outcome(batches, "orders".to_owned(), 0)
+            .await;
 
         assert!(matches!(
             outcome,
