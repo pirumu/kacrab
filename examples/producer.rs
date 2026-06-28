@@ -103,16 +103,15 @@ async fn write_records(
     deliveries.push(first);
 
     let callback_sequence = args.messages.saturating_add(1);
-    let callback_delivery = producer
-        .send_with_callback(
-            record(
-                &args.topic,
-                args.partition,
-                callback_sequence,
-                "callback-send",
-            ),
-            |_result| {},
-        )?;
+    let callback_delivery = producer.send_with_callback(
+        record(
+            &args.topic,
+            args.partition,
+            callback_sequence,
+            "callback-send",
+        ),
+        |_result| {},
+    )?;
     deliveries.push(callback_delivery);
 
     for sequence in 1..=args.messages {
