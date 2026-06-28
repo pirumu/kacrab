@@ -441,16 +441,27 @@ impl ProducerDispatcher {
         self.metrics_enabled.load(Ordering::Relaxed)
     }
 
-    pub(crate) async fn prepare_drained_batches(&self, batches: &mut [ReadyBatch]) -> Result<()> {
+    /// Assign idempotent sequences to freshly drained batches. Returns the indices
+    /// of batches that must be DEFERRED (re-enqueued, not dispatched) this cycle —
+    /// Java `shouldStopDrainBatchesForPartition`'s unresolved-sequence clause: a
+    /// partition with an unresolved sequence and still-in-flight batches stops
+    /// draining new batches until it resolves. The returned indices are positions
+    /// into `batches`; the caller removes them (and their parallel partition keys).
+    /// On error `batches` is left untouched so the caller can re-enqueue them all.
+    pub(crate) async fn prepare_drained_batches(
+        &self,
+        batches: &mut [ReadyBatch],
+    ) -> Result<Vec<usize>> {
         if !self.idempotence.enabled && self.idempotence.transactional_id.is_none() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let topics = unique_topics(batches);
         let metadata = self
             .wire
             .metadata_for_topics(topics.iter().map(String::as_str))
             .await?;
-        for batch in &mut *batches {
+        let mut deferred = Vec::new();
+        for (index, batch) in batches.iter_mut().enumerate() {
             let Some(first_record) = batch.records.first().cloned() else {
                 continue;
             };
@@ -459,12 +470,16 @@ impl ProducerDispatcher {
                 .await?;
             self.add_partition_to_transaction(&route).await?;
             if batch.producer_state.is_none() {
-                batch.producer_state = self
+                match self
                     .producer_batch_state(&route, batch.records.len())
-                    .await?;
+                    .await?
+                {
+                    ProducerBatchPrep::Ready(state) => batch.producer_state = state,
+                    ProducerBatchPrep::DeferUnresolved => deferred.push(index),
+                }
             }
         }
-        Ok(())
+        Ok(deferred)
     }
 
     /// Set the number of retry attempts for retryable leadership errors.
@@ -1944,7 +1959,17 @@ impl ProducerDispatcher {
             }
             if batch.producer_state.is_none() {
                 match self.producer_batch_state(&route, batch.records.len()).await {
-                    Ok(producer_state) => batch.producer_state = producer_state,
+                    Ok(ProducerBatchPrep::Ready(producer_state)) => {
+                        batch.producer_state = producer_state;
+                    },
+                    // The partition entered unresolved-sequence recovery with in-flight
+                    // batches between selection and encoding (Java stop-drain): re-enqueue
+                    // the whole dispatch so these batches are re-evaluated (and deferred)
+                    // on the next drain instead of being sent out of order.
+                    Ok(ProducerBatchPrep::DeferUnresolved) => {
+                        self.rewind_unsent_idempotent_sequences(batches).await;
+                        return Err(DispatchError::Requeue);
+                    },
                     Err(error) => {
                         self.rewind_unsent_idempotent_sequences(batches).await;
                         return Err(DispatchError::from(error));
@@ -2650,9 +2675,9 @@ impl ProducerDispatcher {
         &self,
         route: &ProduceRoute,
         record_count: usize,
-    ) -> Result<Option<ProducerBatchState>> {
+    ) -> Result<ProducerBatchPrep> {
         if !self.idempotence.enabled {
-            return Ok(None);
+            return Ok(ProducerBatchPrep::Ready(None));
         }
         let record_count =
             i32::try_from(record_count).map_err(|_error| ProducerError::SequenceOverflow {
@@ -2674,10 +2699,10 @@ impl ProducerDispatcher {
             state.reset_sequences_after_epoch_bump();
             let base_sequence = state.next_sequence(&route.topic, route.partition, record_count)?;
             drop(state);
-            return Ok(Some(ProducerBatchState {
+            return Ok(ProducerBatchPrep::Ready(Some(ProducerBatchState {
                 identity,
                 base_sequence,
-            }));
+            })));
         }
         let identity = self.producer_identity(route.leader_id).await?;
         let mut state = self.producer_state.lock().await;
@@ -2686,6 +2711,17 @@ impl ProducerDispatcher {
             Err(ProducerError::UnresolvedSequence { .. })
                 if self.idempotence.transactional_id.is_none() =>
             {
+                // Java `shouldStopDrainBatchesForPartition`: while the partition has
+                // an unresolved sequence AND still has in-flight batches, do NOT drain
+                // this fresh batch — defer it until the in-flight requests drain and
+                // `maybeResolveSequences` resolves the marker (which may clear it with
+                // no epoch bump if the gap was filled). Only bump+reset when the
+                // partition has fully drained yet is still unresolved (a genuine gap),
+                // matching `bumpIdempotentEpochAndResetIdIfNeeded`.
+                if state.has_inflight_batches(&route.topic, route.partition) {
+                    drop(state);
+                    return Ok(ProducerBatchPrep::DeferUnresolved);
+                }
                 drop(state);
                 let identity = self.bump_producer_identity(route.leader_id).await?;
                 let mut state = self.producer_state.lock().await;
@@ -2693,18 +2729,18 @@ impl ProducerDispatcher {
                 let base_sequence =
                     state.next_sequence(&route.topic, route.partition, record_count)?;
                 drop(state);
-                return Ok(Some(ProducerBatchState {
+                return Ok(ProducerBatchPrep::Ready(Some(ProducerBatchState {
                     identity,
                     base_sequence,
-                }));
+                })));
             },
             Err(error) => return Err(error),
         };
         drop(state);
-        Ok(Some(ProducerBatchState {
+        Ok(ProducerBatchPrep::Ready(Some(ProducerBatchState {
             identity,
             base_sequence,
-        }))
+        })))
     }
 
     async fn recover_idempotent_partition(
@@ -5274,6 +5310,17 @@ impl From<&ProduceRoute> for TopicPartitionKey {
 pub(crate) enum DispatchOutcome {
     Delivered(Result<Vec<RecordMetadata>>),
     Requeue(Vec<ReadyBatch>),
+}
+
+/// Outcome of assigning idempotent state to one freshly drained batch.
+#[derive(Debug)]
+enum ProducerBatchPrep {
+    /// Sequence assigned (`Some` for idempotent, `None` for non-idempotent).
+    Ready(Option<ProducerBatchState>),
+    /// The partition has an unresolved sequence with in-flight batches: stop
+    /// draining this batch until the partition resolves (Java
+    /// `shouldStopDrainBatchesForPartition`).
+    DeferUnresolved,
 }
 
 #[derive(Debug)]

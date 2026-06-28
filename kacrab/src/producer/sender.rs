@@ -3599,17 +3599,32 @@ impl ProducerSenderState {
         batches: Vec<ReadyBatch>,
     ) -> Result<DispatchSelection, DispatchPrepareError> {
         let mut selection = self.select_dispatchable_batches(batches);
-        if let Err(error) = dispatcher
+        match dispatcher
             .prepare_drained_batches(&mut selection.dispatchable)
             .await
         {
-            selection.dispatchable.extend(selection.deferred);
-            return Err(DispatchPrepareError {
-                error,
-                batches: selection.dispatchable,
-            });
+            // Batches whose partition is mid unresolved-sequence recovery are deferred
+            // (Java stop-drain). `prepare_drained_batches` returns their indices into
+            // `dispatchable`, which is built parallel to `partitions`, so removing
+            // high-to-low keeps both lists aligned. The deferred batches are
+            // re-enqueued by `start_dispatch_selection`.
+            Ok(deferred_indices) => {
+                for index in deferred_indices.into_iter().rev() {
+                    if index < selection.partitions.len() {
+                        let _dropped = selection.partitions.remove(index);
+                    }
+                    selection.deferred.push(selection.dispatchable.remove(index));
+                }
+                Ok(selection)
+            },
+            Err(error) => {
+                selection.dispatchable.extend(selection.deferred);
+                Err(DispatchPrepareError {
+                    error,
+                    batches: selection.dispatchable,
+                })
+            },
         }
-        Ok(selection)
     }
 
     pub(crate) async fn drain_ready_dispatch_batches(
