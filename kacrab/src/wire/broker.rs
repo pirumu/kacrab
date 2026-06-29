@@ -4,7 +4,7 @@ use std::{
     collections::VecDeque,
     marker::PhantomData,
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -19,8 +19,8 @@ use kacrab_protocol::{
     },
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf},
-    sync::{mpsc, oneshot},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter, WriteHalf},
+    sync::{Notify, mpsc, oneshot},
 };
 
 #[cfg(feature = "gssapi")]
@@ -247,7 +247,7 @@ impl BrokerHandle {
     pub(crate) fn negotiated_version(&self, api_key: ApiKey) -> Option<i16> {
         self.capabilities
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner)
             .as_ref()?
             .version_for(api_key)
     }
@@ -362,7 +362,7 @@ impl BrokerTask {
                     *self
                         .capabilities
                         .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        .unwrap_or_else(PoisonError::into_inner) =
                         Some(capabilities.clone());
                     if matches!(
                         self.serve_connection(stream, capabilities, &mut pending, &mut rx_open)
@@ -411,56 +411,64 @@ impl BrokerTask {
         pending: &mut VecDeque<RequestCommand>,
         rx_open: &mut bool,
     ) -> ServeOutcome {
-        let (reader, mut writer) = tokio::io::split(stream);
-        let (response_tx, mut response_rx) =
-            mpsc::channel(self.config.max_in_flight_requests_per_connection);
+        let (reader, writer) = tokio::io::split(stream);
+        // Buffer writes so a batch of queued requests is coalesced into one
+        // socket write instead of one syscall per frame. Frames larger than the
+        // buffer pass straight through, so large ProduceRequests are unaffected.
+        let mut writer = BufWriter::new(writer);
+        // Share the correlation pipeline with the reader task so it can complete
+        // responses directly (no per-response hop back to this loop). The reader
+        // wakes this loop only on disconnect, so a response wakes exactly one
+        // task instead of two (reader + this loop).
+        let pipeline = Arc::new(Mutex::new(RequestPipeline::new(
+            self.config.max_in_flight_requests_per_connection,
+            self.config.request_timeout,
+        )));
+        let disconnect = Arc::new(Notify::new());
         let _reader_task = tokio::spawn(read_response_frames(
             reader,
-            response_tx,
+            Arc::clone(&pipeline),
+            Arc::clone(&disconnect),
             self.config.read_buffer_capacity,
             Arc::clone(&self.buffers),
         ));
 
-        let mut pipeline = RequestPipeline::new(
-            self.config.max_in_flight_requests_per_connection,
-            self.config.request_timeout,
-        );
         let mut timeout_tick = tokio::time::interval(timeout_tick_duration(&self.config));
 
         loop {
             if self
-                .flush_pending(&mut writer, &mut pipeline, pending, &capabilities)
+                .flush_pending(&mut writer, &pipeline, pending, &capabilities)
                 .await
                 .is_err()
             {
-                pipeline.fail_all();
+                lock_pipeline(&pipeline).fail_all();
                 return ServeOutcome::Disconnected;
             }
             tokio::select! {
                 maybe_command = self.rx.recv() => {
                     let Some(command) = maybe_command else {
                         *rx_open = false;
-                        pipeline.fail_all();
+                        lock_pipeline(&pipeline).fail_all();
                         return ServeOutcome::Closed;
                     };
-                    if (!command.expects_response() || pipeline.has_capacity()) && pending.is_empty() {
+                    let admit = (!command.expects_response()
+                        || lock_pipeline(&pipeline).has_capacity())
+                        && pending.is_empty();
+                    if admit {
                         pending.push_back(command);
                     } else {
                         command.completion.send_error(WireError::Backpressure);
                     }
                 },
-                maybe_response = response_rx.recv() => {
-                    let Some(response) = maybe_response else {
-                        pipeline.fail_all();
-                        return ServeOutcome::Disconnected;
-                    };
-                    pipeline.complete_response(response);
+                () = disconnect.notified() => {
+                    lock_pipeline(&pipeline).fail_all();
+                    return ServeOutcome::Disconnected;
                 },
-                _ = timeout_tick.tick(), if !pipeline.is_empty() || !pending.is_empty() => {
-                    pipeline.fail_expired();
+                _ = timeout_tick.tick(), if !lock_pipeline(&pipeline).is_empty() || !pending.is_empty() => {
+                    lock_pipeline(&pipeline).fail_expired();
                     expire_pending_commands(pending, self.config.request_timeout);
                 },
-                () = tokio::time::sleep(self.config.connections_max_idle), if pipeline.is_empty() && pending.is_empty() => {
+                () = tokio::time::sleep(self.config.connections_max_idle), if lock_pipeline(&pipeline).is_empty() && pending.is_empty() => {
                     return ServeOutcome::Disconnected;
                 },
             }
@@ -469,16 +477,15 @@ impl BrokerTask {
 
     async fn flush_pending(
         &self,
-        writer: &mut WriteHalf<BrokerStream>,
-        pipeline: &mut RequestPipeline,
+        writer: &mut BufWriter<WriteHalf<BrokerStream>>,
+        pipeline: &Mutex<RequestPipeline>,
         pending: &mut VecDeque<RequestCommand>,
         capabilities: &BrokerCapabilities,
     ) -> Result<()> {
         let mut wrote_any = false;
-        while pending
-            .front()
-            .is_some_and(|command| !command.expects_response() || pipeline.has_capacity())
-        {
+        while pending.front().is_some_and(|command| {
+            !command.expects_response() || lock_pipeline(pipeline).has_capacity()
+        }) {
             let Some(command) = pending.pop_front() else {
                 break;
             };
@@ -490,7 +497,7 @@ impl BrokerTask {
             }
         }
         if wrote_any && let Err(error) = writer.flush().await {
-            pipeline.fail_all();
+            lock_pipeline(pipeline).fail_all();
             return Err(WireError::Io(error));
         }
         Ok(())
@@ -498,8 +505,8 @@ impl BrokerTask {
 
     async fn write_command(
         &self,
-        writer: &mut WriteHalf<BrokerStream>,
-        pipeline: &mut RequestPipeline,
+        writer: &mut BufWriter<WriteHalf<BrokerStream>>,
+        pipeline: &Mutex<RequestPipeline>,
         command: RequestCommand,
         capabilities: &BrokerCapabilities,
     ) -> Result<bool> {
@@ -524,7 +531,7 @@ impl BrokerTask {
         let tx = match completion {
             RequestCompletion::Response(tx) => tx,
             RequestCompletion::NoResponse(tx) => {
-                let correlation_id = pipeline.next_correlation_id();
+                let correlation_id = lock_pipeline(pipeline).next_correlation_id();
                 let spec = RequestFrameSpec {
                     api_key,
                     api_version,
@@ -549,7 +556,10 @@ impl BrokerTask {
                 return Ok(true);
             },
         };
-        let correlation_id = match pipeline.reserve(api_key, api_version, tx) {
+        // Bind before the match so the pipeline lock is released before the arms
+        // run (don't hold it across `tx.send`).
+        let reserved = lock_pipeline(pipeline).reserve(api_key, api_version, tx);
+        let correlation_id = match reserved {
             Ok(correlation_id) => correlation_id,
             Err(tx) => {
                 let _ignored = tx.send(Err(WireError::Backpressure));
@@ -566,13 +576,13 @@ impl BrokerTask {
         let frame = match self.encode_request_frame(spec, body_len, &*request) {
             Ok(frame) => frame,
             Err(error) => {
-                pipeline.fail_correlation(correlation_id, error);
+                lock_pipeline(pipeline).fail_correlation(correlation_id, error);
                 return Ok(false);
             },
         };
         if let Err(error) = writer.write_all(&frame).await {
             self.buffers.release_write(frame);
-            pipeline.fail_correlation(correlation_id, WireError::Io(error));
+            lock_pipeline(pipeline).fail_correlation(correlation_id, WireError::Io(error));
             return Err(WireError::ConnectionClosed);
         }
         self.buffers.release_write(frame);
@@ -976,20 +986,30 @@ fn reconnect_backoff_state(config: &ConnectionConfig) -> BackoffState {
     )
 }
 
+fn lock_pipeline(pipeline: &Mutex<RequestPipeline>) -> MutexGuard<'_, RequestPipeline> {
+    pipeline.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Read response frames and complete the matching in-flight requests directly on
+/// the shared pipeline. On disconnect, fail the in-flight requests and wake the
+/// serve loop so it can tear the connection down.
 async fn read_response_frames<R>(
     mut reader: R,
-    tx: mpsc::Sender<Bytes>,
+    pipeline: Arc<Mutex<RequestPipeline>>,
+    disconnect: Arc<Notify>,
     read_buffer_capacity: Option<usize>,
     buffers: Arc<BufferPools>,
 ) where
     R: AsyncRead + Unpin,
 {
     loop {
-        let Ok(frame) = read_frame(&mut reader, read_buffer_capacity, &buffers).await else {
-            return;
-        };
-        if tx.send(frame).await.is_err() {
-            return;
+        match read_frame(&mut reader, read_buffer_capacity, &buffers).await {
+            Ok(frame) => lock_pipeline(&pipeline).complete_response(frame),
+            Err(_error) => {
+                lock_pipeline(&pipeline).fail_all();
+                disconnect.notify_one();
+                return;
+            },
         }
     }
 }
@@ -1044,7 +1064,7 @@ mod tests {
 
     use std::{
         collections::VecDeque,
-        sync::Arc,
+        sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
 
@@ -1060,9 +1080,9 @@ mod tests {
         version::{request_header_version, response_header_version},
     };
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
+        io::{AsyncReadExt, AsyncWriteExt, BufWriter},
         net::TcpListener,
-        sync::{mpsc, oneshot},
+        sync::{Notify, mpsc, oneshot},
     };
 
     #[cfg(feature = "gssapi")]
@@ -1070,8 +1090,8 @@ mod tests {
     use super::{
         BrokerCapabilities, BrokerEndpoint, BrokerHandle, BrokerStream, BrokerTask, BufferPools,
         EncodableRequest, OAuthTokenCache, OwnedRequest, RequestCommand, RequestCompletion,
-        RequestPipeline, ResponseEnvelope, ServeOutcome, expire_pending_commands, read_frame,
-        read_response_frames, reconnect_backoff_state, timeout_tick_duration,
+        RequestPipeline, ResponseEnvelope, ServeOutcome, expire_pending_commands, lock_pipeline,
+        read_frame, read_response_frames, reconnect_backoff_state, timeout_tick_duration,
     };
     use crate::wire::{
         ConnectionConfig, Result as WireResult, SaslClientAction, SaslClientAuthenticator,
@@ -1540,22 +1560,18 @@ mod tests {
     async fn write_command_returns_backpressure_when_pipeline_has_no_capacity() {
         let (task, client, _server) = broker_task_with_connected_stream().await;
         let client: BrokerStream = Box::new(client);
-        let (_reader, mut writer) = tokio::io::split(client);
-        let mut pipeline = RequestPipeline::new(1, Duration::from_secs(1));
+        let (_reader, writer) = tokio::io::split(client);
+        let mut writer = BufWriter::new(writer);
+        let pipeline = Arc::new(Mutex::new(RequestPipeline::new(1, Duration::from_secs(1))));
         let (reserved_tx, _reserved_rx) = oneshot::channel();
-        let _reserved = pipeline
+        let _reserved = lock_pipeline(&pipeline)
             .reserve(ApiKey::ApiVersions, 3, reserved_tx)
             .expect("reserve only slot");
         let (tx, rx) = oneshot::channel();
         let command = request_command_with_sender(tx, Instant::now());
 
         let wrote = task
-            .write_command(
-                &mut writer,
-                &mut pipeline,
-                command,
-                &api_versions_capabilities(),
-            )
+            .write_command(&mut writer, &pipeline, command, &api_versions_capabilities())
             .await
             .expect("write command");
 
@@ -1602,23 +1618,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_response_frames_stops_when_receiver_is_closed() {
-        let (_task, mut client, server) = broker_task_with_connected_stream().await;
+    async fn read_response_frames_fails_inflight_and_notifies_on_disconnect() {
+        let (_task, client, server) = broker_task_with_connected_stream().await;
         let (reader, _writer) = server.into_split();
-        let (tx, rx) = mpsc::channel(1);
-        let mut framed = Vec::new();
-        framed.extend_from_slice(&3_i32.to_be_bytes());
-        framed.extend_from_slice(b"abc");
-        drop(rx);
+        let pipeline = Arc::new(Mutex::new(RequestPipeline::new(1, Duration::from_secs(1))));
+        let (response_tx, response_rx) = oneshot::channel();
+        let _correlation = lock_pipeline(&pipeline)
+            .reserve(ApiKey::ApiVersions, 3, response_tx)
+            .expect("reserve slot");
+        let disconnect = Arc::new(Notify::new());
 
         let reader_task = tokio::spawn(read_response_frames(
             reader,
-            tx,
+            Arc::clone(&pipeline),
+            Arc::clone(&disconnect),
             Some(16),
             Arc::new(BufferPools::new(1)),
         ));
 
-        client.write_all(&framed).await.expect("write frame");
+        // Closing the peer makes the reader hit EOF: it must fail the in-flight
+        // request and wake the serve loop via the disconnect notify.
+        drop(client);
         reader_task.await.expect("reader task");
+        assert!(
+            response_rx
+                .await
+                .expect("in-flight completion delivered")
+                .is_err()
+        );
+        disconnect.notified().await;
     }
 }
