@@ -966,15 +966,18 @@ fn fail_pending_setup_error(
 
 /// Connection-setup failures that retrying cannot fix, so pending commands
 /// should fail fast with the real cause instead of looping under reconnect
-/// backoff until they time out. SASL handshake/authentication failures and a
-/// failed server-signature check are terminal here, matching Java's
-/// non-retriable `SaslAuthenticationException` / `IllegalSaslStateException`
-/// semantics; an `Invalid username or password` should surface immediately, not
-/// after `request.timeout.ms`.
+/// backoff until they time out. SASL handshake/authentication failures, a
+/// failed server-signature check, and TLS handshake/config failures are
+/// terminal here, matching Java's non-retriable `SaslAuthenticationException` /
+/// `SslAuthenticationException` / `IllegalSaslStateException` semantics; an
+/// `Invalid username or password` or an untrusted server certificate should
+/// surface immediately, not after `request.timeout.ms`.
 const fn is_fatal_setup_error(error: &WireError) -> bool {
     matches!(
         error,
         WireError::UnsupportedTlsOption(_)
+            | WireError::InvalidTlsConfig(_)
+            | WireError::TlsHandshake(_)
             | WireError::GssapiBackendUnavailable
             | WireError::InvalidSaslConfig(_)
             | WireError::UnsupportedSaslMechanism(_)
@@ -993,6 +996,8 @@ fn clone_setup_error(error: &WireError) -> WireError {
         WireError::UnsupportedTlsOption(message) => {
             WireError::UnsupportedTlsOption(message.clone())
         },
+        WireError::InvalidTlsConfig(message) => WireError::InvalidTlsConfig(message.clone()),
+        WireError::TlsHandshake(message) => WireError::TlsHandshake(message.clone()),
         WireError::GssapiBackendUnavailable => WireError::GssapiBackendUnavailable,
         WireError::InvalidSaslConfig(message) => WireError::InvalidSaslConfig(message.clone()),
         WireError::UnsupportedSaslMechanism(message) => {
