@@ -11,6 +11,7 @@ readme = "README.md"
 [dev-dependencies]
 kacrab = { workspace = true, features = ["producer"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
+bytes = { workspace = true }
 
 [[example]]
 name = "producer"
@@ -19,6 +20,10 @@ path = "producer.rs"
 [[example]]
 name = "config"
 path = "config.rs"
+
+[[example]]
+name = "typed_serializer"
+path = "typed_serializer.rs"
 
 [lints]
 workspace = true

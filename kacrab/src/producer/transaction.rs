@@ -18,12 +18,12 @@ pub struct ProducerBatchState {
     pub base_sequence: i32,
 }
 
-/// Java `TransactionManager.State` equivalent.
+/// Kafka `TransactionManager.State` equivalent.
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "The full Java transaction state enum is ported before every 2PC transition is \
+        reason = "The full Kafka transaction state enum is ported before every 2PC transition is \
                   wired."
     )
 )]

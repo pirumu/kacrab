@@ -11,7 +11,7 @@ use crate::wire::ClusterMetadata;
 
 /// Rust-native hook for selecting a partition for unassigned producer records.
 ///
-/// This mirrors Kafka Java's `Partitioner` extension point at the contract
+/// This mirrors Kafka's `Partitioner` extension point at the contract
 /// level while staying native to Rust. `partitioner.class` is not JVM-loaded;
 /// callers install implementations through [`super::ProducerBuilder::partitioner`]
 /// or [`super::Producer::set_partitioner`].
@@ -73,7 +73,7 @@ impl ProducerPartitioner for RoundRobinPartitioner {
             .filter(|topic| !topic.partitions.is_empty())
             .ok_or_else(|| ProducerError::UnknownTopic(record.topic.to_string()))?;
         let counter = self.next_counter(&record.topic);
-        // Prefer partitions with a live leader (Java availablePartitions); fall
+        // Prefer partitions with a live leader (Kafka availablePartitions); fall
         // back to all partitions when none are currently available.
         let available: Vec<i32> = topic
             .partitions

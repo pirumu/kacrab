@@ -287,7 +287,7 @@ impl ProducerMetricsSnapshot {
     ///
     /// Application metrics use their [`MetricName`] description and tags, and
     /// are exported as gauge number data points because this Rust-native
-    /// `KafkaMetric` facade stores a value provider but not a Java metric type.
+    /// `KafkaMetric` facade stores a value provider but not a Kafka metric type.
     #[must_use]
     pub fn to_otlp_metrics_data_with_kafka_metrics<'a, I>(
         self,
@@ -591,7 +591,7 @@ struct ProducerMetricsInner {
     transaction_commit_total_latency_ns: AtomicU64,
     transaction_abort_count: AtomicU64,
     transaction_abort_total_latency_ns: AtomicU64,
-    /// Java-named client + per-topic metrics (Kafka `SenderMetricsRegistry`).
+    /// Kafka-named client + per-topic metrics (Kafka `SenderMetricsRegistry`).
     sender_registry: SenderMetricsRegistry,
 }
 
@@ -639,7 +639,7 @@ impl ProducerMetrics {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "Mirrors Java handleProduceResponse batch metrics (topic, bytes, size, count, \
+        reason = "Mirrors Kafka's handleProduceResponse batch metrics (topic, bytes, size, count, \
                   ratio)."
     )]
     pub(crate) fn record_produce_batch_with_compression_ratio(
@@ -722,7 +722,7 @@ impl ProducerMetrics {
         self.inner.sender_registry.record_error(topic);
     }
 
-    /// Snapshot the Java-named (Kafka `SenderMetricsRegistry`) producer metrics.
+    /// Snapshot the Kafka-named (Kafka `SenderMetricsRegistry`) producer metrics.
     pub(crate) fn kafka_metrics(&self) -> BTreeMap<String, f64> {
         self.inner.sender_registry.kafka_metrics()
     }
@@ -1002,7 +1002,7 @@ impl Drop for ProducerBufferWaitGuard {
             .inner
             .waiting_threads
             .fetch_sub(1, Ordering::Relaxed);
-        // Java BufferPool: a blocked append is a buffer-exhausted event; record it
+        // Kafka BufferPool: a blocked append is a buffer-exhausted event; record it
         // plus the time spent waiting for space allocation (bufferpool-wait-time).
         let wait_ms = self.started_at.elapsed().as_secs_f64() * 1000.0;
         self.metrics
