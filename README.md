@@ -6,7 +6,7 @@ sequence/epoch recovery state machine — and is memory- and CPU-efficient
 (native, no JVM). Consumer/admin are not implemented yet.
 
 * **Java-compatible auth and producer**: the authentication and producer
-  surfaces use Java client property names, defaults, protocol flow, and wire
+  surfaces use Kafka property names, defaults, protocol flow, and wire
   semantics as the compatibility target.
 * **Pure Rust runtime**: no `librdkafka`, no C client bindings, and workspace
   `unsafe_code` is forbidden.
@@ -59,7 +59,7 @@ it counts generated `kacrab-protocol` message structs for APIs not yet wired
 Auth and producer are treated as **Java-compatible targets** for the
 implemented surface:
 
-- Java-style config keys work through `ClientConfig` and
+- Kafka config keys work through `ClientConfig` and
   `Producer::builder().set(...)`.
 - `security.protocol`, TLS, SASL, idempotence, transactions, batching, request
   timeout, delivery timeout, compression, and in-flight limits map through the
@@ -70,7 +70,7 @@ implemented surface:
   re-send on retry. Behavior is outcome-faithful to Java; the remaining
   differences are concurrency-model details (async tasks vs the Java sender
   thread), not protocol or correctness gaps.
-- `ProducerInterceptor` mirrors Java's `configure`/`onSend`/`onAcknowledgement`/
+- `ProducerInterceptor` mirrors Kafka's `configure`/`onSend`/`onAcknowledgement`/
   `close` plus the `ClusterResourceListener.onUpdate` hook, and metrics are
   published under their Kafka names (`producer-metrics:*` /
   `producer-topic-metrics:*`).
@@ -87,7 +87,7 @@ implemented surface:
   - [x] Apache Kafka 4.3.0 schema snapshots and Java oracle compatibility
         matrix for generated wire messages.
 - [x] Core config and auth foundation
-  - [x] Java-style configuration facade and typed client configs.
+  - [x] Kafka configuration facade and typed client configs.
   - [x] TLS/SASL properties for `SSL`, `SASL_SSL`, and `SASL_PLAINTEXT`.
   - [x] SASL `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, `OAUTHBEARER`,
         feature-gated `GSSAPI`, and native Rust custom auth hooks.
@@ -135,7 +135,7 @@ implemented surface:
         wire reactor.
 - [ ] Admin
   - [ ] Topic, partition, ACL, config, and cluster metadata operations.
-  - [ ] Java-style admin config facade wired through the same auth/transport
+  - [ ] Kafka admin config facade wired through the same auth/transport
         stack.
 - [ ] Streams
   - [ ] Topology API, processor runtime, repartitioning, state stores, and
@@ -165,7 +165,7 @@ GSSAPI/Kerberos support is behind the `gssapi` feature.
 
 ## Producer
 
-The public producer API is intentionally close to Java/Kafka config style
+The public producer API is intentionally close to Kafka config style
 while keeping Rust delivery handles explicit:
 
 ```rust
@@ -184,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
-    // `send` is synchronous like Java's `Producer.send`: it returns immediately
+    // `send` is synchronous like Kafka's `Producer.send`: it returns immediately
     // with a `SendFuture` you await for the broker acknowledgement.
     let delivery = producer.send(
         ProducerRecord::new("orders", 0)
@@ -205,17 +205,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `send` returns a per-record `SendFuture` synchronously (no `await` on the call
-itself), matching Java's thread-safe `Producer.send`. `send_with_callback`
+itself), matching Kafka's thread-safe `Producer.send`. `send_with_callback`
 additionally invokes a callback on acknowledgement. Batching is automatic inside
 the producer accumulator/sender based on `batch.size`, `linger.ms`, buffer
 memory, partition routing, and flush/close boundaries; there is no separate
 public batch send API.
 
-Interceptors and Kafka-named metrics use the Java surface:
+Interceptors and Kafka-named metrics use the Kafka surface:
 
 ```rust
 // ProducerInterceptor: configure(client.id), on_send / on_ack / on_error,
-// on_update(cluster id), close — all panic-isolated like the Java chain.
+// on_update(cluster id), close — all panic-isolated like the Kafka interceptor chain.
 producer.add_interceptor(my_interceptor);
 
 // Metrics under their Kafka names, e.g. "producer-metrics:record-send-rate",
