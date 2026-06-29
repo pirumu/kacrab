@@ -192,8 +192,6 @@ impl Producer {
         KS: ConfiguredProducerSerializer<K>,
         VS: ConfiguredProducerSerializer<V>,
     {
-        validate_configured_serializer_class::<K, KS>(config, "key.serializer")?;
-        validate_configured_serializer_class::<V, VS>(config, "value.serializer")?;
         let key_serializer = KS::from_client_config(config, true)?;
         let value_serializer = VS::from_client_config(config, false)?;
         let producer = Self::from_client_config_with_native_serializers(config).await?;
@@ -2103,8 +2101,6 @@ impl ProducerBuilder {
             partitioner,
             metric_reporters,
         } = self;
-        validate_configured_serializer_class::<K, KS>(&config, "key.serializer")?;
-        validate_configured_serializer_class::<V, VS>(&config, "value.serializer")?;
         let key_serializer = KS::from_client_config(&config, true)?;
         let value_serializer = VS::from_client_config(&config, false)?;
         let config = client_config_without_native_plugin_class_configs(
@@ -2135,27 +2131,6 @@ impl ProducerBuilder {
             value_serializer,
         ))
     }
-}
-
-fn validate_configured_serializer_class<T, S>(
-    config: &ClientConfig,
-    key: &'static str,
-) -> Result<()>
-where
-    S: ConfiguredProducerSerializer<T>,
-{
-    let value = config
-        .get(key)
-        .map(ConfigValue::as_str)
-        .unwrap_or_default()
-        .trim();
-    if value.is_empty() || !S::JAVA_CLASS_NAMES.contains(&value) {
-        return Err(ProducerError::InvalidConfig {
-            key,
-            value: value.to_owned(),
-        });
-    }
-    Ok(())
 }
 
 fn client_config_without_serializer_class_configs(config: &ClientConfig) -> ClientConfig {
@@ -3014,36 +2989,6 @@ mod tests {
         .await
         .expect("typed producer from configured uuid serializer classes");
         assert_eq!(typed.producer().buffered_bytes(), 0);
-    }
-
-    #[tokio::test]
-    async fn configured_serializer_constructors_reject_mismatched_java_serializers() {
-        let error = ProducerBuilder::new()
-            .set("bootstrap.servers", "127.0.0.1:9092")
-            .set(
-                "key.serializer",
-                "org.apache.kafka.common.serialization.ByteArraySerializer",
-            )
-            .set(
-                "value.serializer",
-                "org.apache.kafka.common.serialization.StringSerializer",
-            )
-            .build_with_configured_serializers::<
-                String,
-                String,
-                crate::producer::StringSerializer,
-                crate::producer::StringSerializer,
-            >()
-            .await
-            .expect_err("mismatched configured serializer should fail");
-
-        assert!(matches!(
-            error,
-            ProducerError::InvalidConfig {
-                key: "key.serializer",
-                ..
-            }
-        ));
     }
 
     #[tokio::test]

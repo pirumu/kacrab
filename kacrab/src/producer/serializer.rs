@@ -10,10 +10,8 @@ use crate::config::ClientConfig;
 
 /// Converts typed key/value data into Kafka record bytes.
 pub trait ProducerSerializer<T>: Send + Sync + 'static {
-    /// Configure this serializer from Java-style producer config.
-    ///
-    /// The default mirrors Java `Serializer.configure`, which is intentionally
-    /// a no-op.
+    /// Configure this serializer from producer config; `is_key` selects the key
+    /// or value config keys. The default is a no-op.
     ///
     /// # Errors
     ///
@@ -25,8 +23,8 @@ pub trait ProducerSerializer<T>: Send + Sync + 'static {
 
     /// Serialize one key or value.
     ///
-    /// Implementations receive mutable headers to match Java serializer
-    /// semantics where serialization may add headers before append.
+    /// Implementations receive mutable headers so serialization may attach
+    /// headers before the record is appended.
     ///
     /// # Errors
     ///
@@ -42,21 +40,17 @@ pub trait ProducerSerializer<T>: Send + Sync + 'static {
     fn close(&self) {}
 }
 
-/// Native serializer that can be selected from Java `key.serializer` /
-/// `value.serializer` class names.
+/// A serializer that can be built from producer config.
 pub trait ConfiguredProducerSerializer<T>: ProducerSerializer<T> + Default {
-    /// Java serializer class names this native serializer accepts.
-    const JAVA_CLASS_NAMES: &'static [&'static str];
-
-    /// Build a native serializer from Java-style producer config.
+    /// Build a serializer from producer config.
     ///
-    /// The default implementation mirrors stateless Java serializers whose
-    /// `configure` method does not change serialization behavior.
+    /// The default constructs `Self::default()` and runs
+    /// [`configure`](ProducerSerializer::configure); stateless serializers rely
+    /// on it directly.
     ///
     /// # Errors
     ///
-    /// Returns a producer error when the configured native serializer cannot be
-    /// constructed from the supplied Java-style config.
+    /// Returns a producer error when the serializer cannot be built from config.
     fn from_client_config(config: &ClientConfig, is_key: bool) -> Result<Self> {
         let serializer = Self::default();
         serializer.configure(config, is_key)?;
@@ -64,10 +58,10 @@ pub trait ConfiguredProducerSerializer<T>: ProducerSerializer<T> + Default {
     }
 }
 
-/// Strategy used by Kafka's Java `ListSerializer` for inner values.
+/// How a [`ListSerializer`] lays out inner values on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListSerializationStrategy {
-    /// Fixed-width inner values; null elements are represented by a null index list.
+    /// Fixed-width inner values; null elements are recorded in a null-index list.
     ConstantSize,
     /// Variable-width inner values; each element is length-prefixed.
     VariableSize,
@@ -82,13 +76,10 @@ impl ListSerializationStrategy {
     }
 }
 
-/// Marker for serializers whose Java `ListSerializer` strategy is known.
+/// Inner serializer whose [`ListSerializer`] layout strategy is fixed.
 pub trait ListInnerSerializer<T>: ProducerSerializer<T> {
-    /// Java list serialization strategy for this inner serializer.
+    /// Wire layout strategy used when this serializer is a list inner element.
     const LIST_STRATEGY: ListSerializationStrategy;
-
-    /// Java serde class names accepted for `default.list.*.serde.inner`.
-    const JAVA_SERDE_CLASS_NAMES: &'static [&'static str];
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -189,28 +180,15 @@ impl ProducerSerializer<Bytes> for BytesSerializer {
     }
 }
 
-impl ConfiguredProducerSerializer<Bytes> for BytesSerializer {
-    const JAVA_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.BytesSerializer",
-        "BytesSerializer",
-        "org.apache.kafka.common.serialization.ByteBufferSerializer",
-        "ByteBufferSerializer",
-    ];
-}
+impl ConfiguredProducerSerializer<Bytes> for BytesSerializer {}
 
 impl ListInnerSerializer<Bytes> for BytesSerializer {
     const LIST_STRATEGY: ListSerializationStrategy = ListSerializationStrategy::VariableSize;
-    const JAVA_SERDE_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.Serdes$BytesSerde",
-        "Serdes$BytesSerde",
-        "BytesSerde",
-    ];
 }
 
 /// Serializer for owned byte arrays.
 ///
-/// This matches Kafka's Java `ByteArraySerializer` null handling while using
-/// Rust's [`Vec<u8>`] as the native byte-array type.
+/// Uses Rust's [`Vec<u8>`] as the byte-array type; `None` serializes to null.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ByteArraySerializer;
 
@@ -225,26 +203,15 @@ impl ProducerSerializer<Vec<u8>> for ByteArraySerializer {
     }
 }
 
-impl ConfiguredProducerSerializer<Vec<u8>> for ByteArraySerializer {
-    const JAVA_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.ByteArraySerializer",
-        "ByteArraySerializer",
-    ];
-}
+impl ConfiguredProducerSerializer<Vec<u8>> for ByteArraySerializer {}
 
 impl ListInnerSerializer<Vec<u8>> for ByteArraySerializer {
     const LIST_STRATEGY: ListSerializationStrategy = ListSerializationStrategy::VariableSize;
-    const JAVA_SERDE_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.Serdes$ByteArraySerde",
-        "Serdes$ByteArraySerde",
-        "ByteArraySerde",
-    ];
 }
 
 /// Serializer for [`String`] values.
 ///
-/// This matches Kafka's Java `StringSerializer` default UTF-8 encoding, null
-/// handling, and common `*.serializer.encoding` config overrides.
+/// Defaults to UTF-8 and honors the `*.serializer.encoding` config overrides.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StringSerializer {
     encoding: TextEncoding,
@@ -262,11 +229,6 @@ impl ProducerSerializer<String> for StringSerializer {
 }
 
 impl ConfiguredProducerSerializer<String> for StringSerializer {
-    const JAVA_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.StringSerializer",
-        "StringSerializer",
-    ];
-
     fn from_client_config(config: &ClientConfig, is_key: bool) -> Result<Self> {
         Ok(Self {
             encoding: TextEncoding::from_client_config(config, is_key)?,
@@ -276,14 +238,9 @@ impl ConfiguredProducerSerializer<String> for StringSerializer {
 
 impl ListInnerSerializer<String> for StringSerializer {
     const LIST_STRATEGY: ListSerializationStrategy = ListSerializationStrategy::VariableSize;
-    const JAVA_SERDE_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.Serdes$StringSerde",
-        "Serdes$StringSerde",
-        "StringSerde",
-    ];
 }
 
-/// Boolean serializer matching Kafka's Java `BooleanSerializer`.
+/// Boolean serializer.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BooleanSerializer;
 
@@ -298,23 +255,13 @@ impl ProducerSerializer<bool> for BooleanSerializer {
     }
 }
 
-impl ConfiguredProducerSerializer<bool> for BooleanSerializer {
-    const JAVA_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.BooleanSerializer",
-        "BooleanSerializer",
-    ];
-}
+impl ConfiguredProducerSerializer<bool> for BooleanSerializer {}
 
 impl ListInnerSerializer<bool> for BooleanSerializer {
     const LIST_STRATEGY: ListSerializationStrategy = ListSerializationStrategy::VariableSize;
-    const JAVA_SERDE_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.Serdes$BooleanSerde",
-        "Serdes$BooleanSerde",
-        "BooleanSerde",
-    ];
 }
 
-/// 16-bit integer serializer matching Kafka's Java `ShortSerializer`.
+/// 16-bit integer serializer.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ShortSerializer;
 
@@ -329,23 +276,13 @@ impl ProducerSerializer<i16> for ShortSerializer {
     }
 }
 
-impl ConfiguredProducerSerializer<i16> for ShortSerializer {
-    const JAVA_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.ShortSerializer",
-        "ShortSerializer",
-    ];
-}
+impl ConfiguredProducerSerializer<i16> for ShortSerializer {}
 
 impl ListInnerSerializer<i16> for ShortSerializer {
     const LIST_STRATEGY: ListSerializationStrategy = ListSerializationStrategy::ConstantSize;
-    const JAVA_SERDE_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.Serdes$ShortSerde",
-        "Serdes$ShortSerde",
-        "ShortSerde",
-    ];
 }
 
-/// 32-bit integer serializer matching Kafka's Java `IntegerSerializer`.
+/// 32-bit integer serializer.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct IntegerSerializer;
 
@@ -360,23 +297,13 @@ impl ProducerSerializer<i32> for IntegerSerializer {
     }
 }
 
-impl ConfiguredProducerSerializer<i32> for IntegerSerializer {
-    const JAVA_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.IntegerSerializer",
-        "IntegerSerializer",
-    ];
-}
+impl ConfiguredProducerSerializer<i32> for IntegerSerializer {}
 
 impl ListInnerSerializer<i32> for IntegerSerializer {
     const LIST_STRATEGY: ListSerializationStrategy = ListSerializationStrategy::ConstantSize;
-    const JAVA_SERDE_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.Serdes$IntegerSerde",
-        "Serdes$IntegerSerde",
-        "IntegerSerde",
-    ];
 }
 
-/// 64-bit integer serializer matching Kafka's Java `LongSerializer`.
+/// 64-bit integer serializer.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LongSerializer;
 
@@ -391,23 +318,13 @@ impl ProducerSerializer<i64> for LongSerializer {
     }
 }
 
-impl ConfiguredProducerSerializer<i64> for LongSerializer {
-    const JAVA_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.LongSerializer",
-        "LongSerializer",
-    ];
-}
+impl ConfiguredProducerSerializer<i64> for LongSerializer {}
 
 impl ListInnerSerializer<i64> for LongSerializer {
     const LIST_STRATEGY: ListSerializationStrategy = ListSerializationStrategy::ConstantSize;
-    const JAVA_SERDE_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.Serdes$LongSerde",
-        "Serdes$LongSerde",
-        "LongSerde",
-    ];
 }
 
-/// 32-bit float serializer matching Kafka's Java `FloatSerializer`.
+/// 32-bit float serializer.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FloatSerializer;
 
@@ -422,23 +339,13 @@ impl ProducerSerializer<f32> for FloatSerializer {
     }
 }
 
-impl ConfiguredProducerSerializer<f32> for FloatSerializer {
-    const JAVA_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.FloatSerializer",
-        "FloatSerializer",
-    ];
-}
+impl ConfiguredProducerSerializer<f32> for FloatSerializer {}
 
 impl ListInnerSerializer<f32> for FloatSerializer {
     const LIST_STRATEGY: ListSerializationStrategy = ListSerializationStrategy::ConstantSize;
-    const JAVA_SERDE_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.Serdes$FloatSerde",
-        "Serdes$FloatSerde",
-        "FloatSerde",
-    ];
 }
 
-/// 64-bit float serializer matching Kafka's Java `DoubleSerializer`.
+/// 64-bit float serializer.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DoubleSerializer;
 
@@ -460,23 +367,13 @@ impl ProducerSerializer<f64> for DoubleSerializer {
     }
 }
 
-impl ConfiguredProducerSerializer<f64> for DoubleSerializer {
-    const JAVA_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.DoubleSerializer",
-        "DoubleSerializer",
-    ];
-}
+impl ConfiguredProducerSerializer<f64> for DoubleSerializer {}
 
 impl ListInnerSerializer<f64> for DoubleSerializer {
     const LIST_STRATEGY: ListSerializationStrategy = ListSerializationStrategy::ConstantSize;
-    const JAVA_SERDE_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.Serdes$DoubleSerde",
-        "Serdes$DoubleSerde",
-        "DoubleSerde",
-    ];
 }
 
-/// Void serializer matching Kafka's Java `VoidSerializer`.
+/// Void serializer.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VoidSerializer;
 
@@ -491,23 +388,13 @@ impl ProducerSerializer<()> for VoidSerializer {
     }
 }
 
-impl ConfiguredProducerSerializer<()> for VoidSerializer {
-    const JAVA_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.VoidSerializer",
-        "VoidSerializer",
-    ];
-}
+impl ConfiguredProducerSerializer<()> for VoidSerializer {}
 
 impl ListInnerSerializer<()> for VoidSerializer {
     const LIST_STRATEGY: ListSerializationStrategy = ListSerializationStrategy::VariableSize;
-    const JAVA_SERDE_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.Serdes$VoidSerde",
-        "Serdes$VoidSerde",
-        "VoidSerde",
-    ];
 }
 
-/// UUID serializer matching Kafka's Java `UUIDSerializer`.
+/// UUID serializer.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UuidSerializer {
     encoding: TextEncoding,
@@ -525,11 +412,6 @@ impl ProducerSerializer<uuid::Uuid> for UuidSerializer {
 }
 
 impl ConfiguredProducerSerializer<uuid::Uuid> for UuidSerializer {
-    const JAVA_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.UUIDSerializer",
-        "UUIDSerializer",
-    ];
-
     fn from_client_config(config: &ClientConfig, is_key: bool) -> Result<Self> {
         Ok(Self {
             encoding: TextEncoding::from_client_config(config, is_key)?,
@@ -539,17 +421,12 @@ impl ConfiguredProducerSerializer<uuid::Uuid> for UuidSerializer {
 
 impl ListInnerSerializer<uuid::Uuid> for UuidSerializer {
     const LIST_STRATEGY: ListSerializationStrategy = ListSerializationStrategy::ConstantSize;
-    const JAVA_SERDE_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.Serdes$UUIDSerde",
-        "Serdes$UUIDSerde",
-        "UUIDSerde",
-    ];
 }
 
-/// Serializer for Java-compatible lists with nullable entries.
+/// Serializer for lists with nullable entries.
 ///
-/// The Rust value type is [`Vec<Option<T>>`] so null list elements round-trip
-/// through Kafka's Java `ListSerializer` format.
+/// The value type is [`Vec<Option<T>>`] so null elements round-trip through the
+/// Kafka list wire format.
 #[derive(Debug, Clone)]
 pub struct ListSerializer<T, S>
 where
@@ -564,7 +441,7 @@ impl<T, S> ListSerializer<T, S>
 where
     S: ProducerSerializer<T>,
 {
-    /// Create a list serializer using the Java strategy associated with the
+    /// Create a list serializer using the layout strategy declared by the
     /// native inner serializer.
     #[must_use]
     pub const fn new(inner: S) -> Self
@@ -578,7 +455,7 @@ where
         }
     }
 
-    /// Create a list serializer using Java's fixed-size element strategy.
+    /// Create a list serializer using the fixed-size element strategy.
     #[must_use]
     pub const fn constant_size(inner: S) -> Self {
         Self {
@@ -588,7 +465,7 @@ where
         }
     }
 
-    /// Create a list serializer using Java's variable-size element strategy.
+    /// Create a list serializer using the variable-size element strategy.
     #[must_use]
     pub const fn variable_size(inner: S) -> Self {
         Self {
@@ -678,38 +555,9 @@ where
     T: Sync + 'static,
     S: ListInnerSerializer<T> + ConfiguredProducerSerializer<T>,
 {
-    const JAVA_CLASS_NAMES: &'static [&'static str] = &[
-        "org.apache.kafka.common.serialization.ListSerializer",
-        "ListSerializer",
-    ];
-
     fn from_client_config(config: &ClientConfig, is_key: bool) -> Result<Self> {
-        validate_list_inner_serde::<T, S>(config, is_key)?;
         Ok(Self::new(S::from_client_config(config, is_key)?))
     }
-}
-
-fn validate_list_inner_serde<T, S>(config: &ClientConfig, is_key: bool) -> Result<()>
-where
-    S: ListInnerSerializer<T>,
-{
-    let key = if is_key {
-        "default.list.key.serde.inner"
-    } else {
-        "default.list.value.serde.inner"
-    };
-    let value = config
-        .get(key)
-        .map(crate::config::ConfigValue::as_str)
-        .unwrap_or_default()
-        .trim();
-    if value.is_empty() || !S::JAVA_SERDE_CLASS_NAMES.contains(&value) {
-        return Err(ProducerError::InvalidConfig {
-            key,
-            value: value.to_owned(),
-        });
-    }
-    Ok(())
 }
 
 fn list_len_to_i32(len: usize) -> Result<i32> {
@@ -934,7 +782,7 @@ mod tests {
     use crate::{
         config::ClientConfig,
         producer::{
-            AccumulatorConfig, Producer, ProducerError, ProducerIdempotenceConfig, ProducerRecord,
+            AccumulatorConfig, Producer, ProducerIdempotenceConfig, ProducerRecord,
             ProducerRuntimeConfig,
         },
         wire::{BrokerEndpoint, ConnectionConfig, WireClient},
@@ -960,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn byte_array_serializer_matches_java_vec_bytes_and_null_semantics() {
+    fn byte_array_serializer_vec_bytes_and_null_semantics() {
         let serializer = ByteArraySerializer;
         let mut headers = Vec::new();
 
@@ -979,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn string_serializer_matches_java_utf8_and_null_semantics() {
+    fn string_serializer_utf8_and_null_semantics() {
         let serializer = StringSerializer::default();
         let mut headers = Vec::new();
 
@@ -1002,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn primitive_serializers_match_java_big_endian_and_null_semantics() {
+    fn primitive_serializers_big_endian_and_null_semantics() {
         let mut headers = Vec::new();
 
         assert_eq!(
@@ -1066,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn uuid_serializer_matches_java_uuid_to_string_utf8_and_null_semantics() {
+    fn uuid_serializer_uuid_to_string_utf8_and_null_semantics() {
         let serializer = UuidSerializer::default();
         let mut headers = Vec::new();
         let uuid = uuid::Uuid::from_u128(0x0011_2233_4455_6677_8899_aabb_ccdd_eeff);
@@ -1086,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn string_serializer_uses_java_encoding_config_precedence() {
+    fn string_serializer_uses_encoding_config_precedence() {
         let config: ClientConfig = [
             ("serializer.encoding", "UTF-8"),
             ("key.serializer.encoding", "ISO-8859-1"),
@@ -1121,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn uuid_serializer_uses_java_encoding_config() {
+    fn uuid_serializer_uses_encoding_config() {
         let config: ClientConfig =
             std::iter::once(("key.serializer.encoding", "UTF-16BE")).collect();
         let serializer =
@@ -1145,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn list_serializer_matches_java_constant_size_strategy_and_null_indexes() {
+    fn list_serializer_constant_size_strategy_and_null_indexes() {
         let serializer = ListSerializer::new(IntegerSerializer);
         let mut headers = Vec::new();
         let values = vec![Some(0x0102_0304_i32), None, Some(0x0506_0708_i32)];
@@ -1172,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn list_serializer_matches_java_variable_size_strategy_and_null_sentinel() {
+    fn list_serializer_variable_size_strategy_and_null_sentinel() {
         let serializer = ListSerializer::new(StringSerializer::default());
         let mut headers = Vec::new();
         let values = vec![Some("hi".to_owned()), None, Some("\u{00e9}".to_owned())];
@@ -1192,47 +1040,29 @@ mod tests {
     }
 
     #[test]
-    fn configured_list_serializer_requires_matching_java_inner_serde_config() {
-        let missing_config: ClientConfig =
-            std::iter::once(("key.serializer", "ListSerializer")).collect();
-        let missing_error =
-            <ListSerializer<i32, IntegerSerializer> as ConfiguredProducerSerializer<
-                Vec<Option<i32>>,
-            >>::from_client_config(&missing_config, true)
-            .expect_err("missing inner serde config should fail");
-        assert!(matches!(
-            missing_error,
-            ProducerError::InvalidConfig {
-                key: "default.list.key.serde.inner",
-                ..
-            }
-        ));
+    fn configured_list_serializer_builds_from_config_and_serializes() {
+        let config: ClientConfig = std::iter::once(("key.serializer.encoding", "UTF-8")).collect();
+        let serializer =
+            <ListSerializer<String, StringSerializer> as ConfiguredProducerSerializer<
+                Vec<Option<String>>,
+            >>::from_client_config(&config, true)
+            .expect("list serializer builds from config");
+        let mut headers = Vec::new();
 
-        let mismatched_config: ClientConfig = [
-            ("key.serializer", "ListSerializer"),
-            (
-                "default.list.key.serde.inner",
-                "org.apache.kafka.common.serialization.Serdes$StringSerde",
-            ),
-        ]
-        .into_iter()
-        .collect();
-        let mismatched_error =
-            <ListSerializer<i32, IntegerSerializer> as ConfiguredProducerSerializer<
-                Vec<Option<i32>>,
-            >>::from_client_config(&mismatched_config, true)
-            .expect_err("mismatched inner serde config should fail");
-        assert!(matches!(
-            mismatched_error,
-            ProducerError::InvalidConfig {
-                key: "default.list.key.serde.inner",
-                ..
-            }
-        ));
+        assert!(
+            serializer
+                .serialize(
+                    "orders",
+                    &mut headers,
+                    Some(&vec![Some("a".to_owned()), None])
+                )
+                .expect("serialize list")
+                .is_some()
+        );
     }
 
     #[test]
-    fn configured_serializer_from_client_config_invokes_java_configure_shape() {
+    fn configured_serializer_from_client_config_runs_configure() {
         let config: ClientConfig = [
             ("key.serializer", "ConfiguringSerializer"),
             ("tag", "key-a"),
@@ -1280,7 +1110,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_producer_closes_serializers_on_drop_like_java() {
+    fn typed_producer_closes_serializers_on_drop() {
         let close_count = Arc::new(AtomicUsize::new(0));
         let producer = typed_producer_with_closing_serializers(Arc::clone(&close_count));
 
@@ -1290,7 +1120,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_producer_close_closes_serializers_like_java() {
+    async fn typed_producer_close_closes_serializers() {
         let close_count = Arc::new(AtomicUsize::new(0));
         let producer = typed_producer_with_closing_serializers(Arc::clone(&close_count));
 
@@ -1300,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_producer_close_now_closes_serializers_like_java() {
+    fn typed_producer_close_now_closes_serializers() {
         let close_count = Arc::new(AtomicUsize::new(0));
         let producer = typed_producer_with_closing_serializers(Arc::clone(&close_count));
 
@@ -1310,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_producer_close_now_ignores_serializer_close_panic_like_java() {
+    fn typed_producer_close_now_ignores_serializer_close_panic() {
         let close_count = Arc::new(AtomicUsize::new(0));
         let producer = TypedProducer::from_parts(
             byte_producer(),
@@ -1398,9 +1228,7 @@ mod tests {
         }
     }
 
-    impl ConfiguredProducerSerializer<Bytes> for ConfiguringSerializer {
-        const JAVA_CLASS_NAMES: &'static [&'static str] = &["ConfiguringSerializer"];
-    }
+    impl ConfiguredProducerSerializer<Bytes> for ConfiguringSerializer {}
 
     #[derive(Debug)]
     struct ClosingSerializer {
