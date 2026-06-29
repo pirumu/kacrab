@@ -680,14 +680,38 @@ impl BrokerTask {
             SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => {
                 return self.sasl_scram_authenticate(stream, mechanism).await;
             },
-            SaslMechanism::OAuthBearer => {
-                oauthbearer_auth_bytes(&self.config.sasl, &self.config.tls, &self.oauth_token_cache)
-                    .await?
-            },
+            SaslMechanism::OAuthBearer => return self.sasl_oauthbearer_authenticate(stream).await,
             SaslMechanism::Gssapi => return Err(WireError::GssapiBackendUnavailable),
         };
         let _response = self.sasl_authenticate_round(stream, auth_bytes).await?;
         Ok(())
+    }
+
+    /// SASL/OAUTHBEARER exchange. On success the broker returns an empty server
+    /// response; a non-empty response is the RFC 7628 error JSON. Java's
+    /// `OAuthBearerSaslClient` answers that error with a single `0x01` "kill"
+    /// byte before failing, and without it the broker stays mid-authentication
+    /// and rejects the next request with `ILLEGAL_SASL_STATE` instead of a
+    /// clean auth failure. Mirror that handshake so a rejected token surfaces as
+    /// a fatal [`WireError::SaslAuthentication`].
+    async fn sasl_oauthbearer_authenticate(&self, stream: &mut BrokerStream) -> Result<()> {
+        let auth_bytes =
+            oauthbearer_auth_bytes(&self.config.sasl, &self.config.tls, &self.oauth_token_cache)
+                .await?;
+        let response = self.sasl_authenticate_round(stream, auth_bytes).await?;
+        if response.auth_bytes.as_ref().is_empty() {
+            return Ok(());
+        }
+        let error = String::from_utf8_lossy(response.auth_bytes.as_ref()).into_owned();
+        // Acknowledge the error challenge (%x01) so the broker can finish the
+        // exchange; a follow-up error response or a closed connection is the
+        // expected outcome and does not change the failure we report.
+        let _result = self
+            .sasl_authenticate_round(stream, Bytes::from_static(&[0x01]))
+            .await;
+        Err(WireError::SaslAuthentication(format!(
+            "OAUTHBEARER token rejected by broker: {error}"
+        )))
     }
 
     async fn sasl_custom_authenticate(
