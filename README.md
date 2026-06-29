@@ -78,6 +78,11 @@ implemented surface:
   byte patches.
 - JVM-only callback handler classes cannot be loaded inside Rust; use the
   native Rust SASL authenticator hook for custom auth flows.
+- The whole SASL/TLS surface is verified end-to-end against real Apache Kafka
+  4.3.0 brokers — every SASL mechanism over both plaintext and TLS, plus
+  one-way `SSL` and mutual TLS — and handshake/auth failures fail fast with the
+  broker's reason instead of retrying until the request timeout, matching Java's
+  non-retriable `SaslAuthenticationException` / `SslAuthenticationException`.
 
 ## Current Status
 
@@ -91,6 +96,11 @@ implemented surface:
   - [x] TLS/SASL properties for `SSL`, `SASL_SSL`, and `SASL_PLAINTEXT`.
   - [x] SASL `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, `OAUTHBEARER`,
         feature-gated `GSSAPI`, and native Rust custom auth hooks.
+  - [x] Every SASL mechanism (`PLAIN`, `SCRAM-SHA-256/512`, `OAUTHBEARER`,
+        `GSSAPI`) and TLS mode (`SSL`, `SASL_SSL`, mutual TLS) verified
+        end-to-end against real Apache Kafka 4.3.0 brokers, including fail-fast
+        rejection of bad credentials, expired tokens, and untrusted
+        certificates (`docker-compose.{auth,gssapi,tls}.yml`).
 - [x] Wire usable baseline
   - [x] Broker sessions with TCP/TLS/SASL, ApiVersions negotiation, request
         encoding, response dispatch, and metadata fetch.
