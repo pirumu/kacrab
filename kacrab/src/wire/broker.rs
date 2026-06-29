@@ -374,8 +374,8 @@ impl BrokerTask {
                     }
                 },
                 Err(error) => {
-                    if let Some(error_factory) = fatal_setup_error_factory(&error) {
-                        fail_pending_setup_error(&mut pending, error_factory);
+                    if is_fatal_setup_error(&error) {
+                        fail_pending_setup_error(&mut pending, || clone_setup_error(&error));
                         if pending.is_empty() && !rx_open {
                             return;
                         }
@@ -690,14 +690,38 @@ impl BrokerTask {
             SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => {
                 return self.sasl_scram_authenticate(stream, mechanism).await;
             },
-            SaslMechanism::OAuthBearer => {
-                oauthbearer_auth_bytes(&self.config.sasl, &self.config.tls, &self.oauth_token_cache)
-                    .await?
-            },
+            SaslMechanism::OAuthBearer => return self.sasl_oauthbearer_authenticate(stream).await,
             SaslMechanism::Gssapi => return Err(WireError::GssapiBackendUnavailable),
         };
         let _response = self.sasl_authenticate_round(stream, auth_bytes).await?;
         Ok(())
+    }
+
+    /// SASL/OAUTHBEARER exchange. On success the broker returns an empty server
+    /// response; a non-empty response is the RFC 7628 error JSON. Java's
+    /// `OAuthBearerSaslClient` answers that error with a single `0x01` "kill"
+    /// byte before failing, and without it the broker stays mid-authentication
+    /// and rejects the next request with `ILLEGAL_SASL_STATE` instead of a
+    /// clean auth failure. Mirror that handshake so a rejected token surfaces as
+    /// a fatal [`WireError::SaslAuthentication`].
+    async fn sasl_oauthbearer_authenticate(&self, stream: &mut BrokerStream) -> Result<()> {
+        let auth_bytes =
+            oauthbearer_auth_bytes(&self.config.sasl, &self.config.tls, &self.oauth_token_cache)
+                .await?;
+        let response = self.sasl_authenticate_round(stream, auth_bytes).await?;
+        if response.auth_bytes.as_ref().is_empty() {
+            return Ok(());
+        }
+        let error = String::from_utf8_lossy(response.auth_bytes.as_ref()).into_owned();
+        // Acknowledge the error challenge (%x01) so the broker can finish the
+        // exchange; a follow-up error response or a closed connection is the
+        // expected outcome and does not change the failure we report.
+        let _result = self
+            .sasl_authenticate_round(stream, Bytes::from_static(&[0x01]))
+            .await;
+        Err(WireError::SaslAuthentication(format!(
+            "OAUTHBEARER token rejected by broker: {error}"
+        )))
     }
 
     async fn sasl_custom_authenticate(
@@ -950,30 +974,50 @@ fn fail_pending_setup_error(
     }
 }
 
-fn fatal_setup_error_factory(error: &WireError) -> Option<fn() -> WireError> {
+/// Connection-setup failures that retrying cannot fix, so pending commands
+/// should fail fast with the real cause instead of looping under reconnect
+/// backoff until they time out. SASL handshake/authentication failures, a
+/// failed server-signature check, and TLS handshake/config failures are
+/// terminal here, matching Java's non-retriable `SaslAuthenticationException` /
+/// `SslAuthenticationException` / `IllegalSaslStateException` semantics; an
+/// `Invalid username or password` or an untrusted server certificate should
+/// surface immediately, not after `request.timeout.ms`.
+const fn is_fatal_setup_error(error: &WireError) -> bool {
+    matches!(
+        error,
+        WireError::UnsupportedTlsOption(_)
+            | WireError::InvalidTlsConfig(_)
+            | WireError::TlsHandshake(_)
+            | WireError::GssapiBackendUnavailable
+            | WireError::InvalidSaslConfig(_)
+            | WireError::UnsupportedSaslMechanism(_)
+            | WireError::SaslHandshake(_)
+            | WireError::SaslAuthentication(_)
+            | WireError::SaslServerSignatureMismatch
+    )
+}
+
+/// Reproduces a fatal setup error so every pending command can be failed with
+/// the same cause. [`WireError`] is not `Clone`, so the message-carrying
+/// variants are rebuilt by hand; this is only ever called for errors that
+/// [`is_fatal_setup_error`] accepts.
+fn clone_setup_error(error: &WireError) -> WireError {
     match error {
-        WireError::UnsupportedTlsOption(_) => Some(unsupported_tls_backend_error),
-        WireError::GssapiBackendUnavailable => Some(gssapi_backend_unavailable_error),
-        WireError::InvalidSaslConfig(_) => Some(invalid_sasl_config_error),
-        WireError::UnsupportedSaslMechanism(_) => Some(unsupported_sasl_mechanism_error),
-        _ => None,
+        WireError::UnsupportedTlsOption(message) => {
+            WireError::UnsupportedTlsOption(message.clone())
+        },
+        WireError::InvalidTlsConfig(message) => WireError::InvalidTlsConfig(message.clone()),
+        WireError::TlsHandshake(message) => WireError::TlsHandshake(message.clone()),
+        WireError::GssapiBackendUnavailable => WireError::GssapiBackendUnavailable,
+        WireError::InvalidSaslConfig(message) => WireError::InvalidSaslConfig(message.clone()),
+        WireError::UnsupportedSaslMechanism(message) => {
+            WireError::UnsupportedSaslMechanism(message.clone())
+        },
+        WireError::SaslHandshake(message) => WireError::SaslHandshake(message.clone()),
+        WireError::SaslAuthentication(message) => WireError::SaslAuthentication(message.clone()),
+        WireError::SaslServerSignatureMismatch => WireError::SaslServerSignatureMismatch,
+        _ => WireError::ConnectionClosed,
     }
-}
-
-fn unsupported_tls_backend_error() -> WireError {
-    WireError::UnsupportedTlsOption("tls-rustls backend is not wired yet".to_owned())
-}
-
-const fn gssapi_backend_unavailable_error() -> WireError {
-    WireError::GssapiBackendUnavailable
-}
-
-fn invalid_sasl_config_error() -> WireError {
-    WireError::InvalidSaslConfig("invalid SASL config".to_owned())
-}
-
-fn unsupported_sasl_mechanism_error() -> WireError {
-    WireError::UnsupportedSaslMechanism("unsupported SASL mechanism".to_owned())
 }
 
 fn reconnect_backoff_state(config: &ConnectionConfig) -> BackoffState {

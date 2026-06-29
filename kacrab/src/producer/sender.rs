@@ -2944,27 +2944,6 @@ impl ProducerSenderState {
         )
     }
 
-    pub(crate) async fn wait_for_flush_completion<LatencyObserver, RequeueObserver>(
-        &mut self,
-        accumulator: &SharedAccumulator,
-        mut observe_latency: LatencyObserver,
-        mut observe_requeue: RequeueObserver,
-    ) -> Result<(), ProducerError>
-    where
-        LatencyObserver: FnMut(std::time::Duration),
-        RequeueObserver: FnMut(),
-    {
-        while self.flush_completion_progress() == FlushDispatchProgress::WaitForCompletion {
-            self.wait_for_handled_dispatch(
-                accumulator,
-                true,
-                &mut observe_latency,
-                &mut observe_requeue,
-            )
-            .await?;
-        }
-        Ok(())
-    }
 
     pub(crate) async fn wait_for_abort_completion<LatencyObserver, RequeueObserver>(
         &mut self,
@@ -3150,9 +3129,13 @@ impl ProducerSenderState {
         match prepared {
             PreparedAllDispatch::Empty => Ok(AllDispatchProgress::Empty),
             PreparedAllDispatch::PendingCompletion(result) => {
+                // A retriable requeue is not a flush failure: the batch is put back on
+                // the accumulator and re-dispatched by the surrounding flush loop (Kafka
+                // flush() retries until delivery or delivery.timeout). `false` keeps this
+                // consistent with the non-flush `apply_ready_dispatch_progress` path.
                 self.handle_completed_dispatch_with_lifecycle(
                     accumulator,
-                    CompletedDispatch::new(result, true),
+                    CompletedDispatch::new(result, false),
                     observe_latency,
                     observe_requeue,
                 )?;
@@ -3266,9 +3249,11 @@ impl ProducerSenderState {
             .await?;
         let flush_progress = self.apply_flush_dispatch_progress(progress)?;
         if flush_progress == FlushDispatchProgress::WaitForCompletion {
+            // Tolerate a retriable requeue (re-dispatched by the outer flush loop)
+            // rather than treating it as a terminal FlushIncomplete.
             self.wait_for_handled_dispatch(
                 accumulator,
-                true,
+                false,
                 &mut observe_latency,
                 &mut observe_requeue,
             )
@@ -3299,9 +3284,15 @@ impl ProducerSenderState {
             batches: mut observe_batches,
         } = observers;
         loop {
+            // A finished dispatch that came back as a retriable Requeue is NOT a flush
+            // failure: the batch is put back on the accumulator and must be re-dispatched.
+            // Kafka flush() blocks until every record reaches a terminal outcome
+            // (delivered, or failed after retries / delivery.timeout) — a transient
+            // requeue (e.g. a cold connection to a non-bootstrap leader) is just a retry.
+            // Tolerate it here and let the next dispatch step pick the batch back up.
             self.handle_finished_dispatches(
                 accumulator,
-                true,
+                false,
                 &mut observe_latency,
                 &mut observe_requeue,
             )?;
@@ -3318,12 +3309,27 @@ impl ProducerSenderState {
                 )
                 .await?
             {
-                FlushDispatchProgress::Complete => break,
+                FlushDispatchProgress::Complete => {
+                    if !self.has_in_flight_dispatches() {
+                        break;
+                    }
+                    // Nothing left ready to dispatch, but produce requests are still
+                    // in flight (e.g. cold connections to non-bootstrap leaders still
+                    // negotiating). Wait for one to complete — tolerating a retriable
+                    // requeue so the loop re-dispatches it on the next iteration —
+                    // instead of giving up early with FlushIncomplete.
+                    self.wait_for_handled_dispatch(
+                        accumulator,
+                        false,
+                        &mut observe_latency,
+                        &mut observe_requeue,
+                    )
+                    .await?;
+                },
                 FlushDispatchProgress::Continue | FlushDispatchProgress::WaitForCompletion => {},
             }
         }
-        self.wait_for_flush_completion(accumulator, observe_latency, observe_requeue)
-            .await
+        Ok(())
     }
 
     pub(crate) fn reserve_dispatch_partitions(&mut self, partitions: &[InFlightPartitionKey]) {
@@ -3866,47 +3872,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn wait_for_flush_completion_handles_in_flight_dispatches_until_empty() {
-        let mut state = ProducerSenderState::new(2);
-        let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());
-        let first_latency = Duration::from_millis(3);
-        let second_latency = Duration::from_millis(7);
-        let mut observed_latencies = Vec::new();
-        let mut observed_requeues = 0;
-
-        let _first = state.spawn_in_flight(async move {
-            TimedDispatchOutcome {
-                outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
-                latency: first_latency,
-                partitions: Vec::new(),
-            }
-        });
-        let _second = state.spawn_in_flight(async move {
-            TimedDispatchOutcome {
-                outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
-                latency: second_latency,
-                partitions: Vec::new(),
-            }
-        });
-
-        state
-            .wait_for_flush_completion(
-                &accumulator,
-                |latency| observed_latencies.push(latency),
-                || observed_requeues += 1,
-            )
-            .await
-            .expect("flush completion should drain delivered dispatches");
-
-        observed_latencies.sort_unstable();
-        assert_eq!(observed_latencies, vec![first_latency, second_latency]);
-        assert_eq!(observed_requeues, 0);
-        assert_eq!(
-            state.flush_completion_progress(),
-            FlushDispatchProgress::Complete
-        );
-    }
 
     #[tokio::test]
     async fn wait_for_abort_completion_handles_in_flight_dispatches_until_empty() {

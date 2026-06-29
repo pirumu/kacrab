@@ -1,0 +1,87 @@
+name: kacrab-kafka-auth
+
+# Single-broker KRaft node with SASL enabled, used to verify kacrab's SASL
+# client implementations end to end against a real broker. The client listener
+# (SASL) advertises SASL_PLAINTEXT and enables PLAIN + SCRAM-SHA-256 +
+# SCRAM-SHA-512 simultaneously, so one broker covers every non-Kerberos SASL
+# mechanism kacrab speaks. The CONTROLLER listener stays PLAINTEXT (single-node
+# quorum, no client traffic). Inter-broker traffic also rides the SASL listener
+# as the super-user "admin" via SASL/PLAIN.
+#
+# Credentials:
+#   PLAIN          admin / admin-secret          (super-user)
+#   PLAIN          plainuser / plain-secret
+#   SCRAM-SHA-256  scram256 / scram256-secret    (bootstrapped at format time)
+#   SCRAM-SHA-512  scram512 / scram512-secret    (bootstrapped at format time)
+#   OAUTHBEARER    unsecured JWT (alg=none) validated by Kafka's built-in
+#                  OAuthBearerUnsecuredValidatorCallbackHandler; the client
+#                  supplies the token via sasl.jaas.config (no OAuth server)
+#
+# Host port 19092 is used so this broker can run alongside the 3-broker
+# PLAINTEXT cluster in docker-compose.cluster.yml (which holds 9092/9094/9096).
+
+services:
+  kafka-auth:
+    image: ${KAFKA_IMAGE:-apache/kafka:4.3.0}
+    container_name: kacrab-kafka-auth
+    ports:
+      - "${KAFKA_AUTH_HOST_PORT:-19092}:9092"
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+
+        cat > /tmp/server.properties <<EOF
+        process.roles=broker,controller
+        node.id=1
+        controller.quorum.voters=1@localhost:9093
+        listeners=SASL://:9092,CONTROLLER://:9093
+        advertised.listeners=SASL://localhost:${KAFKA_AUTH_HOST_PORT:-19092}
+        listener.security.protocol.map=SASL:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT
+        controller.listener.names=CONTROLLER
+        inter.broker.listener.name=SASL
+        sasl.enabled.mechanisms=PLAIN,SCRAM-SHA-256,SCRAM-SHA-512,OAUTHBEARER
+        sasl.mechanism.inter.broker.protocol=PLAIN
+        super.users=User:admin
+        listener.name.sasl.plain.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret" user_admin="admin-secret" user_plainuser="plain-secret";
+        listener.name.sasl.scram-sha-256.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required;
+        listener.name.sasl.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required;
+        listener.name.sasl.oauthbearer.sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;
+        listener.name.sasl.oauthbearer.sasl.server.callback.handler.class=org.apache.kafka.common.security.oauthbearer.internals.unsecured.OAuthBearerUnsecuredValidatorCallbackHandler
+        log.dirs=/tmp/kraft-combined-logs
+        offsets.topic.replication.factor=1
+        transaction.state.log.replication.factor=1
+        transaction.state.log.min.isr=1
+        group.initial.rebalance.delay.ms=0
+        auto.create.topics.enable=true
+        num.partitions=3
+        EOF
+
+        cat > /tmp/admin.properties <<EOF
+        security.protocol=SASL_PLAINTEXT
+        sasl.mechanism=PLAIN
+        sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret";
+        EOF
+
+        /opt/kafka/bin/kafka-storage.sh format \
+          -t "${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}" \
+          -c /tmp/server.properties \
+          --ignore-formatted \
+          --add-scram 'SCRAM-SHA-256=[name=scram256,password=scram256-secret]' \
+          --add-scram 'SCRAM-SHA-512=[name=scram512,password=scram512-secret]'
+
+        exec /opt/kafka/bin/kafka-server-start.sh /tmp/server.properties
+    environment:
+      KAFKA_CLUSTER_ID: ${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}
+      KAFKA_AUTH_HOST_PORT: ${KAFKA_AUTH_HOST_PORT:-19092}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 --command-config /tmp/admin.properties >/dev/null 2>&1",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 20s

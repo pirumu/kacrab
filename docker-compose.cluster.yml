@@ -1,0 +1,107 @@
+name: kacrab-kafka-cluster
+
+# Local 3-broker KRaft cluster to verify kacrab's multi-broker dispatch,
+# leadership routing, and replication work end to end. Each broker is a combined
+# broker+controller node forming a 3-node quorum. The PLAINTEXT listener is
+# advertised on a distinct host port so a client on the host can reach every
+# broker directly; INTERNAL is used for inter-broker traffic on the compose
+# network. This is a FUNCTIONAL/correctness setup, not a perf-vs-Java rig
+# (co-located brokers share one machine, so throughput stays broker-bound).
+
+x-broker-env: &broker-env
+  CLUSTER_ID: ${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka1:9093,2@kafka2:9093,3@kafka3:9093
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+  KAFKA_LOG_DIRS: /var/lib/kafka/data
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+  KAFKA_LOG_RETENTION_HOURS: 1
+  # Keep heaps small so three brokers fit a modest local VM.
+  KAFKA_HEAP_OPTS: "-Xmx512M -Xms256M"
+
+services:
+  kafka1:
+    image: ${KAFKA_IMAGE:-apache/kafka:4.3.0}
+    container_name: kacrab-kafka1
+    ports:
+      - "9092:9092"
+    environment:
+      <<: *broker-env
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENERS: PLAINTEXT://:9092,INTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://kafka1:29092
+    volumes:
+      - kafka1-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  kafka2:
+    image: ${KAFKA_IMAGE:-apache/kafka:4.3.0}
+    container_name: kacrab-kafka2
+    ports:
+      - "9094:9092"
+    environment:
+      <<: *broker-env
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: PLAINTEXT://:9092,INTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9094,INTERNAL://kafka2:29092
+    volumes:
+      - kafka2-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  kafka3:
+    image: ${KAFKA_IMAGE:-apache/kafka:4.3.0}
+    container_name: kacrab-kafka3
+    ports:
+      - "9096:9092"
+    environment:
+      <<: *broker-env
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: PLAINTEXT://:9092,INTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9096,INTERNAL://kafka3:29092
+    volumes:
+      - kafka3-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  kafka-init:
+    image: ${KAFKA_IMAGE:-apache/kafka:4.3.0}
+    container_name: kacrab-kafka-cluster-init
+    depends_on:
+      kafka1: { condition: service_healthy }
+      kafka2: { condition: service_healthy }
+      kafka3: { condition: service_healthy }
+    command:
+      - sh
+      - -lc
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka1:29092 \
+          --create --if-not-exists --topic "${KAFKA_CLUSTER_TOPIC:-kacrab-cluster}" \
+          --partitions "${KAFKA_CLUSTER_PARTITIONS:-6}" --replication-factor 3
+        echo "---- topic layout (leaders/replicas spread across brokers) ----"
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka1:29092 \
+          --describe --topic "${KAFKA_CLUSTER_TOPIC:-kacrab-cluster}"
+
+volumes:
+  kafka1-data:
+  kafka2-data:
+  kafka3-data:

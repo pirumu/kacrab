@@ -2089,7 +2089,19 @@ async fn idempotent_kafka_producer_retries_leadership_error_with_current_leader_
 }
 
 #[tokio::test]
-async fn kafka_producer_requeues_in_flight_batch_when_metadata_is_missing() {
+async fn kafka_producer_flush_retries_requeued_batch_until_metadata_resolves() {
+    // Leader for orders-0, reachable only once metadata resolves to it.
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            produce_response_frame_for_request(&header, 0, 40)
+        }),
+    ])
+    .await;
+    // The first metadata response is empty, leaving the batch unroutable so the
+    // dispatch requeues it. The refreshed metadata then names leader 7.
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new(|mut request| {
@@ -2101,6 +2113,15 @@ async fn kafka_producer_requeues_in_flight_batch_when_metadata_is_missing() {
                 header.correlation_id,
                 &empty_metadata_response(),
             )
+        }),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response([(7, leader_7)]);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
         }),
     ])
     .await;
@@ -2120,8 +2141,8 @@ async fn kafka_producer_requeues_in_flight_batch_when_metadata_is_missing() {
             retry_attempts: 0,
             retry_backoff: Duration::from_millis(100),
             retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
+            delivery_timeout: Duration::from_secs(5),
+            max_block: Duration::from_secs(2),
             partitioner_ignore_keys: false,
             partitioner_adaptive_partitioning_enable: true,
             partitioner_availability_timeout: Duration::ZERO,
@@ -2138,14 +2159,17 @@ async fn kafka_producer_requeues_in_flight_batch_when_metadata_is_missing() {
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
         .unwrap();
 
-    let error = producer.flush().await.unwrap_err();
+    // The empty first metadata response leaves the batch unroutable, so the
+    // dispatch requeues it. A requeue is NOT a flush failure (it used to surface
+    // as FlushIncomplete): flush retries the requeued batch, and once the
+    // refreshed metadata names leader 7 the record is delivered and flush returns.
+    producer
+        .flush()
+        .await
+        .expect("flush retries the requeued batch and delivers once metadata resolves");
 
-    assert!(matches!(
-        error,
-        kacrab::producer::ProducerError::FlushIncomplete
-    ));
-    assert!(wait_for_buffered_bytes(&producer).await > 0);
-    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(wait_for_buffered_bytes(&producer).await, 0);
+    assert_eq!(leader_7.join().await, 2);
 }
 
 #[tokio::test]

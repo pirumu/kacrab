@@ -30,3 +30,6 @@ cobertura.xml
 
 # Local upstream source checkouts for reference/debugging
 /upstream/
+
+# Local TLS test material (scripts/gen-tls-certs.sh)
+.tls-certs/
