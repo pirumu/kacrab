@@ -1,7 +1,9 @@
 # Kacrab
 
-A high-performance Kafka client for Rust, built in pure Rust from the Kafka
-protocol up.
+A pure-Rust Kafka client (producer-first), built from the Kafka protocol up.
+The producer is wire-compatible with the Java client — including the idempotent
+sequence/epoch recovery state machine — and is memory- and CPU-efficient
+(native, no JVM). Consumer/admin are not implemented yet.
 
 * **Java-compatible auth and producer**: the authentication and producer
   surfaces use Java client property names, defaults, protocol flow, and wire
@@ -10,13 +12,13 @@ protocol up.
   `unsafe_code` is forbidden.
 * **Generated protocol**: Kafka request/response structs are generated from
   Apache Kafka schemas and checked against the Kafka Java client oracle.
-* **Throughput-focused producer**: batching, linger, bounded memory,
-  idempotence (multi-in-flight per partition with Java-faithful sequence
-  ordering and failure recovery), transactions, compression, metadata routing,
-  interceptors, Kafka-named metrics, and multi-broker dispatch are first-class
-  design points. On a single-node broker it outruns the Java client's
-  throughput on the same workload (trading some latency for it — see
-  [Benchmarks](#benchmarks)).
+* **Efficient producer**: batching, linger, bounded memory, idempotence
+  (multi-in-flight per partition with Kafka-faithful sequence ordering and
+  failure recovery), transactions, compression, metadata routing, interceptors,
+  Kafka-named metrics, and multi-broker dispatch are first-class design points.
+  On a single-node broker it holds throughput parity with the Java client while
+  using ~4x less memory and ~1.5x less CPU (native vs JVM) — see
+  [Benchmarks](#benchmarks).
 * **Tokio-native wire layer**: async broker sessions, ApiVersions negotiation,
   metadata refresh, bounded in-flight requests, request timeouts, and explicit
   connection cleanup.
@@ -36,23 +38,23 @@ protocol up.
 > stable release guarantees yet.
 
 Protocol, wire, auth, and producer now have a usable baseline. The producer is
-the most mature surface: on a single-node broker it sustains ~4.7M records/sec
-at `acks=all` + idempotence, beating the Java client's throughput on the same
-workload (at higher latency — see [Benchmarks](#benchmarks)). The current focus remains wire + producer hardening
-before consumer work: multi-broker behavior, bounded hot paths, routing refresh,
-and sustained stress testing.
+the most mature surface: on a single-node broker it holds throughput parity with
+the Java client at `acks=all` + idempotence (~4.7M × 10B records/sec ≈ 45 MiB/s;
+the ~12% records/sec edge is broker-bound noise, not a language win) while using
+~4x less memory and ~1.5x less CPU — Java keeps a lower tail latency (see
+[Benchmarks](#benchmarks)). The current focus is wire + producer hardening before
+consumer work: multi-broker behavior, bounded hot paths, routing refresh, and
+sustained stress testing.
 
-Producer module test coverage is **~92% line** (`cargo llvm-cov`): 510 unit
-tests in the producer crate plus mock-broker integration suites (including the
-producer-dispatcher fault-injection tests). The append/dispatch/idempotent-recovery
-hot paths, the murmur2 partitioner (byte-exact against the Java client for every
-key length), the transaction state machine, interceptors, and the Kafka-style
-metrics library (sensors, stats, quotas, reporters) are directly tested; the
-remaining gaps are mechanical error-clone arms and rare defensive branches.
-Whole-workspace line coverage is lower (~66%) because most of the generated
-`kacrab-protocol` message structs are for Kafka APIs not yet wired
-(consumer/admin/streams); the hand-written, implemented code sits at ~83–100%
-per module.
+Test coverage (`cargo tarpaulin` / `cargo llvm-cov`): **84.6% maintained-source**
+line coverage (generated protocol excluded), with the **producer module at ~92%**.
+The append/dispatch/idempotent-recovery hot paths, the murmur2 partitioner
+(byte-exact for every key length), the transaction state machine, interceptors,
+and the Kafka-style metrics library (sensors, stats, quotas, reporters) are
+directly tested; remaining gaps are mechanical error-clone arms and rare
+defensive branches. The raw whole-workspace figure (~66%) is lower only because
+it counts generated `kacrab-protocol` message structs for APIs not yet wired
+(consumer/admin/streams).
 
 Auth and producer are treated as **Java-compatible targets** for the
 implemented surface:
@@ -94,12 +96,15 @@ implemented surface:
         encoding, response dispatch, and metadata fetch.
   - [x] Bounded in-flight requests, request timeouts, connection-closed cleanup,
         broker dispatch, and per-session write-buffer reuse.
-  - [ ] Production hardening: lower-allocation correlation storage, leadership
-        error invalidation, reconnect/backoff policy, and sustained multi-broker
-        stress tests.
+  - [x] Lower-allocation correlation storage (fixed-slot in-flight pipeline, no
+        per-request map), leadership-error invalidation (metadata refresh on
+        leader change), and a reconnect/backoff policy (exponential + jitter,
+        resets on a successful connection).
+  - [ ] Sustained multi-broker stress tests and cross-DC / high-RTT coverage
+        (the multi-broker dispatch path itself exists but is unmeasured).
 - [x] Producer usable baseline
-  - [x] Public `Producer` API with Java-style config keys and synchronous
-        `send`/`send_with_callback` (Java `Producer.send` shape) returning a
+  - [x] Public `Producer` API with Kafka config keys and synchronous
+        `send`/`send_with_callback` (Kafka `Producer.send` shape) returning a
         `SendFuture`.
   - [x] Batching by topic-partition, linger, bounded memory, `max.block.ms`,
         compression hooks, and delivery handles.
@@ -108,7 +113,7 @@ implemented surface:
         dispatch.
   - [x] Retry backoff, delivery timeout across retries, broker response error
         propagation, and leadership-error retry path.
-  - [x] Java-faithful idempotent producer: per-partition multi-in-flight,
+  - [x] Kafka-faithful idempotent producer: per-partition multi-in-flight,
         `firstInFlightSequence` ordered retry, `maybeResolveSequences` deferred
         epoch bump, stale-epoch re-stamp, single-bump recovery, sequence
         wraparound, and duplicate-sequence dedup.
@@ -117,8 +122,9 @@ implemented surface:
   - [x] `ProducerInterceptor` lifecycle (`configure`/`on_send`/`on_ack`/
         `on_error`/`on_update`/`close`) and Kafka-named producer + per-topic
         metrics including the buffer-pool gauges.
-  - [x] Beats the Java client throughput on a single-node broker at the default
-        `acks=all` + idempotence config (see [Benchmarks](#benchmarks)).
+  - [x] Throughput parity with the Java client on a single-node broker at the
+        default `acks=all` + idempotence config, at ~4x less memory / ~1.5x less
+        CPU (see [Benchmarks](#benchmarks)).
   - [ ] Production acceptance: sustained multi-broker stress, memory soak,
         leadership-change refresh coverage, and latency-percentile gates on
         realistic multi-broker workloads.
@@ -372,16 +378,20 @@ cargo tarpaulin --workspace --all-features --config tarpaulin.toml
 Latest measured coverage on 2026-06-29:
 
 - `cargo tarpaulin --workspace --all-features --config tarpaulin.toml --out Stdout`
-- Maintained-source line coverage: 84.62%.
-- Covered lines: 13,905 / 16,432.
+- Maintained-source line coverage: **84.62%** (13,905 / 16,432), generated
+  protocol excluded. Producer module ~92% (`cargo llvm-cov`).
+- The raw all-files figure is ~66%, dominated by generated `kacrab-protocol`
+  message structs for APIs not yet wired (consumer/admin/streams).
 - Java oracle fixture inventory: 6 release-grade fixture families × 625
   schema/version cases = 3,750 generated fixture cases.
 
 ## Benchmarks
 
-The producer targets production-grade throughput. Local benchmark hooks live in
-[`benches/`](benches/); `producer_kafka_bench` drives a real broker through the
-public synchronous `send` path.
+Local benchmark hooks live in [`benches/`](benches/); `producer_kafka_bench`
+drives a real broker through the public synchronous `send` path. These are
+single-node, RF=1, broker co-located with the client — read them as a
+client-efficiency signal, not a production throughput claim (no multi-broker /
+cross-DC numbers yet).
 
 Benchmark host (2026-06-28 measurements):
 
@@ -400,8 +410,7 @@ KACRAB_BOOTSTRAP=127.0.0.1:9092 \
 # Java reference — same broker, topic, and config
 kafka-producer-perf-test.sh --topic kacrab-16p --num-records 5000000 \
   --record-size 10 --throughput -1 \
-  --command-property bootstrap.servers=127.0.0.1:9092 \
-  --command-property acks=all --command-property enable.idempotence=true
+  --producer-props bootstrap.servers=127.0.0.1:9092 acks=all enable.idempotence=true
 ```
 
 Head-to-head on the same single-node broker, topic, and config (`acks=all` +
@@ -444,14 +453,16 @@ CPU + peak memory for the same 5M-record run (`/usr/bin/time -l`):
 | Resource | kacrab | Java | Java overhead |
 | --- | ---: | ---: | ---: |
 | Peak RSS | ~68 MiB | ~268 MiB | ~3.9x more |
-| Total CPU (user+sys) | ~2.7 s | ~4.1 s | ~1.5x more |
+| Total CPU (user+sys) | ~2.7 s | ~4.1 s | ~1.5x more\* |
+
+\*Java's CPU includes one-time JVM startup + JIT warmup, not fully amortized over
+a 5M-record run — the ratio narrows on longer runs. Peak RSS is steady-state.
 
 The ~12% throughput edge is modest because throughput here is **broker-bound** —
 both clients spend most of the run waiting on `acks=all` round-trips, so the
 client language barely moves that number. The native-vs-JVM advantage shows up
 instead in efficiency: kacrab uses **~4x less memory** (no JVM heap/metaspace)
-and **~1.5x less CPU per record**. (Java's CPU includes one-time JVM startup +
-JIT warmup; the peak-RSS gap is steady-state.)
+and meaningfully less CPU per record.
 
 Bench knobs: `KACRAB_BENCH_TOPIC`, `KACRAB_BENCH_MESSAGES`, `KACRAB_BENCH_RUNS`,
 `KACRAB_BENCH_ACKS1` (acks=1), `KACRAB_BENCH_BATCH_SIZE`. The 16- and
@@ -459,11 +470,19 @@ Bench knobs: `KACRAB_BENCH_TOPIC`, `KACRAB_BENCH_MESSAGES`, `KACRAB_BENCH_RUNS`,
 in-process criterion microbenchmarks under `benches/` exercise the accumulator,
 wire pipeline, and dispatcher CPU paths in isolation.
 
-Limits: these are local single-node RF=1 smoke measurements on one Mac with the
-broker sharing the client machine. They are not release gates and do not include
-CPU/allocator profiles or broker disk metrics. kacrab reports payload MiB/sec;
-the Java perf tool reports decimal MB/sec. Cross-DC / high-RTT links -- where
-Java's deeper per-connection pipelining helps most -- are not represented here.
+Limits, read these before trusting the headline:
+
+- **Records are 10 bytes**, so `records/sec` is inflated by tiny records — read
+  the **MiB/sec** column (~45 MiB/s) as the meaningful figure. Larger-record
+  (100 B – 1 KB+) throughput is not benchmarked here yet.
+- **Latency is closed-loop saturation latency** (`--throughput -1`), measured
+  from just-before-send to the ack callback. It is not an open-loop SLA latency
+  at a fixed offered rate; under saturation it reflects queueing, not service
+  time, for both clients.
+- Single-node, RF=1, broker co-located with the client. Not release gates; no
+  CPU/allocator profiles or broker disk metrics. Cross-DC / high-RTT links —
+  where deeper per-connection pipelining helps most — are not represented.
+- kacrab reports payload MiB/sec; the Java perf tool reports decimal MB/sec.
 
 
 ## Workspace
