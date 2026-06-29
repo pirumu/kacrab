@@ -1,0 +1,77 @@
+name: kacrab-kafka-tls
+
+# One KRaft broker exposing three TLS listeners so kacrab's SSL paths can be
+# verified against a real broker in one shot:
+#   SSL      one-way TLS (server auth only, client.auth=none)   host 19096
+#   SASLSSL  SASL/SCRAM-SHA-256 over TLS                         host 19097
+#   MTLS     mutual TLS (client.auth=required)                   host 19098
+# Inter-broker + controller stay PLAINTEXT (no client traffic). All listeners
+# share the server keystore; the CA truststore lets the MTLS listener verify
+# client certs. The server cert has SAN localhost+127.0.0.1, so the default
+# ssl.endpoint.identification.algorithm=https hostname check passes.
+#
+# Prereq: generate the trust material first (mounted read-only at /tls):
+#   bash scripts/gen-tls-certs.sh /tmp/kacrab_tls
+#
+# SCRAM cred for the SASL_SSL listener: scram256 / scram256-secret.
+
+services:
+  kafka-tls:
+    image: ${KAFKA_IMAGE:-apache/kafka:4.3.0}
+    container_name: kacrab-kafka-tls
+    ports:
+      - "19096:9092"
+      - "19097:9094"
+      - "19098:9095"
+    volumes:
+      - ${KACRAB_TLS_DIR:-/tmp/kacrab_tls}:/tls:ro
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        cat > /tmp/server.properties <<EOF
+        process.roles=broker,controller
+        node.id=1
+        controller.quorum.voters=1@localhost:9093
+        listeners=SSL://:9092,SASLSSL://:9094,MTLS://:9095,INTERNAL://:29092,CONTROLLER://:9093
+        advertised.listeners=SSL://localhost:19096,SASLSSL://localhost:19097,MTLS://localhost:19098,INTERNAL://kafka-tls:29092
+        listener.security.protocol.map=SSL:SSL,SASLSSL:SASL_SSL,MTLS:SSL,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+        controller.listener.names=CONTROLLER
+        inter.broker.listener.name=INTERNAL
+        ssl.keystore.location=/tls/server.p12
+        ssl.keystore.type=PKCS12
+        ssl.keystore.password=kacrab-store
+        ssl.key.password=kacrab-store
+        ssl.truststore.location=/tls/ca.crt
+        ssl.truststore.type=PEM
+        ssl.client.auth=none
+        listener.name.mtls.ssl.client.auth=required
+        sasl.enabled.mechanisms=SCRAM-SHA-256
+        listener.name.saslssl.scram-sha-256.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required;
+        log.dirs=/tmp/kraft-combined-logs
+        offsets.topic.replication.factor=1
+        transaction.state.log.replication.factor=1
+        transaction.state.log.min.isr=1
+        group.initial.rebalance.delay.ms=0
+        auto.create.topics.enable=true
+        num.partitions=3
+        EOF
+
+        /opt/kafka/bin/kafka-storage.sh format \
+          -t "${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}" \
+          -c /tmp/server.properties \
+          --ignore-formatted \
+          --add-scram 'SCRAM-SHA-256=[name=scram256,password=scram256-secret]'
+
+        exec /opt/kafka/bin/kafka-server-start.sh /tmp/server.properties
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka-tls:29092 >/dev/null 2>&1",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 25s
