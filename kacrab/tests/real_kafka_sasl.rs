@@ -11,13 +11,20 @@
 //!   `cargo test -p kacrab --test real_kafka_sasl -- --ignored --nocapture`
 
 #![allow(
+    clippy::arithmetic_side_effects,
     clippy::expect_used,
+    clippy::indexing_slicing,
     clippy::panic,
     clippy::print_stdout,
-    reason = "Ignored real-broker tests are explicit smoke checks with direct failure output."
+    reason = "Ignored real-broker tests are explicit smoke checks; the local base64url/JWT \
+              helpers index and add over small fixed inputs that cannot overflow or go out of \
+              bounds."
 )]
 
-use std::{env, time::Duration};
+use std::{
+    env,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use kacrab::wire::{BrokerEndpoint, ConnectionConfig, SaslMechanism, SecurityProtocol, WireClient};
 use kacrab_protocol::{
@@ -42,6 +49,57 @@ async fn real_kafka_sasl_scram_sha_256_api_versions() {
 #[ignore = "requires the SASL broker from docker-compose.auth.yml"]
 async fn real_kafka_sasl_scram_sha_512_api_versions() {
     authenticate_and_assert(SaslMechanism::ScramSha512, "scram512", "scram512-secret").await;
+}
+
+#[tokio::test]
+#[ignore = "requires the SASL broker from docker-compose.auth.yml"]
+async fn real_kafka_sasl_oauthbearer_api_versions() {
+    let endpoint = sasl_endpoint().await;
+    let token = unsecured_jwt("oauthuser", 3600);
+    println!(
+        "real Kafka SASL smoke: mechanism=OAUTHBEARER, sub=oauthuser, bootstrap={}:{} resolved={}",
+        endpoint.host(),
+        endpoint.port(),
+        endpoint.addr,
+    );
+
+    let client =
+        WireClient::connect_with_brokers(oauthbearer_config(&token), "kacrab-real-kafka-sasl-test", [
+            endpoint,
+        ]);
+    let response: ApiVersionsResponseData = client
+        .send_to_broker(0, ApiKey::ApiVersions, 3, &api_versions_request())
+        .await
+        .expect("OAUTHBEARER-authenticated ApiVersions should succeed");
+
+    assert!(
+        !response.api_keys.is_empty(),
+        "broker should return advertised API versions after OAUTHBEARER auth"
+    );
+    println!(
+        "OAUTHBEARER auth OK: broker advertised {} API keys",
+        response.api_keys.len()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the SASL broker from docker-compose.auth.yml"]
+async fn real_kafka_sasl_oauthbearer_rejects_expired_token() {
+    let endpoint = sasl_endpoint().await;
+    // exp one hour in the past: the broker's unsecured validator must reject it.
+    let token = unsecured_jwt("oauthuser", -3600);
+
+    let client = WireClient::connect_with_brokers(
+        oauthbearer_config(&token),
+        "kacrab-real-kafka-sasl-negative",
+        [endpoint],
+    );
+    let result: Result<ApiVersionsResponseData, _> = client
+        .send_to_broker(0, ApiKey::ApiVersions, 3, &api_versions_request())
+        .await;
+
+    let error = result.expect_err("authentication with an expired token must fail");
+    println!("OAUTHBEARER expired-token correctly rejected: {error}");
 }
 
 #[tokio::test]
@@ -107,6 +165,56 @@ fn base_config() -> ConnectionConfig {
         .socket_connection_setup_timeout(Duration::from_secs(10));
     config.security.protocol = SecurityProtocol::SaslPlaintext;
     config
+}
+
+fn oauthbearer_config(token: &str) -> ConnectionConfig {
+    let mut config = base_config();
+    config.sasl.mechanism = Some(SaslMechanism::OAuthBearer);
+    config.sasl.jaas_config = Some(format!(
+        "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required \
+         token=\"{token}\";"
+    ));
+    config
+}
+
+/// Builds an RFC 7515 "unsecured" JWS (`alg=none`, empty signature) carrying a
+/// `sub`/`iat`/`exp` claim set, the exact shape Kafka's
+/// `OAuthBearerUnsecuredValidatorCallbackHandler` accepts. `exp_offset_secs` is
+/// added to the current time, so a negative value yields an expired token.
+fn unsecured_jwt(subject: &str, exp_offset_secs: i64) -> String {
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_secs(),
+    )
+    .expect("unix seconds should fit i64");
+    let exp = now + exp_offset_secs;
+    let header = b64url(br#"{"alg":"none"}"#);
+    let payload = b64url(format!("{{\"sub\":\"{subject}\",\"iat\":{now},\"exp\":{exp}}}").as_bytes());
+    format!("{header}.{payload}.")
+}
+
+/// Minimal base64url (no padding) encoder, so the test needs no extra crate.
+fn b64url(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = chunk.get(1).map_or(0, |byte| u32::from(*byte));
+        let b2 = chunk.get(2).map_or(0, |byte| u32::from(*byte));
+        let packed = (b0 << 16) | (b1 << 8) | b2;
+        out.push(char::from(ALPHABET[(packed >> 18 & 0x3f) as usize]));
+        out.push(char::from(ALPHABET[(packed >> 12 & 0x3f) as usize]));
+        if chunk.len() > 1 {
+            out.push(char::from(ALPHABET[(packed >> 6 & 0x3f) as usize]));
+        }
+        if chunk.len() > 2 {
+            out.push(char::from(ALPHABET[(packed & 0x3f) as usize]));
+        }
+    }
+    out
 }
 
 fn jaas_config(username: &str, password: &str) -> String {
