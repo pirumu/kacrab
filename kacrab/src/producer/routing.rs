@@ -156,8 +156,8 @@ mod tests {
         clippy::expect_used,
         clippy::missing_assert_message,
         clippy::unwrap_used,
-        reason = "Unit test fixtures fail fastest with contextual unwrap/expect calls; \
-                  murmur2 hashes are reinterpreted as Java's signed int for comparison."
+        reason = "Unit test fixtures fail fastest with contextual unwrap/expect calls; murmur2 \
+                  hashes are reinterpreted as Java's signed int for comparison."
     )]
 
     use bytes::Bytes;
@@ -269,7 +269,10 @@ mod tests {
         // returns a signed `int`, so the `u32` hash is reinterpreted with `as i32`.
         let cases: [(&[u8], i32); 8] = [
             (b"a-little-bit-long-string", -985_981_536), // len 24, %4 == 0
-            (b"lkjh234lh9fiuh90y23oiuhsafujhadof229phr9h19h89h8", -58_897_971), // len 48, %4 == 0
+            (
+                b"lkjh234lh9fiuh90y23oiuhsafujhadof229phr9h19h89h8",
+                -58_897_971,
+            ), // len 48, %4 == 0
             (b"a", -1_563_381_124),                      // len 1, %4 == 1
             (b"hello", 2_132_663_229),                   // len 5, %4 == 1
             (b"21", -973_932_308),                       // len 2, %4 == 2
