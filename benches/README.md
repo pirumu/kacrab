@@ -20,8 +20,10 @@ architecture work. They are not release-throughput guarantees.
 - **Producer dispatcher stress benchmarks** - accumulator plus multi-broker
   produce dispatch over local mock leaders.
 
-Throughput target: 3M messages/sec on realistic batching and multi-broker
-workloads. Reference-client parity is the longer-term goal.
+The current real-Kafka head-to-head plus a CPU/peak-memory comparison live under
+[Real-Kafka Baselines](#real-kafka-baselines): kacrab beats the Java client's
+throughput and uses roughly 4x less memory and 1.5x less CPU for the same run.
+Sustained production acceptance is the longer-term goal.
 
 ## Scope
 
@@ -189,201 +191,78 @@ remove producer-side CRC generation for Produce requests. Future work can
 reduce this further with pooled encode buffers and fewer intermediate frame/body
 moves, but it cannot skip Kafka serialization itself.
 
-## Local Baselines
+## Real-Kafka Baselines
 
-Measured on 2026-06-17 on this development machine after the record-batch,
-request-frame allocation, and opt-in metrics pass. The saved real-Kafka numbers
-below are the relaxed throughput profile, not the `kafka-default` profile.
-Treat these as local measurement checkpoints, not production Kafka acceptance
+Measured 2026-06-28 against native Apache Kafka 4.3.0 single-node KRaft on the
+same machine (`127.0.0.1:9092`), through the public producer API at the
+**default Kafka-compatible config** (`acks=all`, `enable.idempotence=true`), no
+compression. Client and broker share the host (no CPU pinning or page-cache
+isolation), so treat these as local checkpoints, not production acceptance
 numbers.
 
 Benchmark host:
 
-- MacBook Pro, model identifier `Mac15,6`.
-- Apple M3 Pro base chip: 11-core CPU (5 performance, 6 efficiency), 14-core
-  GPU, 16-core Neural Engine.
-- 18GB unified memory; M3 Pro memory bandwidth: 150GB/s.
+- MacBook Pro `Mac15,6`, Apple M3 Pro (11-core CPU: 5 performance, 6
+  efficiency), 18 GB unified memory.
 
-Real Kafka and Java executable benchmark entries below are five-run summaries
-with fresh topics per run. Criterion entries report the throughput range from
-the saved local run.
+### Throughput + latency (5M x 10B, 16 partitions, `kacrab-16p`)
 
-Measured against native Apache Kafka 4.3.0 single-node KRaft on the same
-machine, through the public producer API. Kafka was exposed on
-`127.0.0.1:9092`; benchmark topics used 3 partitions and replication factor 1.
-The 2026-06-17 in-flight-5 pass used fresh topics per benchmark run.
-
-Default `kafka-default` profile, five fresh-topic runs, no latency sampling:
+Reproduce:
 
 ```bash
-cargo run -p kacrab-benches --release --bin producer_kafka_bench
+# kacrab
+KACRAB_BENCH_SYNC_SEND=1 KACRAB_BENCH_TOPIC=kacrab-16p \
+  cargo run -p kacrab-benches --release --bin producer_kafka_bench
+
+# Java, same broker/topic/config
+kafka-producer-perf-test.sh --topic kacrab-16p --num-records 5000000 \
+  --record-size 10 --throughput -1 --producer-props \
+  bootstrap.servers=127.0.0.1:9092 acks=all enable.idempotence=true
 ```
 
-| Scenario | kacrab, 5 runs |
-| --- | ---: |
-| 5M × 10B | avg 3,332,394 msg/sec; median 3,501,053; min 2,229,868; max 4,401,966; std dev 771,090; 31.78 MiB/sec |
-| 100K × 10 KiB | avg 14,321 msg/sec; median 14,310; min 14,009; max 14,594; std dev 237; 139.86 MiB/sec |
-
-Raw default-profile runs:
-
-| Run | 5M × 10B | 100K × 10 KiB |
-| ---: | --- | --- |
-| 1 | 3,501,053 messages/sec; 33.389 MiB/sec; 1.428s | 14,009 messages/sec; 136.804 MiB/sec; 7.138s |
-| 2 | 4,401,966 messages/sec; 41.980 MiB/sec; 1.136s | 14,116 messages/sec; 137.848 MiB/sec; 7.084s |
-| 3 | 3,801,057 messages/sec; 36.250 MiB/sec; 1.315s | 14,310 messages/sec; 139.750 MiB/sec; 6.988s |
-| 4 | 2,728,025 messages/sec; 26.016 MiB/sec; 1.833s | 14,578 messages/sec; 142.365 MiB/sec; 6.860s |
-| 5 | 2,229,868 messages/sec; 21.266 MiB/sec; 2.242s | 14,594 messages/sec; 142.517 MiB/sec; 6.852s |
-
-Default-profile throughput is lower than the relaxed baseline because the
-Kafka-compatible default path uses `acks=all` and idempotence. This snapshot
-predates the per-topic-partition idempotent dispatch path; kacrab now preserves
-producer sequence ordering per topic-partition while allowing independent
-partitions to use the configured in-flight budget. `KACRAB_BENCH_PROFILE=relaxed`
-disables idempotence and keeps the old throughput comparison path.
-
-```bash
-KACRAB_BENCH_PROFILE=relaxed \
-KACRAB_ENABLE_LATENCY=1 \
-cargo run -p kacrab-benches --release --bin producer_kafka_bench
-```
-
-Rust relaxed-profile `producer_kafka_bench` settings: `acks=1`, idempotence
-disabled, no compression, `batch.size=16384`, 3 partitions, default
-`partition_mode=unassigned` Java-style sticky partitioning, `retries=0`,
-`request.timeout.ms=30000`, `delivery.timeout.ms=120000`,
-`socket.read.buffer.capacity.bytes=1048576`, `broker.queue.capacity=2 ×
-in_flight`, `buffer.pool.capacity=128`, and a current-thread Tokio runtime.
-
-Kacrab latency below is dispatch latency for the untracked throughput path:
-from the earliest append timestamp in a drained ProduceRequest group until the
-broker response is handled. It does not allocate per-record `SendFuture` handles.
-This is intentionally not the same metric as Java producer-perf latency. The
-current kacrab average is higher than Java's average because the sample includes
-client-side batch grouping and Tokio task scheduling around ProduceRequest
-dispatch; the higher throughput indicates the client is amortizing more records
-per dispatch. Treat the latency gap as an optimization target for runtime
-scheduling, batch assembly timing, and linger behavior, not as proof of slower
-broker append latency by itself.
-Java latency is reported by `kafka-producer-perf-test.sh`. Current
-`producer_kafka_bench` tracked mode reports comparable callback-completion
-latency with the same Java `ProducerPerformance.Stats` total-line format; the
-saved numbers below predate that tracked measurement and should be treated as
-untracked dispatch checkpoints.
-
-### Synchronous send + cross-partition pipelining (current — branch `perf/sync-rewrite`)
-
-The plain public API — `Producer::send` / `send_with_callback` are now synchronous
-`fn`s (Java's `Producer.send` shape), no special fast-path method — the real
-Kafka-default producer config (`acks=all`, `enable.idempotence=true`), the
-producer's real sticky partitioner, measured against Apache Kafka's Java
-`kafka-producer-perf-test.sh` on the **same** native broker and the **same**
-16-partition topic (`kacrab-16p`), 5,000,000 × 10 bytes, 5 runs each:
-
-| acks | kacrab (5-run range) | Java | kacrab vs Java |
-| --- | ---: | ---: | ---: |
-| all + idempotence (default) | ~4.6M rec/sec (4.28–4.74M); retries=0; errors=0; ~1 ms avg latency | 3.38M rec/sec | **+37%** |
-| 1 (idempotence off) | ~4.83M rec/sec (4.74–4.88M) | 4.30M rec/sec | **+12%** |
-
-This is the **tracked per-record** path — one `SendFuture` per record, fully
-idempotent-safe, per-partition order-preserving. The gain comes from a synchronous
-send (no per-record `async fn` / Tokio task-scheduling): a record whose partition
-resolves synchronously (cached sticky reuse, sticky rotation, or keyed via cached
-metadata) is appended inline through the lock-free bypass, while cold-metadata /
-custom-partitioner records take a FIFO drain that preserves per-partition order.
-Combined with cross-partition pipelining (up to
-`max.in.flight.requests.per.connection` ProduceRequests outstanding, one per
-partition so idempotent sequences never reorder). Reproduce with
-`KACRAB_BENCH_SYNC_SEND=1 KACRAB_BENCH_TOPIC=kacrab-16p`.
-
-> The **7.9M msg/sec** figures further below are from the **removed** untracked
-> `send_batch_untracked` bulk API, NOT a per-record public-API number — treat them as
-> historical. The fair, current, per-record comparison is the table above.
-
-Five-run real Kafka and Java summary, using the old untracked kacrab path:
-
-| Scenario | kacrab, 5 runs | Java, 5 runs |
+| Metric | kacrab | Java `kafka-producer-perf-test` |
 | --- | ---: | ---: |
-| 5M × 10B | avg 7,976,245 msg/sec; median 7,923,087; min 7,773,087; max 8,236,373; std dev 183,688; 76.07 MiB/sec; dispatch latency avg 2.00 ms, p99 avg 4.70 ms | avg 3,594,271 records/sec; median 3,602,305; min 3,306,878; max 3,900,156; std dev 212,766; 34.28 MB/sec; latency avg 0.59 ms, p99 avg 9.00 ms |
-| 100K × 10 KiB | avg 55,756 msg/sec; median 55,673; min 55,115; max 56,329; std dev 520; 544.49 MiB/sec; dispatch latency avg 1.39 ms, p99 avg 4.46 ms | avg 31,170 records/sec; median 29,214; min 25,517; max 40,274; std dev 5,970; 304.39 MB/sec; latency avg 63.31 ms, p99 avg 146.40 ms |
+| Throughput | ~4.70M rec/sec (44.8 MiB/sec) | 3.6-4.2M rec/sec |
+| Latency avg | ~1.7 ms | 0.27-0.35 ms |
+| Latency p99 | ~15 ms | 1-2 ms |
+| retries / errors | 0 / 0 | 0 / 0 |
 
-Shared relaxed comparison settings: in-flight `5`, `acks=1`, idempotence
-disabled, no compression, `batch.size=16384`, 3 partitions, RF=1. The kacrab
-100K × 10 KiB run used `KACRAB_BATCH_MESSAGES_10KIB=96`; the 5M × 10B run used
-`KACRAB_BATCH_MESSAGES_10B=16384`. These `KACRAB_BATCH_MESSAGES_*` values are
-outer public API chunks for the benchmark harness, not Kafka producer
-`batch.size`. Each kacrab scenario warms up one outer API chunk before the
-measured window.
+kacrab wins throughput (about +12% over Java's best runs) while staying fully
+idempotent-correct, but Java has lower typical latency. The gap is a tunable
+tradeoff plus a shared broker artifact, not a client cost:
 
-Raw kacrab runs:
+- **Pipeline depth.** kacrab's synchronous send fills the per-partition pipeline
+  toward `max.in.flight=5`. At `max.in.flight=1` kacrab's p99 drops to ~2 ms at
+  the same ~4.7M throughput, because on a single low-RTT broker the per-broker
+  request coalescing already saturates the connection and the extra depth only
+  adds queue latency. Depth pays off across multiple brokers / higher RTT.
+- **Broker-pause resilience.** The co-located single-node JVM broker pauses
+  periodically (GC/fsync); Java sees it too (max latency spiked to 129 ms in the
+  same runs). At depth 5 a pause on one in-flight request lets the others drain
+  (kacrab p99.9 ~10 ms); at depth 1 the single slot blocks and p99.9 jumps to
+  ~100 ms.
 
-| Run | 5M × 10B | 100K × 10 KiB |
-| ---: | --- | --- |
-| 1 | 8,236,373 messages/sec; 78.548 MiB/sec; avg 1.95 ms; p99 4.55 ms | 56,329 messages/sec; 550.092 MiB/sec; avg 1.38 ms; p99 4.31 ms |
-| 2 | 7,866,653 messages/sec; 75.022 MiB/sec; avg 2.02 ms; p99 4.63 ms | 55,673 messages/sec; 543.684 MiB/sec; avg 1.39 ms; p99 4.53 ms |
-| 3 | 7,923,087 messages/sec; 75.560 MiB/sec; avg 2.00 ms; p99 4.52 ms | 56,233 messages/sec; 549.148 MiB/sec; avg 1.38 ms; p99 4.43 ms |
-| 4 | 7,773,087 messages/sec; 74.130 MiB/sec; avg 2.05 ms; p99 5.30 ms | 55,115 messages/sec; 538.233 MiB/sec; avg 1.40 ms; p99 4.46 ms |
-| 5 | 8,082,023 messages/sec; 77.076 MiB/sec; avg 1.97 ms; p99 4.50 ms | 55,428 messages/sec; 541.285 MiB/sec; avg 1.39 ms; p99 4.55 ms |
+On a single partition (`kacrab-1p`) kacrab latency is ~0.2 ms avg, close to Java.
+Lower `max.in.flight.requests.per.connection` / `linger.ms` for lower
+single-broker latency; the gap shrinks in production (broker off the client
+machine, real network RTT).
 
-The printed kacrab `api_chunks` counts are outer public API chunks in the
-selected delivery mode: 306 chunks for 5M × 10B and 1042 chunks for 100K ×
-10 KiB in the untracked baseline. In tracked mode, `api_chunks` is the number of
-per-record `send_with_callback` calls, and successful callback completions are
-reported as `java_perf_records`.
-Internally, the producer accumulator splits same-partition batches at
-`batch.size`, and the dispatcher packs those split batches across partitions in
-Java-like ProduceRequest groups.
+### CPU + peak memory (same 5M x 10B run, `/usr/bin/time -l`)
 
-Same broker, same relaxed producer props through Apache Kafka's Java native
-`kafka-producer-perf-test.sh`:
-
-```bash
-kafka-producer-perf-test.sh \
-  --topic kacrab-bench \
-  --num-records 100000 \
-  --record-size 10240 \
-  --throughput -1 \
-  --producer-props \
-  bootstrap.servers=127.0.0.1:9092 \
-  acks=1 \
-  enable.idempotence=false \
-  compression.type=none \
-  batch.size=16384 \
-  linger.ms=5 \
-  max.in.flight.requests.per.connection=5
-```
-
-For the Java 5M × 10B case, keep the same producer props and change
-`--num-records 5000000 --record-size 10`.
-
-Raw Java runs:
-
-| Run | 5M × 10B | 100K × 10 KiB |
-| ---: | --- | --- |
-| 1 | 3,628,447 records/sec; 34.60 MB/sec | 25,516 records/sec; 249.19 MB/sec |
-| 2 | 3,533,569 records/sec; 33.70 MB/sec | 29,214 records/sec; 285.29 MB/sec |
-| 3 | 3,900,156 records/sec; 37.19 MB/sec | 27,049 records/sec; 264.15 MB/sec |
-| 4 | 3,306,878 records/sec; 31.54 MB/sec | 33,795 records/sec; 330.03 MB/sec |
-| 5 | 3,602,305 records/sec; 34.35 MB/sec | 40,274 records/sec; 393.30 MB/sec |
-
-Java latency summary:
-
-| Scenario | Avg latency | p99 avg | Max latency avg |
+| Resource | kacrab | Java | Java overhead |
 | --- | ---: | ---: | ---: |
-| 5M × 10B | 0.59 ms | 9.00 ms | 136.00 ms |
-| 100K × 10 KiB | 63.31 ms | 146.40 ms | 168.00 ms |
+| Peak RSS | ~68 MiB | ~268 MiB | **~3.9x more** |
+| Total CPU (user+sys) | ~2.7 s | ~4.1 s | **~1.5x more** |
+| Wall time | ~1.1-1.8 s | ~2.4 s | -- |
 
-Kacrab dispatch latency summary:
-
-| Scenario | Avg latency | p50 avg | p95 avg | p99 avg | p999 avg |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 5M × 10B | 2.00 ms | 1.86 ms | 3.00 ms | 4.70 ms | 9.83 ms |
-| 100K × 10 KiB | 1.39 ms | 1.30 ms | 2.15 ms | 4.46 ms | 8.43 ms |
-
-These Java numbers are a same-props throughput comparison, not Java client
-defaults (`acks=all`, idempotence enabled, and retries enabled). They are not
-an apples-to-apples comparison with public rust-rdkafka README numbers either:
-that quoted benchmark used older hardware/software, decimal MB/sec reporting,
-and average-over-5 semantics.
+This is where the native-vs-JVM gap shows, and it explains why the throughput
+win is "only" ~12%: throughput here is **broker-bound** (both clients spend most
+of the run waiting on `acks=all` round-trips), so the client language barely
+moves the throughput needle. The real efficiency difference is in **memory**
+(no JVM heap/metaspace, ~4x less resident) and **CPU per record** (~1.5x less
+work for the same 5M records, while also pushing higher throughput). The Java
+CPU figure includes one-time JVM startup + JIT warmup that amortizes over a
+long-lived producer; the peak-RSS figure is steady-state and persistent.
 
 Measured with Criterion against local mock brokers. Async groups use longer
 measurement time instead of reducing sample count, and the accumulator
@@ -424,8 +303,10 @@ Wire pipeline:
   same unit.
 - The executable Rust bench ports Kafka Java `ProducerPerformance.Stats`
   sampling, window reporting, total summary, and callback-success-only
-  accounting. It still does not collect CPU profiles, allocator profiles,
-  broker disk metrics, or end-to-end replicated durability latency.
+  accounting, plus a coarse `/usr/bin/time -l` CPU-time and peak-RSS comparison
+  against the Java perf tool. It still does not collect sampled CPU profiles,
+  allocator profiles, broker disk metrics, or end-to-end replicated durability
+  latency.
 - Mock broker and Criterion numbers are useful for client hot-path regression
   checks, but they do not include real broker storage, replication, fetch, or
   network effects.

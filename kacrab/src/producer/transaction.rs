@@ -93,3 +93,29 @@ impl TransactionState {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TransactionState;
+
+    #[test]
+    fn is_completing_only_while_committing_or_aborting() {
+        for state in [
+            TransactionState::CommittingTransaction,
+            TransactionState::AbortingTransaction,
+        ] {
+            assert!(state.is_completing(), "{state:?} should be completing");
+        }
+        for state in [
+            TransactionState::Uninitialized,
+            TransactionState::Initializing,
+            TransactionState::Ready,
+            TransactionState::InTransaction,
+            TransactionState::PreparedTransaction,
+            TransactionState::AbortableError,
+            TransactionState::FatalError,
+        ] {
+            assert!(!state.is_completing(), "{state:?} should not be completing");
+        }
+    }
+}

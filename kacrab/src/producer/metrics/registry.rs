@@ -2318,3 +2318,273 @@ impl PartialOrd for MetricName {
         Some(self.cmp(other))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::float_cmp,
+        clippy::missing_assert_message,
+        clippy::unwrap_used,
+        reason = "Unit tests for the metrics library assert exact recorded values and \
+                  fail fastest with contextual expect calls."
+    )]
+
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+
+    use super::{
+        KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
+        MetricValue, Metrics, MetricsError, SensorRecordingLevel,
+    };
+
+    #[derive(Debug, Default, Clone)]
+    struct CountingReporter {
+        inits: Arc<AtomicUsize>,
+        changes: Arc<AtomicUsize>,
+        removals: Arc<AtomicUsize>,
+        closes: Arc<AtomicUsize>,
+    }
+
+    impl MetricReporter for CountingReporter {
+        fn init(&self, _metrics: &[KafkaMetric]) {
+            let _previous = self.inits.fetch_add(1, Ordering::Relaxed);
+        }
+        fn metric_change(&self, _metric: &KafkaMetric) {
+            let _previous = self.changes.fetch_add(1, Ordering::Relaxed);
+        }
+        fn metric_removal(&self, _metric: &KafkaMetric) {
+            let _previous = self.removals.fetch_add(1, Ordering::Relaxed);
+        }
+        fn close(&self) {
+            let _previous = self.closes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn value_of(metrics: &Metrics, name: &MetricName) -> f64 {
+        metrics
+            .metric(name)
+            .map(KafkaMetric::metric_value)
+            .expect("metric is registered")
+    }
+
+    #[test]
+    fn metric_quota_bounds_and_acceptability() {
+        let upper = MetricQuota::upper_bound(10.0);
+        assert!(upper.is_upper_bound());
+        assert_eq!(upper.bound(), 10.0);
+        assert!(upper.acceptable(10.0));
+        assert!(!upper.acceptable(10.1));
+
+        let lower = MetricQuota::lower_bound(3.0);
+        assert!(!lower.is_upper_bound());
+        assert!(lower.acceptable(3.0));
+        assert!(!lower.acceptable(2.9));
+    }
+
+    #[test]
+    fn metric_config_builders_and_getters() {
+        let config = MetricConfig::new()
+            .with_quota(MetricQuota::upper_bound(5.0))
+            .with_event_window(64)
+            .with_time_window_ms(1_000)
+            .with_record_level(SensorRecordingLevel::Debug)
+            .with_tag("client-id", "c1")
+            .with_tags([("topic", "orders"), ("node", "7")])
+            .with_samples(4)
+            .expect("samples >= 1");
+
+        assert_eq!(config.quota(), Some(MetricQuota::upper_bound(5.0)));
+        assert_eq!(config.event_window(), 64);
+        assert_eq!(config.time_window_ms(), 1_000);
+        assert_eq!(config.record_level(), SensorRecordingLevel::Debug);
+        assert_eq!(config.samples(), 4);
+        // with_tags replaces, so "client-id" from with_tag is gone.
+        assert_eq!(config.tags().get("topic").map(String::as_str), Some("orders"));
+        assert!(config.tags().get("client-id").is_none());
+
+        assert!(matches!(
+            MetricConfig::new().with_samples(0),
+            Err(MetricsError::InvalidMetricConfig { .. })
+        ));
+        assert_eq!(MetricConfig::default(), MetricConfig::new());
+    }
+
+    #[test]
+    fn recording_level_gates_records() {
+        // Sensor at Debug level under an Info-level registry must not record.
+        let mut metrics = Metrics::new();
+        let name = metrics.metric_name("v", "g", "d");
+        let sensor = metrics.sensor_with_parents(
+            "s",
+            SensorRecordingLevel::Debug,
+            std::iter::empty::<super::SensorId>(),
+        );
+        metrics
+            .sensor_add_value(sensor, name.clone())
+            .expect("add value");
+        metrics.record(sensor, 42.0).expect("record");
+        assert_eq!(value_of(&metrics, &name), 0.0); // gated out
+
+        // A Trace-level registry records everything.
+        let mut trace = Metrics::new().with_recording_level(SensorRecordingLevel::Trace);
+        let tname = trace.metric_name("v", "g", "d");
+        let tsensor = trace.sensor("s");
+        trace
+            .sensor_add_value(tsensor, tname.clone())
+            .expect("add value");
+        trace.record(tsensor, 7.0).expect("record");
+        assert_eq!(value_of(&trace, &tname), 7.0);
+    }
+
+    #[test]
+    fn sensor_stats_record_expected_values() {
+        let mut metrics = Metrics::new().with_default_tag("client-id", "c1");
+        let sensor = metrics.sensor("throughput");
+
+        let max = metrics.metric_name("max", "g", "max stat");
+        let min = metrics.metric_name("min", "g", "min stat");
+        let avg = metrics.metric_name("avg", "g", "avg stat");
+        let total = metrics.metric_name("total", "g", "total stat");
+        let count = metrics.metric_name("count", "g", "count stat");
+        let value = metrics.metric_name("value", "g", "value stat");
+        let rate = metrics.metric_name("rate", "g", "rate stat");
+        let meter_rate = metrics.metric_name("m-rate", "g", "meter rate");
+        let meter_total = metrics.metric_name("m-total", "g", "meter total");
+
+        metrics.sensor_add_max(sensor, max.clone()).expect("max");
+        metrics.sensor_add_min(sensor, min.clone()).expect("min");
+        metrics.sensor_add_avg(sensor, avg.clone()).expect("avg");
+        metrics.sensor_add_total(sensor, total.clone()).expect("total");
+        metrics.sensor_add_count(sensor, count.clone()).expect("count");
+        metrics.sensor_add_value(sensor, value.clone()).expect("value");
+        metrics.sensor_add_rate(sensor, rate).expect("rate");
+        metrics
+            .sensor_add_meter(sensor, meter_rate, meter_total.clone())
+            .expect("meter");
+
+        assert!(metrics.sensor_has_metrics(sensor).expect("has metrics"));
+        assert_eq!(metrics.sensor_name(sensor).expect("name"), "throughput");
+
+        for sample in [2.0, 8.0, 5.0] {
+            metrics.record(sensor, sample).expect("record");
+        }
+
+        assert_eq!(value_of(&metrics, &max), 8.0);
+        assert_eq!(value_of(&metrics, &min), 2.0);
+        assert_eq!(value_of(&metrics, &avg), 5.0);
+        assert_eq!(value_of(&metrics, &total), 15.0);
+        assert_eq!(value_of(&metrics, &count), 3.0);
+        assert_eq!(value_of(&metrics, &value), 5.0);
+        assert_eq!(value_of(&metrics, &meter_total), 15.0);
+    }
+
+    #[test]
+    fn quota_and_config_stat_variants_plus_special_stats() {
+        let mut metrics = Metrics::new();
+        let sensor = metrics.sensor("s");
+
+        let q_value = metrics.metric_name("qv", "g", "value w/ quota");
+        let c_max = metrics.metric_name("cmax", "g", "max w/ config");
+        let tb = metrics.metric_name("tb", "g", "token bucket");
+        let f_false = metrics.metric_name("ff", "g", "false freq");
+        let f_true = metrics.metric_name("ft", "g", "true freq");
+
+        metrics
+            .sensor_add_value_with_quota(sensor, q_value, MetricQuota::upper_bound(100.0))
+            .expect("value w/ quota");
+        metrics
+            .sensor_add_max_with_config(sensor, c_max, MetricConfig::new().with_event_window(8))
+            .expect("max w/ config");
+        metrics
+            .sensor_add_min_with_quota(
+                sensor,
+                metrics.metric_name("qmin", "g", "min quota"),
+                MetricQuota::lower_bound(0.0),
+            )
+            .expect("min w/ quota");
+        metrics
+            .sensor_add_token_bucket(sensor, tb)
+            .expect("token bucket");
+        metrics
+            .sensor_add_boolean_frequencies(sensor, Some(f_false), Some(f_true))
+            .expect("frequencies");
+
+        metrics.record(sensor, 1.0).expect("record");
+        metrics.check_sensor_quotas(sensor).expect("within quota");
+    }
+
+    #[test]
+    fn reporters_observe_metric_lifecycle_and_close() {
+        let reporter = CountingReporter::default();
+        let inits = Arc::clone(&reporter.inits);
+        let changes = Arc::clone(&reporter.changes);
+        let removals = Arc::clone(&reporter.removals);
+        let closes = Arc::clone(&reporter.closes);
+
+        let mut metrics = Metrics::new();
+        metrics.add_reporter(reporter);
+        assert_eq!(inits.load(Ordering::Relaxed), 1);
+
+        let name = metrics.metric_name("g", "grp", "gauge");
+        metrics
+            .add_metric(name.clone(), || MetricValue::Number(3.0))
+            .expect("add metric");
+        assert_eq!(changes.load(Ordering::Relaxed), 1);
+        assert_eq!(value_of(&metrics, &name), 3.0);
+        assert_eq!(metrics.registered_metrics().count(), 1);
+
+        let removed = metrics.remove_metric(&name).expect("removed");
+        assert_eq!(removed.metric_value(), 3.0);
+        assert_eq!(removals.load(Ordering::Relaxed), 1);
+        assert!(metrics.remove_metric_if_present(&name).is_none());
+
+        metrics.close();
+        assert_eq!(closes.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn sensor_expiration_and_removal() {
+        let mut metrics = Metrics::new();
+        let sensor = metrics.sensor_with_expiration(
+            "ephemeral",
+            SensorRecordingLevel::Info,
+            Duration::from_millis(100),
+            std::iter::empty::<super::SensorId>(),
+        );
+        let name = metrics.metric_name("e", "g", "ephemeral value");
+        metrics.sensor_add_value(sensor, name).expect("add value");
+        metrics.record_at_ms(sensor, 1.0, 1_000).expect("record");
+
+        assert!(!metrics.sensor_has_expired_at_ms(sensor, 1_050).expect("not expired"));
+        assert!(metrics.sensor_has_expired_at_ms(sensor, 2_000).expect("expired"));
+        assert_eq!(metrics.expire_sensors_at_ms(2_000), 1);
+
+        assert!(!metrics.remove_sensor("missing"));
+    }
+
+    #[test]
+    fn metric_name_template_instance_and_ordering() {
+        let metrics = Metrics::new();
+        let template =
+            MetricNameTemplate::new("lag", "grp", "consumer lag", ["client-id", "topic"]);
+        let instance = metrics
+            .metric_instance(&template, [("client-id", "c1"), ("topic", "orders")])
+            .expect("instance");
+        assert_eq!(instance.name(), "lag");
+
+        let tagged = metrics.metric_name_with_tags("lag", "grp", "d", [("client-id", "c2")]);
+        assert!(instance < tagged || tagged < instance || instance == tagged);
+
+        // KafkaMetric Debug + MetricsError Display.
+        let metric = KafkaMetric::from_fn(instance, || MetricValue::Number(1.0));
+        assert!(format!("{metric:?}").contains("KafkaMetric"));
+        let err = MetricsError::InvalidMetricConfig {
+            reason: "bad".to_owned(),
+        };
+        assert!(format!("{err}").contains("bad"));
+    }
+}
