@@ -5,6 +5,7 @@
     clippy::cast_possible_truncation,
     clippy::expect_used,
     clippy::indexing_slicing,
+    clippy::panic,
     clippy::print_stdout,
     clippy::unwrap_used,
     missing_docs,
@@ -25,7 +26,8 @@ use std::{
 use bytes::Bytes;
 use kacrab::{
     config::{ClientConfig, ProducerConfig},
-    producer::{Producer, ProducerMetricsSnapshot, ProducerRecord, RecordMetadata},
+    producer::{Producer, ProducerError, ProducerMetricsSnapshot, ProducerRecord, RecordMetadata},
+    wire::WireError,
 };
 use tokio::runtime::Builder;
 
@@ -182,6 +184,11 @@ async fn build_producer(config: &ProducerConfig) -> Producer {
     if let Ok(batch_size) = env::var("KACRAB_BENCH_BATCH_SIZE") {
         builder = builder.set("batch.size", batch_size.as_str());
     }
+    // KACRAB_BENCH_MAX_REQUEST_SIZE lifts the 1 MiB default so large-record runs
+    // with a bigger batch.size do not trip RecordTooLarge on coalesced requests.
+    if let Ok(max_request_size) = env::var("KACRAB_BENCH_MAX_REQUEST_SIZE") {
+        builder = builder.set("max.request.size", max_request_size.as_str());
+    }
     if env::var("KACRAB_BENCH_ACKS1").is_ok() {
         builder = builder.set("acks", "1").set("enable.idempotence", "false");
     }
@@ -272,10 +279,20 @@ async fn run_per_record_tracked_send_loop(
         // (cold metadata / buffer-full) to the internal FIFO drain. No per-record
         // `.await`, no manual partition assignment.
         let record = benchmark_record(Arc::clone(&topic), sent).value(value.clone());
-        let _delivery = producer
-            .send_with_callback(record, callback)
-            .expect("benchmark send should fit and dispatch");
-        sent = sent.saturating_add(1);
+        match producer.send_with_callback(record, callback) {
+            Ok(_delivery) => sent = sent.saturating_add(1),
+            // Closed-loop backpressure. The producer buffer (Backpressure) or a
+            // broker connection's in-flight queue (Wire(Backpressure)) is full —
+            // common with large records, which fill the 32 MiB buffer long before
+            // the drain catches up. Wait for the drain to free space and retry the
+            // same record instead of flooding open-loop and panicking. This caps
+            // the send rate at the real drain rate and keeps `send_started`
+            // measuring service time, not an unbounded enqueue backlog.
+            Err(ProducerError::Backpressure | ProducerError::Wire(WireError::Backpressure)) => {
+                tokio::time::sleep(Duration::from_micros(50)).await;
+            },
+            Err(error) => panic!("benchmark send failed: {error:?}"),
+        }
     }
     if sync_send {
         eprintln!(
@@ -467,6 +484,9 @@ fn scenarios() -> Vec<Scenario> {
     // KACRAB_BENCH_MESSAGES bounds the small-payload run to a fixed record count and
     // skips the large-payload scenario — used to profile a single hot partition without
     // the default 5,000,000-record flood overrunning delivery.timeout.ms.
+    if env::var("KACRAB_ONLY_10KIB").is_ok() {
+        return vec![large_payload_scenario()];
+    }
     if let Some(messages) = env::var("KACRAB_BENCH_MESSAGES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -474,6 +494,9 @@ fn scenarios() -> Vec<Scenario> {
         let mut scenario = small_payload_scenario();
         scenario.messages = messages;
         return vec![scenario];
+    }
+    if env::var("KACRAB_ONLY_10B").is_ok() {
+        return vec![small_payload_scenario()];
     }
     vec![small_payload_scenario(), large_payload_scenario()]
 }
