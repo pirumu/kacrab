@@ -7,7 +7,7 @@
     reason = "Ignored real-broker tests are explicit smoke checks with direct failure output."
 )]
 
-use std::{env, time::Duration};
+use std::{env, net::SocketAddr, time::Duration};
 
 use kacrab::wire::{BrokerEndpoint, ConnectionConfig, SaslMechanism, SecurityProtocol, WireClient};
 use kacrab_protocol::{
@@ -75,11 +75,18 @@ async fn gssapi_endpoint() -> BrokerEndpoint {
     let bootstrap = env::var("KACRAB_GSSAPI_BOOTSTRAP")
         .expect("set KACRAB_GSSAPI_BOOTSTRAP to host:port for a SASL/GSSAPI Kafka broker");
     let (host, port) = parse_host_port(&bootstrap);
-    let addr = lookup_host((host.as_str(), port))
+    let addrs: Vec<SocketAddr> = lookup_host((host.as_str(), port))
         .await
         .expect("KACRAB_GSSAPI_BOOTSTRAP should resolve")
-        .next()
+        .collect();
+    let first = *addrs
+        .first()
         .expect("KACRAB_GSSAPI_BOOTSTRAP should resolve to at least one address");
+    // Prefer an IPv4 address when the name resolves to both: brokers published
+    // by Docker Desktop on macOS are reachable on 127.0.0.1 but not on ::1, and
+    // resolvers often return the IPv6 address first. The host string is kept
+    // for the Kerberos SPN, so this does not change kafka/<host>.
+    let addr = addrs.iter().copied().find(SocketAddr::is_ipv4).unwrap_or(first);
     BrokerEndpoint::from_resolved(0, host, port, addr)
 }
 
