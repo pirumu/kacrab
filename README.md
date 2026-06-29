@@ -407,10 +407,11 @@ KACRAB_BOOTSTRAP=127.0.0.1:9092 \
   KACRAB_BENCH_SYNC_SEND=1 KACRAB_BENCH_TOPIC=kacrab-16p KACRAB_BENCH_MESSAGES=5000000 \
   cargo run -q -p kacrab-benches --release --bin producer_kafka_bench
 
-# Java reference — same broker, topic, and config
+# Java reference — same broker, topic, and config (Kafka 4.3.0: --command-property
+# takes space-separated PROP=VALUE; --producer-props is deprecated)
 kafka-producer-perf-test.sh --topic kacrab-16p --num-records 5000000 \
   --record-size 10 --throughput -1 \
-  --producer-props bootstrap.servers=127.0.0.1:9092 acks=all enable.idempotence=true
+  --command-property bootstrap.servers=127.0.0.1:9092 acks=all enable.idempotence=true
 ```
 
 Head-to-head on the same single-node broker, topic, and config (`acks=all` +
@@ -420,6 +421,15 @@ Head-to-head on the same single-node broker, topic, and config (`acks=all` +
 | --- | ---: | ---: |
 | 5M x 10B, 16 partitions | **4.70M rec/sec**; 44.8 MiB/sec; lat avg ~1.3 ms, p99 ~8 ms (depth 5; see below); retries 0, errors 0, in-flight stalls 0 | 4.21M records/sec; 40.1 MB/sec; lat avg **0.27 ms**, p99 **1 ms** |
 | 2M x 10B, 1 partition | **4.69M rec/sec**; 44.7 MiB/sec; lat avg ~0.2 ms, p99 ~5 ms; retries 0, errors 0 | -- |
+| 100K x 10 KiB, 16 partitions (batch.size=256 KB) | **~613 MiB/sec** (62.8K rec/sec); lat avg 68 ms, p99 ~150 ms; retries 0, errors 0 | 515 MB/sec (52.8K records/sec); lat avg 43 ms, p99 104 ms |
+
+Large records (not just tiny ones): at 10 KiB, kacrab sustains **~613 MiB/sec**
+(≈ Java's 515 MB/sec, slightly ahead on bytes, behind on latency — the same
+depth tradeoff). **Caveat that matters:** a 10 KiB record exceeds half of the
+default 16 KiB `batch.size`, so it lands one-record-per-batch → one record per
+`acks=all` produce request → broker-fsync-bound (~3.7 MiB/sec). Raising
+`batch.size` to 256 KB (≈ 24 records/batch) restores ~165x throughput. This is
+standard Kafka tuning, not a client quirk — the Java client behaves identically.
 
 Throughput vs latency, honestly: kacrab is ~12% faster on the 16-partition
 workload while staying fully idempotent-correct (zero retries/errors), **but Java
@@ -472,9 +482,10 @@ wire pipeline, and dispatcher CPU paths in isolation.
 
 Limits, read these before trusting the headline:
 
-- **Records are 10 bytes**, so `records/sec` is inflated by tiny records — read
-  the **MiB/sec** column (~45 MiB/s) as the meaningful figure. Larger-record
-  (100 B – 1 KB+) throughput is not benchmarked here yet.
+- The headline rows use **10-byte records**, so `records/sec` is inflated by tiny
+  records — read the **MiB/sec** column (~45 MiB/s) as the meaningful figure. The
+  10 KiB row (~613 MiB/s) is the realistic large-record number; sizes between
+  10 B and 10 KiB are not separately charted.
 - **Latency is closed-loop saturation latency** (`--throughput -1`), measured
   from just-before-send to the ack callback. It is not an open-loop SLA latency
   at a fixed offered rate; under saturation it reflects queueing, not service
