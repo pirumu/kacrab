@@ -6,7 +6,9 @@ Runnable examples for the public `kacrab` API. **Not published.**
 
 - `producer` - public `Producer` usage, batching, idempotence,
   transactions, and auth configuration examples.
-- `config` - Java-style config facade and typed config conversion examples.
+- `config` - Kafka config facade and typed config conversion examples.
+- `typed_serializer` - a custom `ProducerSerializer<T>` wired through
+  `build_with_serializers` to send a strongly-typed value.
 
 ## Running
 
@@ -15,6 +17,7 @@ Run examples from the workspace root:
 ```bash
 cargo run -p kacrab-examples --example producer
 cargo run -p kacrab-examples --example config
+cargo run -p kacrab-examples --example typed_serializer
 ```
 
 ## Author

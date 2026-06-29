@@ -221,6 +221,60 @@ let _delivery = producer.send(ProducerRecord::new("orders", 0).value("created"))
 producer.commit_transaction().await?;
 ```
 
+### Custom serializers
+
+Serializers are a plain Rust trait, `ProducerSerializer<T>` — implement it for
+your own type and pass the serializer value to `build_with_serializers`. There
+is no `key.serializer` / `value.serializer` class-name configuration: the key
+and value types are checked at compile time. Built-in serializers
+(`StringSerializer`, `IntegerSerializer`, `BytesSerializer`, `ListSerializer`,
+…) are provided for the common cases.
+
+```rust
+use bytes::Bytes;
+use kacrab::producer::{
+    Producer, ProducerRecord, ProducerSerializer, RecordHeader, Result, StringSerializer,
+};
+
+struct OrderEvent { order_id: u64, amount_cents: u64 }
+
+struct OrderEventSerializer;
+impl ProducerSerializer<OrderEvent> for OrderEventSerializer {
+    fn serialize(
+        &self,
+        _topic: &str,
+        _headers: &mut Vec<RecordHeader>,
+        value: Option<&OrderEvent>,
+    ) -> Result<Option<Bytes>> {
+        Ok(value.map(|e| {
+            let mut bytes = Vec::with_capacity(16);
+            bytes.extend_from_slice(&e.order_id.to_be_bytes());
+            bytes.extend_from_slice(&e.amount_cents.to_be_bytes());
+            Bytes::from(bytes)
+        }))
+    }
+}
+
+// Key uses the built-in StringSerializer; value uses the custom one. K = String
+// and V = OrderEvent are inferred from the serializer types.
+let mut producer = Producer::builder()
+    .set("bootstrap.servers", "127.0.0.1:9092")
+    .build_with_serializers(StringSerializer::default(), OrderEventSerializer)
+    .await?;
+
+let event = OrderEvent { order_id: 42, amount_cents: 1_999 };
+let _delivery = producer.send(
+    ProducerRecord::new("orders", 0),
+    Some(&"order-42".to_owned()),
+    Some(&event),
+)?;
+```
+
+Custom **deserializers** are consumer-side and are not available yet — the
+consumer is not implemented (see [Current Status](#current-status)). A runnable
+version of the above lives in
+[`examples/typed_serializer.rs`](examples/typed_serializer.rs).
+
 ## Auth
 
 Auth uses Kafka-compatible property names. For built-in `PLAIN` and `SCRAM`,
