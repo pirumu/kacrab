@@ -24,33 +24,33 @@ use super::{Result, WireError};
 /// TLS settings for `SSL` and `SASL_SSL` broker connections.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsConfig {
-    /// Java key: `ssl.truststore.location`.
+    /// Kafka key: `ssl.truststore.location`.
     pub truststore_location: Option<String>,
-    /// Java key: `ssl.truststore.password`.
+    /// Kafka key: `ssl.truststore.password`.
     pub truststore_password: Option<String>,
-    /// Java key: `ssl.truststore.certificates`.
+    /// Kafka key: `ssl.truststore.certificates`.
     pub truststore_certificates: Option<String>,
-    /// Java key: `ssl.truststore.type`.
+    /// Kafka key: `ssl.truststore.type`.
     pub truststore_type: Option<String>,
-    /// Java key: `ssl.keystore.location`.
+    /// Kafka key: `ssl.keystore.location`.
     pub keystore_location: Option<String>,
-    /// Java key: `ssl.keystore.password`.
+    /// Kafka key: `ssl.keystore.password`.
     pub keystore_password: Option<String>,
-    /// Java key: `ssl.keystore.key`.
+    /// Kafka key: `ssl.keystore.key`.
     pub keystore_key: Option<String>,
-    /// Java key: `ssl.keystore.certificate.chain`.
+    /// Kafka key: `ssl.keystore.certificate.chain`.
     pub keystore_certificate_chain: Option<String>,
-    /// Java key: `ssl.keystore.type`.
+    /// Kafka key: `ssl.keystore.type`.
     pub keystore_type: Option<String>,
-    /// Java key: `ssl.key.password`.
+    /// Kafka key: `ssl.key.password`.
     pub key_password: Option<String>,
-    /// Java key: `ssl.endpoint.identification.algorithm`.
+    /// Kafka key: `ssl.endpoint.identification.algorithm`.
     pub endpoint_identification_algorithm: Option<String>,
-    /// Java key: `ssl.protocol`.
+    /// Kafka key: `ssl.protocol`.
     pub protocol: String,
-    /// Java key: `ssl.enabled.protocols`.
+    /// Kafka key: `ssl.enabled.protocols`.
     pub enabled_protocols: Option<String>,
-    /// Java key: `ssl.cipher.suites`.
+    /// Kafka key: `ssl.cipher.suites`.
     pub cipher_suites: Option<String>,
 }
 
