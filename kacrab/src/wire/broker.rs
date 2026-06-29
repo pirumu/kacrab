@@ -19,7 +19,7 @@ use kacrab_protocol::{
     },
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter, WriteHalf},
     sync::{Notify, mpsc, oneshot},
 };
 
@@ -411,7 +411,11 @@ impl BrokerTask {
         pending: &mut VecDeque<RequestCommand>,
         rx_open: &mut bool,
     ) -> ServeOutcome {
-        let (reader, mut writer) = tokio::io::split(stream);
+        let (reader, writer) = tokio::io::split(stream);
+        // Buffer writes so a batch of queued requests is coalesced into one
+        // socket write instead of one syscall per frame. Frames larger than the
+        // buffer pass straight through, so large ProduceRequests are unaffected.
+        let mut writer = BufWriter::new(writer);
         // Share the correlation pipeline with the reader task so it can complete
         // responses directly (no per-response hop back to this loop). The reader
         // wakes this loop only on disconnect, so a response wakes exactly one
@@ -473,7 +477,7 @@ impl BrokerTask {
 
     async fn flush_pending(
         &self,
-        writer: &mut WriteHalf<BrokerStream>,
+        writer: &mut BufWriter<WriteHalf<BrokerStream>>,
         pipeline: &Mutex<RequestPipeline>,
         pending: &mut VecDeque<RequestCommand>,
         capabilities: &BrokerCapabilities,
@@ -501,7 +505,7 @@ impl BrokerTask {
 
     async fn write_command(
         &self,
-        writer: &mut WriteHalf<BrokerStream>,
+        writer: &mut BufWriter<WriteHalf<BrokerStream>>,
         pipeline: &Mutex<RequestPipeline>,
         command: RequestCommand,
         capabilities: &BrokerCapabilities,
@@ -1076,7 +1080,7 @@ mod tests {
         version::{request_header_version, response_header_version},
     };
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
+        io::{AsyncReadExt, AsyncWriteExt, BufWriter},
         net::TcpListener,
         sync::{Notify, mpsc, oneshot},
     };
@@ -1556,7 +1560,8 @@ mod tests {
     async fn write_command_returns_backpressure_when_pipeline_has_no_capacity() {
         let (task, client, _server) = broker_task_with_connected_stream().await;
         let client: BrokerStream = Box::new(client);
-        let (_reader, mut writer) = tokio::io::split(client);
+        let (_reader, writer) = tokio::io::split(client);
+        let mut writer = BufWriter::new(writer);
         let pipeline = Arc::new(Mutex::new(RequestPipeline::new(1, Duration::from_secs(1))));
         let (reserved_tx, _reserved_rx) = oneshot::channel();
         let _reserved = lock_pipeline(&pipeline)
