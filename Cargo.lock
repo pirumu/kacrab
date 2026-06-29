@@ -1133,6 +1133,7 @@ dependencies = [
 name = "kacrab-examples"
 version = "0.0.1"
 dependencies = [
+ "bytes",
  "kacrab",
  "tokio",
 ]
