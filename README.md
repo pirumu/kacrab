@@ -42,11 +42,17 @@ workload (at higher latency — see [Benchmarks](#benchmarks)). The current focu
 before consumer work: multi-broker behavior, bounded hot paths, routing refresh,
 and sustained stress testing.
 
-Producer module test coverage is **~92% line** (`cargo llvm-cov`, 600+ unit and
-integration tests). The append/dispatch/idempotent-recovery hot paths, the
-murmur2 partitioner (byte-exact against the Java client for every key length),
-transactions, interceptors, and metrics are covered; the remaining gaps are
-mechanical error-clone arms and rare defensive branches.
+Producer module test coverage is **~92% line** (`cargo llvm-cov`): 510 unit
+tests in the producer crate plus mock-broker integration suites (including the
+producer-dispatcher fault-injection tests). The append/dispatch/idempotent-recovery
+hot paths, the murmur2 partitioner (byte-exact against the Java client for every
+key length), the transaction state machine, interceptors, and the Kafka-style
+metrics library (sensors, stats, quotas, reporters) are directly tested; the
+remaining gaps are mechanical error-clone arms and rare defensive branches.
+Whole-workspace line coverage is lower (~66%) because most of the generated
+`kacrab-protocol` message structs are for Kafka APIs not yet wired
+(consumer/admin/streams); the hand-written, implemented code sits at ~83–100%
+per module.
 
 Auth and producer are treated as **Java-compatible targets** for the
 implemented surface:
@@ -309,11 +315,11 @@ still gated by generated round trips and the Java oracle matrix.
 cargo tarpaulin --workspace --all-features --config tarpaulin.toml
 ```
 
-Latest measured coverage on 2026-06-16:
+Latest measured coverage on 2026-06-29:
 
 - `cargo tarpaulin --workspace --all-features --config tarpaulin.toml --out Stdout`
-- Maintained-source line coverage: 82.65%.
-- Covered lines: 5,942 / 7,189.
+- Maintained-source line coverage: 84.62%.
+- Covered lines: 13,905 / 16,432.
 - Java oracle fixture inventory: 6 release-grade fixture families × 625
   schema/version cases = 3,750 generated fixture cases.
 
