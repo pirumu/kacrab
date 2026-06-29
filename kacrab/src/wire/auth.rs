@@ -42,7 +42,7 @@ pub enum SecurityProtocol {
 }
 
 impl SecurityProtocol {
-    /// Parses a Java-compatible `security.protocol` value.
+    /// Parses a Kafka `security.protocol` value.
     ///
     /// # Errors
     ///
@@ -88,7 +88,7 @@ pub enum SaslMechanism {
 }
 
 impl SaslMechanism {
-    /// Parses a Java-compatible `sasl.mechanism` value.
+    /// Parses a Kafka `sasl.mechanism` value.
     ///
     /// # Errors
     ///
@@ -517,71 +517,71 @@ impl Default for SecurityConfig {
 pub struct SaslConfig {
     /// Selected SASL mechanism when `security.protocol` uses SASL.
     pub mechanism: Option<SaslMechanism>,
-    /// Raw Java-compatible JAAS config string.
+    /// Raw JAAS config string (Java format, accepted for migration).
     pub jaas_config: Option<String>,
     /// Native Rust authenticator for custom SASL flows.
     pub client_authenticator: Option<SaslClientAuthenticatorHandle>,
     /// Native Rust factory for per-session custom SASL flows.
     pub client_authenticator_factory: Option<SaslClientAuthenticatorFactoryHandle>,
-    /// Java key: `sasl.login.callback.handler.class`.
+    /// Kafka key: `sasl.login.callback.handler.class`.
     pub login_callback_handler_class: Option<String>,
-    /// Java key: `sasl.client.callback.handler.class`.
+    /// Kafka key: `sasl.client.callback.handler.class`.
     pub client_callback_handler_class: Option<String>,
-    /// Java key: `sasl.kerberos.service.name`.
+    /// Kafka key: `sasl.kerberos.service.name`.
     pub kerberos_service_name: Option<String>,
-    /// Java key: `sasl.kerberos.kinit.cmd`.
+    /// Kafka key: `sasl.kerberos.kinit.cmd`.
     pub kerberos_kinit_cmd: Option<String>,
-    /// Java key: `sasl.kerberos.ticket.renew.window.factor`.
+    /// Kafka key: `sasl.kerberos.ticket.renew.window.factor`.
     pub kerberos_ticket_renew_window_factor: f64,
-    /// Java key: `sasl.kerberos.ticket.renew.jitter`.
+    /// Kafka key: `sasl.kerberos.ticket.renew.jitter`.
     pub kerberos_ticket_renew_jitter: f64,
-    /// Java key: `sasl.kerberos.min.time.before.relogin`.
+    /// Kafka key: `sasl.kerberos.min.time.before.relogin`.
     pub kerberos_min_time_before_relogin: Duration,
-    /// Java key: `sasl.oauthbearer.token.endpoint.url`.
+    /// Kafka key: `sasl.oauthbearer.token.endpoint.url`.
     pub oauthbearer_token_endpoint_url: Option<String>,
-    /// Java key: `sasl.oauthbearer.assertion.file`.
+    /// Kafka key: `sasl.oauthbearer.assertion.file`.
     pub oauthbearer_assertion_file: Option<String>,
-    /// Java key: `sasl.oauthbearer.assertion.private.key.file`.
+    /// Kafka key: `sasl.oauthbearer.assertion.private.key.file`.
     pub oauthbearer_assertion_private_key_file: Option<String>,
-    /// Java key: `sasl.oauthbearer.assertion.private.key.passphrase`.
+    /// Kafka key: `sasl.oauthbearer.assertion.private.key.passphrase`.
     pub oauthbearer_assertion_private_key_passphrase: Option<String>,
-    /// Java key: `sasl.oauthbearer.assertion.template.file`.
+    /// Kafka key: `sasl.oauthbearer.assertion.template.file`.
     pub oauthbearer_assertion_template_file: Option<String>,
-    /// Java key: `sasl.oauthbearer.assertion.algorithm`.
+    /// Kafka key: `sasl.oauthbearer.assertion.algorithm`.
     pub oauthbearer_assertion_algorithm: String,
-    /// Java key: `sasl.oauthbearer.assertion.claim.aud`.
+    /// Kafka key: `sasl.oauthbearer.assertion.claim.aud`.
     pub oauthbearer_assertion_claim_aud: Option<String>,
-    /// Java key: `sasl.oauthbearer.assertion.claim.iss`.
+    /// Kafka key: `sasl.oauthbearer.assertion.claim.iss`.
     pub oauthbearer_assertion_claim_iss: Option<String>,
-    /// Java key: `sasl.oauthbearer.assertion.claim.sub`.
+    /// Kafka key: `sasl.oauthbearer.assertion.claim.sub`.
     pub oauthbearer_assertion_claim_sub: Option<String>,
-    /// Java key: `sasl.oauthbearer.assertion.claim.exp.seconds`.
+    /// Kafka key: `sasl.oauthbearer.assertion.claim.exp.seconds`.
     pub oauthbearer_assertion_claim_exp: Duration,
-    /// Java key: `sasl.oauthbearer.assertion.claim.nbf.seconds`.
+    /// Kafka key: `sasl.oauthbearer.assertion.claim.nbf.seconds`.
     pub oauthbearer_assertion_claim_nbf: Duration,
-    /// Java key: `sasl.oauthbearer.assertion.claim.jti.include`.
+    /// Kafka key: `sasl.oauthbearer.assertion.claim.jti.include`.
     pub oauthbearer_assertion_claim_jti_include: bool,
-    /// Java key: `sasl.oauthbearer.client.credentials.client.id`.
+    /// Kafka key: `sasl.oauthbearer.client.credentials.client.id`.
     pub oauthbearer_client_id: Option<String>,
-    /// Java key: `sasl.oauthbearer.client.credentials.client.secret`.
+    /// Kafka key: `sasl.oauthbearer.client.credentials.client.secret`.
     pub oauthbearer_client_secret: Option<String>,
-    /// Java key: `sasl.oauthbearer.scope`.
+    /// Kafka key: `sasl.oauthbearer.scope`.
     pub oauthbearer_scope: Option<String>,
-    /// Java key: `sasl.login.connect.timeout.ms`.
+    /// Kafka key: `sasl.login.connect.timeout.ms`.
     pub login_connect_timeout: Option<Duration>,
-    /// Java key: `sasl.login.read.timeout.ms`.
+    /// Kafka key: `sasl.login.read.timeout.ms`.
     pub login_read_timeout: Option<Duration>,
-    /// Java key: `sasl.login.refresh.window.factor`.
+    /// Kafka key: `sasl.login.refresh.window.factor`.
     pub login_refresh_window_factor: f64,
-    /// Java key: `sasl.login.refresh.window.jitter`.
+    /// Kafka key: `sasl.login.refresh.window.jitter`.
     pub login_refresh_window_jitter: f64,
-    /// Java key: `sasl.login.refresh.min.period.seconds`.
+    /// Kafka key: `sasl.login.refresh.min.period.seconds`.
     pub login_refresh_min_period: Duration,
-    /// Java key: `sasl.login.refresh.buffer.seconds`.
+    /// Kafka key: `sasl.login.refresh.buffer.seconds`.
     pub login_refresh_buffer: Duration,
-    /// Java key: `sasl.login.retry.backoff.ms`.
+    /// Kafka key: `sasl.login.retry.backoff.ms`.
     pub login_retry_backoff: Duration,
-    /// Java key: `sasl.login.retry.backoff.max.ms`.
+    /// Kafka key: `sasl.login.retry.backoff.max.ms`.
     pub login_retry_backoff_max: Duration,
 }
 
