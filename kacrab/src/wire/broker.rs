@@ -374,8 +374,8 @@ impl BrokerTask {
                     }
                 },
                 Err(error) => {
-                    if let Some(error_factory) = fatal_setup_error_factory(&error) {
-                        fail_pending_setup_error(&mut pending, error_factory);
+                    if is_fatal_setup_error(&error) {
+                        fail_pending_setup_error(&mut pending, || clone_setup_error(&error));
                         if pending.is_empty() && !rx_open {
                             return;
                         }
@@ -940,30 +940,45 @@ fn fail_pending_setup_error(
     }
 }
 
-fn fatal_setup_error_factory(error: &WireError) -> Option<fn() -> WireError> {
+/// Connection-setup failures that retrying cannot fix, so pending commands
+/// should fail fast with the real cause instead of looping under reconnect
+/// backoff until they time out. SASL handshake/authentication failures and a
+/// failed server-signature check are terminal here, matching Java's
+/// non-retriable `SaslAuthenticationException` / `IllegalSaslStateException`
+/// semantics; an `Invalid username or password` should surface immediately, not
+/// after `request.timeout.ms`.
+const fn is_fatal_setup_error(error: &WireError) -> bool {
+    matches!(
+        error,
+        WireError::UnsupportedTlsOption(_)
+            | WireError::GssapiBackendUnavailable
+            | WireError::InvalidSaslConfig(_)
+            | WireError::UnsupportedSaslMechanism(_)
+            | WireError::SaslHandshake(_)
+            | WireError::SaslAuthentication(_)
+            | WireError::SaslServerSignatureMismatch
+    )
+}
+
+/// Reproduces a fatal setup error so every pending command can be failed with
+/// the same cause. [`WireError`] is not `Clone`, so the message-carrying
+/// variants are rebuilt by hand; this is only ever called for errors that
+/// [`is_fatal_setup_error`] accepts.
+fn clone_setup_error(error: &WireError) -> WireError {
     match error {
-        WireError::UnsupportedTlsOption(_) => Some(unsupported_tls_backend_error),
-        WireError::GssapiBackendUnavailable => Some(gssapi_backend_unavailable_error),
-        WireError::InvalidSaslConfig(_) => Some(invalid_sasl_config_error),
-        WireError::UnsupportedSaslMechanism(_) => Some(unsupported_sasl_mechanism_error),
-        _ => None,
+        WireError::UnsupportedTlsOption(message) => {
+            WireError::UnsupportedTlsOption(message.clone())
+        },
+        WireError::GssapiBackendUnavailable => WireError::GssapiBackendUnavailable,
+        WireError::InvalidSaslConfig(message) => WireError::InvalidSaslConfig(message.clone()),
+        WireError::UnsupportedSaslMechanism(message) => {
+            WireError::UnsupportedSaslMechanism(message.clone())
+        },
+        WireError::SaslHandshake(message) => WireError::SaslHandshake(message.clone()),
+        WireError::SaslAuthentication(message) => WireError::SaslAuthentication(message.clone()),
+        WireError::SaslServerSignatureMismatch => WireError::SaslServerSignatureMismatch,
+        _ => WireError::ConnectionClosed,
     }
-}
-
-fn unsupported_tls_backend_error() -> WireError {
-    WireError::UnsupportedTlsOption("tls-rustls backend is not wired yet".to_owned())
-}
-
-const fn gssapi_backend_unavailable_error() -> WireError {
-    WireError::GssapiBackendUnavailable
-}
-
-fn invalid_sasl_config_error() -> WireError {
-    WireError::InvalidSaslConfig("invalid SASL config".to_owned())
-}
-
-fn unsupported_sasl_mechanism_error() -> WireError {
-    WireError::UnsupportedSaslMechanism("unsupported SASL mechanism".to_owned())
 }
 
 fn reconnect_backoff_state(config: &ConnectionConfig) -> BackoffState {
