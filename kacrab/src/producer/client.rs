@@ -76,14 +76,14 @@ pub struct Producer {
     interceptors: ProducerInterceptors,
     // Producer config handed to interceptor `configure` (client.id), and the last
     // cluster id reported to interceptor `on_update` (deduped so on_update fires only
-    // when the cluster id first resolves or changes — Java ClusterResourceListener).
+    // when the cluster id first resolves or changes — Kafka ClusterResourceListener).
     interceptor_configs: InterceptorConfigs,
     last_cluster_id: Arc<RwLock<Option<String>>>,
     partitioner: ProducerPartitionerHandle,
     metric_reporters: Vec<Arc<dyn MetricReporter>>,
     // Lazily-spawned FIFO drain for the rare synchronous-send slow path (cold
     // metadata, buffer-full, transactional, or custom-partitioner records).
-    // `send`/`send_with_callback` are synchronous like Java's `Producer.send`;
+    // `send`/`send_with_callback` are synchronous like Kafka's `Producer.send`;
     // records that cannot append synchronously are handed to this drain so
     // per-partition append order is preserved without blocking the caller thread.
     slow_send: OnceLock<SlowSendHandle>,
@@ -147,13 +147,13 @@ impl Producer {
         self.control_dispatcher.clone()
     }
 
-    /// Creates a Java-style producer builder.
+    /// Creates a producer builder.
     #[must_use]
     pub fn builder() -> ProducerBuilder {
         ProducerBuilder::new()
     }
 
-    /// Build a producer from an ergonomic Java-style client config.
+    /// Build a producer from an ergonomic Kafka client config.
     ///
     /// # Errors
     ///
@@ -163,7 +163,7 @@ impl Producer {
         Self::from_client_config(&config).await
     }
 
-    /// Build a producer from borrowed Java-style client config.
+    /// Build a producer from borrowed Kafka client config.
     ///
     /// # Errors
     ///
@@ -202,7 +202,7 @@ impl Producer {
         ))
     }
 
-    /// Build a producer from Java-style `Properties`.
+    /// Build a producer from `Properties`-style entries.
     ///
     /// # Errors
     ///
@@ -213,7 +213,7 @@ impl Producer {
         Self::from_client_config(&config).await
     }
 
-    /// Build a producer from a Java-style map/iterator of config entries.
+    /// Build a producer from a map/iterator of Kafka config entries.
     ///
     /// # Errors
     ///
@@ -229,7 +229,7 @@ impl Producer {
         Self::from_client_config(&config).await
     }
 
-    /// Java-style constructor shape that accepts key/value serializers.
+    /// Constructor accepting key/value serializers.
     ///
     /// # Errors
     ///
@@ -255,7 +255,7 @@ impl Producer {
         ))
     }
 
-    /// Java-style map constructor shape that accepts key/value serializers.
+    /// Map constructor accepting key/value serializers.
     ///
     /// # Errors
     ///
@@ -284,7 +284,7 @@ impl Producer {
         ))
     }
 
-    /// Java-style map constructor that loads built-in native serializers from
+    /// Map constructor that loads built-in native serializers from
     /// `key.serializer` and `value.serializer` class names.
     ///
     /// # Errors
@@ -307,7 +307,7 @@ impl Producer {
         Self::from_client_config_with_configured_serializers(&config).await
     }
 
-    /// Java-style properties constructor that loads built-in native serializers
+    /// Properties constructor that loads built-in native serializers
     /// from `key.serializer` and `value.serializer` class names.
     ///
     /// # Errors
@@ -360,7 +360,7 @@ impl Producer {
         Ok(Self::from_parts(wire, runtime))
     }
 
-    /// Append one record, returning a delivery future — synchronous like Java's
+    /// Append one record, returning a delivery future — synchronous like Kafka's
     /// `Producer.send(record)`. A record whose partition resolves synchronously is
     /// appended inline with zero per-record `.await`; the rare record that needs
     /// the network (cold metadata), must wait for buffer space, or belongs to a
@@ -374,8 +374,8 @@ impl Producer {
         self.send_with_optional_callback(record, None)
     }
 
-    /// Append one record with a Java-style completion callback — synchronous like
-    /// Java's `Producer.send(record, callback)`; the returned future can still be
+    /// Append one record with a completion callback — synchronous like
+    /// Kafka's `Producer.send(record, callback)`; the returned future can still be
     /// awaited.
     ///
     /// # Errors
@@ -395,7 +395,7 @@ impl Producer {
     ) -> Result<SendFuture> {
         self.ensure_background_sender_loop();
         let mut record = self.intercept_on_send(record);
-        // Java throws fatal transaction errors synchronously from send(); guard
+        // Kafka throws fatal transaction errors synchronously from send(); guard
         // before appending. On momentary lock contention, take the slow drain
         // (which performs the awaiting guard).
         if self.control_dispatcher.is_transactional() {
@@ -441,7 +441,7 @@ impl Producer {
     }
 
     /// Run a record's user callback (when the error is callback-eligible) and then
-    /// the `on_error` interceptor, matching Java's local-error ordering where the
+    /// the `on_error` interceptor, matching Kafka's local-error ordering where the
     /// completion callback fires before interceptors observe the failure.
     fn run_local_send_error(
         &self,
@@ -568,7 +568,7 @@ impl Producer {
         self.ensure_background_sender_loop();
         // Drain any records queued on the synchronous-send slow path so they are
         // appended to the accumulator before the flush dispatches buffered batches
-        // (Java flush() waits for every prior send to complete).
+        // (Kafka flush() waits for every prior send to complete).
         self.wait_for_slow_send_drain().await;
         self.drive_flush_until_complete().await
     }
@@ -774,8 +774,8 @@ impl Producer {
 
     /// Close immediately without waiting for buffered records or in-flight dispatches.
     ///
-    /// Mirrors Java producer close with a zero timeout: buffered records are
-    /// aborted with a [`ProducerError::ProducerClosed`] error (Java's forced
+    /// Mirrors Kafka producer close with a zero timeout: buffered records are
+    /// aborted with a [`ProducerError::ProducerClosed`] error (Kafka's forced
     /// close fails incomplete batches) rather than silently dropped.
     pub fn close_now(self) {
         if let Ok(sender) = self.sender.try_lock() {
@@ -804,7 +804,7 @@ impl Producer {
             })?
     }
 
-    /// Flush buffered records and consume the producer using a Java-style
+    /// Flush buffered records and consume the producer using a
     /// signed millisecond timeout.
     ///
     /// # Errors
@@ -842,13 +842,13 @@ impl Producer {
         })
     }
 
-    /// Point-in-time named producer metrics, similar to Java's metrics map.
+    /// Point-in-time named producer metrics, similar to Kafka's metrics map.
     #[must_use]
     pub fn metrics_registry(&self) -> BTreeMap<&'static str, ProducerMetricValue> {
         self.metrics().as_metric_map()
     }
 
-    /// Snapshot producer metrics under their Kafka metric names, mirroring Java's
+    /// Snapshot producer metrics under their Kafka metric names, mirroring Kafka's
     /// `SenderMetricsRegistry`. Keys are formatted as `group:name[:tag=value]`
     /// (e.g. `producer-metrics:record-send-rate`,
     /// `producer-topic-metrics:record-send-total:topic=orders`).
@@ -918,7 +918,7 @@ impl Producer {
     /// # Errors
     ///
     /// Returns [`ProducerError::TelemetryDisabled`] when
-    /// `enable.metrics.push=false`, matching Java `KafkaProducer`.
+    /// `enable.metrics.push=false`, matching Kafka `KafkaProducer`.
     pub async fn client_instance_id(&self, timeout: std::time::Duration) -> Result<KafkaUuid> {
         if !self.telemetry_is_enabled() {
             return Err(ProducerError::TelemetryDisabled);
@@ -954,7 +954,7 @@ impl Producer {
 
     /// Return this producer instance's Kafka-negotiated client-instance id.
     ///
-    /// This Java-style overload accepts a signed millisecond timeout so callers
+    /// This overload accepts a signed millisecond timeout so callers
     /// can receive a local validation error for negative durations.
     ///
     /// # Errors
@@ -1194,7 +1194,7 @@ impl Producer {
     /// Register one application Kafka metric for client telemetry subscription.
     ///
     /// Rust cannot JVM-load arbitrary `KafkaMetric` instances, so this native API
-    /// mirrors Java's reporter lifecycle for caller-provided metrics.
+    /// mirrors Kafka's reporter lifecycle for caller-provided metrics.
     pub fn register_kafka_metric_for_subscription(&mut self, metric: KafkaMetric) {
         if !self.enable_metrics_push {
             return;
@@ -1260,14 +1260,14 @@ impl Producer {
     }
 
     /// Add a producer interceptor to this producer instance. The interceptor is
-    /// `configure`d immediately with this producer's config (Java configures each
+    /// `configure`d immediately with this producer's config (Kafka configures each
     /// interceptor once when it is created).
     pub fn add_interceptor(&mut self, interceptor: impl ProducerInterceptor) {
         self.interceptors
             .push_and_configure(interceptor, &self.interceptor_configs);
     }
 
-    /// Notify interceptors of a cluster-metadata update (Java
+    /// Notify interceptors of a cluster-metadata update (Kafka
     /// `ClusterResourceListener.onUpdate`), deduplicated so it fires only when the
     /// cluster id first resolves or changes. No-op when there are no interceptors.
     fn notify_cluster_metadata(&self, metadata: &ClusterMetadata) {
@@ -1467,7 +1467,7 @@ impl Producer {
                 max_request_size: self.max_request_size,
             });
         }
-        // Java ensureValidRecordSize: a record larger than the whole buffer can
+        // Kafka ensureValidRecordSize: a record larger than the whole buffer can
         // never be allocated, so fail fast instead of blocking until max.block.ms.
         if estimated_size > self.buffer_memory {
             return Err(ProducerError::RecordExceedsBufferMemory {
@@ -1501,7 +1501,7 @@ struct SlowSend {
 
 /// Cloned handles the slow drain needs to assign + append without owning the
 /// (non-`Clone`) producer runtime.
-/// Deliver Java `ClusterResourceListener.onUpdate` to the interceptors, deduplicated
+/// Deliver Kafka `ClusterResourceListener.onUpdate` to the interceptors, deduplicated
 /// against the last-seen cluster id so it fires only when the cluster id first
 /// resolves or changes. No-op when there are no interceptors.
 fn notify_interceptors_cluster_update(
@@ -1571,7 +1571,7 @@ impl SlowSendContext {
             return;
         }
         // Assign the partition before validating size so a too-large record reports
-        // its assigned partition to the on_error interceptor, matching Java's doSend
+        // its assigned partition to the on_error interceptor, matching Kafka's doSend
         // ordering (partition first, ensureValidRecordSize second).
         if let Err(error) = self.assign(&mut record).await {
             self.complete_with_error(proxy, callback, error_record.as_ref(), &error);
@@ -1893,7 +1893,7 @@ fn producer_error_for_callback(error: &ProducerError) -> Option<ProducerError> {
     }
 }
 
-/// Java-style builder for [`Producer`].
+/// Builder for [`Producer`].
 #[derive(Clone, Debug, Default)]
 pub struct ProducerBuilder {
     config: ClientConfig,
@@ -1970,7 +1970,7 @@ impl ProducerBuilder {
         self
     }
 
-    /// Returns the underlying Java-style client config.
+    /// Returns the underlying Kafka client config.
     #[must_use]
     pub const fn client_config(&self) -> &ClientConfig {
         &self.config
@@ -2013,7 +2013,7 @@ impl ProducerBuilder {
         let wire = WireClient::connect_with_brokers(connection, config.client_id, endpoints);
         let mut producer = Producer::from_parts(wire, runtime);
         producer.interceptors = interceptors;
-        // Java Configurable.configure: configure each interceptor once at construction,
+        // Kafka Configurable.configure: configure each interceptor once at construction,
         // passing the producer config (client.id).
         producer.interceptors.configure(&interceptor_configs);
         producer.interceptor_configs = interceptor_configs;
@@ -2612,7 +2612,7 @@ mod tests {
         assert!(
             body.contains("self.control_dispatcher.try_fail_if_transaction_error_now()"),
             "the synchronous send path should guard fatal transaction errors synchronously before \
-             appending, like Java's send()"
+             appending, like Kafka's send()"
         );
     }
 
@@ -2622,7 +2622,7 @@ mod tests {
 
         assert!(
             !source.contains(concat!("pub async fn ", "send_batch")),
-            "producer public API should rely on Java-style per-record send and internal batching"
+            "producer public API should rely on per-record send and internal batching"
         );
         assert!(
             !source.contains(concat!("pub async fn ", "send_batch_with_callback")),
@@ -2638,7 +2638,7 @@ mod tests {
         );
         assert!(
             !source.contains(concat!("pub async fn ", "send_with_java_callback")),
-            "producer public API should expose the Java send(record, callback) overload as \
+            "producer public API should expose the Kafka send(record, callback) overload as \
              send_with_callback only"
         );
     }
@@ -3101,7 +3101,7 @@ mod tests {
             .interceptor(PartitionRewriteInterceptor)
             .build()
             .await
-            .expect("native interceptor should replace Java interceptor class loading");
+            .expect("native interceptor should replace JVM interceptor class loading");
 
         assert_eq!(producer.buffered_bytes(), 0);
         assert!(!producer.interceptors.is_empty());
@@ -3121,7 +3121,7 @@ mod tests {
             })
             .build()
             .await
-            .expect("native metric reporter should replace Java metric reporter loading");
+            .expect("native metric reporter should replace JVM metric reporter loading");
 
         assert_eq!(producer.buffered_bytes(), 0);
         producer.close_now();
@@ -3224,7 +3224,7 @@ mod tests {
             ("interceptor.classes", ""),
         ])
         .await
-        .expect("empty interceptor.classes should match Java default list");
+        .expect("empty interceptor.classes should match Kafka's default list");
         assert_eq!(producer.buffered_bytes(), 0);
         assert!(producer.interceptors.is_empty());
 
@@ -3233,7 +3233,7 @@ mod tests {
             .set("interceptor.classes", "  ")
             .build()
             .await
-            .expect("blank interceptor.classes should match Java default list");
+            .expect("blank interceptor.classes should match Kafka's default list");
         assert_eq!(producer.buffered_bytes(), 0);
         assert!(producer.interceptors.is_empty());
 
@@ -3696,7 +3696,7 @@ mod tests {
         };
         let producer = Producer::from_parts(test_wire(), config);
         // A partition with one in-flight request (depth 1 < max.in.flight=5) still pipelines
-        // another request — Java parity for idempotent producers.
+        // another request — Kafka parity for idempotent producers.
         let pipelined = {
             let mut sender = producer.sender.try_lock().expect("sender");
             sender
@@ -4387,7 +4387,7 @@ mod tests {
 
         producer.close_now();
 
-        // Java forceClose fails incomplete batches with an explicit error.
+        // Kafka forceClose fails incomplete batches with an explicit error.
         assert!(matches!(delivery.await, Err(ProducerError::ProducerClosed)));
     }
 
@@ -4523,7 +4523,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_api_rejects_record_larger_than_buffer_before_dispatch() {
-        // A record that cannot fit the whole buffer is rejected up front (Java
+        // A record that cannot fit the whole buffer is rejected up front (Kafka
         // ensureValidRecordSize / G17) rather than blocking or surfacing generic
         // backpressure. Buffer-full backpressure for fitting records is covered
         // at the accumulator level.

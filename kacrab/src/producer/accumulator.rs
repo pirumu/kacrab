@@ -17,7 +17,7 @@ use super::{
 };
 use crate::wire::{PartitionMetadata, TopicMetadata};
 
-/// Kafka default `batch.size`: 16 KiB is the Java producer baseline that gives
+/// Kafka default `batch.size`: 16 KiB is the Kafka producer baseline that gives
 /// useful batching without forcing large per-partition buffers.
 const DEFAULT_BATCH_SIZE: usize = 16_384;
 /// Kafka default `linger.ms` is zero for the raw accumulator; typed
@@ -91,7 +91,7 @@ pub struct ReadyBatch {
     pub(crate) delivery: Option<DeliverySender>,
     /// Estimated batch bytes used for produce-batch metrics.
     pub bytes: usize,
-    /// Bytes currently held against Java-style pooled buffer memory.
+    /// Bytes currently held against pooled buffer memory.
     pub(crate) pooled_buffer_bytes: usize,
     /// Timestamp for the first record in this batch.
     pub first_append_at: Instant,
@@ -336,7 +336,7 @@ impl RecordAccumulator {
             .sum()
     }
 
-    /// Build Java-style queue load stats for one topic while excluding partitions
+    /// Build queue load stats for one topic while excluding partitions
     /// whose leaders are temporarily unavailable for adaptive sticky routing.
     pub(crate) fn partition_queue_load_with_availability<F>(
         &self,

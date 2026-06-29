@@ -34,7 +34,7 @@ pub(crate) struct ProducerSenderState {
     in_flight: JoinSet<TimedDispatchOutcome>,
     // Per-partition in-flight DEPTH (number of outstanding ProduceRequests for each
     // partition). Idempotent producers pipeline up to max.in.flight.requests.per.connection
-    // requests per partition (Java parity); `select_dispatchable_batches` emits at most one
+    // requests per partition (Kafka parity); `select_dispatchable_batches` emits at most one
     // new request per partition per cycle so each becomes its own concurrent dispatch task
     // (pipelining across the outer in-flight JoinSet) and the depth here bounds the pipeline.
     in_flight_partitions: AHashMap<InFlightPartitionKey, usize>,
@@ -86,7 +86,7 @@ pub(crate) struct ProducerSenderRuntime {
 pub(crate) struct ProducerSenderLoop {
     // Interior mutability so the send hot path can ensure the loop is running
     // through `&self`, which lets `Producer::send` take `&self` and be called
-    // concurrently from multiple tasks (Java-style thread-safe producer).
+    // concurrently from multiple tasks (thread-safe producer).
     started: AtomicBool,
     handle: std::sync::Mutex<Option<AbortHandle>>,
 }
@@ -327,7 +327,7 @@ impl ProducerSenderRuntime {
                 SyncCallbackAppend::WouldBlock(retry_append, retry_before_dispatch) => {
                     // buffer.memory full. On a multi-threaded runtime the background
                     // loop drains on another worker, so spin until it frees space.
-                    // Bound the wait by the record's max.block deadline (like Java's
+                    // Bound the wait by the record's max.block deadline (like Kafka's
                     // BufferPool wait) so a single-threaded runtime — where no other
                     // worker can drain while we spin — reports backpressure instead
                     // of spinning forever.
@@ -551,7 +551,7 @@ impl ProducerSender {
     }
 
     pub(crate) fn next_wake_action(&self, now: std::time::Instant) -> SenderWakeAction {
-        // Only stop dispatching when AT the in-flight capacity (Java pipelines up to
+        // Only stop dispatching when AT the in-flight capacity (Kafka pipelines up to
         // max.in.flight); previously this stopped at the first in-flight request,
         // serializing the sticky single-partition path to in-flight=1.
         if self.state.at_in_flight_capacity() {
@@ -694,7 +694,7 @@ impl ProducerSender {
     }
 
     /// Fail every buffered record's delivery with `error` and drop the batches,
-    /// mirroring Java `RecordAccumulator.abortIncompleteBatches` on a forced
+    /// mirroring Kafka `RecordAccumulator.abortIncompleteBatches` on a forced
     /// close. Returns the number of batches aborted.
     pub(crate) fn fail_buffered_batches(&self, error: &ProducerError) -> usize {
         let mut batches = self.accumulator.discard_all();
@@ -3469,12 +3469,12 @@ impl ProducerSenderState {
         let mut reserved = AHashSet::new();
         for batch in batches {
             let key = InFlightPartitionKey::from(&batch);
-            // The Java `shouldStopDrainBatchesForPartition` retry / unresolved gates run in
+            // The Kafka `shouldStopDrainBatchesForPartition` retry / unresolved gates run in
             // `prepare_drained_batches` (under the producer_state lock, the single source of
             // truth for per-partition in-flight sequences). Here we only apply the
             // per-partition request-depth cap.
             // Up to max.in.flight.requests.per.connection in-flight requests per partition
-            // (Java parity), but at most ONE new request per partition per selection so each
+            // (Kafka parity), but at most ONE new request per partition per selection so each
             // becomes its own concurrent dispatch task (pipelining across the outer
             // in-flight JoinSet). Additional same-partition batches defer to the next cycle.
             let in_flight_depth = self.in_flight_partitions.get(&key).copied().unwrap_or(0);
@@ -3504,7 +3504,7 @@ impl ProducerSenderState {
             .await
         {
             // Batches whose partition is mid unresolved-sequence recovery are deferred
-            // (Java stop-drain). `prepare_drained_batches` returns their indices into
+            // (Kafka stop-drain). `prepare_drained_batches` returns their indices into
             // `dispatchable`, which is built parallel to `partitions`, so removing
             // high-to-low keeps both lists aligned. The deferred batches are
             // re-enqueued by `start_dispatch_selection`.

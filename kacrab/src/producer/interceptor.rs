@@ -7,7 +7,7 @@ use kacrab_protocol::record::RecordHeader;
 use super::{ProducerError, ProducerRecord, RecordMetadata, Result};
 
 /// Producer configuration handed to [`ProducerInterceptor::configure`] when the
-/// interceptor is registered, mirroring Java `Configurable.configure(configs)`
+/// interceptor is registered, mirroring Kafka `Configurable.configure(configs)`
 /// which always includes the `client.id`.
 #[derive(Debug, Clone, Default)]
 pub struct InterceptorConfigs {
@@ -16,7 +16,7 @@ pub struct InterceptorConfigs {
 }
 
 /// Cluster identity handed to [`ProducerInterceptor::on_update`] when the
-/// producer's metadata first resolves or its cluster id changes, mirroring Java
+/// producer's metadata first resolves or its cluster id changes, mirroring Kafka
 /// `ClusterResourceListener.onUpdate(ClusterResource)`.
 #[derive(Debug, Clone, Default)]
 pub struct ClusterResource {
@@ -26,18 +26,18 @@ pub struct ClusterResource {
 
 /// Hook interface around producer send and acknowledgement.
 pub trait ProducerInterceptor: Send + Sync + 'static {
-    /// Configure the interceptor when it is registered (Java
+    /// Configure the interceptor when it is registered (Kafka
     /// `Configurable.configure`). The producer's `client.id` is provided.
     fn configure(&self, _configs: &InterceptorConfigs) {}
 
-    /// Observe a cluster-metadata update (Java
+    /// Observe a cluster-metadata update (Kafka
     /// `ClusterResourceListener.onUpdate`). Called once the producer first learns
     /// the cluster id and again whenever it changes.
     fn on_update(&self, _cluster: &ClusterResource) {}
 
     /// Intercept or mutate a record before partitioning and append.
     ///
-    /// Errors are ignored by the interceptor chain to match Java producer
+    /// Errors are ignored by the interceptor chain to match Kafka producer
     /// semantics.
     fn on_send(&self, record: ProducerRecord) -> Result<ProducerRecord> {
         Ok(record)
@@ -101,7 +101,7 @@ impl ProducerInterceptors {
         self.inner.is_empty()
     }
 
-    /// Invoke `configure` on every interceptor (Java instantiation hook),
+    /// Invoke `configure` on every interceptor (Kafka instantiation hook),
     /// panic-isolated like the other callbacks.
     pub(crate) fn configure(&self, configs: &InterceptorConfigs) {
         for interceptor in self.inner.iter() {
@@ -112,7 +112,7 @@ impl ProducerInterceptors {
     }
 
     /// Invoke `on_update` on every interceptor with the resolved cluster resource
-    /// (Java `ClusterResourceListener.onUpdate`), panic-isolated.
+    /// (Kafka `ClusterResourceListener.onUpdate`), panic-isolated.
     pub(crate) fn on_cluster_update(&self, cluster: &ClusterResource) {
         for interceptor in self.inner.iter() {
             let _ignored = catch_interceptor_unwind(|| {
@@ -222,7 +222,7 @@ mod tests {
         let mut interceptors = ProducerInterceptors::default();
         interceptors.push(std::sync::Arc::clone(&recorder));
 
-        // configure(configs) delivers the client.id (Java Configurable.configure).
+        // configure(configs) delivers the client.id (Kafka Configurable.configure).
         interceptors.configure(&InterceptorConfigs {
             client_id: Some("kacrab-test".to_owned()),
         });
@@ -231,7 +231,7 @@ mod tests {
             vec![Some("kacrab-test".to_owned())]
         );
 
-        // on_update delivers the cluster id (Java ClusterResourceListener.onUpdate).
+        // on_update delivers the cluster id (Kafka ClusterResourceListener.onUpdate).
         interceptors.on_cluster_update(&ClusterResource {
             cluster_id: Some("cluster-a".to_owned()),
         });

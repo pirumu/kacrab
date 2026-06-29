@@ -1,4 +1,4 @@
-//! Public Java-compatible producer API helper types.
+//! Public Kafka-compatible producer API helper types.
 
 use core::fmt;
 
@@ -25,15 +25,15 @@ pub struct ProducerPartitionInfo {
     pub offline_replicas: Vec<i32>,
 }
 
-/// Java-compatible alias for partition metadata returned by producer metadata APIs.
+/// Kafka-compatible alias for partition metadata returned by producer metadata APIs.
 pub type PartitionInfo = ProducerPartitionInfo;
 
 impl ProducerPartitionInfo {
-    /// Create partition metadata from Java-style node id arrays.
+    /// Create partition metadata from node id arrays.
     #[must_use]
     #[expect(
         clippy::too_many_arguments,
-        reason = "Constructor mirrors Java PartitionInfo(topic, partition, leader, replicas, isr, \
+        reason = "Constructor mirrors Kafka's PartitionInfo(topic, partition, leader, replicas, isr, \
                   offlineReplicas)."
     )]
     pub fn new(
@@ -222,7 +222,7 @@ impl OffsetAndMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(
     clippy::struct_field_names,
-    reason = "Field names intentionally mirror Java ConsumerGroupMetadata accessors."
+    reason = "Field names intentionally mirror Kafka's ConsumerGroupMetadata accessors."
 )]
 pub struct ConsumerGroupMetadata {
     /// Consumer group id.
@@ -247,7 +247,7 @@ impl ConsumerGroupMetadata {
         }
     }
 
-    /// Create consumer group metadata with the full Java constructor shape.
+    /// Create consumer group metadata with the full Kafka constructor shape.
     #[must_use]
     pub fn from_parts(
         group_id: impl Into<String>,
@@ -298,7 +298,7 @@ impl fmt::Display for ConsumerGroupMetadata {
     }
 }
 
-/// Metric registration token for Java-compatible client telemetry APIs.
+/// Metric registration token for Kafka-compatible client telemetry APIs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProducerMetricSubscription {
     /// Metric name.

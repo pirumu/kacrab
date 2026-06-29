@@ -1,4 +1,4 @@
-//! Java-style metrics registry primitives.
+//! Metrics registry primitives mirroring Kafka's metrics model.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -23,7 +23,7 @@ impl MetricValue {
     }
 }
 
-/// Java-style metric identity.
+/// Metric identity (Kafka's `MetricName`).
 #[derive(Clone, Eq)]
 pub struct MetricName {
     name: String,
@@ -108,7 +108,7 @@ impl fmt::Debug for MetricName {
     }
 }
 
-/// Java-style template for creating [`MetricName`] values with a fixed tag set.
+/// Template for creating [`MetricName`] values with a fixed tag set.
 #[derive(Clone)]
 pub struct MetricNameTemplate {
     name: String,
@@ -204,7 +204,7 @@ impl fmt::Debug for MetricNameTemplate {
     }
 }
 
-/// Java-style upper or lower bound for a metric.
+/// Upper or lower bound for a metric.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MetricQuota {
     bound: f64,
@@ -246,7 +246,7 @@ impl MetricQuota {
     }
 }
 
-/// Java-style metric configuration.
+/// Metric configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetricConfig {
     quota: Option<MetricQuota>,
@@ -258,9 +258,9 @@ pub struct MetricConfig {
 }
 
 impl MetricConfig {
-    /// Java default number of samples.
+    /// Kafka default number of samples.
     pub const DEFAULT_NUM_SAMPLES: usize = 2;
-    /// Java default time window in milliseconds.
+    /// Kafka default time window in milliseconds.
     pub const DEFAULT_TIME_WINDOW_MS: u64 = 30_000;
 
     /// Create an empty metric configuration.
@@ -289,7 +289,7 @@ impl MetricConfig {
         self.quota
     }
 
-    /// Java `MetricConfig.samples()`.
+    /// Kafka `MetricConfig.samples()`.
     #[must_use]
     pub const fn samples(&self) -> usize {
         self.samples
@@ -310,7 +310,7 @@ impl MetricConfig {
         Ok(self)
     }
 
-    /// Java `MetricConfig.eventWindow()`.
+    /// Kafka `MetricConfig.eventWindow()`.
     #[must_use]
     pub const fn event_window(&self) -> u64 {
         self.event_window
@@ -323,7 +323,7 @@ impl MetricConfig {
         self
     }
 
-    /// Java `MetricConfig.timeWindowMs()`.
+    /// Kafka `MetricConfig.timeWindowMs()`.
     #[must_use]
     pub const fn time_window_ms(&self) -> u64 {
         self.time_window_ms
@@ -336,7 +336,7 @@ impl MetricConfig {
         self
     }
 
-    /// Java `MetricConfig.tags()`.
+    /// Kafka `MetricConfig.tags()`.
     #[must_use]
     pub const fn tags(&self) -> &BTreeMap<String, String> {
         &self.tags
@@ -364,7 +364,7 @@ impl MetricConfig {
         self
     }
 
-    /// Java `MetricConfig.recordLevel()`.
+    /// Kafka `MetricConfig.recordLevel()`.
     #[must_use]
     pub const fn record_level(&self) -> SensorRecordingLevel {
         self.record_level
@@ -431,7 +431,7 @@ impl KafkaMetric {
         Self::new(metric_name, provider)
     }
 
-    /// Create a metric from a value provider and Java-style config.
+    /// Create a metric from a value provider and config.
     #[must_use]
     pub fn from_fn_with_config(
         metric_name: MetricName,
@@ -453,7 +453,7 @@ impl KafkaMetric {
         self.metric_value_at_ms(current_time_ms())
     }
 
-    /// Read the metric value at an explicit Java-style millisecond timestamp.
+    /// Read the metric value at an explicit millisecond timestamp.
     #[must_use]
     pub fn metric_value_at_ms(&self, time_ms: u64) -> f64 {
         (self.provider)(time_ms).as_f64()
@@ -468,7 +468,7 @@ impl KafkaMetric {
             .clone()
     }
 
-    /// Replace the metric config, matching Java `KafkaMetric.config(newConfig)`.
+    /// Replace the metric config, matching Kafka `KafkaMetric.config(newConfig)`.
     pub fn set_metric_config(&self, config: MetricConfig) {
         *self
             .config
@@ -533,7 +533,7 @@ impl SensorRecordingLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SensorId(usize);
 
-/// Java-style metrics registry.
+/// Metrics registry mirroring Kafka's `org.apache.kafka.common.metrics`.
 #[derive(Debug, Default)]
 pub struct Metrics {
     registered: BTreeMap<MetricName, KafkaMetric>,
@@ -1266,7 +1266,7 @@ impl Metrics {
         metric_name
     }
 
-    /// Create a metric name from a Java-style template and runtime tags.
+    /// Create a metric name from a template and runtime tags.
     ///
     /// # Errors
     ///
@@ -1440,7 +1440,7 @@ impl Metrics {
         self.sensor_add_total_with_config(sensor, metric_name, MetricConfig::new())
     }
 
-    /// Add a total statistic with a Java-style metric config to a sensor.
+    /// Add a total statistic with a metric config to a sensor.
     ///
     /// # Errors
     ///
@@ -1485,7 +1485,7 @@ impl Metrics {
         self.sensor_add_value_with_config(sensor, metric_name, MetricConfig::new())
     }
 
-    /// Add a latest-value statistic with a Java-style metric config to a sensor.
+    /// Add a latest-value statistic with a metric config to a sensor.
     ///
     /// # Errors
     ///
@@ -1530,7 +1530,7 @@ impl Metrics {
         self.sensor_add_avg_with_config(sensor, metric_name, MetricConfig::new())
     }
 
-    /// Add an average statistic with a Java-style metric config to a sensor.
+    /// Add an average statistic with a metric config to a sensor.
     ///
     /// # Errors
     ///
@@ -1571,7 +1571,7 @@ impl Metrics {
         self.sensor_add_count_with_config(sensor, metric_name, MetricConfig::new())
     }
 
-    /// Add a cumulative count statistic with a Java-style metric config to a sensor.
+    /// Add a cumulative count statistic with a metric config to a sensor.
     ///
     /// # Errors
     ///
@@ -1603,7 +1603,7 @@ impl Metrics {
         )
     }
 
-    /// Add a Java `Rate` statistic to a sensor using seconds as the unit.
+    /// Add a Kafka `Rate` statistic to a sensor using seconds as the unit.
     ///
     /// # Errors
     ///
@@ -1616,7 +1616,7 @@ impl Metrics {
         self.sensor_add_rate_with_config(sensor, metric_name, MetricConfig::new())
     }
 
-    /// Add a Java `Rate` statistic with a Java-style metric config.
+    /// Add a Kafka `Rate` statistic with a metric config.
     ///
     /// # Errors
     ///
@@ -1630,7 +1630,7 @@ impl Metrics {
         self.sensor_add_stat(sensor, metric_name, SensorStatRecordMode::Rate, config)
     }
 
-    /// Add a Java `TokenBucket` statistic to a sensor.
+    /// Add a Kafka `TokenBucket` statistic to a sensor.
     ///
     /// # Errors
     ///
@@ -1643,10 +1643,10 @@ impl Metrics {
         self.sensor_add_token_bucket_with_config(sensor, metric_name, MetricConfig::new())
     }
 
-    /// Add a Java `TokenBucket` statistic with a Java-style metric config.
+    /// Add a Kafka `TokenBucket` statistic with a metric config.
     ///
     /// The quota bound is the refill rate in tokens per second. The effective
-    /// burst is `samples * time_window * bound`, matching Java `TokenBucket`.
+    /// burst is `samples * time_window * bound`, matching Kafka `TokenBucket`.
     ///
     /// # Errors
     ///
@@ -1665,10 +1665,10 @@ impl Metrics {
         )
     }
 
-    /// Add Java `Frequencies.forBooleanValues(falseMetric, trueMetric)`.
+    /// Add Kafka `Frequencies.forBooleanValues(falseMetric, trueMetric)`.
     ///
     /// Pass `None` for either metric name to skip that side. At least one
-    /// metric name must be present, matching Java's null-name validation.
+    /// metric name must be present, matching Kafka's null-name validation.
     ///
     /// # Errors
     ///
@@ -1688,7 +1688,7 @@ impl Metrics {
         )
     }
 
-    /// Add Java `Frequencies.forBooleanValues` with a Java-style metric config.
+    /// Add Kafka `Frequencies.forBooleanValues` with a metric config.
     ///
     /// # Errors
     ///
@@ -1735,7 +1735,7 @@ impl Metrics {
         Ok(())
     }
 
-    /// Add a Java `Meter` compound statistic: cumulative total plus rate.
+    /// Add a Kafka `Meter` compound statistic: cumulative total plus rate.
     ///
     /// # Errors
     ///
@@ -1754,7 +1754,7 @@ impl Metrics {
         )
     }
 
-    /// Add a Java `Meter` compound statistic with a Java-style metric config.
+    /// Add a Kafka `Meter` compound statistic with a metric config.
     ///
     /// # Errors
     ///
@@ -1783,7 +1783,7 @@ impl Metrics {
         self.sensor_add_min_with_config(sensor, metric_name, MetricConfig::new())
     }
 
-    /// Add a minimum statistic with a Java-style metric config to a sensor.
+    /// Add a minimum statistic with a metric config to a sensor.
     ///
     /// # Errors
     ///
@@ -1824,7 +1824,7 @@ impl Metrics {
         self.sensor_add_max_with_config(sensor, metric_name, MetricConfig::new())
     }
 
-    /// Add a maximum statistic with a Java-style metric config to a sensor.
+    /// Add a maximum statistic with a metric config to a sensor.
     ///
     /// # Errors
     ///
@@ -1903,7 +1903,7 @@ impl Metrics {
         self.record_at_ms(sensor, value, current_time_ms())
     }
 
-    /// Record a sensor value with explicit quota enforcement, matching Java
+    /// Record a sensor value with explicit quota enforcement, matching Kafka
     /// `Sensor.record(value, timeMs, checkQuotas)`.
     ///
     /// # Errors
@@ -1919,7 +1919,7 @@ impl Metrics {
         self.record_with_quota_check_at_ms(sensor, value, current_time_ms(), check_quotas)
     }
 
-    /// Record a sensor value at an explicit Java-style millisecond timestamp.
+    /// Record a sensor value at an explicit millisecond timestamp.
     ///
     /// # Errors
     ///
@@ -1949,7 +1949,7 @@ impl Metrics {
         self.record_inner(sensor, value, time_ms, check_quotas)
     }
 
-    /// Record one occurrence, matching Java `Sensor.record()`.
+    /// Record one occurrence, matching Kafka `Sensor.record()`.
     ///
     /// # Errors
     ///
@@ -1968,7 +1968,7 @@ impl Metrics {
         self.check_sensor_quotas_at_ms(sensor, current_time_ms())
     }
 
-    /// Check sensor stat quotas at an explicit Java-style millisecond timestamp.
+    /// Check sensor stat quotas at an explicit millisecond timestamp.
     ///
     /// # Errors
     ///
@@ -2010,7 +2010,7 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when a metric with the same Java identity already exists.
+    /// Returns an error when a metric with the same Kafka identity already exists.
     pub fn add_metric(
         &mut self,
         metric_name: MetricName,
@@ -2038,9 +2038,9 @@ impl Metrics {
         Ok(())
     }
 
-    /// Add a standalone metric unless one with the same Java identity exists.
+    /// Add a standalone metric unless one with the same Kafka identity exists.
     ///
-    /// Returns the existing metric when present, matching Java `Metrics.addMetricIfAbsent`.
+    /// Returns the existing metric when present, matching Kafka `Metrics.addMetricIfAbsent`.
     pub fn add_metric_if_absent(
         &mut self,
         metric_name: MetricName,
@@ -2082,7 +2082,7 @@ impl Metrics {
 
     /// Remove a metric when present.
     ///
-    /// Returns `None` when the metric does not exist, matching Java `Metrics.removeMetric`.
+    /// Returns `None` when the metric does not exist, matching Kafka `Metrics.removeMetric`.
     #[must_use]
     pub fn remove_metric_if_present(&mut self, metric_name: &MetricName) -> Option<KafkaMetric> {
         let metric = self.registered.remove(metric_name)?;
@@ -2094,7 +2094,7 @@ impl Metrics {
 
     /// Remove a sensor and its child sensors, including their registered metrics.
     ///
-    /// Returns `false` when no sensor with `name` exists, matching Java's no-op removal.
+    /// Returns `false` when no sensor with `name` exists, matching Kafka's no-op removal.
     pub fn remove_sensor(&mut self, name: &str) -> bool {
         let Some(sensor) = self.sensors_by_name.remove(name) else {
             return false;
@@ -2102,7 +2102,7 @@ impl Metrics {
         self.remove_sensor_by_id(sensor)
     }
 
-    /// Remove expired sensors and their children, matching Java's expire sensor task.
+    /// Remove expired sensors and their children, matching Kafka's expire sensor task.
     ///
     /// Returns the number of sensors removed, including children removed with an
     /// expired parent.

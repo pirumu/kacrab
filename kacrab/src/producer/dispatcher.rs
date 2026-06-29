@@ -76,7 +76,7 @@ const COMPRESSION_RATE_ESTIMATION_FACTOR: f32 = 1.05;
 /// single-threaded drain/sequence order). A dispatch waits for its ticket's turn before
 /// enqueuing, then advances the turn once its requests are enqueued — so the broker observes
 /// ascending base sequences per partition even though the response waits run concurrently.
-/// This replaces Java's single Sender thread, which is the in-order enqueuer by construction.
+/// This replaces Kafka's single Sender thread, which is the in-order enqueuer by construction.
 struct EnqueueSequencer {
     next_ticket: AtomicU64,
     serving: AtomicU64,
@@ -298,7 +298,7 @@ impl ProducerDispatcher {
 
     /// Non-blocking transaction-error guard for the synchronous send path. Reads
     /// the producer state via `try_lock` so a transactional send can stay on the
-    /// fast synchronous append path (Java throws fatal transaction errors
+    /// fast synchronous append path (Kafka throws fatal transaction errors
     /// synchronously). Returns `None` on momentary lock contention, in which case
     /// the caller takes the slow drain (which performs the awaiting guard).
     pub(crate) fn try_fail_if_transaction_error_now(&self) -> Option<Result<()>> {
@@ -443,7 +443,7 @@ impl ProducerDispatcher {
 
     /// Assign idempotent sequences to freshly drained batches. Returns the indices
     /// of batches that must be DEFERRED (re-enqueued, not dispatched) this cycle —
-    /// Java `shouldStopDrainBatchesForPartition`'s unresolved-sequence clause: a
+    /// Kafka `shouldStopDrainBatchesForPartition`'s unresolved-sequence clause: a
     /// partition with an unresolved sequence and still-in-flight batches stops
     /// draining new batches until it resolves. The returned indices are positions
     /// into `batches`; the caller removes them (and their parallel partition keys).
@@ -470,7 +470,7 @@ impl ProducerDispatcher {
                 .await?;
             self.add_partition_to_transaction(&route).await?;
             // A batch whose stamped epoch was bumped since (stale) must be re-stamped
-            // under the new epoch with a fresh sequence (Java startSequencesAtBeginning):
+            // under the new epoch with a fresh sequence (Kafka startSequencesAtBeginning):
             // clear it so it preps as fresh below.
             if let Some(producer_state) = batch.producer_state
                 && self
@@ -489,7 +489,7 @@ impl ProducerDispatcher {
                     ProducerBatchPrep::Ready(state) => batch.producer_state = state,
                     ProducerBatchPrep::DeferUnresolved => deferred.push(index),
                 },
-                // Retried batch (kept its assigned sequence): Java
+                // Retried batch (kept its assigned sequence): Kafka
                 // `shouldStopDrainBatchesForPartition` retry clause — only dispatch when
                 // its base sequence is the partition's first in-flight sequence; else an
                 // earlier-sequence batch is still unacked, so defer to keep retries in
@@ -1120,7 +1120,7 @@ impl ProducerDispatcher {
     #[expect(
         clippy::too_many_lines,
         reason = "EndTxn retry, coordinator refresh, epoch bump, and transaction error \
-                  classification stay together to mirror Java TransactionManager ordering."
+                  classification stay together to mirror Kafka's TransactionManager ordering."
     )]
     pub async fn end_transaction(&self, committed: bool) -> Result<()> {
         let transactional_id = self
@@ -1343,7 +1343,7 @@ impl ProducerDispatcher {
                         self.metrics.record_retry_for_topic(Some(&topic));
                     }
                     // Leader changed for the ongoing retry -> retry immediately
-                    // (Java skips backoff); otherwise back off normally.
+                    // (Kafka skips backoff); otherwise back off normally.
                     let retry_wait = if metadata_updated {
                         self.check_delivery_timeout_before_retry(&batches, false)
                             .await
@@ -1497,7 +1497,7 @@ impl ProducerDispatcher {
         self.enqueue_sequencer.reserve_ticket()
     }
 
-    /// Register a dispatch's idempotent batches as in flight (Java
+    /// Register a dispatch's idempotent batches as in flight (Kafka
     /// `addInFlightBatch`, done at drain). Each batch already carries its assigned
     /// `producer_state` from `prepare_drained_batches`; retried batches re-register
     /// the sequence they kept (a no-op on the set).
@@ -1512,7 +1512,7 @@ impl ProducerDispatcher {
     }
 
     /// Terminal completion of a dispatch (anything but a requeue): drop its batches
-    /// from the in-flight set (Java `removeInFlightBatch`) and re-attempt
+    /// from the in-flight set (Kafka `removeInFlightBatch`) and re-attempt
     /// `maybeResolveSequences` for each touched partition, which now succeeds for
     /// any partition that has fully drained.
     async fn release_idempotent_inflight_after_terminal(&self, inflight: &[(String, i32, i32)]) {
@@ -1546,7 +1546,7 @@ impl ProducerDispatcher {
         enqueue_ticket: u64,
     ) -> DispatchOutcome {
         // Capture each idempotent batch's (topic, partition, base_sequence) before the
-        // batches move into the dispatch, then register them as in flight (Java
+        // batches move into the dispatch, then register them as in flight (Kafka
         // addInFlightBatch). On a terminal outcome they are removed and the partition's
         // unresolved sequence is re-resolved; on a requeue they stay tracked so a
         // retried batch keeps gating `first_inflight_sequence`/`maybeResolveSequences`.
@@ -1571,7 +1571,7 @@ impl ProducerDispatcher {
     #[expect(
         clippy::too_many_lines,
         reason = "Single drain loop handles every dispatch outcome (split, leadership, \
-                  idempotent, retriable broker, wire) in one place to mirror Java's \
+                  idempotent, retriable broker, wire) in one place to mirror Kafka's \
                   Sender.runOnce."
     )]
     async fn dispatch_drained_inner(
@@ -1715,7 +1715,7 @@ impl ProducerDispatcher {
             compression_ratio,
         ) else {
             // A single-record batch that still exceeds max.request.size cannot be split
-            // and fails terminally, leaving a hole in the partition's sequence. Java
+            // and fails terminally, leaving a hole in the partition's sequence. Kafka
             // failBatch(adjustSequenceNumbers=true) -> requestIdempotentEpochBumpForPartition
             // requests an epoch bump so the next produce restarts the sequence and heals
             // the gap rather than wedging later batches on OUT_OF_ORDER.
@@ -1865,7 +1865,7 @@ impl ProducerDispatcher {
         if self.metrics_are_enabled() {
             self.metrics.record_retry_for_topic(Some(&retry.topic));
         }
-        // Leader changed for the ongoing retry -> retry immediately (Java skips
+        // Leader changed for the ongoing retry -> retry immediately (Kafka skips
         // backoff); otherwise back off normally.
         let retry_wait = if retry.metadata_updated {
             self.check_delivery_timeout_before_retry(batches, false)
@@ -1917,7 +1917,7 @@ impl ProducerDispatcher {
         None
     }
 
-    /// Retry a generic retriable broker produce error (Java `Sender.canRetry`):
+    /// Retry a generic retriable broker produce error (Kafka `Sender.canRetry`):
     /// retry while attempts remain and the delivery timeout has not elapsed,
     /// otherwise fail the batch definitively.
     #[expect(
@@ -2018,7 +2018,7 @@ impl ProducerDispatcher {
                         batch.producer_state = producer_state;
                     },
                     // The partition entered unresolved-sequence recovery with in-flight
-                    // batches between selection and encoding (Java stop-drain): re-enqueue
+                    // batches between selection and encoding (Kafka stop-drain): re-enqueue
                     // the whole dispatch so these batches are re-evaluated (and deferred)
                     // on the next drain instead of being sent out of order.
                     Ok(ProducerBatchPrep::DeferUnresolved) => {
@@ -2091,7 +2091,7 @@ impl ProducerDispatcher {
                         records: batch.records.len(),
                         queued: Instant::now().saturating_duration_since(batch.first_append_at),
                         // Per-record serialized (uncompressed) sizes for Kafka's
-                        // record-size avg/max, mirroring Java's per-record metric.
+                        // record-size avg/max, mirroring Kafka's per-record metric.
                         record_sizes: batch
                             .records
                             .iter()
@@ -2154,7 +2154,7 @@ impl ProducerDispatcher {
 
     #[expect(
         clippy::cast_precision_loss,
-        reason = "Producer metrics expose compression ratios as f64 like Java metrics."
+        reason = "Producer metrics expose compression ratios as f64 like Kafka metrics."
     )]
     fn actual_compression_ratio_for_encoded_batch(
         &self,
@@ -2368,7 +2368,7 @@ impl ProducerDispatcher {
             let mut updated_leaders = AHashSet::new();
             let request_receipts = match response {
                 ProduceDispatchResponse::Acknowledged(response) => {
-                    // Java honors the broker-imposed quota throttle window by
+                    // Kafka honors the broker-imposed quota throttle window by
                     // muting the channel for throttle_time_ms. Honor it here by
                     // delaying this dispatch before the next request is issued.
                     // No-op in the common (unthrottled) case where it is 0.
@@ -2488,7 +2488,7 @@ impl ProducerDispatcher {
                     }));
                 },
                 Err(ProduceReceiptError::Broker(error)) if error.error.is_retriable() => {
-                    // Java Sender.canRetry: any RetriableException is retried
+                    // Kafka Sender.canRetry: any RetriableException is retried
                     // (non-transactional path; transactional errors are handled
                     // above) subject to attempts < retries and the delivery
                     // timeout.
@@ -2626,7 +2626,7 @@ impl ProducerDispatcher {
         None
     }
 
-    /// Java `hasLeaderChangedForTheOngoingRetry`: when the partition leader has
+    /// Kafka `hasLeaderChangedForTheOngoingRetry`: when the partition leader has
     /// changed for the ongoing retry, retry immediately without the backoff
     /// sleep, while still honoring the delivery timeout. Mirrors the
     /// delivery-timeout guard of [`Self::wait_before_retry`] without the wait.
@@ -2708,7 +2708,7 @@ impl ProducerDispatcher {
                 expired_partitions.push((batch.topic.clone(), batch.partition));
             }
         }
-        // Java maybeResolveSequences: attempt to resolve each partition now. While
+        // Kafka maybeResolveSequences: attempt to resolve each partition now. While
         // this expiring request (or any sibling request) is still tracked in flight,
         // `resolve_unresolved_sequence_after_drain` defers; the deferred resolve is
         // retriggered from `release_idempotent_inflight_after_terminal` as each
@@ -2741,7 +2741,7 @@ impl ProducerDispatcher {
         // Idempotent (non-transactional) lost-sequence recovery: an ambiguous loss
         // (a no-response/connection delivery timeout) sets `epoch_bump_required` while
         // clearing the unresolved marker, so bump the producer epoch via InitProducerId
-        // and reset the per-partition sequences before the next produce — Java
+        // and reset the per-partition sequences before the next produce — Kafka
         // bumpIdempotentEpochAndResetIdIfNeeded. Definitive rejections never set the
         // flag (see resolve_unresolved_sequence_after_drain), so leadership / unknown-
         // producer-id recovery is left to their own retry paths.
@@ -2765,7 +2765,7 @@ impl ProducerDispatcher {
             Err(ProducerError::UnresolvedSequence { .. })
                 if self.idempotence.transactional_id.is_none() =>
             {
-                // Java `shouldStopDrainBatchesForPartition`: while the partition has
+                // Kafka `shouldStopDrainBatchesForPartition`: while the partition has
                 // an unresolved sequence AND still has in-flight batches, do NOT drain
                 // this fresh batch — defer it until the in-flight requests drain and
                 // `maybeResolveSequences` resolves the marker (which may clear it with
@@ -2780,7 +2780,7 @@ impl ProducerDispatcher {
                 let identity = self.bump_producer_identity(route.leader_id).await?;
                 let mut state = self.producer_state.lock().await;
                 // A producer-epoch bump invalidates EVERY partition's old sequences, so
-                // restart them all at 0 under the new epoch (Java startSequencesAtBeginning
+                // restart them all at 0 under the new epoch (Kafka startSequencesAtBeginning
                 // applies per-partition as each drains; kacrab's global reset is equivalent
                 // because stale in-flight batches are re-stamped, not renumbered in place).
                 state.reset_sequences_after_epoch_bump();
@@ -2808,7 +2808,7 @@ impl ProducerDispatcher {
         partition: i32,
         leader_id: i32,
     ) -> Result<()> {
-        // Java `sequenceHasBeenReset`/`reopened` short-circuit: if the producer epoch was
+        // Kafka `sequenceHasBeenReset`/`reopened` short-circuit: if the producer epoch was
         // already bumped (e.g. by a sibling in-flight request's recovery), these batches
         // are already stale — re-stamping them under the current epoch is enough; do NOT
         // bump the epoch a second time (which would churn through InitProducerId and reset
@@ -2918,7 +2918,7 @@ impl ProducerDispatcher {
             }
             let next_sequence = increment_sequence(producer_state.base_sequence, record_count);
             state.release_sequence(&batch.topic, batch.partition, next_sequence);
-            // Java handleCompletedBatch: record the last acked sequence/offset for
+            // Kafka handleCompletedBatch: record the last acked sequence/offset for
             // this partition (used by maybeResolveSequences and UnknownProducerId
             // disambiguation). lastSequence = base + recordCount - 1 (wrapping).
             let last_sequence =
@@ -2935,7 +2935,7 @@ impl ProducerDispatcher {
     #[expect(
         clippy::too_many_lines,
         reason = "AddPartitions state tracking, coordinator retry, and partition-set promotion \
-                  mirror Java ordering."
+                  mirror Kafka ordering."
     )]
     async fn add_partition_to_transaction(&self, route: &ProduceRoute) -> Result<()> {
         let Some(transactional_id) = self.idempotence.transactional_id.as_ref() else {
@@ -2981,7 +2981,7 @@ impl ProducerDispatcher {
         let version = client_api_info(ApiKey::AddPartitionsToTxn).max_version;
         let mut attempts_remaining = self.retry_attempts;
         let mut retry_backoff = self.retry_backoff_state();
-        // Java maybeOverrideRetryBackoffMs latches a 20ms backoff once the first
+        // Kafka maybeOverrideRetryBackoffMs latches a 20ms backoff once the first
         // AddPartitions of a transaction hits CONCURRENT_TRANSACTIONS.
         let mut reduced_concurrent_backoff = false;
         let mut request_guard = self
@@ -3210,7 +3210,7 @@ impl ProducerDispatcher {
     }
 
     /// Record whether the transaction coordinator can bump the producer epoch,
-    /// derived from the `InitProducerId` version it advertised (Java's
+    /// derived from the `InitProducerId` version it advertised (Kafka's
     /// `handleCoordinatorReady` / `coordinatorSupportsBumpingEpoch`). Only flips
     /// the flag when a concrete coordinator version is known, so a transient
     /// missing-capability read never falsely escalates errors to fatal.
@@ -3237,7 +3237,7 @@ impl ProducerDispatcher {
             if matches!(error, ErrorCode::UnknownProducerId) {
                 if state.coordinator_lacks_epoch_bump_support {
                     // Coordinator cannot bump the epoch, so this abortable error
-                    // is unrecoverable and must escalate to fatal (Java
+                    // is unrecoverable and must escalate to fatal (Kafka
                     // canHandleAbortableError() == false).
                     state.abortable_error = None;
                     state.fatal_error = Some(error);
@@ -3272,7 +3272,7 @@ impl ProducerDispatcher {
             } else if state.coordinator_lacks_epoch_bump_support {
                 // Recovering this abortable error needs a client-side epoch
                 // bump the coordinator cannot perform, so escalate to fatal
-                // (Java canHandleAbortableError() == false).
+                // (Kafka canHandleAbortableError() == false).
                 state.abortable_error = None;
                 state.fatal_error = Some(error);
                 state.transaction_state = TransactionState::FatalError;
@@ -3341,7 +3341,7 @@ impl ProducerDispatcher {
         {
             let state = self.producer_state.lock().await;
             // A concurrent recovery already advanced the identity past what we read: the
-            // bump already happened, so reuse it instead of bumping again (Java's single
+            // bump already happened, so reuse it instead of bumping again (Kafka's single
             // epoch bump per recovery generation / reopened short-circuit).
             if let Some(current) = state.identity
                 && Some(current) != expected
@@ -3565,11 +3565,11 @@ impl ProducerDispatcher {
 #[derive(Debug, Default)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "Mirrors Java TransactionManager's flat transaction/idempotence state flags."
+    reason = "Mirrors Kafka's TransactionManager flat transaction/idempotence state flags."
 )]
 struct ProducerIdempotenceState {
     identity: Option<ProducerIdentity>,
-    /// Per-partition idempotent bookkeeping (Java `TxnPartitionMap` /
+    /// Per-partition idempotent bookkeeping (Kafka `TxnPartitionMap` /
     /// `TxnPartitionEntry`): next sequence, last-acked sequence and offset, and
     /// any unresolved-sequence marker.
     partitions: AHashMap<TopicPartitionKey, IdempotentPartitionEntry>,
@@ -3586,7 +3586,7 @@ struct ProducerIdempotenceState {
     epoch_bump_required: bool,
     /// Set once the transaction coordinator is observed to advertise an
     /// `InitProducerId` version below v3, meaning it cannot bump the producer
-    /// epoch. Java's `coordinatorSupportsBumpingEpoch` (the inverse) gates
+    /// epoch. Kafka's `coordinatorSupportsBumpingEpoch` (the inverse) gates
     /// whether an abortable error that needs an epoch bump can be recovered or
     /// must escalate to a fatal error. Defaults to `false` (assume supported),
     /// matching modern brokers; flipped only when an old coordinator is seen.
@@ -5040,7 +5040,7 @@ impl ProducerIdempotenceState {
         self.epoch_bump_required = false;
     }
 
-    /// Java `requestIdempotentEpochBumpForPartition`: flag that the producer epoch
+    /// Kafka `requestIdempotentEpochBumpForPartition`: flag that the producer epoch
     /// must be bumped before the next produce (applied in `producer_batch_state`),
     /// healing a sequence gap left by a terminally failed batch.
     const fn request_epoch_bump(&mut self) {
@@ -5089,7 +5089,7 @@ impl ProducerIdempotenceState {
             topic: topic.to_owned(),
             partition,
         };
-        // Java startSequencesAtBeginning: sequence restarts at 0 with no acks.
+        // Kafka startSequencesAtBeginning: sequence restarts at 0 with no acks.
         let entry = self.partitions.entry(key).or_default();
         entry.unresolved_next_sequence = None;
         entry.unresolved_loss_ambiguous = false;
@@ -5112,7 +5112,7 @@ impl ProducerIdempotenceState {
         }
     }
 
-    /// Java `TxnPartitionEntry::addInflightBatch`: track a dispatched batch's base
+    /// Kafka `TxnPartitionEntry::addInflightBatch`: track a dispatched batch's base
     /// sequence as in flight for its partition. Re-adding a retried batch's
     /// sequence is a no-op (the set already holds it).
     fn register_inflight_sequence(&mut self, topic: &str, partition: i32, base_sequence: i32) {
@@ -5128,7 +5128,7 @@ impl ProducerIdempotenceState {
             .insert(base_sequence);
     }
 
-    /// Java `TxnPartitionEntry::removeInFlightBatch`: drop a base sequence once its
+    /// Kafka `TxnPartitionEntry::removeInFlightBatch`: drop a base sequence once its
     /// batch terminally completes (NOT on requeue).
     fn remove_inflight_sequence(&mut self, topic: &str, partition: i32, base_sequence: i32) {
         let key = TopicPartitionKey {
@@ -5140,7 +5140,7 @@ impl ProducerIdempotenceState {
         }
     }
 
-    /// Java `TransactionManager::hasInflightBatches`: whether the partition still
+    /// Kafka `TransactionManager::hasInflightBatches`: whether the partition still
     /// has any batch dispatched-but-not-terminally-completed. Gates
     /// `resolve_unresolved_sequence_after_drain`.
     fn has_inflight_batches(&self, topic: &str, partition: i32) -> bool {
@@ -5154,16 +5154,16 @@ impl ProducerIdempotenceState {
     }
 
     /// Whether a batch's stamped producer id/epoch is stale relative to the current
-    /// producer identity (Java `hasStaleProducerIdAndEpoch`). True after an epoch
+    /// producer identity (Kafka `hasStaleProducerIdAndEpoch`). True after an epoch
     /// bump for any batch still carrying the old epoch — such a batch must be
     /// re-stamped (fresh sequence under the new epoch) before it is sent, which is
-    /// kacrab's equivalent of Java `startSequencesAtBeginning` renumbering an
+    /// kacrab's equivalent of Kafka `startSequencesAtBeginning` renumbering an
     /// in-flight batch in place.
     fn is_stale_identity(&self, identity: ProducerIdentity) -> bool {
         self.identity.is_some_and(|current| current != identity)
     }
 
-    /// Java `firstInFlightSequence`: the lowest in-flight base sequence for a
+    /// Kafka `firstInFlightSequence`: the lowest in-flight base sequence for a
     /// partition, or `None` when nothing is in flight. The drain gate defers a
     /// retried batch whose base sequence is not this value, so retries re-send
     /// strictly in sequence order.
@@ -5199,7 +5199,7 @@ impl ProducerIdempotenceState {
             .is_some_and(|entry| entry.unresolved_loss_ambiguous)
     }
 
-    /// Java `maybeResolveSequences`: once a partition's in-flight batches have
+    /// Kafka `maybeResolveSequences`: once a partition's in-flight batches have
     /// drained with its sequence still unresolved, either confirm it was fully
     /// acknowledged (drop the marker) or recover. When unacked messages remain,
     /// a transactional producer transitions to an abortable error (or fatal when
@@ -5212,7 +5212,7 @@ impl ProducerIdempotenceState {
         transactional: bool,
         loss_is_ambiguous: bool,
     ) {
-        // Java `maybeResolveSequences` only resolves a partition once it has NO
+        // Kafka `maybeResolveSequences` only resolves a partition once it has NO
         // in-flight batches. With multiple in-flight requests per partition, an
         // ambiguous timeout on one batch must NOT bump the epoch while later
         // batches are still in flight under the current epoch — defer until the
@@ -5229,7 +5229,7 @@ impl ProducerIdempotenceState {
             Some(entry) => (
                 entry.unresolved_next_sequence.is_some(),
                 // isNextSequence: nextSequence - lastAcked == 1 => fully acked.
-                // Java uses wrapping int subtraction so it stays correct across the
+                // Kafka uses wrapping int subtraction so it stays correct across the
                 // i32::MAX sequence wraparound.
                 entry.last_acked_sequence != NO_LAST_ACKED_SEQUENCE
                     && entry.next_sequence.wrapping_sub(entry.last_acked_sequence) == 1,
@@ -5265,7 +5265,7 @@ impl ProducerIdempotenceState {
         }
     }
 
-    /// Java `TxnPartitionEntry::maybeUpdateLastAckedSequence`: record the highest
+    /// Kafka `TxnPartitionEntry::maybeUpdateLastAckedSequence`: record the highest
     /// acknowledged sequence for a partition.
     fn maybe_update_last_acked_sequence(&mut self, topic: &str, partition: i32, sequence: i32) {
         let key = TopicPartitionKey {
@@ -5278,7 +5278,7 @@ impl ProducerIdempotenceState {
         }
     }
 
-    /// Java `TxnPartitionMap::updateLastAckedOffset`: record the highest
+    /// Kafka `TxnPartitionMap::updateLastAckedOffset`: record the highest
     /// acknowledged base offset, used to disambiguate `UnknownProducerId`.
     fn update_last_acked_offset(&mut self, topic: &str, partition: i32, last_offset: i64) {
         if last_offset == INVALID_LAST_ACKED_OFFSET {
@@ -5312,7 +5312,7 @@ impl ProducerIdempotenceState {
         if matches!(decision.error, ErrorCode::UnknownProducerId) {
             // Retention elapsed (lastAckedOffset < logStartOffset) is recoverable
             // by resetting; genuine data loss is not. Without a last-acked offset
-            // we fall back to Java's logStartOffset != -1 heuristic.
+            // we fall back to Kafka's logStartOffset != -1 heuristic.
             if let Some(last_acked_offset) =
                 self.last_acked_offset(decision.topic, decision.partition)
                 && decision.log_start_offset != -1
@@ -5356,17 +5356,17 @@ impl ProducerIdempotenceState {
     }
 }
 
-/// Java `TxnPartitionEntry::NO_LAST_ACKED_SEQUENCE_NUMBER`.
+/// Kafka `TxnPartitionEntry::NO_LAST_ACKED_SEQUENCE_NUMBER`.
 const NO_LAST_ACKED_SEQUENCE: i32 = -1;
-/// Java `ProduceResponse::INVALID_OFFSET`.
+/// Kafka `ProduceResponse::INVALID_OFFSET`.
 const INVALID_LAST_ACKED_OFFSET: i64 = -1;
 
-/// Java `DefaultRecordBatch.incrementSequence`: advance a non-negative idempotent
+/// Kafka `DefaultRecordBatch.incrementSequence`: advance a non-negative idempotent
 /// base sequence by `increment`, wrapping at `i32::MAX` back to 0 (Kafka sequences
 /// are 31-bit and wrap rather than overflow). `increment` is a record count (>= 0).
 const fn increment_sequence(sequence: i32, increment: i32) -> i32 {
     // All branches are provably non-overflowing for non-negative `sequence`/`increment`;
-    // wrapping ops also mirror Java's wrapping int arithmetic exactly.
+    // wrapping ops also mirror Kafka's wrapping int arithmetic exactly.
     if sequence > i32::MAX.wrapping_sub(increment) {
         increment
             .wrapping_sub(i32::MAX.wrapping_sub(sequence))
@@ -5376,7 +5376,7 @@ const fn increment_sequence(sequence: i32, increment: i32) -> i32 {
     }
 }
 
-/// Per-partition idempotent bookkeeping, mirroring Java `TxnPartitionEntry`.
+/// Per-partition idempotent bookkeeping, mirroring Kafka `TxnPartitionEntry`.
 #[derive(Debug, Clone)]
 struct IdempotentPartitionEntry {
     /// Base sequence of the next batch bound for this partition.
@@ -5387,15 +5387,15 @@ struct IdempotentPartitionEntry {
     /// Last acknowledged base offset, or [`INVALID_LAST_ACKED_OFFSET`].
     last_acked_offset: i64,
     /// When set, new sends to this partition block until the marked sequence is
-    /// resolved (Java `partitionsWithUnresolvedSequences`).
+    /// resolved (Kafka `partitionsWithUnresolvedSequences`).
     unresolved_next_sequence: Option<i32>,
     /// Whether the loss that marked this partition unresolved was ambiguous (a
     /// no-response timeout that MIGHT have been written), recorded so the deferred
     /// resolve (run once the partition has no in-flight batches) bumps the epoch
-    /// only for ambiguous losses. Java carries this via the batch's last error.
+    /// only for ambiguous losses. Kafka carries this via the batch's last error.
     unresolved_loss_ambiguous: bool,
     /// Base sequences of this partition's batches that have been dispatched at
-    /// least once and not yet terminally completed (Java
+    /// least once and not yet terminally completed (Kafka
     /// `TxnPartitionEntry::inflightBatchesBySequence`). A sequence is added when
     /// its batch is dispatched and removed only on terminal completion (NOT on
     /// requeue), so `has_inflight_batches` gates `maybeResolveSequences`: an
@@ -5446,7 +5446,7 @@ enum ProducerBatchPrep {
     /// Sequence assigned (`Some` for idempotent, `None` for non-idempotent).
     Ready(Option<ProducerBatchState>),
     /// The partition has an unresolved sequence with in-flight batches: stop
-    /// draining this batch until the partition resolves (Java
+    /// draining this batch until the partition resolves (Kafka
     /// `shouldStopDrainBatchesForPartition`).
     DeferUnresolved,
 }
@@ -5472,7 +5472,7 @@ enum DispatchError {
         error: ErrorCode,
         reset_sequence: bool,
     },
-    /// A generic retriable broker produce error (Java `RetriableException`) that
+    /// A generic retriable broker produce error (Kafka `RetriableException`) that
     /// is neither leadership- nor idempotence-specific.
     RetryableBroker {
         topic: String,
@@ -6023,7 +6023,7 @@ fn pop_dispatchable_broker_request(
     // Idempotent/transactional producers keep at most one in-flight request per
     // partition so broker-side sequence numbers can never reorder. Non-idempotent
     // producers may pipeline several requests to the same partition (up to
-    // max.in.flight.requests.per.connection), matching Java, so they take requests
+    // max.in.flight.requests.per.connection), matching Kafka, so they take requests
     // in FIFO order regardless of which partitions are already in flight.
     let dispatch_index = if enforce_partition_ordering {
         pending.iter().position(|(_index, request)| {
@@ -6426,9 +6426,9 @@ const fn is_idempotent_retry_error(error: ErrorCode) -> bool {
 /// non-2PC producers cap negotiation at v5 until the broker-side behavior changes.
 const NON_2PC_INIT_PRODUCER_ID_MAX_VERSION: i16 = 5;
 /// Lowest coordinator `InitProducerId` version that supports bumping the
-/// producer epoch from the client (Java `coordinatorSupportsBumpingEpoch`).
+/// producer epoch from the client (Kafka `coordinatorSupportsBumpingEpoch`).
 const COORDINATOR_EPOCH_BUMP_MIN_INIT_PRODUCER_ID_VERSION: i16 = 3;
-/// Java `ADD_PARTITIONS_RETRY_BACKOFF_MS`: shortened backoff for the first
+/// Kafka `ADD_PARTITIONS_RETRY_BACKOFF_MS`: shortened backoff for the first
 /// `AddPartitionsToTxn` retrying on `CONCURRENT_TRANSACTIONS`, so a new
 /// transaction does not wait long for the previous one to finish completing.
 const ADD_PARTITIONS_RETRY_BACKOFF: Duration = Duration::from_millis(20);
@@ -7067,7 +7067,7 @@ mod tests {
         clippy::cast_possible_truncation,
         clippy::cast_precision_loss,
         clippy::cast_sign_loss,
-        reason = "Test mirrors Java's f32 compression estimate formula exactly."
+        reason = "Test mirrors Kafka's f32 compression estimate formula exactly."
     )]
     fn sticky_record_estimate_uses_java_compression_safety_factor() {
         let record = ProducerRecord::unassigned("orders").value(Bytes::from(vec![b'x'; 128]));
@@ -8270,7 +8270,7 @@ mod tests {
 
     #[tokio::test]
     async fn retryable_broker_error_fails_definitively_when_attempts_exhausted_like_java() {
-        // Java Sender.canRetry stops retrying once attempts are exhausted: the
+        // Kafka Sender.canRetry stops retrying once attempts are exhausted: the
         // generic retriable broker error becomes a definite Broker failure.
         let dispatcher = ProducerDispatcher::new(test_wire());
         let batches = vec![ready_batch("orders", 0)];
@@ -8436,7 +8436,7 @@ mod tests {
     async fn transactional_produce_error_escalates_to_fatal_when_coordinator_cannot_bump_epoch() {
         use super::super::transaction::TransactionState;
         // A bump-capable coordinator keeps UnknownProducerId abortable and
-        // requests a client-side epoch bump (Java needToTriggerEpochBumpFromClient).
+        // requests a client-side epoch bump (Kafka needToTriggerEpochBumpFromClient).
         let can_bump = transactional_dispatcher();
         {
             let mut state = can_bump.producer_state.lock().await;
@@ -8453,7 +8453,7 @@ mod tests {
         }
 
         // A coordinator that cannot bump the epoch (InitProducerId < v3) turns the
-        // same error fatal (Java canHandleAbortableError() == false).
+        // same error fatal (Kafka canHandleAbortableError() == false).
         let cannot_bump = transactional_dispatcher();
         {
             let mut state = cannot_bump.producer_state.lock().await;
@@ -8689,7 +8689,7 @@ mod tests {
         first_result
             .wait()
             .await
-            .expect("awaiting the cached result should ack it like Java");
+            .expect("awaiting the cached result should ack it like Kafka");
 
         let TransactionPendingOperationStart::Started(second_result) = state
             .begin_pending_transaction_operation(TransactionOperation::SendOffsetsToTransaction)
@@ -8741,7 +8741,7 @@ mod tests {
         first_result
             .wait()
             .await
-            .expect("awaiting the cached result should ack it like Java");
+            .expect("awaiting the cached result should ack it like Kafka");
 
         fail_pending_transaction_operation(&mut state)
             .expect("acked pending operation should be cleared");
@@ -9145,7 +9145,7 @@ mod tests {
             3
         );
 
-        // Java DefaultRecordBatch.incrementSequence wraps at i32::MAX rather than
+        // Kafka DefaultRecordBatch.incrementSequence wraps at i32::MAX rather than
         // overflowing: base i32::MAX with a 1-record batch returns i32::MAX and the
         // next base wraps to 0.
         let key = TopicPartitionKey {
@@ -9228,7 +9228,7 @@ mod tests {
 
     #[test]
     fn resolve_defers_until_partition_has_no_inflight_batches_like_java() {
-        // Java maybeResolveSequences only resolves a partition once it has NO
+        // Kafka maybeResolveSequences only resolves a partition once it has NO
         // in-flight batches. Two batches are in flight (base sequence 0 and 3).
         let mut state = ProducerIdempotenceState::default();
         let seq0 = state.next_sequence("orders", 0, 3).expect("seq0");
@@ -9268,7 +9268,7 @@ mod tests {
     #[test]
     fn detects_stale_producer_identity_after_epoch_bump_like_java() {
         use super::super::transaction::ProducerIdentity;
-        // Java hasStaleProducerIdAndEpoch: a batch stamped under an older epoch is stale
+        // Kafka hasStaleProducerIdAndEpoch: a batch stamped under an older epoch is stale
         // once the producer identity advances, so it is re-stamped before being sent.
         let mut state = ProducerIdempotenceState::default();
         // No identity yet -> nothing is stale (cannot compare).

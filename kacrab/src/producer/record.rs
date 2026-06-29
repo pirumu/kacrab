@@ -20,15 +20,15 @@ pub use kacrab_protocol::record::RecordHeader;
 use super::{ProducerError, Result};
 use crate::wire::WireError;
 
-/// Java-style `Header` alias for a Kafka record header.
+/// `Header` alias for a Kafka record header.
 pub type Header = RecordHeader;
 
-/// Java-style `Headers` alias for an ordered mutable record header collection.
+/// `Headers` alias for an ordered mutable record header collection.
 pub type Headers = RecordHeaders;
 
 /// Ordered mutable collection of Kafka record headers.
 ///
-/// This mirrors Java's `RecordHeaders` shape while keeping mutation failures
+/// This mirrors Kafka's `RecordHeaders` shape while keeping mutation failures
 /// explicit through [`Result`] instead of throwing `IllegalStateException`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecordHeaders {
@@ -141,7 +141,7 @@ impl RecordHeaders {
         self.entries.is_empty()
     }
 
-    /// Mark this collection read-only, matching Java `RecordHeaders#setReadOnly`.
+    /// Mark this collection read-only, matching Kafka `RecordHeaders#setReadOnly`.
     pub const fn set_read_only(&mut self) {
         self.read_only = true;
     }
@@ -331,7 +331,7 @@ impl ProducerRecord {
         }
     }
 
-    /// Create an unassigned record with a non-null value, matching Java's
+    /// Create an unassigned record with a non-null value, matching Kafka's
     /// `ProducerRecord(topic, value)` constructor shape.
     #[must_use]
     pub fn topic_value(topic: impl Into<Arc<str>>, value: impl Into<Bytes>) -> Self {
@@ -339,7 +339,7 @@ impl ProducerRecord {
     }
 
     /// Create an unassigned record with a non-null key and value, matching
-    /// Java's `ProducerRecord(topic, key, value)` constructor shape.
+    /// Kafka's `ProducerRecord(topic, key, value)` constructor shape.
     #[must_use]
     pub fn topic_key_value(
         topic: impl Into<Arc<str>>,
@@ -360,7 +360,7 @@ impl ProducerRecord {
     }
 
     /// Create an explicit-partition record with a non-null key and value,
-    /// matching Java's `ProducerRecord(topic, partition, key, value)`.
+    /// matching Kafka's `ProducerRecord(topic, partition, key, value)`.
     #[must_use]
     pub fn partition_key_value(
         topic: impl Into<Arc<str>>,
@@ -372,7 +372,7 @@ impl ProducerRecord {
     }
 
     /// Try to create an explicit-partition timestamped record with a non-null
-    /// key and value, matching Java's timestamped constructor validation.
+    /// key and value, matching Kafka's timestamped constructor validation.
     ///
     /// # Errors
     ///
@@ -430,7 +430,7 @@ impl ProducerRecord {
     /// Set the create-time timestamp in milliseconds since Unix epoch.
     ///
     /// This is an alias for [`Self::try_timestamp_ms`] that reads naturally in
-    /// Java-style constructor tests.
+    /// Constructor tests.
     ///
     /// # Errors
     ///
@@ -472,7 +472,7 @@ impl ProducerRecord {
         &self.headers
     }
 
-    /// Return all headers for `key` in insertion order, matching Java
+    /// Return all headers for `key` in insertion order, matching Kafka
     /// `Headers.headers(key)`.
     pub fn headers_for_key<'a>(
         &'a self,
@@ -483,7 +483,7 @@ impl ProducerRecord {
             .filter(move |header| header.key.as_ref() == key)
     }
 
-    /// Return the last header for `key`, matching Java `Headers.lastHeader`.
+    /// Return the last header for `key`, matching Kafka `Headers.lastHeader`.
     #[must_use]
     pub fn last_header(&self, key: &[u8]) -> Option<&RecordHeader> {
         self.headers
@@ -526,7 +526,7 @@ pub struct RecordMetadata {
 }
 
 impl RecordMetadata {
-    /// Sentinel metadata used for Java-style callbacks when delivery fails.
+    /// Sentinel metadata used for callbacks when delivery fails.
     #[must_use]
     pub fn failed() -> Self {
         Self {

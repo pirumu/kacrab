@@ -199,7 +199,7 @@ impl ProducerRuntimeConfig {
 }
 
 fn validate_delivery_timeout(config: &crate::config::ProducerConfig) -> Result<()> {
-    // Java ProducerConfig.postProcessParsedConfig: delivery.timeout.ms must be at least
+    // Kafka ProducerConfig.postProcessParsedConfig: delivery.timeout.ms must be at least
     // linger.ms + request.timeout.ms, so every record gets at least one full request
     // attempt before the delivery deadline expires.
     let delivery = config.delivery_timeout_ms.duration();

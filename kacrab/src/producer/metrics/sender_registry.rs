@@ -3,7 +3,7 @@
     reason = "Metric counts/bytes are coarse observability samples; f64 mantissa loss is \
               acceptable."
 )]
-//! Java-compatible producer metrics, mirroring Kafka's `SenderMetricsRegistry`.
+//! Kafka-compatible producer metrics, mirroring Kafka's `SenderMetricsRegistry`.
 //!
 //! The producer's primary metrics facade is the lock-free
 //! [`super::super::metrics::ProducerMetrics`] atomic counter set, exposed under Rust-native names.
@@ -32,7 +32,7 @@ fn now_ms() -> u64 {
     .unwrap_or(u64::MAX)
 }
 
-/// Java-named producer client-level and per-topic metrics.
+/// Kafka-named producer client-level and per-topic metrics.
 #[derive(Debug)]
 pub(crate) struct SenderMetricsRegistry {
     inner: Mutex<RegistryInner>,
@@ -613,7 +613,7 @@ mod tests {
 
         let metrics = registry.kafka_metrics();
 
-        // Java BufferPool metrics: exhaustion count, wait-time avg/max, and gauges.
+        // Kafka BufferPool metrics: exhaustion count, wait-time avg/max, and gauges.
         assert_eq!(
             metrics.get("producer-metrics:buffer-exhausted-total"),
             Some(&2.0)
@@ -632,7 +632,7 @@ mod tests {
         );
         assert_eq!(metrics.get("producer-metrics:waiting-threads"), Some(&2.0));
 
-        // Client-level cumulative totals (Java Meter total = sum of recorded values).
+        // Client-level cumulative totals (Kafka Meter total = sum of recorded values).
         assert_eq!(
             metrics.get("producer-metrics:record-send-total"),
             Some(&5.0)

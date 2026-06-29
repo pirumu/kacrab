@@ -52,7 +52,7 @@ pub enum ProducerError {
     /// Internal producer batch ownership invariant was violated.
     #[error("producer batch lifecycle violation: {0}")]
     BatchLifecycle(&'static str),
-    /// Producer API was called from a delivery callback where Java forbids blocking.
+    /// Producer API was called from a delivery callback where Kafka forbids blocking.
     #[error("producer operation {operation} cannot be invoked from a delivery callback")]
     CallbackOperation {
         /// Producer operation name.
@@ -147,7 +147,7 @@ pub enum ProducerError {
     /// `SendFuture` handle was dropped before a broker receipt was produced.
     #[error("producer delivery was dropped before completion")]
     DeliveryDropped,
-    /// Public API exists for Java compatibility, but the backend is not wired yet.
+    /// Public API exists for Kafka compatibility, but the backend is not wired yet.
     #[error("producer operation is not supported yet: {0}")]
     UnsupportedOperation(&'static str),
     /// Client telemetry APIs were called while `enable.metrics.push=false`.
@@ -176,7 +176,7 @@ pub enum ProducerError {
         /// Timeout in milliseconds supplied by the caller.
         timeout_ms: i64,
     },
-    /// Public Java-style producer config could not be mapped to typed config.
+    /// Public Kafka producer config could not be mapped to typed config.
     #[error("producer config error: {error}")]
     Config {
         /// Configuration validation error.
