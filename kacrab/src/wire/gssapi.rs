@@ -4,7 +4,7 @@ use std::{fmt, string::String, sync::Mutex};
 
 use bytes::Bytes;
 use libgssapi::{
-    context::{ClientCtx, CtxFlags},
+    context::{ClientCtx, CtxFlags, SecurityContext},
     credential::{Cred, CredUsage},
     name::Name,
     oid::{GSS_MECH_KRB5, GSS_NT_HOSTBASED_SERVICE, OidSet},
@@ -16,12 +16,33 @@ use super::{
     kerberos::KerberosLoginManager,
 };
 
+/// SASL/GSSAPI security-layer bitmask for "no security layer" (auth only).
+/// Kafka runs its own transport, so the client always selects this; matches the
+/// JDK `GssKrb5Client`, which Kafka uses.
+const SECURITY_LAYER_NONE: u8 = 0x01;
+
+/// Where we are in the SASL/GSSAPI exchange. After the GSSAPI context is
+/// established there is still the RFC 4752 security-layer round (unwrap the
+/// server's offer, send back the chosen layer + max buffer), which must finish
+/// before the broker will accept application requests.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GssapiPhase {
+    Establishing,
+    SecurityLayer,
+    Done,
+}
+
+struct GssapiSession {
+    context: ClientCtx,
+    phase: GssapiPhase,
+}
+
 /// Native Kerberos/GSSAPI authenticator backed by the platform GSSAPI library.
 pub struct GssapiAuthenticator {
     service_name: String,
     host: String,
     target_name: String,
-    context: Mutex<Option<ClientCtx>>,
+    session: Mutex<Option<GssapiSession>>,
     kerberos_login: Option<KerberosLoginManager>,
 }
 
@@ -42,7 +63,7 @@ impl GssapiAuthenticator {
             service_name,
             host,
             target_name,
-            context: Mutex::new(None),
+            session: Mutex::new(None),
             kerberos_login: None,
         }
     }
@@ -103,33 +124,83 @@ impl SaslClientAuthenticator for GssapiAuthenticator {
 
     fn start(&self) -> Result<SaslClientAction, WireError> {
         let mut context = self.new_context()?;
-        let action = gssapi_action(context.step(None, None).map_err(gssapi_error)?);
-        let mut stored = self.context.lock().map_err(gssapi_lock_error)?;
-        *stored = Some(context);
+        let token = context.step(None, None).map_err(gssapi_error)?;
+        // The initial GSS_Init_sec_context always yields the AP-REQ token.
+        let action = token.as_ref().map(send_token).ok_or_else(|| {
+            WireError::SaslAuthentication("GSSAPI produced no initial token".to_owned())
+        })?;
+        let mut stored = self.session.lock().map_err(gssapi_lock_error)?;
+        *stored = Some(GssapiSession {
+            context,
+            phase: GssapiPhase::Establishing,
+        });
         drop(stored);
         Ok(action)
     }
 
     fn next(&self, challenge: &[u8]) -> Result<SaslClientAction, WireError> {
-        let token = {
-            let mut stored = self.context.lock().map_err(gssapi_lock_error)?;
-            let Some(context) = stored.as_mut() else {
-                return Err(WireError::SaslAuthentication(
-                    "GSSAPI challenge received before context start".to_owned(),
-                ));
-            };
-            let token = context.step(Some(challenge), None).map_err(gssapi_error)?;
-            drop(stored);
-            token
+        let mut stored = self.session.lock().map_err(gssapi_lock_error)?;
+        let session = stored.as_mut().ok_or_else(|| {
+            WireError::SaslAuthentication("GSSAPI challenge received before context start".to_owned())
+        })?;
+        let action = match session.phase {
+            GssapiPhase::Establishing => {
+                let token = session
+                    .context
+                    .step(Some(challenge), None)
+                    .map_err(gssapi_error)?;
+                if session.context.is_complete() {
+                    // Context established. The next server message is the
+                    // RFC 4752 security-layer offer, so send any final context
+                    // token (or an empty token to yield the turn) and move on.
+                    session.phase = GssapiPhase::SecurityLayer;
+                    send_token_or_empty(token.as_ref())
+                } else {
+                    // Still negotiating: a missing token here means a stalled
+                    // context rather than a normal continuation.
+                    token.as_ref().map(send_token).ok_or_else(|| {
+                        WireError::SaslAuthentication(
+                            "GSSAPI context did not complete and produced no token".to_owned(),
+                        )
+                    })?
+                }
+            },
+            GssapiPhase::SecurityLayer => {
+                // The challenge is the GSS-wrapped server offer: byte 0 is the
+                // supported security-layer bitmask, bytes 1..4 the max server
+                // buffer. We select "no security layer" (max buffer 0) and
+                // return the GSS-wrapped reply, matching the JDK GssKrb5Client.
+                let offer = session.context.unwrap(challenge).map_err(gssapi_error)?;
+                if offer
+                    .as_ref()
+                    .first()
+                    .is_some_and(|supported| supported & SECURITY_LAYER_NONE == 0)
+                {
+                    return Err(WireError::SaslAuthentication(
+                        "broker does not offer the SASL/GSSAPI no-security-layer option".to_owned(),
+                    ));
+                }
+                let reply = [SECURITY_LAYER_NONE, 0x00, 0x00, 0x00];
+                let wrapped = session.context.wrap(false, &reply).map_err(gssapi_error)?;
+                session.phase = GssapiPhase::Done;
+                SaslClientAction::Send(Bytes::copy_from_slice(wrapped.as_ref()))
+            },
+            GssapiPhase::Done => SaslClientAction::Complete,
         };
-        Ok(gssapi_action(token))
+        drop(stored);
+        Ok(action)
     }
 }
 
-fn gssapi_action(token: Option<Buf>) -> SaslClientAction {
-    token.map_or(SaslClientAction::Complete, |token| {
-        SaslClientAction::Send(Bytes::copy_from_slice(token.as_ref()))
-    })
+fn send_token(token: &Buf) -> SaslClientAction {
+    SaslClientAction::Send(Bytes::copy_from_slice(token.as_ref()))
+}
+
+fn send_token_or_empty(token: Option<&Buf>) -> SaslClientAction {
+    token.map_or_else(
+        || SaslClientAction::Send(Bytes::new()),
+        send_token,
+    )
 }
 
 fn gssapi_error(error: libgssapi::error::Error) -> WireError {
