@@ -1686,15 +1686,10 @@ async fn idempotent_kafka_producer_retries_disconnected_in_flight_batch_with_sam
     let leader_7 = MockBroker::serve_idempotent_disconnect_then_retry().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        // A disconnect now invalidates the partition's leader (Java requests a
+        // metadata update on server disconnect), so the retry re-fetches metadata.
+        Box::new(metadata_same_leader_handler(leader_7.addr())),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -1744,7 +1739,7 @@ async fn idempotent_kafka_producer_retries_disconnected_in_flight_batch_with_sam
     assert_eq!(receipt.partition, 0);
     assert_eq!(receipt.offset, 40);
     assert_eq!(producer.buffered_bytes(), 0);
-    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(bootstrap.join().await, 3);
     assert_eq!(leader_7.join().await, 5);
 }
 
@@ -1753,15 +1748,10 @@ async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_t
     let leader_7 = MockBroker::serve_idempotent_timeout_then_epoch_bump_recovery().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        // The disconnect invalidates the cached leader, so the second send
+        // re-fetches metadata before producing.
+        Box::new(metadata_same_leader_handler(leader_7.addr())),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -1823,7 +1813,7 @@ async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_t
     assert_eq!(receipt.partition, 0);
     assert_eq!(receipt.offset, 41);
     assert_eq!(producer.buffered_bytes(), 0);
-    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(bootstrap.join().await, 3);
     assert_eq!(leader_7.join().await, 6);
 }
 
@@ -1835,15 +1825,10 @@ async fn idempotent_kafka_producer_resends_multi_inflight_batches_in_sequence_or
     let leader_7 = MockBroker::serve_idempotent_two_inflight_disconnect_then_inorder_retry().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        // The disconnect invalidates the cached leader, so the in-order retry
+        // re-fetches metadata before re-sending the two in-flight batches.
+        Box::new(metadata_same_leader_handler(leader_7.addr())),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -1900,7 +1885,7 @@ async fn idempotent_kafka_producer_resends_multi_inflight_batches_in_sequence_or
     assert_eq!(second_receipt.partition, 0);
     assert_eq!(second_receipt.offset, 41);
     assert_eq!(producer.buffered_bytes(), 0);
-    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(bootstrap.join().await, 3);
     // The mock asserts in-order base sequences (0 then 1) on BOTH the initial in-flight
     // pair and the retry; reaching its full handler count proves the ordering held.
     assert_eq!(leader_7.join().await, 6);
@@ -8005,6 +7990,21 @@ fn metadata_response<const N: usize>(
             ..MetadataResponseTopic::default()
         }],
         ..MetadataResponseData::default()
+    }
+}
+
+/// A `serve_many` handler that answers one `Metadata` request with leader 7 at
+/// `leader_addr`. Shared by the disconnect/retry idempotent tests, which now see
+/// an extra metadata fetch because a wire disconnect invalidates the partition's
+/// cached leader before retrying.
+fn metadata_same_leader_handler(
+    leader_addr: std::net::SocketAddr,
+) -> impl FnOnce(Bytes) -> BytesMut + Send {
+    move |mut request| {
+        let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+        assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+        let response = metadata_response_same_leader(7, leader_addr);
+        response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
     }
 }
 
