@@ -20,7 +20,9 @@ rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 authors = ["pirumu"]
 repository = "https://github.com/pirumu/kacrab"
-publish = false
+# Publishable by default; internal crates (benches, examples, kacrab-codegen)
+# override this with `publish = false`.
+publish = true
 
 # ============================================================================
 # Workspace-shared deps. Members reference via `{ workspace = true }`.
