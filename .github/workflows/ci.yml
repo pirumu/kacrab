@@ -67,7 +67,7 @@ jobs:
         run: make test
 
   coverage:
-    name: coverage (tarpaulin)
+    name: coverage (llvm-cov)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -80,24 +80,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-tarpaulin
+      - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-tarpaulin
+          tool: cargo-llvm-cov
 
-      # Coverage is INFORMATIONAL, not a CI gate. This crate is heavily async and
-      # its tests lean on real timeouts and blocking semantics (max.block.ms,
-      # delivery.timeout.ms, leadership-retry windows). Coverage instrumentation
-      # slows execution enough to violate those timing windows, so a large and
-      # *shifting* set of tests flakes under tarpaulin from one run to the next —
-      # which makes it an unreliable gate (no fixed set to pin or ignore).
-      # Correctness is enforced by the `fmt · clippy · test` job, which runs the
-      # full suite uninstrumented. We still publish the report for visibility.
-      # `continue-on-error` keeps a flaky instrumented run from blocking CI;
-      # `--no-fail-fast` measures across the whole suite. Honors tarpaulin.toml.
-      - name: Coverage (informational; non-blocking)
-        continue-on-error: true
-        run: cargo tarpaulin --workspace --all-features --engine llvm --timeout 360 --out Xml --no-fail-fast
+      # Real gate. cargo-llvm-cov uses LLVM source-based coverage and runs the
+      # tests at near-native speed, so the suite's many timeout/blocking-based
+      # async tests (max.block.ms, delivery.timeout.ms, leadership-retry windows)
+      # keep passing under instrumentation — unlike tarpaulin, whose slowdown
+      # tripped those timing windows and flaked a shifting set of tests run to
+      # run. --ignore-filename-regex drops generated Kafka protocol/config
+      # artifacts (validated by generator + Java oracle tests instead). Measured
+      # ~87% lines; the floor sits below that for headroom — raise as it grows.
+      - name: Coverage
+        run: cargo llvm-cov --workspace --all-features --ignore-filename-regex '(benches/|kacrab-codegen/src/main\.rs|kacrab-macros/src/lib\.rs|kacrab/src/config/catalog\.rs|kacrab-protocol/src/generated|kacrab-protocol/tests/support/generated_test_utils/)' --fail-under-lines 80 --cobertura --output-path cobertura.xml
 
       - uses: actions/upload-artifact@v4
         if: always()

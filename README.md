@@ -61,8 +61,8 @@ the SASL/TLS surface, and every compression codec are verified end-to-end
 against real brokers. The remaining focus before consumer work is sustained
 stress / latency testing (see [Production acceptance](#production-acceptance)).
 
-Test coverage (`cargo tarpaulin` / `cargo llvm-cov`): **84.6% maintained-source**
-line coverage (generated protocol excluded), with the **producer module at ~92%**.
+Test coverage (`cargo llvm-cov`): **~87% maintained-source** line coverage
+(generated protocol excluded), with the **producer module at ~92%**.
 The append/dispatch/idempotent-recovery hot paths, the murmur2 partitioner
 (byte-exact for every key length), the transaction state machine, interceptors,
 and the Kafka-style metrics library (sensors, stats, quotas, reporters) are
@@ -523,22 +523,27 @@ cargo test -p kacrab --test real_kafka_producer --all-features -- --ignored --no
 docker compose -f docker-compose.kafka.yml down
 ```
 
-For line coverage, [`tarpaulin.toml`](tarpaulin.toml) keeps generated Kafka
-artifacts and benchmark fixtures out of the maintained-source coverage signal.
+For line coverage, the CI gate runs [`cargo llvm-cov`][llvm-cov] and excludes
+generated Kafka artifacts and benchmark fixtures via `--ignore-filename-regex`,
+so the signal reflects maintained source. LLVM source-based coverage runs the
+tests at near-native speed, so the suite's many timeout/blocking-based async
+tests stay reliable under instrumentation (tarpaulin's slowdown did not).
 Coverage is a regression signal for code we maintain; protocol compatibility is
 still gated by generated round trips and the Java oracle matrix.
 
 ```bash
-cargo tarpaulin --workspace --all-features --config tarpaulin.toml
+cargo llvm-cov --workspace --all-features \
+  --ignore-filename-regex '(benches/|kacrab-codegen/src/main\.rs|kacrab-macros/src/lib\.rs|kacrab/src/config/catalog\.rs|kacrab-protocol/src/generated)'
 ```
 
-Latest measured coverage on 2026-06-29:
+Latest measured coverage:
 
-- `cargo tarpaulin --workspace --all-features --config tarpaulin.toml --out Stdout`
-- Maintained-source line coverage: **84.62%** (13,905 / 16,432), generated
-  protocol excluded. Producer module ~92% (`cargo llvm-cov`).
-- The raw all-files figure is ~66%, dominated by generated `kacrab-protocol`
+- Maintained-source line coverage: **~87.5%** (27,860 / 31,849 lines), generated
+  protocol excluded. Producer module ~92%.
+- The raw all-files figure is ~63%, dominated by generated `kacrab-protocol`
   message structs for APIs not yet wired (consumer/admin/streams).
+
+[llvm-cov]: https://github.com/taiki-e/cargo-llvm-cov
 - Java oracle fixture inventory: 6 release-grade fixture families × 625
   schema/version cases = 3,750 generated fixture cases.
 

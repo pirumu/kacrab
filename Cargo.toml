@@ -117,12 +117,6 @@ debug = true
 # Hard ban — cannot be overridden with #[allow].
 unsafe_code = "forbid"
 
-# `cargo tarpaulin` compiles with `--cfg=tarpaulin`; a few timing-sensitive
-# async tests are `#[cfg_attr(tarpaulin, ignore)]` (they flake under coverage
-# instrumentation but pass under a normal `cargo test`). Declare the cfg so it
-# is not flagged as unexpected under `-D warnings`.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
-
 # Correctness / hygiene — block builds.
 let_underscore_drop = "deny"
 macro_use_extern_crate = "deny"

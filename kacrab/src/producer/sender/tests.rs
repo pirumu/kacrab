@@ -1515,7 +1515,6 @@ fn sender_state_owns_append_backpressure_action() {
 }
 
 #[tokio::test]
-#[cfg_attr(tarpaulin, ignore = "timing-sensitive under coverage instrumentation")]
 async fn wait_for_append_capacity_drains_ready_buffered_batch_before_append() {
     let mut state = ProducerSenderState::new(1);
     let now = std::time::Instant::now();
@@ -1566,7 +1565,6 @@ async fn wait_for_append_capacity_drains_ready_buffered_batch_before_append() {
 }
 
 #[tokio::test]
-#[cfg_attr(tarpaulin, ignore = "timing-sensitive under coverage instrumentation")]
 async fn append_untracked_waits_for_capacity_then_appends_record() {
     let mut state = ProducerSenderState::new(1);
     let now = std::time::Instant::now();
@@ -1614,7 +1612,6 @@ async fn append_untracked_waits_for_capacity_then_appends_record() {
 }
 
 #[tokio::test]
-#[cfg_attr(tarpaulin, ignore = "timing-sensitive under coverage instrumentation")]
 async fn producer_sender_append_untracked_owns_capacity_wait_and_append() {
     let now = std::time::Instant::now();
     let deadline = now + Duration::from_millis(5);
@@ -1791,7 +1788,6 @@ async fn producer_sender_loop_wait_handles_dispatch_completion() {
 }
 
 #[tokio::test]
-#[cfg_attr(tarpaulin, ignore = "timing-sensitive under coverage instrumentation")]
 async fn producer_sender_loop_tick_waits_after_reaching_dispatch_completion() {
     let now = std::time::Instant::now();
     let mut sender = ProducerSender::new(AccumulatorConfig::default(), 1);
@@ -1871,7 +1867,6 @@ async fn producer_sender_buffer_progress_dispatches_after_linger_sleep() {
 }
 
 #[tokio::test]
-#[cfg_attr(tarpaulin, ignore = "timing-sensitive under coverage instrumentation")]
 async fn append_for_delivery_waits_for_capacity_then_returns_delivery() {
     let mut state = ProducerSenderState::new(1);
     let now = std::time::Instant::now();
@@ -1919,7 +1914,6 @@ async fn append_for_delivery_waits_for_capacity_then_returns_delivery() {
 }
 
 #[tokio::test]
-#[cfg_attr(tarpaulin, ignore = "timing-sensitive under coverage instrumentation")]
 async fn producer_sender_append_for_delivery_owns_capacity_wait_and_append() {
     let now = std::time::Instant::now();
     let deadline = now + Duration::from_millis(5);
@@ -2437,7 +2431,6 @@ async fn in_flight_batch_bytes_hold_append_backpressure_until_dispatch_completes
 }
 
 #[tokio::test]
-#[cfg_attr(tarpaulin, ignore = "timing-sensitive under coverage instrumentation")]
 async fn buffer_wait_metric_tracks_append_blocked_on_buffer_memory_like_java() {
     fn ignore_latency(_: Duration) {}
     fn ignore_requeue() {}
