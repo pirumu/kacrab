@@ -56,6 +56,7 @@ services:
         group.initial.rebalance.delay.ms=0
         auto.create.topics.enable=true
         num.partitions=3
+        delegation.token.secret.key=kacrab-delegation-token-secret-please-change
         EOF
 
         cat > /tmp/admin.properties <<EOF

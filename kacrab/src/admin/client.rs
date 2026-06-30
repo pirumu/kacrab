@@ -38,6 +38,7 @@ use kacrab_protocol::{
         ElectLeadersRequestData, ElectLeadersResponseData, ErrorCode,
         ExpireDelegationTokenRequestData, ExpireDelegationTokenResponseData, FeatureUpdateKey,
         FindCoordinatorRequestData, FindCoordinatorResponseData,
+        GetTelemetrySubscriptionsRequestData, GetTelemetrySubscriptionsResponseData,
         IncrementalAlterConfigsRequestData, IncrementalAlterConfigsResponseData,
         InitProducerIdRequestData, InitProducerIdResponseData, LeaveGroupRequestData,
         LeaveGroupResponseData, ListConfigResourcesRequestData, ListConfigResourcesResponseData,
@@ -112,7 +113,8 @@ use crate::{
     common::{OffsetAndMetadata, TopicPartition},
     config::{AdminConfig, ClientConfig, ConfigKey, ConfigValue, Properties},
     wire::{
-        BrokerEndpoint, ClusterMetadata, RequestMessage, ResponseMessage, WireClient, WireError,
+        BrokerEndpoint, BufferPoolStats, ClusterMetadata, RequestMessage, ResponseMessage,
+        WireClient, WireError,
     },
 };
 
@@ -553,6 +555,51 @@ impl AdminClient {
         Ok(())
     }
 
+    /// Return the client's unique instance id, fetched from a broker via
+    /// `GetTelemetrySubscriptions` (Kafka's `clientInstanceId`).
+    ///
+    /// # Errors
+    /// Returns the broker error code (e.g. when client telemetry is disabled) or
+    /// a wire error.
+    pub async fn client_instance_id(&self) -> Result<KafkaUuid> {
+        let request = GetTelemetrySubscriptionsRequestData {
+            client_instance_id: KafkaUuid::ZERO,
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let broker_id = self.wire.admin_any_broker_id()?;
+        // Client telemetry is optional, so the broker may support a lower max
+        // version than the client (or none); use the negotiated version.
+        let version = self
+            .wire
+            .negotiated_version(broker_id, ApiKey::GetTelemetrySubscriptions)
+            .ok_or_else(|| AdminError::Broker {
+                target: String::new(),
+                error: ErrorCode::UnsupportedVersion,
+                message: Some("broker does not support client telemetry".to_owned()),
+            })?;
+        let response: GetTelemetrySubscriptionsResponseData = self
+            .wire
+            .send_to_broker(
+                broker_id,
+                ApiKey::GetTelemetrySubscriptions,
+                version,
+                &request,
+            )
+            .await?;
+        check_code("", response.error_code, None)?;
+        Ok(response.client_instance_id)
+    }
+
+    /// The client-side metrics this admin client tracks.
+    ///
+    /// kacrab exposes its wire buffer-pool counters here; this is the analogue of
+    /// Java's `Admin.metrics()` (kacrab does not maintain Java's full
+    /// `KafkaMetric` registry).
+    #[must_use]
+    pub fn metrics(&self) -> BufferPoolStats {
+        self.wire.buffer_pool_stats()
+    }
+
     /// Send a controller-only request, retrying against a freshly discovered
     /// controller while the broker reports `NOT_CONTROLLER`.
     async fn route_to_controller<Req, Resp>(
@@ -582,6 +629,57 @@ impl AdminClient {
                 continue;
             }
             return Ok(response);
+        }
+    }
+
+    /// Send a request to the coordinator for `key` (a group id with
+    /// `key_type` 0, or a transactional id with `key_type` 1), retrying against a
+    /// freshly resolved coordinator while it reports a transient coordinator
+    /// error (`NOT_COORDINATOR` / `COORDINATOR_NOT_AVAILABLE` /
+    /// `COORDINATOR_LOAD_IN_PROGRESS`) — whether from `FindCoordinator` or in the
+    /// response. Returns the (possibly still-erroring) response and the resolved
+    /// coordinator so the caller can run its own per-result error checks.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Coordinator routing needs the key, its type, the API, request, and an error \
+                  predicate; each is distinct."
+    )]
+    async fn route_to_coordinator<Req, Resp>(
+        &self,
+        key: &str,
+        key_type: i8,
+        api_key: ApiKey,
+        request: &Req,
+        has_coordinator_error: impl Fn(&Resp) -> bool,
+    ) -> Result<(Resp, Node)>
+    where
+        Req: RequestMessage + Clone + Send + Sync + 'static,
+        Resp: ResponseMessage,
+    {
+        let version = client_api_info(api_key).max_version;
+        let mut attempt: u32 = 0;
+        loop {
+            attempt = attempt.saturating_add(1);
+            let coordinator = match self.coordinator_node(key, key_type).await {
+                Ok(coordinator) => coordinator,
+                Err(AdminError::Broker { error, .. })
+                    if is_coordinator_error(i16::from(error))
+                        && attempt < self.controller_attempts =>
+                {
+                    tokio::time::sleep(CONTROLLER_RETRY_BACKOFF).await;
+                    continue;
+                },
+                Err(error) => return Err(error),
+            };
+            let response: Resp = self
+                .wire
+                .send_to_broker(coordinator.id, api_key, version, request)
+                .await?;
+            if has_coordinator_error(&response) && attempt < self.controller_attempts {
+                tokio::time::sleep(CONTROLLER_RETRY_BACKOFF).await;
+                continue;
+            }
+            return Ok((response, coordinator));
         }
     }
 
@@ -655,18 +753,26 @@ impl AdminClient {
         group_ids: Vec<String>,
         options: DescribeConsumerGroupsOptions,
     ) -> Result<Vec<ConsumerGroupDescription>> {
-        let version = client_api_info(ApiKey::DescribeGroups).max_version;
         let mut described = Vec::with_capacity(group_ids.len());
         for group_id in &group_ids {
-            let coordinator = self.group_coordinator(group_id).await?;
             let request = DescribeGroupsRequestData {
                 groups: vec![group_id.clone().into()],
                 include_authorized_operations: options.include_authorized_operations,
                 _unknown_tagged_fields: Vec::new(),
             };
-            let response: DescribeGroupsResponseData = self
-                .wire
-                .send_to_broker(coordinator.id, ApiKey::DescribeGroups, version, &request)
+            let (response, coordinator) = self
+                .route_to_coordinator(
+                    group_id,
+                    0,
+                    ApiKey::DescribeGroups,
+                    &request,
+                    |response: &DescribeGroupsResponseData| {
+                        response
+                            .groups
+                            .iter()
+                            .any(|group| is_coordinator_error(group.error_code))
+                    },
+                )
                 .await?;
             let group = response
                 .groups
@@ -703,16 +809,24 @@ impl AdminClient {
     /// # Errors
     /// Returns the coordinator-lookup error or the first per-group broker error.
     pub async fn delete_consumer_groups(&self, group_ids: Vec<String>) -> Result<()> {
-        let version = client_api_info(ApiKey::DeleteGroups).max_version;
         for group_id in &group_ids {
-            let coordinator = self.group_coordinator(group_id).await?;
             let request = DeleteGroupsRequestData {
                 groups_names: vec![group_id.clone().into()],
                 _unknown_tagged_fields: Vec::new(),
             };
-            let response: DeleteGroupsResponseData = self
-                .wire
-                .send_to_broker(coordinator.id, ApiKey::DeleteGroups, version, &request)
+            let (response, _coordinator) = self
+                .route_to_coordinator(
+                    group_id,
+                    0,
+                    ApiKey::DeleteGroups,
+                    &request,
+                    |response: &DeleteGroupsResponseData| {
+                        response
+                            .results
+                            .iter()
+                            .any(|result| is_coordinator_error(result.error_code))
+                    },
+                )
                 .await?;
             for result in &response.results {
                 check_code(result.group_id.as_str(), result.error_code, None)?;
@@ -751,11 +865,19 @@ impl AdminClient {
             require_stable: options.require_stable,
             ..OffsetFetchRequestData::default()
         };
-        let coordinator = self.group_coordinator(group_id).await?;
-        let version = client_api_info(ApiKey::OffsetFetch).max_version;
-        let response: OffsetFetchResponseData = self
-            .wire
-            .send_to_broker(coordinator.id, ApiKey::OffsetFetch, version, &request)
+        let (response, _coordinator) = self
+            .route_to_coordinator(
+                group_id,
+                0,
+                ApiKey::OffsetFetch,
+                &request,
+                |response: &OffsetFetchResponseData| {
+                    response
+                        .groups
+                        .iter()
+                        .any(|group| is_coordinator_error(group.error_code))
+                },
+            )
             .await?;
         let group = response
             .groups
@@ -817,11 +939,21 @@ impl AdminClient {
             topics: offset_commit_topics(offsets, &topic_ids),
             _unknown_tagged_fields: Vec::new(),
         };
-        let coordinator = self.group_coordinator(group_id).await?;
-        let version = client_api_info(ApiKey::OffsetCommit).max_version;
-        let response: OffsetCommitResponseData = self
-            .wire
-            .send_to_broker(coordinator.id, ApiKey::OffsetCommit, version, &request)
+        let (response, _coordinator) = self
+            .route_to_coordinator(
+                group_id,
+                0,
+                ApiKey::OffsetCommit,
+                &request,
+                |response: &OffsetCommitResponseData| {
+                    response.topics.iter().any(|topic| {
+                        topic
+                            .partitions
+                            .iter()
+                            .any(|partition| is_coordinator_error(partition.error_code))
+                    })
+                },
+            )
             .await?;
         for topic in &response.topics {
             for partition in &topic.partitions {
@@ -846,11 +978,22 @@ impl AdminClient {
             topics: offset_delete_topics(partitions),
             _unknown_tagged_fields: Vec::new(),
         };
-        let coordinator = self.group_coordinator(group_id).await?;
-        let version = client_api_info(ApiKey::OffsetDelete).max_version;
-        let response: OffsetDeleteResponseData = self
-            .wire
-            .send_to_broker(coordinator.id, ApiKey::OffsetDelete, version, &request)
+        let (response, _coordinator) = self
+            .route_to_coordinator(
+                group_id,
+                0,
+                ApiKey::OffsetDelete,
+                &request,
+                |response: &OffsetDeleteResponseData| {
+                    is_coordinator_error(response.error_code)
+                        || response.topics.iter().any(|topic| {
+                            topic
+                                .partitions
+                                .iter()
+                                .any(|partition| is_coordinator_error(partition.error_code))
+                        })
+                },
+            )
             .await?;
         check_code(group_id, response.error_code, None)?;
         for topic in &response.topics {
@@ -1292,10 +1435,8 @@ impl AdminClient {
         &self,
         transactional_ids: Vec<String>,
     ) -> Result<Vec<FencedProducer>> {
-        let version = client_api_info(ApiKey::InitProducerId).max_version;
         let mut fenced = Vec::with_capacity(transactional_ids.len());
         for transactional_id in &transactional_ids {
-            let coordinator = self.transaction_coordinator(transactional_id).await?;
             let request = InitProducerIdRequestData {
                 transactional_id: Some(transactional_id.clone().into()),
                 transaction_timeout_ms: FENCE_PRODUCER_TXN_TIMEOUT_MS,
@@ -1305,9 +1446,16 @@ impl AdminClient {
                 keep_prepared_txn: false,
                 _unknown_tagged_fields: Vec::new(),
             };
-            let response: InitProducerIdResponseData = self
-                .wire
-                .send_to_broker(coordinator.id, ApiKey::InitProducerId, version, &request)
+            let (response, _coordinator) = self
+                .route_to_coordinator(
+                    transactional_id,
+                    1,
+                    ApiKey::InitProducerId,
+                    &request,
+                    |response: &InitProducerIdResponseData| {
+                        is_coordinator_error(response.error_code)
+                    },
+                )
                 .await?;
             check_code(transactional_id, response.error_code, None)?;
             fenced.push(FencedProducer {
@@ -1497,11 +1645,14 @@ impl AdminClient {
                 .collect(),
             _unknown_tagged_fields: Vec::new(),
         };
-        let coordinator = self.group_coordinator(group_id).await?;
-        let version = client_api_info(ApiKey::LeaveGroup).max_version;
-        let response: LeaveGroupResponseData = self
-            .wire
-            .send_to_broker(coordinator.id, ApiKey::LeaveGroup, version, &request)
+        let (response, _coordinator) = self
+            .route_to_coordinator(
+                group_id,
+                0,
+                ApiKey::LeaveGroup,
+                &request,
+                |response: &LeaveGroupResponseData| is_coordinator_error(response.error_code),
+            )
             .await?;
         check_code(group_id, response.error_code, None)?;
         for member in &response.members {
@@ -1764,22 +1915,25 @@ impl AdminClient {
         &self,
         group_ids: Vec<String>,
     ) -> Result<Vec<ShareGroupDescription>> {
-        let version = client_api_info(ApiKey::ShareGroupDescribe).max_version;
         let mut described = Vec::with_capacity(group_ids.len());
         for group_id in &group_ids {
-            let coordinator = self.group_coordinator(group_id).await?;
             let request = ShareGroupDescribeRequestData {
                 group_ids: vec![group_id.clone().into()],
                 include_authorized_operations: false,
                 _unknown_tagged_fields: Vec::new(),
             };
-            let response: ShareGroupDescribeResponseData = self
-                .wire
-                .send_to_broker(
-                    coordinator.id,
+            let (response, coordinator) = self
+                .route_to_coordinator(
+                    group_id,
+                    0,
                     ApiKey::ShareGroupDescribe,
-                    version,
                     &request,
+                    |response: &ShareGroupDescribeResponseData| {
+                        response
+                            .groups
+                            .iter()
+                            .any(|group| is_coordinator_error(group.error_code))
+                    },
                 )
                 .await?;
             let group = response
@@ -1821,22 +1975,25 @@ impl AdminClient {
         &self,
         group_ids: Vec<String>,
     ) -> Result<Vec<StreamsGroupDescription>> {
-        let version = client_api_info(ApiKey::StreamsGroupDescribe).max_version;
         let mut described = Vec::with_capacity(group_ids.len());
         for group_id in &group_ids {
-            let coordinator = self.group_coordinator(group_id).await?;
             let request = StreamsGroupDescribeRequestData {
                 group_ids: vec![group_id.clone().into()],
                 include_authorized_operations: false,
                 _unknown_tagged_fields: Vec::new(),
             };
-            let response: StreamsGroupDescribeResponseData = self
-                .wire
-                .send_to_broker(
-                    coordinator.id,
+            let (response, coordinator) = self
+                .route_to_coordinator(
+                    group_id,
+                    0,
                     ApiKey::StreamsGroupDescribe,
-                    version,
                     &request,
+                    |response: &StreamsGroupDescribeResponseData| {
+                        response
+                            .groups
+                            .iter()
+                            .any(|group| is_coordinator_error(group.error_code))
+                    },
                 )
                 .await?;
             let group = response
@@ -1905,15 +2062,18 @@ impl AdminClient {
             }],
             _unknown_tagged_fields: Vec::new(),
         };
-        let coordinator = self.group_coordinator(group_id).await?;
-        let version = client_api_info(ApiKey::DescribeShareGroupOffsets).max_version;
-        let response: DescribeShareGroupOffsetsResponseData = self
-            .wire
-            .send_to_broker(
-                coordinator.id,
+        let (response, _coordinator) = self
+            .route_to_coordinator(
+                group_id,
+                0,
                 ApiKey::DescribeShareGroupOffsets,
-                version,
                 &request,
+                |response: &DescribeShareGroupOffsetsResponseData| {
+                    response
+                        .groups
+                        .iter()
+                        .any(|group| is_coordinator_error(group.error_code))
+                },
             )
             .await?;
         let group = response
@@ -1983,15 +2143,15 @@ impl AdminClient {
             topics,
             _unknown_tagged_fields: Vec::new(),
         };
-        let coordinator = self.group_coordinator(group_id).await?;
-        let version = client_api_info(ApiKey::AlterShareGroupOffsets).max_version;
-        let response: AlterShareGroupOffsetsResponseData = self
-            .wire
-            .send_to_broker(
-                coordinator.id,
+        let (response, _coordinator) = self
+            .route_to_coordinator(
+                group_id,
+                0,
                 ApiKey::AlterShareGroupOffsets,
-                version,
                 &request,
+                |response: &AlterShareGroupOffsetsResponseData| {
+                    is_coordinator_error(response.error_code)
+                },
             )
             .await?;
         check_code(
@@ -2033,15 +2193,15 @@ impl AdminClient {
                 .collect(),
             _unknown_tagged_fields: Vec::new(),
         };
-        let coordinator = self.group_coordinator(group_id).await?;
-        let version = client_api_info(ApiKey::DeleteShareGroupOffsets).max_version;
-        let response: DeleteShareGroupOffsetsResponseData = self
-            .wire
-            .send_to_broker(
-                coordinator.id,
+        let (response, _coordinator) = self
+            .route_to_coordinator(
+                group_id,
+                0,
                 ApiKey::DeleteShareGroupOffsets,
-                version,
                 &request,
+                |response: &DeleteShareGroupOffsetsResponseData| {
+                    is_coordinator_error(response.error_code)
+                },
             )
             .await?;
         check_code(
@@ -2790,21 +2950,24 @@ impl AdminClient {
         &self,
         transactional_ids: Vec<String>,
     ) -> Result<Vec<TransactionDescription>> {
-        let version = client_api_info(ApiKey::DescribeTransactions).max_version;
         let mut described = Vec::with_capacity(transactional_ids.len());
         for transactional_id in &transactional_ids {
-            let coordinator = self.transaction_coordinator(transactional_id).await?;
             let request = DescribeTransactionsRequestData {
                 transactional_ids: vec![transactional_id.clone().into()],
                 _unknown_tagged_fields: Vec::new(),
             };
-            let response: DescribeTransactionsResponseData = self
-                .wire
-                .send_to_broker(
-                    coordinator.id,
+            let (response, coordinator) = self
+                .route_to_coordinator(
+                    transactional_id,
+                    1,
                     ApiKey::DescribeTransactions,
-                    version,
                     &request,
+                    |response: &DescribeTransactionsResponseData| {
+                        response
+                            .transaction_states
+                            .iter()
+                            .any(|state| is_coordinator_error(state.error_code))
+                    },
                 )
                 .await?;
             let state = response
@@ -2895,19 +3058,6 @@ impl AdminClient {
             .iter()
             .map(|topic| (topic.name.clone(), topic.topic_id))
             .collect())
-    }
-
-    /// Find the coordinator broker for a consumer group (`FindCoordinator`
-    /// key type `0`), registering its endpoint so subsequent `send_to_broker`
-    /// calls can reach it.
-    async fn group_coordinator(&self, group_id: &str) -> Result<Node> {
-        self.coordinator_node(group_id, 0).await
-    }
-
-    /// Find the transaction coordinator broker for a transactional id
-    /// (`FindCoordinator` key type `1`), registering its endpoint.
-    async fn transaction_coordinator(&self, transactional_id: &str) -> Result<Node> {
-        self.coordinator_node(transactional_id, 1).await
     }
 
     /// Resolve a coordinator broker for `key` of the given `FindCoordinator`
@@ -3383,6 +3533,17 @@ fn node_or_placeholder(metadata: &ClusterMetadata, broker_id: i32) -> Node {
 
 fn is_not_controller(error_code: i16) -> bool {
     error_code == i16::from(ErrorCode::NotController)
+}
+
+/// Whether `error_code` is a transient coordinator error worth retrying against a
+/// freshly resolved coordinator.
+fn is_coordinator_error(error_code: i16) -> bool {
+    matches!(
+        ErrorCode::from(error_code),
+        ErrorCode::NotCoordinator
+            | ErrorCode::CoordinatorNotAvailable
+            | ErrorCode::CoordinatorLoadInProgress
+    )
 }
 
 /// Map a broker error code on a single result to an [`AdminError::Broker`],

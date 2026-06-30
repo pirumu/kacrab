@@ -534,6 +534,8 @@ async fn real_kafka_admin_extended() {
             .create_delegation_token(kacrab::admin::CreateDelegationTokenOptions::default())
             .await,
     );
+    assert_wire_ok("client_instance_id", admin.client_instance_id().await);
+    println!("  metrics: {:?}", admin.metrics());
 
     admin
         .delete_topics(vec![topic])
