@@ -43,7 +43,10 @@ async fn real_kafka_cluster_dispatches_across_brokers() {
     let receipts = produce_to_all_partitions(&producer, "dispatch").await;
     for (partition, offset) in &receipts {
         println!("partition {partition} -> offset {offset}");
-        assert!(*offset >= 0, "partition {partition} should get a real offset");
+        assert!(
+            *offset >= 0,
+            "partition {partition} should get a real offset"
+        );
     }
     assert_eq!(
         receipts.len(),
@@ -55,12 +58,17 @@ async fn real_kafka_cluster_dispatches_across_brokers() {
 #[tokio::test]
 #[ignore = "requires the 3-broker cluster and stops a broker via docker"]
 async fn real_kafka_cluster_survives_broker_loss() {
-    let victim = env::var("KACRAB_CLUSTER_VICTIM").unwrap_or_else(|_error| "kacrab-kafka2".to_owned());
+    let victim =
+        env::var("KACRAB_CLUSTER_VICTIM").unwrap_or_else(|_error| "kacrab-kafka2".to_owned());
     let producer = build_producer().await;
 
     // Baseline round while all three brokers are up.
     let baseline = produce_to_all_partitions(&producer, "baseline").await;
-    assert_eq!(baseline.len(), PARTITIONS as usize, "baseline should deliver");
+    assert_eq!(
+        baseline.len(),
+        PARTITIONS as usize,
+        "baseline should deliver"
+    );
     println!("baseline delivered across all partitions; stopping broker {victim}");
 
     // Take a broker down: partitions it led must fail over to an ISR replica,
@@ -93,7 +101,8 @@ async fn real_kafka_cluster_survives_broker_loss() {
 async fn real_kafka_cluster_unaffected_partition_during_broker_loss() {
     // Partition 0's leader is broker 1; we stop broker 2. Partition 0 should be
     // completely unaffected. Produce to it once per second across the stop.
-    let victim = env::var("KACRAB_CLUSTER_VICTIM").unwrap_or_else(|_error| "kacrab-kafka2".to_owned());
+    let victim =
+        env::var("KACRAB_CLUSTER_VICTIM").unwrap_or_else(|_error| "kacrab-kafka2".to_owned());
     let partition: i32 = env::var("KACRAB_CLUSTER_PARTITION")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -113,7 +122,10 @@ async fn real_kafka_cluster_unaffected_partition_during_broker_loss() {
         {
             Ok(metadata) => {
                 ok += 1;
-                println!("round {round}: partition {partition} -> offset {}", metadata.offset);
+                println!(
+                    "round {round}: partition {partition} -> offset {}",
+                    metadata.offset
+                );
             },
             Err(error) => println!("round {round}: partition {partition} FAILED: {error}"),
         }
@@ -121,7 +133,10 @@ async fn real_kafka_cluster_unaffected_partition_during_broker_loss() {
     }
     docker(&["start", &victim]);
     println!("partition {partition} delivered {ok}/20 across the broker loss");
-    assert!(ok >= 18, "partition {partition} should keep delivering; got {ok}/20");
+    assert!(
+        ok >= 18,
+        "partition {partition} should keep delivering; got {ok}/20"
+    );
 }
 
 #[tokio::test]
@@ -132,7 +147,8 @@ async fn real_kafka_cluster_live_only_burst_during_broker_loss() {
     // 2,4 on broker 3). If these stall, a dead partition is not required to wedge
     // the flush; if they deliver, the wedge is head-of-line blocking from the
     // dead-broker partitions sharing a coalesced flush.
-    let victim = env::var("KACRAB_CLUSTER_VICTIM").unwrap_or_else(|_error| "kacrab-kafka2".to_owned());
+    let victim =
+        env::var("KACRAB_CLUSTER_VICTIM").unwrap_or_else(|_error| "kacrab-kafka2".to_owned());
     let live_partitions = [0_i32, 2, 3, 4];
     let producer = build_producer().await;
 
@@ -160,7 +176,10 @@ async fn real_kafka_cluster_live_only_burst_during_broker_loss() {
         }
     }
     docker(&["start", &victim]);
-    println!("live-broker partitions delivered {ok}/{}", live_partitions.len());
+    println!(
+        "live-broker partitions delivered {ok}/{}",
+        live_partitions.len()
+    );
     assert_eq!(
         ok as usize,
         live_partitions.len(),
@@ -223,7 +242,10 @@ async fn produce_to_all_partitions_collect(
     for (partition, future) in futures.into_iter().enumerate() {
         let result = future.await;
         match &result {
-            Ok(metadata) => println!("  [{tag}] partition {partition} -> offset {}", metadata.offset),
+            Ok(metadata) => println!(
+                "  [{tag}] partition {partition} -> offset {}",
+                metadata.offset
+            ),
             Err(error) => println!("  [{tag}] partition {partition} FAILED: {error}"),
         }
         results.push(result);

@@ -362,8 +362,7 @@ impl BrokerTask {
                     *self
                         .capabilities
                         .write()
-                        .unwrap_or_else(PoisonError::into_inner) =
-                        Some(capabilities.clone());
+                        .unwrap_or_else(PoisonError::into_inner) = Some(capabilities.clone());
                     if matches!(
                         self.serve_connection(stream, capabilities, &mut pending, &mut rx_open)
                             .await,
@@ -1615,7 +1614,12 @@ mod tests {
         let command = request_command_with_sender(tx, Instant::now());
 
         let wrote = task
-            .write_command(&mut writer, &pipeline, command, &api_versions_capabilities())
+            .write_command(
+                &mut writer,
+                &pipeline,
+                command,
+                &api_versions_capabilities(),
+            )
             .await
             .expect("write command");
 

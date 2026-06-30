@@ -63,10 +63,11 @@ async fn real_kafka_sasl_oauthbearer_api_versions() {
         endpoint.addr,
     );
 
-    let client =
-        WireClient::connect_with_brokers(oauthbearer_config(&token), "kacrab-real-kafka-sasl-test", [
-            endpoint,
-        ]);
+    let client = WireClient::connect_with_brokers(
+        oauthbearer_config(&token),
+        "kacrab-real-kafka-sasl-test",
+        [endpoint],
+    );
     let response: ApiVersionsResponseData = client
         .send_to_broker(0, ApiKey::ApiVersions, 3, &api_versions_request())
         .await
@@ -134,17 +135,17 @@ async fn authenticate_and_assert(mechanism: SaslMechanism, username: &str, passw
     config.sasl.mechanism = Some(mechanism);
     config.sasl.jaas_config = Some(jaas_config(username, password));
 
-    let client = WireClient::connect_with_brokers(
-        config,
-        "kacrab-real-kafka-sasl-test",
-        [endpoint],
-    );
+    let client =
+        WireClient::connect_with_brokers(config, "kacrab-real-kafka-sasl-test", [endpoint]);
 
     let response: ApiVersionsResponseData = client
         .send_to_broker(0, ApiKey::ApiVersions, 3, &api_versions_request())
         .await
         .unwrap_or_else(|error| {
-            panic!("{}-authenticated ApiVersions should succeed: {error}", mechanism.as_str())
+            panic!(
+                "{}-authenticated ApiVersions should succeed: {error}",
+                mechanism.as_str()
+            )
         });
 
     assert!(
@@ -191,14 +192,14 @@ fn unsecured_jwt(subject: &str, exp_offset_secs: i64) -> String {
     .expect("unix seconds should fit i64");
     let exp = now + exp_offset_secs;
     let header = b64url(br#"{"alg":"none"}"#);
-    let payload = b64url(format!("{{\"sub\":\"{subject}\",\"iat\":{now},\"exp\":{exp}}}").as_bytes());
+    let payload =
+        b64url(format!("{{\"sub\":\"{subject}\",\"iat\":{now},\"exp\":{exp}}}").as_bytes());
     format!("{header}.{payload}.")
 }
 
 /// Minimal base64url (no padding) encoder, so the test needs no extra crate.
 fn b64url(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = u32::from(chunk[0]);
@@ -219,8 +220,8 @@ fn b64url(input: &[u8]) -> String {
 
 fn jaas_config(username: &str, password: &str) -> String {
     format!(
-        "org.apache.kafka.common.security.plain.PlainLoginModule required \
-         username=\"{username}\" password=\"{password}\";"
+        "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"{username}\" \
+         password=\"{password}\";"
     )
 }
 

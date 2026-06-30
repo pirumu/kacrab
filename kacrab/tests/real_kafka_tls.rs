@@ -47,8 +47,8 @@ async fn real_kafka_sasl_ssl_scram_api_versions() {
     config.tls.truststore_certificates = Some(ca_pem());
     config.sasl.mechanism = Some(SaslMechanism::ScramSha256);
     config.sasl.jaas_config = Some(
-        "org.apache.kafka.common.security.scram.ScramLoginModule required \
-         username=\"scram256\" password=\"scram256-secret\";"
+        "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"scram256\" \
+         password=\"scram256-secret\";"
             .to_owned(),
     );
     assert_api_versions(config, SASL_SSL_PORT, "SASL_SSL/SCRAM-SHA-256").await;
@@ -95,7 +95,10 @@ async fn assert_api_versions(config: ConnectionConfig, port: u16, label: &str) {
         !response.api_keys.is_empty(),
         "broker should return advertised API versions over {label}"
     );
-    println!("{label} OK: broker advertised {} API keys", response.api_keys.len());
+    println!(
+        "{label} OK: broker advertised {} API keys",
+        response.api_keys.len()
+    );
 }
 
 fn tls_config(protocol: SecurityProtocol) -> ConnectionConfig {
@@ -140,6 +143,10 @@ async fn endpoint(port: u16) -> BrokerEndpoint {
     let first = *addrs
         .first()
         .expect("localhost should resolve to at least one address");
-    let addr = addrs.iter().copied().find(SocketAddr::is_ipv4).unwrap_or(first);
+    let addr = addrs
+        .iter()
+        .copied()
+        .find(SocketAddr::is_ipv4)
+        .unwrap_or(first);
     BrokerEndpoint::from_resolved(0, "localhost".to_owned(), port, addr)
 }

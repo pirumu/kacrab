@@ -33,8 +33,8 @@ impl ProducerPartitionInfo {
     #[must_use]
     #[expect(
         clippy::too_many_arguments,
-        reason = "Constructor mirrors Kafka's PartitionInfo(topic, partition, leader, replicas, isr, \
-                  offlineReplicas)."
+        reason = "Constructor mirrors Kafka's PartitionInfo(topic, partition, leader, replicas, \
+                  isr, offlineReplicas)."
     )]
     pub fn new(
         topic: impl Into<String>,
