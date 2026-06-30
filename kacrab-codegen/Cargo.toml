@@ -6,7 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-publish.workspace = true
+# Maintainer-only build tool — not published (no runtime crate depends on it).
+publish = false
 description = "Maintainer code generator for Kafka protocol schemas and config metadata."
 readme = "README.md"
 default-run = "kacrab-codegen"
