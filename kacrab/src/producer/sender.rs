@@ -2944,7 +2944,6 @@ impl ProducerSenderState {
         )
     }
 
-
     pub(crate) async fn wait_for_abort_completion<LatencyObserver, RequeueObserver>(
         &mut self,
         accumulator: &SharedAccumulator,
@@ -3871,7 +3870,6 @@ mod tests {
             FlushDispatchProgress::WaitForCompletion
         );
     }
-
 
     #[tokio::test]
     async fn wait_for_abort_completion_handles_in_flight_dispatches_until_empty() {

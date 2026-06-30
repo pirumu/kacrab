@@ -1,0 +1,94 @@
+name: ci
+
+# Enforce the things the repo claims: formatting, the strict clippy lint set,
+# the full test suite (incl. the Java oracle matrix's non-ignored tests), code
+# coverage, and dependency/license/advisory policy. Runs on every push to master
+# and every PR.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint-test:
+    name: fmt · clippy · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # gssapi (libgssapi) needs libkrb5; zstd / lz4-hc need a C compiler (gcc
+      # is preinstalled). --all-features pulls all of these.
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev
+
+      # Installs the toolchain pinned by rust-toolchain.toml (1.95 + clippy).
+      - name: Pinned Rust toolchain
+        run: rustup show
+
+      # `make fmt-check` runs `cargo +nightly fmt` (uses unstable rustfmt opts).
+      - name: Nightly rustfmt
+        run: rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: make fmt-check
+
+      - name: Clippy (pedantic + nursery + cargo, -D warnings)
+        run: make clippy
+
+      - name: Test (workspace, all features)
+        run: make test
+
+  coverage:
+    name: coverage (tarpaulin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev
+
+      - name: Pinned Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-tarpaulin
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+
+      # Honors tarpaulin.toml (excludes generated artifacts). The floor is below
+      # the measured ~84.6% to leave headroom; raise it as coverage grows.
+      - name: Coverage
+        run: cargo tarpaulin --workspace --all-features --timeout 360 --out Xml --fail-under 78
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: cobertura.xml
+
+  deny:
+    name: cargo-deny (licenses · advisories · bans)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo deny check
+        run: cargo deny check

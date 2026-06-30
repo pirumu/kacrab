@@ -44,7 +44,8 @@ const CONTAINER: &str = "kacrab-kafka";
 #[tokio::test]
 #[ignore = "requires the broker from docker-compose.kafka.yml and the docker CLI"]
 async fn real_kafka_compression_roundtrips_every_codec() {
-    let bootstrap = env::var("KACRAB_BOOTSTRAP").unwrap_or_else(|_error| "127.0.0.1:9092".to_owned());
+    let bootstrap =
+        env::var("KACRAB_BOOTSTRAP").unwrap_or_else(|_error| "127.0.0.1:9092".to_owned());
     let topic = unique_topic();
     create_topic(&topic);
     println!("compression round-trip: bootstrap={bootstrap}, topic={topic}");
@@ -59,11 +60,17 @@ async fn real_kafka_compression_roundtrips_every_codec() {
                 .expect("send should enqueue")
                 .await
                 .unwrap_or_else(|error| panic!("broker should accept the {codec} batch: {error}"));
-            assert!(receipt.offset >= 0, "{codec} record should get a real offset");
+            assert!(
+                receipt.offset >= 0,
+                "{codec} record should get a real offset"
+            );
             expected.push(value);
         }
         println!("{codec}: produced {RECORDS_PER_CODEC} records (broker accepted the batch)");
-        producer.close().await.expect("producer should close cleanly");
+        producer
+            .close()
+            .await
+            .expect("producer should close cleanly");
     }
 
     // Prove the batches were actually stored compressed with the right codec
@@ -102,7 +109,9 @@ async fn build_producer(bootstrap: &str, codec: &str) -> Producer {
         .set("compression.type", codec)
         .build()
         .await
-        .unwrap_or_else(|error| panic!("producer with compression.type={codec} should build: {error}"))
+        .unwrap_or_else(|error| {
+            panic!("producer with compression.type={codec} should build: {error}")
+        })
 }
 
 /// A compressible, codec-tagged value so it is identifiable in the consumer

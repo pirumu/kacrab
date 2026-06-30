@@ -141,7 +141,9 @@ impl SaslClientAuthenticator for GssapiAuthenticator {
     fn next(&self, challenge: &[u8]) -> Result<SaslClientAction, WireError> {
         let mut stored = self.session.lock().map_err(gssapi_lock_error)?;
         let session = stored.as_mut().ok_or_else(|| {
-            WireError::SaslAuthentication("GSSAPI challenge received before context start".to_owned())
+            WireError::SaslAuthentication(
+                "GSSAPI challenge received before context start".to_owned(),
+            )
         })?;
         let action = match session.phase {
             GssapiPhase::Establishing => {
@@ -197,10 +199,7 @@ fn send_token(token: &Buf) -> SaslClientAction {
 }
 
 fn send_token_or_empty(token: Option<&Buf>) -> SaslClientAction {
-    token.map_or_else(
-        || SaslClientAction::Send(Bytes::new()),
-        send_token,
-    )
+    token.map_or_else(|| SaslClientAction::Send(Bytes::new()), send_token)
 }
 
 fn gssapi_error(error: libgssapi::error::Error) -> WireError {

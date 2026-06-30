@@ -32,6 +32,10 @@ exceptions = []
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# kacrab-macros has a path-only dev-dependency on kacrab (no version) on purpose:
+# a versioned dev-dep would be a publish cycle (kacrab depends on kacrab-macros).
+# Path wildcards are workspace-internal and dropped on publish, so allow them.
+allow-wildcard-paths = true
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"

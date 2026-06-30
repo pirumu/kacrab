@@ -2326,15 +2326,17 @@ mod tests {
         clippy::float_cmp,
         clippy::missing_assert_message,
         clippy::unwrap_used,
-        reason = "Unit tests for the metrics library assert exact recorded values and \
-                  fail fastest with contextual expect calls."
+        reason = "Unit tests for the metrics library assert exact recorded values and fail \
+                  fastest with contextual expect calls."
     )]
 
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
-    use std::time::Duration;
 
     use super::{
         KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
@@ -2403,7 +2405,10 @@ mod tests {
         assert_eq!(config.record_level(), SensorRecordingLevel::Debug);
         assert_eq!(config.samples(), 4);
         // with_tags replaces, so "client-id" from with_tag is gone.
-        assert_eq!(config.tags().get("topic").map(String::as_str), Some("orders"));
+        assert_eq!(
+            config.tags().get("topic").map(String::as_str),
+            Some("orders")
+        );
         assert!(config.tags().get("client-id").is_none());
 
         assert!(matches!(
@@ -2458,9 +2463,15 @@ mod tests {
         metrics.sensor_add_max(sensor, max.clone()).expect("max");
         metrics.sensor_add_min(sensor, min.clone()).expect("min");
         metrics.sensor_add_avg(sensor, avg.clone()).expect("avg");
-        metrics.sensor_add_total(sensor, total.clone()).expect("total");
-        metrics.sensor_add_count(sensor, count.clone()).expect("count");
-        metrics.sensor_add_value(sensor, value.clone()).expect("value");
+        metrics
+            .sensor_add_total(sensor, total.clone())
+            .expect("total");
+        metrics
+            .sensor_add_count(sensor, count.clone())
+            .expect("count");
+        metrics
+            .sensor_add_value(sensor, value.clone())
+            .expect("value");
         metrics.sensor_add_rate(sensor, rate).expect("rate");
         metrics
             .sensor_add_meter(sensor, meter_rate, meter_total.clone())
@@ -2559,8 +2570,16 @@ mod tests {
         metrics.sensor_add_value(sensor, name).expect("add value");
         metrics.record_at_ms(sensor, 1.0, 1_000).expect("record");
 
-        assert!(!metrics.sensor_has_expired_at_ms(sensor, 1_050).expect("not expired"));
-        assert!(metrics.sensor_has_expired_at_ms(sensor, 2_000).expect("expired"));
+        assert!(
+            !metrics
+                .sensor_has_expired_at_ms(sensor, 1_050)
+                .expect("not expired")
+        );
+        assert!(
+            metrics
+                .sensor_has_expired_at_ms(sensor, 2_000)
+                .expect("expired")
+        );
         assert_eq!(metrics.expire_sensors_at_ms(2_000), 1);
 
         assert!(!metrics.remove_sensor("missing"));
