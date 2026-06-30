@@ -140,30 +140,35 @@ This catches Rust decoding bugs and default/null handling mismatches.
 
 ## Fixture coverage
 
-Generated support currently emits two fixture families:
+Generated support currently emits six fixture families, each producing one case
+per valid version of every schema:
 
 - `null_optionals`
-  - One case for every valid version of every schema.
   - Uses null values where the field is nullable in the schema version being
-    tested.
-  - Uses non-null defaults where a Rust type is optional only because a
+    tested, and non-null defaults where a Rust type is optional only because a
     different historical version allowed null.
-
 - `populated`
-  - One case for the latest valid version of each schema.
-  - Uses deterministic non-default values and unknown tagged fields where the
+  - Deterministic non-default values, plus unknown tagged fields where the
     schema supports flexible versions.
+- `empty_collections`
+  - Array/map fields present but empty.
+- `multi_element_collections`
+  - Array/map fields with multiple elements.
+- `numeric_boundaries`
+  - Integer/float fields at their min/max boundary values.
+- `tagged_fields`
+  - Exercises flexible-version tagged-field encoding.
 
-At the time of writing this produces:
-
-- 625 `null_optionals` cases
-- 190 `populated` cases
+At the time of writing this produces 625 cases per family (3,750 total).
 
 Re-count after regenerating with:
 
 ```sh
-rg -n 'fixture: "null_optionals"' kacrab-protocol/tests/support/generated_test_utils | wc -l
-rg -n 'fixture: "populated"' kacrab-protocol/tests/support/generated_test_utils | wc -l
+for f in null_optionals populated empty_collections \
+         multi_element_collections numeric_boundaries tagged_fields; do
+  printf '%s = ' "$f"
+  rg -no "fixture: \"$f\"" kacrab-protocol/tests/support/generated_test_utils | wc -l
+done
 ```
 
 ## What this guarantees
