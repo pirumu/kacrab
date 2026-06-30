@@ -1,0 +1,23 @@
+[book]
+title = "kacrab — Design & Internals"
+authors = ["pirumu"]
+description = "Architecture, algorithms, and internals of the kacrab Kafka client."
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/pirumu/kacrab"
+edit-url-template = "https://github.com/pirumu/kacrab/edit/master/docs-book/{path}"
+no-section-label = false
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+# Mermaid diagrams. The CI workflow (and a one-time local run) does
+# `mdbook-mermaid install docs-book` to drop in the JS assets before building.
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
