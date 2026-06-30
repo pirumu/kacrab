@@ -86,7 +86,11 @@ async fn gssapi_endpoint() -> BrokerEndpoint {
     // by Docker Desktop on macOS are reachable on 127.0.0.1 but not on ::1, and
     // resolvers often return the IPv6 address first. The host string is kept
     // for the Kerberos SPN, so this does not change kafka/<host>.
-    let addr = addrs.iter().copied().find(SocketAddr::is_ipv4).unwrap_or(first);
+    let addr = addrs
+        .iter()
+        .copied()
+        .find(SocketAddr::is_ipv4)
+        .unwrap_or(first);
     BrokerEndpoint::from_resolved(0, host, port, addr)
 }
 

@@ -1,6 +1,6 @@
 //! Rust-native key/value serializer support for typed producer records.
 
-use core::marker::PhantomData;
+use std::marker::PhantomData;
 
 use bytes::Bytes;
 use kacrab_protocol::record::RecordHeader;
@@ -718,27 +718,13 @@ fn close_serializer_quietly<T, S>(serializer: &S)
 where
     S: ProducerSerializer<T>,
 {
-    #[cfg(feature = "std")]
-    {
-        let _ignored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            serializer.close();
-        }));
-    }
-    #[cfg(not(feature = "std"))]
-    {
+    let _ignored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         serializer.close();
-    }
+    }));
 }
 
 fn abort_missing_state<T>() -> T {
-    #[cfg(feature = "std")]
-    {
-        std::process::abort()
-    }
-    #[cfg(not(feature = "std"))]
-    loop {
-        core::hint::spin_loop();
-    }
+    std::process::abort()
 }
 
 impl<K, V, KS, VS> Drop for TypedProducer<K, V, KS, VS>

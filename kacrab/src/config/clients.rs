@@ -5,9 +5,7 @@
               data"
 )]
 
-extern crate alloc;
-
-use alloc::string::String;
+use std::string::String;
 
 use kacrab_macros::kafka_config;
 
@@ -1450,9 +1448,9 @@ fn sasl_config_from_fields(
     }
 }
 
-fn seconds_from_i32(value: i32) -> core::time::Duration {
+fn seconds_from_i32(value: i32) -> std::time::Duration {
     positive_i32_to_u64(value)
-        .map(core::time::Duration::from_secs)
+        .map(std::time::Duration::from_secs)
         .unwrap_or_default()
 }
 
@@ -1510,22 +1508,22 @@ mod tests {
 
         assert_eq!(config.socket.send_buffer_bytes, Some(131_072));
         assert_eq!(config.socket.receive_buffer_bytes, Some(262_144));
-        assert_eq!(config.request_timeout, core::time::Duration::from_secs(9));
-        assert_eq!(config.metadata_max_age, core::time::Duration::from_secs(10));
+        assert_eq!(config.request_timeout, std::time::Duration::from_secs(9));
+        assert_eq!(config.metadata_max_age, std::time::Duration::from_secs(10));
         assert_eq!(
             config.socket_connection_setup_timeout,
-            core::time::Duration::from_secs(2)
+            std::time::Duration::from_secs(2)
         );
         assert_eq!(
             config.socket_connection_setup_timeout_max,
-            core::time::Duration::from_secs(5)
+            std::time::Duration::from_secs(5)
         );
         assert!(!config.socket.tcp_nodelay);
         assert_eq!(config.socket.tcp_notsent_lowat_bytes, Some(32_768));
         assert_eq!(config.socket.tcp_quickack, Some(false));
         assert_eq!(
             config.socket.tcp_user_timeout_ms,
-            Some(core::time::Duration::from_secs(12))
+            Some(std::time::Duration::from_secs(12))
         );
         assert_eq!(
             config.socket.tcp_congestion,
@@ -1570,22 +1568,22 @@ mod tests {
 
         assert_eq!(config.socket.send_buffer_bytes, Some(65_536));
         assert_eq!(config.socket.receive_buffer_bytes, Some(98_304));
-        assert_eq!(config.request_timeout, core::time::Duration::from_secs(4));
-        assert_eq!(config.metadata_max_age, core::time::Duration::from_secs(6));
+        assert_eq!(config.request_timeout, std::time::Duration::from_secs(4));
+        assert_eq!(config.metadata_max_age, std::time::Duration::from_secs(6));
         assert_eq!(
             config.socket_connection_setup_timeout,
-            core::time::Duration::from_secs(1)
+            std::time::Duration::from_secs(1)
         );
         assert_eq!(
             config.socket_connection_setup_timeout_max,
-            core::time::Duration::from_secs(8)
+            std::time::Duration::from_secs(8)
         );
         assert!(config.socket.tcp_nodelay);
         assert_eq!(config.socket.tcp_notsent_lowat_bytes, Some(16_384));
         assert_eq!(config.socket.tcp_quickack, Some(true));
         assert_eq!(
             config.socket.tcp_user_timeout_ms,
-            Some(core::time::Duration::from_secs(3))
+            Some(std::time::Duration::from_secs(3))
         );
         assert_eq!(
             config.socket.tcp_congestion,
@@ -1608,15 +1606,15 @@ mod tests {
 
         assert_eq!(
             config.connections_max_idle,
-            core::time::Duration::from_secs(11)
+            std::time::Duration::from_secs(11)
         );
         assert_eq!(
             config.reconnect_backoff_initial,
-            core::time::Duration::from_millis(17)
+            std::time::Duration::from_millis(17)
         );
         assert_eq!(
             config.reconnect_backoff_max,
-            core::time::Duration::from_millis(71)
+            std::time::Duration::from_millis(71)
         );
     }
 
@@ -1634,11 +1632,11 @@ mod tests {
 
         assert_eq!(
             config.metadata_max_age,
-            core::time::Duration::from_millis(31)
+            std::time::Duration::from_millis(31)
         );
         assert_eq!(
             config.metadata_max_idle,
-            core::time::Duration::from_millis(37)
+            std::time::Duration::from_millis(37)
         );
         assert_eq!(
             config.metadata_recovery_strategy,
@@ -1646,7 +1644,7 @@ mod tests {
         );
         assert_eq!(
             config.metadata_rebootstrap_trigger,
-            core::time::Duration::from_millis(41)
+            std::time::Duration::from_millis(41)
         );
     }
 

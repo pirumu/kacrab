@@ -2944,7 +2944,6 @@ impl ProducerSenderState {
         )
     }
 
-
     pub(crate) async fn wait_for_abort_completion<LatencyObserver, RequeueObserver>(
         &mut self,
         accumulator: &SharedAccumulator,
@@ -3414,7 +3413,7 @@ impl ProducerSenderState {
     }
 
     fn complete_pending_accumulator_batches(&mut self, accumulator: &SharedAccumulator) {
-        let identities = core::mem::take(&mut self.pending_accumulator_completions);
+        let identities = std::mem::take(&mut self.pending_accumulator_completions);
         let _completed = accumulator.complete_batch_identities(identities);
     }
 
@@ -3871,7 +3870,6 @@ mod tests {
             FlushDispatchProgress::WaitForCompletion
         );
     }
-
 
     #[tokio::test]
     async fn wait_for_abort_completion_handles_in_flight_dispatches_until_empty() {

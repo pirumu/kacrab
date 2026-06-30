@@ -1,6 +1,6 @@
 //! # kacrab
 //!
-//! A production-oriented Kafka client for Rust, built from the protocol up.
+//! A Kafka client for Rust, built from the protocol up.
 //!
 //! This is the public entry point users depend on. The current runtime surface
 //! is:
@@ -12,8 +12,6 @@
 //! The companion crate [`kacrab-macros`] provides procedural macros.
 //!
 //! [`kacrab-macros`]: https://docs.rs/kacrab-macros
-
-#![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate self as kacrab;
 

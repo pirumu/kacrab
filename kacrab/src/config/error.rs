@@ -1,9 +1,6 @@
 //! Configuration errors.
 
-extern crate alloc;
-
-use alloc::string::String;
-use core::fmt;
+use std::{fmt, string::String};
 
 use super::ClientKind;
 

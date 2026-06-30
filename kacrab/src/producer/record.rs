@@ -1,17 +1,14 @@
 //! Public producer record, delivery, and receipt types.
 
-use core::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-};
 use std::{
     cell::Cell,
+    future::Future,
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU8, Ordering},
     },
-    task::Waker,
+    task::{Context, Poll, Waker},
 };
 
 use bytes::Bytes;
@@ -583,8 +580,8 @@ impl Default for DeliveryState {
     }
 }
 
-impl core::fmt::Debug for DeliveryState {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl std::fmt::Debug for DeliveryState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let error = self
             .error
             .lock()
@@ -845,7 +842,7 @@ fn take_wakers(state: &DeliveryState) -> Vec<Waker> {
         .wakers
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    core::mem::take(&mut *wakers)
+    std::mem::take(&mut *wakers)
 }
 
 fn take_callbacks(state: &DeliveryState) -> Vec<(usize, DeliveryCallback)> {
@@ -853,19 +850,14 @@ fn take_callbacks(state: &DeliveryState) -> Vec<(usize, DeliveryCallback)> {
         .callbacks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    core::mem::take(&mut *callbacks)
+    std::mem::take(&mut *callbacks)
 }
 
 fn invoke_delivery_callback(callback: DeliveryCallback, result: Result<RecordMetadata>) {
-    #[cfg(feature = "std")]
-    {
-        let _ignored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _scope = enter_delivery_callback_scope();
-            callback(result);
-        }));
-    }
-    #[cfg(not(feature = "std"))]
-    callback(result);
+    let _ignored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _scope = enter_delivery_callback_scope();
+        callback(result);
+    }));
 }
 
 fn lock_is_empty<T>(mutex: &Mutex<Vec<T>>) -> bool {

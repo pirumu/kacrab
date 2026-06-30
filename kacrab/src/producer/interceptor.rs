@@ -153,7 +153,6 @@ impl ProducerInterceptors {
         }
     }
 
-    #[cfg(feature = "std")]
     pub(crate) fn close(&self) {
         for interceptor in self.inner.iter() {
             let _ignored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -161,23 +160,10 @@ impl ProducerInterceptors {
             }));
         }
     }
-
-    #[cfg(not(feature = "std"))]
-    pub(crate) fn close(&self) {
-        for interceptor in self.inner.iter() {
-            interceptor.close();
-        }
-    }
 }
 
-#[cfg(feature = "std")]
 fn catch_interceptor_unwind<T>(f: impl FnOnce() -> T) -> Option<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
-}
-
-#[cfg(not(feature = "std"))]
-fn catch_interceptor_unwind<T>(f: impl FnOnce() -> T) -> Option<T> {
-    Some(f())
 }
 
 impl fmt::Debug for ProducerInterceptors {

@@ -1,8 +1,6 @@
 //! Structured warnings returned by lenient config parsing.
 
-extern crate alloc;
-
-use alloc::{format, string::String, vec::Vec};
+use std::{format, string::String, vec::Vec};
 
 use super::ClientKind;
 

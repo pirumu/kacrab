@@ -1,9 +1,6 @@
 //! Deterministic Java-style property containers.
 
-extern crate alloc;
-
-use alloc::{collections::BTreeMap, string::String};
-use core::fmt;
+use std::{collections::BTreeMap, fmt, string::String};
 
 /// Normalized Java-style configuration key.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]

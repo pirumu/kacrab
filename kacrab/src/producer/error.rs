@@ -193,4 +193,4 @@ pub enum ProducerError {
 }
 
 /// Result alias for producer operations.
-pub type Result<T> = core::result::Result<T, ProducerError>;
+pub type Result<T> = std::result::Result<T, ProducerError>;
