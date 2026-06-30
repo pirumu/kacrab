@@ -41,7 +41,6 @@ cargo bench -p kacrab-benches --bench producer_accumulator
 cargo bench -p kacrab-benches --bench wire_pipeline
 cargo bench -p kacrab-benches --bench producer_dispatcher
 cargo run -p kacrab-benches --release --bin producer_mock_bench
-KACRAB_BENCH_SMOKE=1 cargo run -p kacrab-benches --release --bin producer_kafka_bench
 cargo run -p kacrab-benches --release --bin producer_kafka_bench
 KACRAB_ONLY_10KIB=1 cargo run -p kacrab-benches --release --bin producer_kafka_bench
 ```
@@ -113,72 +112,42 @@ actual dispatcher-encoded record batches. Java producer-perf public metrics do n
 exact record-batch count or records-per-batch count, so those fields are
 labeled `not_exposed_by_producer_perf`; do not treat them as parity proof.
 
-The default benchmark profile is `kafka-default`: the binary sets only
-`bootstrap.servers` and `client.id`, then relies on the producer's normal
-Kafka-compatible defaults. The previous throughput-oriented local baseline is
-still available with `KACRAB_BENCH_PROFILE=relaxed`.
+By default the binary sets only `bootstrap.servers` and `client.id` and relies
+on the producer's normal Kafka-compatible defaults (`acks=all`,
+`enable.idempotence=true`, no compression). Set `KACRAB_BENCH_ACKS1=1` for the
+relaxed throughput-comparison config (`acks=1`, idempotence disabled).
 
-Useful real-Kafka knobs:
+Useful real-Kafka knobs (all read from the environment by `producer_kafka_bench`,
+so set them inline before `cargo run`):
 
-- `KACRAB_BENCH_PROFILE=kafka-default|relaxed` selects the producer config
-  profile. `kafka-default` is the default and applies no throughput tuning.
-  `relaxed` applies the old comparison settings: idempotence disabled,
-  `acks=1`, no compression, `retries=0`, explicit timeouts, `batch.size`, and
-  bounded queue/pool knobs.
-- `KACRAB_IN_FLIGHT` explicitly overrides
-  `max.in.flight.requests.per.connection`.
-- `KACRAB_ACKS` explicitly overrides `acks`. `KACRAB_ACKS=0` is a no-response
-  produce path; use it only with a valid config such as
-  `KACRAB_BENCH_PROFILE=relaxed KACRAB_ACKS=0`, because idempotence requires
-  acknowledgement.
-- `KACRAB_PARTITION_MODE=unassigned` uses the default Java-style sticky
-  partitioner for null-key records. This is the default benchmark mode.
-- `KACRAB_PARTITION_MODE=manual` keeps the older manual round-robin benchmark
-  path for isolating partitioner overhead.
-- `KACRAB_BATCH_SIZE` explicitly overrides producer `batch.size`.
-- `KACRAB_BATCH_MESSAGES_10B` controls the outer API chunk size for the 10-byte
-  scenario. This is benchmark harness chunking, not Kafka producer
-  `batch.size`.
-- `KACRAB_BATCH_MESSAGES_10KIB` controls the outer API chunk size for the
-  10 KiB scenario. This is benchmark harness chunking, not Kafka producer
-  `batch.size`. The default is `96`, matching the saved relaxed five-run
-  baseline.
-- `KACRAB_ONLY_10B=1` runs only the 5M × 10B scenario.
-- `KACRAB_ONLY_10KIB=1` runs only the 100K × 10 KiB scenario.
-- `KACRAB_ENABLE_METRICS=1` enables opt-in producer accounting metrics in the
-  executable output: broker Produce requests, records, retries, errors,
-  requeues, and batch fill ratio. The default keeps this disabled so baseline
-  throughput does not pay for operational counters.
-- `KACRAB_ENABLE_LATENCY=1` enables dispatch latency sampling and percentile
-  output. The default keeps this disabled so throughput-only runs do not pay
-  for latency accounting. In `tracked` mode, Java-style callback latency is
-  always collected because it is part of the tracked benchmark semantics.
-- `KACRAB_BENCH_API` is accepted for old scripts, but all values resolve to the
-  Java-style per-record public API. The benchmark uses `send_with_callback` once
-  per record and measures callback latency from immediately before send to
-  callback completion, matching Kafka Java producer-perf tracking semantics.
-- `KACRAB_TRACKED_DELIVERY_WINDOW` bounds how many callback-tracked records are
-  sent before the benchmark forces a `flush`. The default is unbounded unless
-  set explicitly.
-- `KACRAB_REPORTING_INTERVAL_MS` controls tracked-mode progress output. The
-  default is `5000`, matching Kafka Java producer-perf
-  `--reporting-interval`.
-- `KACRAB_CUSTOM_MESSAGES`, `KACRAB_CUSTOM_VALUE_SIZE`, and
-  `KACRAB_CUSTOM_BATCH_MESSAGES` run one custom payload profile instead of the
-  built-in extremes.
-- `KACRAB_PAYLOAD_FILE=/path/to/payload.bin` repeats bytes from a real payload
-  file. If `KACRAB_CUSTOM_VALUE_SIZE` is omitted, the benchmark uses the file
-  size for buffer sizing and scenario labeling; if `KACRAB_CUSTOM_MESSAGES` is
-  omitted, it sends 100K records.
-
-Example real-payload run:
-
-```bash
-KACRAB_PAYLOAD_FILE=/tmp/order-event.bin \
-KACRAB_CUSTOM_MESSAGES=250000 \
-KACRAB_CUSTOM_BATCH_MESSAGES=2048 \
-cargo run -p kacrab-benches --release --bin producer_kafka_bench
-```
+- `KACRAB_BOOTSTRAP` — broker address (default `127.0.0.1:9092`).
+- `KACRAB_BENCH_TOPIC` — topic (default `kacrab-bench`).
+- `KACRAB_BENCH_ACKS1=1` — switch to `acks=1` + `enable.idempotence=false` (the
+  relaxed comparison config); the default is `acks=all` + idempotence on.
+- `KACRAB_BENCH_BATCH_SIZE=N` — override producer `batch.size` (probe whether
+  throughput is round-trip / pipelining bound).
+- `KACRAB_BENCH_MAX_REQUEST_SIZE=N` — override `max.request.size`, lifting the
+  1 MiB default so large-record runs with a bigger `batch.size` do not trip
+  `RecordTooLarge` on coalesced requests.
+- `KACRAB_BENCH_SYNC_SEND=1` — use the synchronous send path (real sticky
+  partitioner, non-blocking partition assignment) instead of the async path.
+- `KACRAB_BENCH_SEND_CONCURRENCY=N` — number of concurrent in-flight send tasks
+  (default `1`).
+- `KACRAB_BENCH_CURRENT_THREAD=1` — force the single-thread Tokio runtime
+  (default: multi-thread).
+- `KACRAB_BENCH_WORKERS=N` — worker threads for the multi-thread runtime
+  (default `4`).
+- `KACRAB_BENCH_NO_METRICS=1` — disable the producer accounting metrics (broker
+  Produce requests, records, retries, errors, requeues, fill ratio); these are
+  enabled by default.
+- `KACRAB_ONLY_10B=1` — run only the 5M × 10B scenario.
+- `KACRAB_ONLY_10KIB=1` — run only the 100K × 10 KiB scenario.
+- `KACRAB_BENCH_MESSAGES=N` — run a single 10B scenario with `N` records.
+- `KACRAB_BENCH_RUNS=N` — number of runs per scenario.
+- `KACRAB_BENCH_API` — accepted for old scripts but a no-op; every value resolves
+  to the Java-style per-record public API. The benchmark calls
+  `send_with_callback` once per record and measures callback latency from just
+  before send to callback completion, matching Kafka Java producer-perf tracking.
 
 The public API hot path is allocation-conscious rather than magically
 wire-zero-copy: payloads are cloned as `Bytes` handles, and benchmark topics are
@@ -295,9 +264,10 @@ Wire pipeline:
 - Client and broker share the same machine, CPU, memory, and disk. There was no
   CPU pinning, broker log-dir purge between every trial, page-cache isolation,
   or background-load control.
-- The Kafka setup is deliberately relaxed for throughput exploration:
-  single-node KRaft, 3 partitions, RF=1, `acks=1`, idempotence disabled, no
-  compression, and no replication durability target.
+- The Kafka setup is single-node KRaft with RF=1 and no replication durability
+  target. The baselines above run the default `acks=all` + idempotence config;
+  the relaxed `acks=1` / no-idempotence config is opt-in via
+  `KACRAB_BENCH_ACKS1=1`.
 - Kacrab throughput prints payload MiB/sec. Kafka's Java perf tool prints
   decimal MB/sec, so MiB/sec and MB/sec values should not be compared as the
   same unit.

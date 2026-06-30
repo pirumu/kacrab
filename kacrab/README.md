@@ -18,7 +18,8 @@ The remaining product order is consumer, then admin, then streams.
 
 ## Java Compatibility
 
-Auth and producer are 100% Java-compatible targets for the implemented surface:
+Auth and producer are Java-compatible targets for the implemented surface
+(outcome-faithful to the Java client, not a literal class-for-class port):
 
 - Use familiar Java client keys such as `bootstrap.servers`,
   `security.protocol`, `ssl.truststore.location`, `sasl.mechanism`,
@@ -72,11 +73,11 @@ runtime currently use `std` and Tokio.
 ## Producer Example
 
 ```rust
-use kacrab::producer::{KafkaProducer, ProducerRecord};
+use kacrab::producer::{Producer, ProducerRecord};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut producer = KafkaProducer::builder()
+    let mut producer = Producer::builder()
         .set("bootstrap.servers", "127.0.0.1:9092")
         .set("client.id", "kacrab-example")
         .set("acks", "all")
@@ -86,15 +87,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
+    // `send` is synchronous (Kafka `Producer.send` shape): it enqueues the
+    // record and returns a future you await for the broker acknowledgement.
     let delivery = producer
-        .send(ProducerRecord::new("orders", 0).key("k").value("v"))
-        .await?;
+        .send(ProducerRecord::new("orders", 0).key("k").value("v"))?;
 
     producer.flush().await?;
     let receipt = delivery.await?;
     println!(
         "topic={} partition={} offset={}",
-        receipt.topic, receipt.partition, receipt.base_offset
+        receipt.topic, receipt.partition, receipt.offset
     );
 
     producer.close().await?;
