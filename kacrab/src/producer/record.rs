@@ -1493,6 +1493,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(tarpaulin, ignore = "timing-sensitive under coverage instrumentation")]
     fn pending_delivery_registers_one_waker_and_sender_wakes_it() {
         let (sender, mut delivery) = SendFuture::channel();
         let counter = Arc::new(WakeCounter::default());
