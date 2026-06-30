@@ -110,8 +110,12 @@ implemented surface:
         per-request map), leadership-error invalidation (metadata refresh on
         leader change), and a reconnect/backoff policy (exponential + jitter,
         resets on a successful connection).
+  - [x] Multi-broker dispatch and leadership-change failover verified against a
+        real 3-broker KRaft cluster (`docker-compose.cluster.yml`): records route
+        to every broker's leaders, and a broker loss re-routes affected
+        partitions to their new leaders without wedging co-batched ones.
   - [ ] Sustained multi-broker stress tests and cross-DC / high-RTT coverage
-        (the multi-broker dispatch path itself exists but is unmeasured).
+        (functionally verified, but not yet load- or latency-tested).
 - [x] Producer usable baseline
   - [x] Public `Producer` API with Kafka config keys and synchronous
         `send`/`send_with_callback` (Kafka `Producer.send` shape) returning a
@@ -135,9 +139,12 @@ implemented surface:
   - [x] Throughput parity with the Java client on a single-node broker at the
         default `acks=all` + idempotence config, at ~4x less memory / ~1.5x less
         CPU (see [Benchmarks](#benchmarks)).
-  - [ ] Production acceptance: sustained multi-broker stress, memory soak,
-        leadership-change refresh coverage, and latency-percentile gates on
-        realistic multi-broker workloads.
+  - [x] Leadership-change refresh: a concurrent multi-partition burst recovers
+        when a broker is lost (a wire disconnect invalidates the stale leader so
+        the retry re-fetches metadata and re-routes), verified against a real
+        3-broker cluster.
+  - [ ] Production acceptance: sustained multi-broker stress, memory soak, and
+        latency-percentile gates on realistic multi-broker workloads.
 - [ ] Consumer
   - [ ] Manual assignment, fetch, offsets, and committed offset handling.
   - [ ] Group coordination: join, sync, heartbeat, rebalance, and offset commit.
