@@ -10,46 +10,60 @@ use std::{collections::HashMap, time::Duration};
 use kacrab_protocol::{
     KafkaString, KafkaUuid,
     generated::{
-        AlterClientQuotasRequestData, AlterClientQuotasResponseData, AlterConfigsRequestData,
-        AlterConfigsResponseData, AlterPartitionReassignmentsRequestData,
-        AlterPartitionReassignmentsResponseData, AlterReplicaLogDirsRequestData,
-        AlterReplicaLogDirsResponseData, AlterUserScramCredentialsRequestData,
-        AlterUserScramCredentialsResponseData, ApiKey, ApiVersionsRequestData,
-        ApiVersionsResponseData, CreateAclsRequestData, CreateAclsResponseData,
-        CreateDelegationTokenRequestData, CreateDelegationTokenResponseData,
-        CreatePartitionsRequestData, CreatePartitionsResponseData, CreateTopicsRequestData,
-        CreateTopicsResponseData, DeleteAclsRequestData, DeleteAclsResponseData,
-        DeleteGroupsRequestData, DeleteGroupsResponseData, DeleteRecordsPartition,
-        DeleteRecordsRequestData, DeleteRecordsResponseData, DeleteRecordsTopic, DeleteTopicState,
-        DeleteTopicsRequestData, DeleteTopicsResponseData, DescribableLogDirTopic,
-        DescribeAclsRequestData, DescribeAclsResponseData, DescribeClientQuotasRequestData,
+        AddRaftVoterRequestData, AddRaftVoterResponseData, AlterClientQuotasRequestData,
+        AlterClientQuotasResponseData, AlterConfigsRequestData, AlterConfigsResponseData,
+        AlterPartitionReassignmentsRequestData, AlterPartitionReassignmentsResponseData,
+        AlterReplicaLogDirsRequestData, AlterReplicaLogDirsResponseData,
+        AlterShareGroupOffsetsRequestData, AlterShareGroupOffsetsResponseData,
+        AlterUserScramCredentialsRequestData, AlterUserScramCredentialsResponseData, ApiKey,
+        ApiVersionsRequestData, ApiVersionsResponseData, CreateAclsRequestData,
+        CreateAclsResponseData, CreateDelegationTokenRequestData,
+        CreateDelegationTokenResponseData, CreatePartitionsRequestData,
+        CreatePartitionsResponseData, CreateTopicsRequestData, CreateTopicsResponseData,
+        DeleteAclsRequestData, DeleteAclsResponseData, DeleteGroupsRequestData,
+        DeleteGroupsResponseData, DeleteRecordsPartition, DeleteRecordsRequestData,
+        DeleteRecordsResponseData, DeleteRecordsTopic, DeleteShareGroupOffsetsRequestData,
+        DeleteShareGroupOffsetsResponseData, DeleteTopicState, DeleteTopicsRequestData,
+        DeleteTopicsResponseData, DescribableLogDirTopic, DescribeAclsRequestData,
+        DescribeAclsResponseData, DescribeClientQuotasRequestData,
         DescribeClientQuotasResponseData, DescribeClusterRequestData, DescribeClusterResponseData,
         DescribeConfigsRequestData, DescribeConfigsResponseData,
         DescribeDelegationTokenRequestData, DescribeDelegationTokenResponseData,
         DescribeGroupsRequestData, DescribeGroupsResponseData, DescribeLogDirsRequestData,
         DescribeLogDirsResponseData, DescribeProducersRequestData, DescribeProducersResponseData,
+        DescribeQuorumRequestData, DescribeQuorumResponseData,
+        DescribeShareGroupOffsetsRequestData, DescribeShareGroupOffsetsResponseData,
         DescribeTransactionsRequestData, DescribeTransactionsResponseData,
         DescribeUserScramCredentialsRequestData, DescribeUserScramCredentialsResponseData,
         ElectLeadersRequestData, ElectLeadersResponseData, ErrorCode,
         ExpireDelegationTokenRequestData, ExpireDelegationTokenResponseData, FeatureUpdateKey,
         FindCoordinatorRequestData, FindCoordinatorResponseData,
         IncrementalAlterConfigsRequestData, IncrementalAlterConfigsResponseData,
-        InitProducerIdRequestData, InitProducerIdResponseData, ListGroupsRequestData,
-        ListGroupsResponseData, ListOffsetsPartition, ListOffsetsRequestData,
-        ListOffsetsResponseData, ListOffsetsTopic, ListPartitionReassignmentsRequestData,
-        ListPartitionReassignmentsResponseData, ListPartitionReassignmentsTopics,
-        ListTransactionsRequestData, ListTransactionsResponseData, OffsetCommitRequestData,
-        OffsetCommitRequestPartition, OffsetCommitRequestTopic, OffsetCommitResponseData,
-        OffsetDeleteRequestData, OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
-        OffsetDeleteResponseData, OffsetFetchRequestData, OffsetFetchRequestGroup,
-        OffsetFetchRequestTopics, OffsetFetchResponseData, ReassignablePartition,
-        ReassignableTopic, RenewDelegationTokenRequestData, RenewDelegationTokenResponseData,
-        UnregisterBrokerRequestData, UnregisterBrokerResponseData, UpdateFeaturesRequestData,
-        UpdateFeaturesResponseData, WriteTxnMarkersRequestData, WriteTxnMarkersResponseData,
+        InitProducerIdRequestData, InitProducerIdResponseData, LeaveGroupRequestData,
+        LeaveGroupResponseData, ListConfigResourcesRequestData, ListConfigResourcesResponseData,
+        ListGroupsRequestData, ListGroupsResponseData, ListOffsetsPartition,
+        ListOffsetsRequestData, ListOffsetsResponseData, ListOffsetsTopic,
+        ListPartitionReassignmentsRequestData, ListPartitionReassignmentsResponseData,
+        ListPartitionReassignmentsTopics, ListTransactionsRequestData,
+        ListTransactionsResponseData, OffsetCommitRequestData, OffsetCommitRequestPartition,
+        OffsetCommitRequestTopic, OffsetCommitResponseData, OffsetDeleteRequestData,
+        OffsetDeleteRequestPartition, OffsetDeleteRequestTopic, OffsetDeleteResponseData,
+        OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
+        OffsetFetchResponseData, ReassignablePartition, ReassignableTopic,
+        RemoveRaftVoterRequestData, RemoveRaftVoterResponseData, RenewDelegationTokenRequestData,
+        RenewDelegationTokenResponseData, ShareGroupDescribeRequestData,
+        ShareGroupDescribeResponseData, StreamsGroupDescribeRequestData,
+        StreamsGroupDescribeResponseData, UnregisterBrokerRequestData,
+        UnregisterBrokerResponseData, UpdateFeaturesRequestData, UpdateFeaturesResponseData,
+        WriteTxnMarkersRequestData, WriteTxnMarkersResponseData,
+        add_raft_voter_request::Listener,
         alter_client_quotas_request::{
             EntityData as AlterClientQuotasEntity, EntryData as AlterClientQuotasEntry, OpData,
         },
         alter_replica_log_dirs_request::{AlterReplicaLogDir, AlterReplicaLogDirTopic},
+        alter_share_group_offsets_request::{
+            AlterShareGroupOffsetsRequestPartition, AlterShareGroupOffsetsRequestTopic,
+        },
         alter_user_scram_credentials_request::{
             ScramCredentialDeletion as WireScramCredentialDeletion,
             ScramCredentialUpsertion as WireScramCredentialUpsertion,
@@ -57,11 +71,16 @@ use kacrab_protocol::{
         create_acls_request::AclCreation,
         create_delegation_token_request::CreatableRenewers,
         delete_acls_request::DeleteAclsFilter,
+        delete_share_group_offsets_request::DeleteShareGroupOffsetsRequestTopic,
         describe_client_quotas_request::ComponentData,
         describe_delegation_token_request::DescribeDelegationTokenOwner,
         describe_producers_request::TopicRequest as DescribeProducersTopicRequest,
+        describe_share_group_offsets_request::{
+            DescribeShareGroupOffsetsRequestGroup, DescribeShareGroupOffsetsRequestTopic,
+        },
         describe_user_scram_credentials_request::UserName,
         elect_leaders_request::TopicPartitions as ElectLeadersTopicPartitions,
+        leave_group_request::MemberIdentity,
         write_txn_markers_request::{WritableTxnMarker, WritableTxnMarkerTopic},
     },
     version::client_api_info,
@@ -80,12 +99,13 @@ use super::{
         FeatureUpdate, FencedProducer, FinalizedVersionRange, GroupOffset,
         ListConsumerGroupOffsetsOptions, ListConsumerGroupsOptions, ListOffsetsResult,
         ListTopicsOptions, ListTransactionsOptions, LogDirDescription, LogDirReplicaInfo,
-        MemberDescription, NewPartitionReassignment, NewPartitions, NewTopic, Node, OffsetSpec,
-        PartitionProducerState, PartitionReassignment, ProducerState, ReplicaLogDirAssignment,
+        MemberDescription, MemberToRemove, NewPartitionReassignment, NewPartitions, NewTopic, Node,
+        OffsetSpec, PartitionProducerState, PartitionReassignment, ProducerState, QuorumInfo,
+        QuorumReplicaState, RaftVoterEndpoint, ReplicaLogDirAssignment, ReplicaLogDirInfo,
         ResourceConfig, ResourceType, ScramCredentialDeletion, ScramCredentialInfo,
-        ScramCredentialUpsertion, ScramMechanism, SupportedVersionRange, TopicDescription,
-        TopicListing, TopicPartitionInfo, TransactionDescription, TransactionListing,
-        UserScramCredentials,
+        ScramCredentialUpsertion, ScramMechanism, ShareGroupDescription, StreamsGroupDescription,
+        SupportedVersionRange, TopicDescription, TopicListing, TopicPartitionInfo,
+        TransactionDescription, TransactionListing, UserScramCredentials,
     },
 };
 use crate::{
@@ -103,6 +123,9 @@ const MAX_CONTROLLER_ATTEMPTS: u32 = 8;
 /// Transaction timeout sent in the `InitProducerId` used to fence producers; the
 /// value is immaterial since fencing only bumps the epoch.
 const FENCE_PRODUCER_TXN_TIMEOUT_MS: i32 = 60_000;
+/// The internal topic backing the `KRaft` metadata quorum, queried by
+/// `describe_metadata_quorum`.
+const METADATA_QUORUM_TOPIC: &str = "__cluster_metadata";
 
 /// A Kafka admin client for managing topics, partitions, and configs.
 ///
@@ -1368,6 +1391,709 @@ impl AdminClient {
             supported_features,
             finalized_features,
         })
+    }
+
+    /// List all groups in the cluster (any type), aggregated across brokers.
+    /// Mirrors Java's `listGroups`.
+    ///
+    /// # Errors
+    /// Returns a wire error or the first broker top-level error code.
+    pub async fn list_groups(
+        &self,
+        options: ListConsumerGroupsOptions,
+    ) -> Result<Vec<ConsumerGroupListing>> {
+        let request = ListGroupsRequestData {
+            states_filter: options.states_filter.into_iter().map(Into::into).collect(),
+            types_filter: options.types_filter.into_iter().map(Into::into).collect(),
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let metadata = self.wire.admin_metadata(None).await?;
+        let broker_ids: Vec<i32> = metadata
+            .brokers
+            .iter()
+            .map(|broker| broker.node_id)
+            .collect();
+        let version = client_api_info(ApiKey::ListGroups).max_version;
+        let mut listings = Vec::new();
+        for broker_id in broker_ids {
+            let response: ListGroupsResponseData = self
+                .wire
+                .send_to_broker(broker_id, ApiKey::ListGroups, version, &request)
+                .await?;
+            check_code("", response.error_code, None)?;
+            for group in response.groups {
+                listings.push(ConsumerGroupListing {
+                    group_id: group.group_id.as_str().to_owned(),
+                    is_simple_consumer_group: group.protocol_type.as_str().is_empty(),
+                    state: non_empty(group.group_state.as_str()),
+                    group_type: non_empty(group.group_type.as_str()),
+                });
+            }
+        }
+        Ok(listings)
+    }
+
+    /// Describe the given classic-protocol groups. Like
+    /// [`describe_consumer_groups`](Self::describe_consumer_groups), it uses the
+    /// `DescribeGroups` API against each group's coordinator.
+    ///
+    /// # Errors
+    /// As [`describe_consumer_groups`](Self::describe_consumer_groups).
+    pub async fn describe_classic_groups(
+        &self,
+        group_ids: Vec<String>,
+        options: DescribeConsumerGroupsOptions,
+    ) -> Result<Vec<ConsumerGroupDescription>> {
+        self.describe_consumer_groups(group_ids, options).await
+    }
+
+    /// Remove members from a consumer group via `LeaveGroup` (e.g. to evict
+    /// static members), routed to the group coordinator.
+    ///
+    /// # Errors
+    /// Returns the coordinator-lookup error, the top-level, or first per-member
+    /// broker error code.
+    pub async fn remove_members_from_consumer_group(
+        &self,
+        group_id: &str,
+        members: Vec<MemberToRemove>,
+    ) -> Result<()> {
+        let request = LeaveGroupRequestData {
+            group_id: group_id.to_owned().into(),
+            member_id: String::new().into(),
+            members: members
+                .into_iter()
+                .map(|member| MemberIdentity {
+                    member_id: member.member_id.unwrap_or_default().into(),
+                    group_instance_id: member.group_instance_id.map(Into::into),
+                    reason: None,
+                    _unknown_tagged_fields: Vec::new(),
+                })
+                .collect(),
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let coordinator = self.group_coordinator(group_id).await?;
+        let version = client_api_info(ApiKey::LeaveGroup).max_version;
+        let response: LeaveGroupResponseData = self
+            .wire
+            .send_to_broker(coordinator.id, ApiKey::LeaveGroup, version, &request)
+            .await?;
+        check_code(group_id, response.error_code, None)?;
+        for member in &response.members {
+            check_code(group_id, member.error_code, None)?;
+        }
+        Ok(())
+    }
+
+    /// List the config resources of the given types (e.g. topics, brokers,
+    /// client-metrics subscriptions). Mirrors Java's `listConfigResources`.
+    ///
+    /// # Errors
+    /// Returns the broker error code or a wire error.
+    pub async fn list_config_resources(
+        &self,
+        resource_types: Vec<ResourceType>,
+    ) -> Result<Vec<ConfigResource>> {
+        let request = ListConfigResourcesRequestData {
+            resource_types: resource_types.iter().map(|ty| ty.to_wire()).collect(),
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let broker_id = self.wire.admin_any_broker_id()?;
+        let version = client_api_info(ApiKey::ListConfigResources).max_version;
+        let response: ListConfigResourcesResponseData = self
+            .wire
+            .send_to_broker(broker_id, ApiKey::ListConfigResources, version, &request)
+            .await?;
+        check_code("", response.error_code, None)?;
+        Ok(response
+            .config_resources
+            .into_iter()
+            .map(|resource| ConfigResource {
+                resource_type: ResourceType::from_wire(resource.resource_type),
+                name: resource.resource_name.as_str().to_owned(),
+            })
+            .collect())
+    }
+
+    /// List the names of client-metrics subscription resources. Mirrors Java's
+    /// `listClientMetricsResources` (a `listConfigResources` over `ClientMetrics`).
+    ///
+    /// # Errors
+    /// Returns the broker error code or a wire error.
+    pub async fn list_client_metrics_resources(&self) -> Result<Vec<String>> {
+        let resources = self
+            .list_config_resources(vec![ResourceType::ClientMetrics])
+            .await?;
+        Ok(resources
+            .into_iter()
+            .map(|resource| resource.name)
+            .collect())
+    }
+
+    /// Describe the log directory hosting each given replica
+    /// `(partition, broker)`, including any pending future-replica directory.
+    ///
+    /// # Errors
+    /// Returns a wire error or the first per-broker top-level error code.
+    pub async fn describe_replica_log_dirs(
+        &self,
+        replicas: Vec<(TopicPartition, i32)>,
+    ) -> Result<Vec<ReplicaLogDirInfo>> {
+        let mut by_broker: HashMap<i32, Vec<TopicPartition>> = HashMap::new();
+        for (topic_partition, broker_id) in &replicas {
+            by_broker
+                .entry(*broker_id)
+                .or_default()
+                .push(topic_partition.clone());
+        }
+        let version = client_api_info(ApiKey::DescribeLogDirs).max_version;
+        let mut infos = Vec::with_capacity(replicas.len());
+        for (broker_id, partitions) in by_broker {
+            let request = DescribeLogDirsRequestData {
+                topics: describe_log_dirs_topics(&partitions),
+                _unknown_tagged_fields: Vec::new(),
+            };
+            let response: DescribeLogDirsResponseData = self
+                .wire
+                .send_to_broker(broker_id, ApiKey::DescribeLogDirs, version, &request)
+                .await?;
+            check_code("", response.error_code, None)?;
+            for partition in partitions {
+                let mut current_log_dir = None;
+                let mut future_log_dir = None;
+                for result in &response.results {
+                    for topic in &result.topics {
+                        if topic.name.as_str() != partition.topic {
+                            continue;
+                        }
+                        for entry in &topic.partitions {
+                            if entry.partition_index != partition.partition {
+                                continue;
+                            }
+                            let dir = result.log_dir.as_str().to_owned();
+                            if entry.is_future_key {
+                                future_log_dir = Some(dir);
+                            } else {
+                                current_log_dir = Some(dir);
+                            }
+                        }
+                    }
+                }
+                infos.push(ReplicaLogDirInfo {
+                    topic_partition: partition,
+                    broker_id,
+                    current_log_dir,
+                    future_log_dir,
+                });
+            }
+        }
+        Ok(infos)
+    }
+
+    /// Describe the `KRaft` metadata quorum state.
+    ///
+    /// # Errors
+    /// Returns the broker error code, a wire error, or
+    /// [`AdminError::MissingResult`] if the broker omits the quorum partition.
+    pub async fn describe_metadata_quorum(&self) -> Result<QuorumInfo> {
+        let request = DescribeQuorumRequestData {
+            topics: vec![
+                kacrab_protocol::generated::describe_quorum_request::TopicData {
+                    topic_name: METADATA_QUORUM_TOPIC.to_owned().into(),
+                    partitions: vec![
+                        kacrab_protocol::generated::describe_quorum_request::PartitionData {
+                            partition_index: 0,
+                            _unknown_tagged_fields: Vec::new(),
+                        },
+                    ],
+                    _unknown_tagged_fields: Vec::new(),
+                },
+            ],
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let broker_id = self.wire.admin_any_broker_id()?;
+        let version = client_api_info(ApiKey::DescribeQuorum).max_version;
+        let response: DescribeQuorumResponseData = self
+            .wire
+            .send_to_broker(broker_id, ApiKey::DescribeQuorum, version, &request)
+            .await?;
+        check_code("", response.error_code, response.error_message.as_ref())?;
+        let partition = response
+            .topics
+            .into_iter()
+            .find(|topic| topic.topic_name.as_str() == METADATA_QUORUM_TOPIC)
+            .and_then(|topic| topic.partitions.into_iter().next())
+            .ok_or_else(|| AdminError::MissingResult {
+                target: METADATA_QUORUM_TOPIC.to_owned(),
+            })?;
+        check_code(
+            METADATA_QUORUM_TOPIC,
+            partition.error_code,
+            partition.error_message.as_ref(),
+        )?;
+        let map_state =
+            |replica: &kacrab_protocol::generated::describe_quorum_response::ReplicaState| {
+                QuorumReplicaState {
+                    replica_id: replica.replica_id,
+                    log_end_offset: replica.log_end_offset,
+                }
+            };
+        Ok(QuorumInfo {
+            leader_id: partition.leader_id,
+            leader_epoch: partition.leader_epoch,
+            high_watermark: partition.high_watermark,
+            voters: partition.current_voters.iter().map(map_state).collect(),
+            observers: partition.observers.iter().map(map_state).collect(),
+        })
+    }
+
+    /// Add a `KRaft` voter to the metadata quorum (controller-routed).
+    ///
+    /// # Errors
+    /// Returns the broker error code or a routing error.
+    pub async fn add_raft_voter(
+        &self,
+        voter_id: i32,
+        voter_directory_id: KafkaUuid,
+        endpoints: Vec<RaftVoterEndpoint>,
+    ) -> Result<()> {
+        let request = AddRaftVoterRequestData {
+            cluster_id: None,
+            timeout_ms: self.request_timeout_ms,
+            voter_id,
+            voter_directory_id,
+            listeners: endpoints
+                .into_iter()
+                .map(|endpoint| Listener {
+                    name: endpoint.name.into(),
+                    host: endpoint.host.into(),
+                    port: endpoint.port,
+                    _unknown_tagged_fields: Vec::new(),
+                })
+                .collect(),
+            ack_when_committed: true,
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let response: AddRaftVoterResponseData = self
+            .route_to_controller(
+                ApiKey::AddRaftVoter,
+                &request,
+                |response: &AddRaftVoterResponseData| is_not_controller(response.error_code),
+            )
+            .await?;
+        check_code("", response.error_code, response.error_message.as_ref())?;
+        Ok(())
+    }
+
+    /// Remove a `KRaft` voter from the metadata quorum (controller-routed).
+    ///
+    /// # Errors
+    /// Returns the broker error code or a routing error.
+    pub async fn remove_raft_voter(
+        &self,
+        voter_id: i32,
+        voter_directory_id: KafkaUuid,
+    ) -> Result<()> {
+        let request = RemoveRaftVoterRequestData {
+            cluster_id: None,
+            voter_id,
+            voter_directory_id,
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let response: RemoveRaftVoterResponseData = self
+            .route_to_controller(
+                ApiKey::RemoveRaftVoter,
+                &request,
+                |response: &RemoveRaftVoterResponseData| is_not_controller(response.error_code),
+            )
+            .await?;
+        check_code("", response.error_code, response.error_message.as_ref())?;
+        Ok(())
+    }
+
+    /// Force-terminate a hanging transaction by fencing its producer (a
+    /// single-id [`fence_producers`](Self::fence_producers)). Mirrors Java's
+    /// `forceTerminateTransaction`.
+    ///
+    /// # Errors
+    /// As [`fence_producers`](Self::fence_producers).
+    pub async fn force_terminate_transaction(
+        &self,
+        transactional_id: &str,
+    ) -> Result<FencedProducer> {
+        let mut fenced = self
+            .fence_producers(vec![transactional_id.to_owned()])
+            .await?;
+        fenced.pop().ok_or_else(|| AdminError::MissingResult {
+            target: transactional_id.to_owned(),
+        })
+    }
+
+    /// Describe the given share groups (Kafka 4.x, KIP-932), routed per group to
+    /// its coordinator.
+    ///
+    /// # Errors
+    /// Returns the coordinator-lookup error, the per-group broker error code, or
+    /// [`AdminError::MissingResult`] when the broker omits a group.
+    pub async fn describe_share_groups(
+        &self,
+        group_ids: Vec<String>,
+    ) -> Result<Vec<ShareGroupDescription>> {
+        let version = client_api_info(ApiKey::ShareGroupDescribe).max_version;
+        let mut described = Vec::with_capacity(group_ids.len());
+        for group_id in &group_ids {
+            let coordinator = self.group_coordinator(group_id).await?;
+            let request = ShareGroupDescribeRequestData {
+                group_ids: vec![group_id.clone().into()],
+                include_authorized_operations: false,
+                _unknown_tagged_fields: Vec::new(),
+            };
+            let response: ShareGroupDescribeResponseData = self
+                .wire
+                .send_to_broker(
+                    coordinator.id,
+                    ApiKey::ShareGroupDescribe,
+                    version,
+                    &request,
+                )
+                .await?;
+            let group = response
+                .groups
+                .into_iter()
+                .find(|group| group.group_id.as_str() == group_id)
+                .ok_or_else(|| AdminError::MissingResult {
+                    target: group_id.clone(),
+                })?;
+            check_code(group_id, group.error_code, group.error_message.as_ref())?;
+            let members = group
+                .members
+                .into_iter()
+                .map(|member| MemberDescription {
+                    member_id: member.member_id.as_str().to_owned(),
+                    group_instance_id: None,
+                    client_id: member.client_id.as_str().to_owned(),
+                    host: member.client_host.as_str().to_owned(),
+                })
+                .collect();
+            described.push(ShareGroupDescription {
+                group_id: group.group_id.as_str().to_owned(),
+                state: group.group_state.as_str().to_owned(),
+                group_epoch: group.group_epoch,
+                assignor_name: group.assignor_name.as_str().to_owned(),
+                members,
+                coordinator,
+            });
+        }
+        Ok(described)
+    }
+
+    /// Describe the given streams groups (Kafka 4.x, KIP-1071), routed per group
+    /// to its coordinator.
+    ///
+    /// # Errors
+    /// As [`describe_share_groups`](Self::describe_share_groups).
+    pub async fn describe_streams_groups(
+        &self,
+        group_ids: Vec<String>,
+    ) -> Result<Vec<StreamsGroupDescription>> {
+        let version = client_api_info(ApiKey::StreamsGroupDescribe).max_version;
+        let mut described = Vec::with_capacity(group_ids.len());
+        for group_id in &group_ids {
+            let coordinator = self.group_coordinator(group_id).await?;
+            let request = StreamsGroupDescribeRequestData {
+                group_ids: vec![group_id.clone().into()],
+                include_authorized_operations: false,
+                _unknown_tagged_fields: Vec::new(),
+            };
+            let response: StreamsGroupDescribeResponseData = self
+                .wire
+                .send_to_broker(
+                    coordinator.id,
+                    ApiKey::StreamsGroupDescribe,
+                    version,
+                    &request,
+                )
+                .await?;
+            let group = response
+                .groups
+                .into_iter()
+                .find(|group| group.group_id.as_str() == group_id)
+                .ok_or_else(|| AdminError::MissingResult {
+                    target: group_id.clone(),
+                })?;
+            check_code(group_id, group.error_code, group.error_message.as_ref())?;
+            let members = group
+                .members
+                .into_iter()
+                .map(|member| MemberDescription {
+                    member_id: member.member_id.as_str().to_owned(),
+                    group_instance_id: member.instance_id.map(|id| id.as_str().to_owned()),
+                    client_id: member.client_id.as_str().to_owned(),
+                    host: member.client_host.as_str().to_owned(),
+                })
+                .collect();
+            described.push(StreamsGroupDescription {
+                group_id: group.group_id.as_str().to_owned(),
+                state: group.group_state.as_str().to_owned(),
+                group_epoch: group.group_epoch,
+                members,
+                coordinator,
+            });
+        }
+        Ok(described)
+    }
+
+    /// List the committed share-group offsets, routed to the group coordinator.
+    ///
+    /// # Errors
+    /// Returns the coordinator-lookup error or the first broker error code.
+    pub async fn list_share_group_offsets(
+        &self,
+        group_id: &str,
+        partitions: Vec<TopicPartition>,
+    ) -> Result<Vec<GroupOffset>> {
+        let topics = if partitions.is_empty() {
+            None
+        } else {
+            let mut grouped: Vec<DescribeShareGroupOffsetsRequestTopic> = Vec::new();
+            for partition in &partitions {
+                if let Some(topic) = grouped
+                    .iter_mut()
+                    .find(|topic| topic.topic_name.as_str() == partition.topic)
+                {
+                    topic.partitions.push(partition.partition);
+                } else {
+                    grouped.push(DescribeShareGroupOffsetsRequestTopic {
+                        topic_name: partition.topic.clone().into(),
+                        partitions: vec![partition.partition],
+                        _unknown_tagged_fields: Vec::new(),
+                    });
+                }
+            }
+            Some(grouped)
+        };
+        let request = DescribeShareGroupOffsetsRequestData {
+            groups: vec![DescribeShareGroupOffsetsRequestGroup {
+                group_id: group_id.to_owned().into(),
+                topics,
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let coordinator = self.group_coordinator(group_id).await?;
+        let version = client_api_info(ApiKey::DescribeShareGroupOffsets).max_version;
+        let response: DescribeShareGroupOffsetsResponseData = self
+            .wire
+            .send_to_broker(
+                coordinator.id,
+                ApiKey::DescribeShareGroupOffsets,
+                version,
+                &request,
+            )
+            .await?;
+        let group = response
+            .groups
+            .into_iter()
+            .find(|group| group.group_id.as_str() == group_id)
+            .ok_or_else(|| AdminError::MissingResult {
+                target: group_id.to_owned(),
+            })?;
+        check_code(group_id, group.error_code, group.error_message.as_ref())?;
+        let mut offsets = Vec::new();
+        for topic in group.topics {
+            for partition in topic.partitions {
+                check_code(
+                    topic.topic_name.as_str(),
+                    partition.error_code,
+                    partition.error_message.as_ref(),
+                )?;
+                if partition.start_offset < 0 {
+                    continue;
+                }
+                offsets.push(GroupOffset {
+                    partition: TopicPartition::new(
+                        topic.topic_name.as_str().to_owned(),
+                        partition.partition_index,
+                    ),
+                    offset: build_offset(partition.start_offset, partition.leader_epoch, None),
+                });
+            }
+        }
+        Ok(offsets)
+    }
+
+    /// Reset share-group offsets to the given start offsets, routed to the group
+    /// coordinator.
+    ///
+    /// # Errors
+    /// Returns the coordinator-lookup error, the top-level, or first per-partition
+    /// broker error code.
+    pub async fn alter_share_group_offsets(
+        &self,
+        group_id: &str,
+        offsets: Vec<(TopicPartition, i64)>,
+    ) -> Result<()> {
+        let mut topics: Vec<AlterShareGroupOffsetsRequestTopic> = Vec::new();
+        for (topic_partition, start_offset) in offsets {
+            let partition = AlterShareGroupOffsetsRequestPartition {
+                partition_index: topic_partition.partition,
+                start_offset,
+                _unknown_tagged_fields: Vec::new(),
+            };
+            if let Some(topic) = topics
+                .iter_mut()
+                .find(|topic| topic.topic_name.as_str() == topic_partition.topic)
+            {
+                topic.partitions.push(partition);
+            } else {
+                topics.push(AlterShareGroupOffsetsRequestTopic {
+                    topic_name: topic_partition.topic.clone().into(),
+                    partitions: vec![partition],
+                    _unknown_tagged_fields: Vec::new(),
+                });
+            }
+        }
+        let request = AlterShareGroupOffsetsRequestData {
+            group_id: group_id.to_owned().into(),
+            topics,
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let coordinator = self.group_coordinator(group_id).await?;
+        let version = client_api_info(ApiKey::AlterShareGroupOffsets).max_version;
+        let response: AlterShareGroupOffsetsResponseData = self
+            .wire
+            .send_to_broker(
+                coordinator.id,
+                ApiKey::AlterShareGroupOffsets,
+                version,
+                &request,
+            )
+            .await?;
+        check_code(
+            group_id,
+            response.error_code,
+            response.error_message.as_ref(),
+        )?;
+        for topic in &response.responses {
+            for partition in &topic.partitions {
+                check_code(
+                    topic.topic_name.as_str(),
+                    partition.error_code,
+                    partition.error_message.as_ref(),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete share-group offsets for the given topics, routed to the group
+    /// coordinator.
+    ///
+    /// # Errors
+    /// Returns the coordinator-lookup error, the top-level, or first per-topic
+    /// broker error code.
+    pub async fn delete_share_group_offsets(
+        &self,
+        group_id: &str,
+        topics: Vec<String>,
+    ) -> Result<()> {
+        let request = DeleteShareGroupOffsetsRequestData {
+            group_id: group_id.to_owned().into(),
+            topics: topics
+                .into_iter()
+                .map(|topic_name| DeleteShareGroupOffsetsRequestTopic {
+                    topic_name: topic_name.into(),
+                    _unknown_tagged_fields: Vec::new(),
+                })
+                .collect(),
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let coordinator = self.group_coordinator(group_id).await?;
+        let version = client_api_info(ApiKey::DeleteShareGroupOffsets).max_version;
+        let response: DeleteShareGroupOffsetsResponseData = self
+            .wire
+            .send_to_broker(
+                coordinator.id,
+                ApiKey::DeleteShareGroupOffsets,
+                version,
+                &request,
+            )
+            .await?;
+        check_code(
+            group_id,
+            response.error_code,
+            response.error_message.as_ref(),
+        )?;
+        for topic in &response.responses {
+            check_code(
+                topic.topic_name.as_str(),
+                topic.error_code,
+                topic.error_message.as_ref(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Delete share groups by id (Kafka 4.x). Uses the `DeleteGroups` API, like
+    /// [`delete_consumer_groups`](Self::delete_consumer_groups).
+    ///
+    /// # Errors
+    /// As [`delete_consumer_groups`](Self::delete_consumer_groups).
+    pub async fn delete_share_groups(&self, group_ids: Vec<String>) -> Result<()> {
+        self.delete_consumer_groups(group_ids).await
+    }
+
+    /// List the committed offsets of a streams group (Kafka 4.x). Streams-group
+    /// offsets are stored like consumer-group offsets, so this uses the same
+    /// `OffsetFetch` path as
+    /// [`list_consumer_group_offsets`](Self::list_consumer_group_offsets).
+    ///
+    /// # Errors
+    /// As [`list_consumer_group_offsets`](Self::list_consumer_group_offsets).
+    pub async fn list_streams_group_offsets(
+        &self,
+        group_id: &str,
+        options: ListConsumerGroupOffsetsOptions,
+    ) -> Result<Vec<GroupOffset>> {
+        self.list_consumer_group_offsets(group_id, options).await
+    }
+
+    /// Alter (commit) the offsets of a streams group (Kafka 4.x), using the same
+    /// `OffsetCommit` path as
+    /// [`alter_consumer_group_offsets`](Self::alter_consumer_group_offsets).
+    ///
+    /// # Errors
+    /// As [`alter_consumer_group_offsets`](Self::alter_consumer_group_offsets).
+    pub async fn alter_streams_group_offsets(
+        &self,
+        group_id: &str,
+        offsets: Vec<(TopicPartition, OffsetAndMetadata)>,
+    ) -> Result<()> {
+        self.alter_consumer_group_offsets(group_id, offsets).await
+    }
+
+    /// Delete committed offsets of a streams group (Kafka 4.x), using the same
+    /// `OffsetDelete` path as
+    /// [`delete_consumer_group_offsets`](Self::delete_consumer_group_offsets).
+    ///
+    /// # Errors
+    /// As [`delete_consumer_group_offsets`](Self::delete_consumer_group_offsets).
+    pub async fn delete_streams_group_offsets(
+        &self,
+        group_id: &str,
+        partitions: Vec<TopicPartition>,
+    ) -> Result<()> {
+        self.delete_consumer_group_offsets(group_id, partitions)
+            .await
+    }
+
+    /// Delete streams groups by id (Kafka 4.x). Uses the `DeleteGroups` API, like
+    /// [`delete_consumer_groups`](Self::delete_consumer_groups).
+    ///
+    /// # Errors
+    /// As [`delete_consumer_groups`](Self::delete_consumer_groups).
+    pub async fn delete_streams_groups(&self, group_ids: Vec<String>) -> Result<()> {
+        self.delete_consumer_groups(group_ids).await
     }
 
     /// Describe client quotas matching the given filter components. With

@@ -1419,6 +1419,129 @@ pub struct FeatureMetadata {
     pub finalized_features: Vec<(String, FinalizedVersionRange)>,
 }
 
+/// A consumer-group member to remove, mirroring Java's `MemberToRemove`.
+///
+/// Used by
+/// [`remove_members_from_consumer_group`](super::AdminClient::remove_members_from_consumer_group):
+/// identify a static member by its `group_instance_id` or a dynamic member by
+/// its `member_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MemberToRemove {
+    /// The dynamic member id, if removing a dynamic member.
+    pub member_id: Option<String>,
+    /// The static group instance id, if removing a static member.
+    pub group_instance_id: Option<String>,
+}
+
+impl MemberToRemove {
+    /// Remove a static member by its group instance id.
+    #[must_use]
+    pub fn static_member(group_instance_id: impl Into<String>) -> Self {
+        Self {
+            member_id: None,
+            group_instance_id: Some(group_instance_id.into()),
+        }
+    }
+
+    /// Remove a dynamic member by its member id.
+    #[must_use]
+    pub fn dynamic_member(member_id: impl Into<String>) -> Self {
+        Self {
+            member_id: Some(member_id.into()),
+            group_instance_id: None,
+        }
+    }
+}
+
+/// The current/future log directory of one replica, returned by
+/// [`describe_replica_log_dirs`](super::AdminClient::describe_replica_log_dirs),
+/// mirroring Java's `ReplicaLogDirInfo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicaLogDirInfo {
+    /// The replica's partition.
+    pub topic_partition: TopicPartition,
+    /// The broker hosting the replica.
+    pub broker_id: i32,
+    /// The log dir currently hosting the replica, if known.
+    pub current_log_dir: Option<String>,
+    /// The log dir a pending move is creating the replica in, if any.
+    pub future_log_dir: Option<String>,
+}
+
+/// One replica's state in the metadata quorum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuorumReplicaState {
+    /// The replica (voter/observer) node id.
+    pub replica_id: i32,
+    /// The replica's log end offset.
+    pub log_end_offset: i64,
+}
+
+/// The metadata (`KRaft`) quorum state from
+/// [`describe_metadata_quorum`](super::AdminClient::describe_metadata_quorum),
+/// mirroring Java's `QuorumInfo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuorumInfo {
+    /// The current quorum leader node id.
+    pub leader_id: i32,
+    /// The current leader epoch.
+    pub leader_epoch: i32,
+    /// The quorum high watermark.
+    pub high_watermark: i64,
+    /// The voter replicas and their state.
+    pub voters: Vec<QuorumReplicaState>,
+    /// The observer replicas and their state.
+    pub observers: Vec<QuorumReplicaState>,
+}
+
+/// One advertised endpoint of a `KRaft` voter for
+/// [`add_raft_voter`](super::AdminClient::add_raft_voter).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftVoterEndpoint {
+    /// The listener name (e.g. `CONTROLLER`).
+    pub name: String,
+    /// The advertised host.
+    pub host: String,
+    /// The advertised port.
+    pub port: u16,
+}
+
+/// A share-group description from
+/// [`describe_share_groups`](super::AdminClient::describe_share_groups)
+/// (Kafka 4.x share groups, KIP-932).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareGroupDescription {
+    /// The share group id.
+    pub group_id: String,
+    /// The broker-reported group state name.
+    pub state: String,
+    /// The group epoch.
+    pub group_epoch: i32,
+    /// The assignor the group settled on.
+    pub assignor_name: String,
+    /// The group members.
+    pub members: Vec<MemberDescription>,
+    /// The group's coordinator broker.
+    pub coordinator: Node,
+}
+
+/// A streams-group description from
+/// [`describe_streams_groups`](super::AdminClient::describe_streams_groups)
+/// (Kafka 4.x streams groups, KIP-1071).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamsGroupDescription {
+    /// The streams group id.
+    pub group_id: String,
+    /// The broker-reported group state name.
+    pub state: String,
+    /// The group epoch.
+    pub group_epoch: i32,
+    /// The group members.
+    pub members: Vec<MemberDescription>,
+    /// The group's coordinator broker.
+    pub coordinator: Node,
+}
+
 #[cfg(test)]
 mod tests {
     use kacrab_protocol::KafkaString;
@@ -1637,6 +1760,20 @@ mod tests {
         assert_eq!(filter.resource_name, None);
         assert_eq!(filter.principal, None);
         assert_eq!(filter.host, None);
+    }
+
+    #[test]
+    fn member_to_remove_constructors_set_one_identifier() {
+        let static_member = MemberToRemove::static_member("instance-1");
+        assert_eq!(
+            static_member.group_instance_id.as_deref(),
+            Some("instance-1")
+        );
+        assert_eq!(static_member.member_id, None);
+
+        let dynamic_member = MemberToRemove::dynamic_member("member-1");
+        assert_eq!(dynamic_member.member_id.as_deref(), Some("member-1"));
+        assert_eq!(dynamic_member.group_instance_id, None);
     }
 
     #[test]
