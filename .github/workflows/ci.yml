@@ -71,10 +71,13 @@ jobs:
         with:
           tool: cargo-tarpaulin
 
-      # Honors tarpaulin.toml (excludes generated artifacts). The floor is below
-      # the measured ~84.6% to leave headroom; raise it as coverage grows.
+      # Honors tarpaulin.toml (excludes generated artifacts). Use the LLVM
+      # (source-based) engine instead of the default ptrace one: ptrace slows
+      # execution enough to flake the timing-sensitive sender tests, which pass
+      # under a normal `cargo test`. The floor is below the measured ~84.6% to
+      # leave headroom; raise it as coverage grows.
       - name: Coverage
-        run: cargo tarpaulin --workspace --all-features --timeout 360 --out Xml --fail-under 78
+        run: cargo tarpaulin --workspace --all-features --engine llvm --timeout 360 --out Xml --fail-under 78
 
       - uses: actions/upload-artifact@v4
         if: always()
