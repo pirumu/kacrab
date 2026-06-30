@@ -19,6 +19,7 @@
 # Correctness & performance
 
 - [Failure modes](./failure-modes.md)
+- [Testing, coverage & CI](./testing-and-ci.md)
 - [Verification against real brokers](./verification.md)
 - [Benchmarks & methodology](./benchmarks.md)
 
