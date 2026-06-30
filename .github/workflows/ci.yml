@@ -8,7 +8,21 @@ name: ci
 on:
   push:
     branches: [master]
+    # Docs-only changes don't affect the build/tests — skip the heavy
+    # fmt/clippy/test/coverage run (the design book has its own deploy in
+    # docs.yml). A mixed code+docs change still runs, since paths-ignore only
+    # skips when *every* changed file matches.
+    paths-ignore:
+      - "docs-book/**"
+      - "**/*.md"
+      - "LICENSE-*"
+      - ".github/workflows/docs.yml"
   pull_request:
+    paths-ignore:
+      - "docs-book/**"
+      - "**/*.md"
+      - "LICENSE-*"
+      - ".github/workflows/docs.yml"
 
 permissions:
   contents: read
