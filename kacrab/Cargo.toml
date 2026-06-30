@@ -17,7 +17,11 @@ exclude = ["tests/**"]
 
 [features]
 default = ["std"]
-compression = ["kacrab-protocol/compression"]
+# Meta-feature: enable kacrab's own codec features (each forwards to
+# `kacrab-protocol/<codec>`) so the codec cfgs gated on these — e.g. the lz4
+# round-trip test — are active too. Selects pure-Rust `lz4`; opt into `lz4-hc`
+# explicitly for the C-FFI high-compression backend.
+compression = ["gzip", "snappy", "lz4", "zstd"]
 gssapi = ["dep:libgssapi"]
 gzip = ["kacrab-protocol/gzip"]
 lz4 = ["kacrab-protocol/lz4"]
