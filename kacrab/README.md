@@ -62,8 +62,12 @@ kacrab = { git = "https://github.com/pirumu/kacrab", features = ["producer"] }
 Optional runtime features:
 
 - `producer` - enables the producer API.
-- `gzip`, `snappy`, `lz4`, `zstd` - enable individual record-batch compression
-  codecs (pure Rust); `compression` enables all four at once.
+- `gzip`, `snappy`, `lz4` - pure-Rust record-batch compression codecs (no C
+  toolchain).
+- `zstd` - record-batch compression via the C `libzstd` (`zstd-sys`); needs a C
+  compiler at build time. The `compression` meta-feature enables all four
+  (`gzip` + `snappy` + `lz4` + `zstd`), so it requires a C compiler too — for a
+  pure-Rust build, enable only the first three.
 - `lz4-hc` - C-FFI LZ4 backend adding high-compression levels
   (`compression.lz4.level` 3..=12); needs a C compiler at build time. Plain
   `lz4` is fast-mode only.
