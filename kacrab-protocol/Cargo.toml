@@ -18,7 +18,8 @@ thiserror = { workspace = true }
 # Protocol-runtime-only — kept local; no other workspace member needs them.
 crc32c = "0.6"
 uuid = { workspace = true }
-base64 = { version = "0.22", default-features = false, features = ["std"] }
+# Shared with the rest of the workspace.
+base64 = { workspace = true }
 
 # Compression codecs — feature-gated.
 #
