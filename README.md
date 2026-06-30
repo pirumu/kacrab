@@ -42,9 +42,10 @@ the most mature surface: on a single-node broker it holds throughput parity with
 the Java client at `acks=all` + idempotence (~4.7M × 10B records/sec ≈ 45 MiB/s;
 the ~12% records/sec edge is broker-bound noise, not a language win) while using
 ~4x less memory and ~1.5x less CPU — Java keeps a lower tail latency (see
-[Benchmarks](#benchmarks)). The current focus is wire + producer hardening before
-consumer work: multi-broker behavior, bounded hot paths, routing refresh, and
-sustained stress testing.
+[Benchmarks](#benchmarks)). Multi-broker dispatch, leadership-change recovery,
+the SASL/TLS surface, and every compression codec are verified end-to-end
+against real brokers. The remaining focus before consumer work is sustained
+stress / latency testing (see [Production acceptance](#production-acceptance)).
 
 Test coverage (`cargo tarpaulin` / `cargo llvm-cov`): **84.6% maintained-source**
 line coverage (generated protocol excluded), with the **producer module at ~92%**.
@@ -121,7 +122,8 @@ implemented surface:
         `send`/`send_with_callback` (Kafka `Producer.send` shape) returning a
         `SendFuture`.
   - [x] Batching by topic-partition, linger, bounded memory, `max.block.ms`,
-        compression hooks, and delivery handles.
+        compression (`gzip`/`snappy`/`lz4`/`zstd`, each round-tripped through a
+        real broker), and delivery handles.
   - [x] Metadata routing with default partition assignment, keyed murmur2
         partitioning, sticky/adaptive unkeyed assignment, and multi-broker
         dispatch.
