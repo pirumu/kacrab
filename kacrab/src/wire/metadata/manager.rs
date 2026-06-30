@@ -643,6 +643,7 @@ mod tests {
             topics: vec![TopicMetadata {
                 name: topic.to_owned(),
                 topic_id: KafkaUuid::ZERO,
+                is_internal: false,
                 partitions: vec![PartitionMetadata {
                     partition_index: 0,
                     leader_id: broker_id,

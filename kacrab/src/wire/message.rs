@@ -5,13 +5,42 @@ use kacrab_protocol::{
     KafkaString, KafkaUuid, Result,
     generated::{
         AddOffsetsToTxnRequestData, AddOffsetsToTxnResponseData, AddPartitionsToTxnRequestData,
-        AddPartitionsToTxnResponseData, ApiVersionsRequestData, ApiVersionsResponseData,
-        EndTxnRequestData, EndTxnResponseData, FindCoordinatorRequestData,
-        FindCoordinatorResponseData, GetTelemetrySubscriptionsRequestData,
-        GetTelemetrySubscriptionsResponseData, InitProducerIdRequestData,
-        InitProducerIdResponseData, MetadataRequestData, MetadataResponseData, ProduceRequestData,
-        ProduceResponseData, PushTelemetryRequestData, PushTelemetryResponseData,
-        TxnOffsetCommitRequestData, TxnOffsetCommitResponseData,
+        AddPartitionsToTxnResponseData, AlterClientQuotasRequestData,
+        AlterClientQuotasResponseData, AlterConfigsRequestData, AlterConfigsResponseData,
+        AlterPartitionReassignmentsRequestData, AlterPartitionReassignmentsResponseData,
+        AlterReplicaLogDirsRequestData, AlterReplicaLogDirsResponseData,
+        AlterUserScramCredentialsRequestData, AlterUserScramCredentialsResponseData,
+        ApiVersionsRequestData, ApiVersionsResponseData, CreateAclsRequestData,
+        CreateAclsResponseData, CreateDelegationTokenRequestData,
+        CreateDelegationTokenResponseData, CreatePartitionsRequestData,
+        CreatePartitionsResponseData, CreateTopicsRequestData, CreateTopicsResponseData,
+        DeleteAclsRequestData, DeleteAclsResponseData, DeleteGroupsRequestData,
+        DeleteGroupsResponseData, DeleteRecordsRequestData, DeleteRecordsResponseData,
+        DeleteTopicsRequestData, DeleteTopicsResponseData, DescribeAclsRequestData,
+        DescribeAclsResponseData, DescribeClientQuotasRequestData,
+        DescribeClientQuotasResponseData, DescribeClusterRequestData, DescribeClusterResponseData,
+        DescribeConfigsRequestData, DescribeConfigsResponseData,
+        DescribeDelegationTokenRequestData, DescribeDelegationTokenResponseData,
+        DescribeGroupsRequestData, DescribeGroupsResponseData, DescribeLogDirsRequestData,
+        DescribeLogDirsResponseData, DescribeProducersRequestData, DescribeProducersResponseData,
+        DescribeTransactionsRequestData, DescribeTransactionsResponseData,
+        DescribeUserScramCredentialsRequestData, DescribeUserScramCredentialsResponseData,
+        ElectLeadersRequestData, ElectLeadersResponseData, EndTxnRequestData, EndTxnResponseData,
+        ExpireDelegationTokenRequestData, ExpireDelegationTokenResponseData,
+        FindCoordinatorRequestData, FindCoordinatorResponseData,
+        GetTelemetrySubscriptionsRequestData, GetTelemetrySubscriptionsResponseData,
+        IncrementalAlterConfigsRequestData, IncrementalAlterConfigsResponseData,
+        InitProducerIdRequestData, InitProducerIdResponseData, ListGroupsRequestData,
+        ListGroupsResponseData, ListOffsetsRequestData, ListOffsetsResponseData,
+        ListPartitionReassignmentsRequestData, ListPartitionReassignmentsResponseData,
+        ListTransactionsRequestData, ListTransactionsResponseData, MetadataRequestData,
+        MetadataResponseData, OffsetCommitRequestData, OffsetCommitResponseData,
+        OffsetDeleteRequestData, OffsetDeleteResponseData, OffsetFetchRequestData,
+        OffsetFetchResponseData, ProduceRequestData, ProduceResponseData, PushTelemetryRequestData,
+        PushTelemetryResponseData, RenewDelegationTokenRequestData,
+        RenewDelegationTokenResponseData, TxnOffsetCommitRequestData, TxnOffsetCommitResponseData,
+        UnregisterBrokerRequestData, UnregisterBrokerResponseData, UpdateFeaturesRequestData,
+        UpdateFeaturesResponseData, WriteTxnMarkersRequestData, WriteTxnMarkersResponseData,
     },
 };
 
@@ -215,6 +244,74 @@ impl ResponseMessage for PushTelemetryResponseData {
     fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
         Self::read(buf, version)
     }
+}
+
+/// Implement [`RequestMessage`]/[`ResponseMessage`] for a generated request and
+/// response pair whose encoding is a straight pass-through to the generated
+/// `write`/`encoded_len`/`read` methods (no version-specific normalization).
+macro_rules! impl_passthrough_message {
+    ($($request:ty => $response:ty),+ $(,)?) => {
+        $(
+            impl RequestMessage for $request {
+                fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+                    self.write(buf, version)?;
+                    Ok(())
+                }
+
+                fn encoded_len(&self, version: i16) -> Result<usize> {
+                    self.encoded_len(version)
+                }
+            }
+
+            impl ResponseMessage for $response {
+                fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+                    Self::read(buf, version)
+                }
+            }
+        )+
+    };
+}
+
+// Admin client request/response pairs. These are pure pass-through codecs, so
+// the macro above generates their wire adapters.
+impl_passthrough_message! {
+    CreateTopicsRequestData => CreateTopicsResponseData,
+    DeleteTopicsRequestData => DeleteTopicsResponseData,
+    CreatePartitionsRequestData => CreatePartitionsResponseData,
+    DescribeClusterRequestData => DescribeClusterResponseData,
+    DescribeConfigsRequestData => DescribeConfigsResponseData,
+    AlterConfigsRequestData => AlterConfigsResponseData,
+    ListGroupsRequestData => ListGroupsResponseData,
+    DescribeGroupsRequestData => DescribeGroupsResponseData,
+    DeleteGroupsRequestData => DeleteGroupsResponseData,
+    OffsetFetchRequestData => OffsetFetchResponseData,
+    OffsetCommitRequestData => OffsetCommitResponseData,
+    OffsetDeleteRequestData => OffsetDeleteResponseData,
+    IncrementalAlterConfigsRequestData => IncrementalAlterConfigsResponseData,
+    ElectLeadersRequestData => ElectLeadersResponseData,
+    ListOffsetsRequestData => ListOffsetsResponseData,
+    DeleteRecordsRequestData => DeleteRecordsResponseData,
+    DescribeProducersRequestData => DescribeProducersResponseData,
+    DescribeTransactionsRequestData => DescribeTransactionsResponseData,
+    ListTransactionsRequestData => ListTransactionsResponseData,
+    DescribeLogDirsRequestData => DescribeLogDirsResponseData,
+    AlterPartitionReassignmentsRequestData => AlterPartitionReassignmentsResponseData,
+    ListPartitionReassignmentsRequestData => ListPartitionReassignmentsResponseData,
+    UpdateFeaturesRequestData => UpdateFeaturesResponseData,
+    UnregisterBrokerRequestData => UnregisterBrokerResponseData,
+    DescribeAclsRequestData => DescribeAclsResponseData,
+    CreateAclsRequestData => CreateAclsResponseData,
+    DeleteAclsRequestData => DeleteAclsResponseData,
+    DescribeClientQuotasRequestData => DescribeClientQuotasResponseData,
+    AlterClientQuotasRequestData => AlterClientQuotasResponseData,
+    DescribeUserScramCredentialsRequestData => DescribeUserScramCredentialsResponseData,
+    AlterUserScramCredentialsRequestData => AlterUserScramCredentialsResponseData,
+    CreateDelegationTokenRequestData => CreateDelegationTokenResponseData,
+    RenewDelegationTokenRequestData => RenewDelegationTokenResponseData,
+    ExpireDelegationTokenRequestData => ExpireDelegationTokenResponseData,
+    DescribeDelegationTokenRequestData => DescribeDelegationTokenResponseData,
+    AlterReplicaLogDirsRequestData => AlterReplicaLogDirsResponseData,
+    WriteTxnMarkersRequestData => WriteTxnMarkersResponseData,
 }
 
 fn normalize_produce_request(request: &ProduceRequestData, version: i16) -> ProduceRequestData {

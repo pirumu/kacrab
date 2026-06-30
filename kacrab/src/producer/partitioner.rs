@@ -158,6 +158,7 @@ mod tests {
             topics: vec![TopicMetadata {
                 name: "orders".to_owned(),
                 topic_id: KafkaUuid::ZERO,
+                is_internal: false,
                 partitions: partitions
                     .iter()
                     .map(|&(partition_index, leader_id)| PartitionMetadata {

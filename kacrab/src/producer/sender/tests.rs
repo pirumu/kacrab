@@ -120,6 +120,7 @@ fn metadata_with_topics(topics: &[(&str, usize)]) -> ClusterMetadata {
             TopicMetadata {
                 name: (*topic).to_owned(),
                 topic_id: KafkaUuid::ZERO,
+                is_internal: false,
                 partitions,
             }
         })

@@ -375,7 +375,7 @@ impl WireClient {
 
     async fn fetch_metadata_response(&self, topics: &[String]) -> Result<MetadataResponseData> {
         let broker_id = self.refresh_broker_id()?;
-        let request = metadata_request(topics);
+        let request = metadata_request(topics, self.inner.config.allow_auto_topic_creation);
         let version = client_api_info(ApiKey::Metadata).max_version;
         self.send_to_broker(broker_id, ApiKey::Metadata, version, &request)
             .await
@@ -485,6 +485,36 @@ impl WireClient {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = endpoints;
     }
+
+    /// Fetch fresh cluster metadata for admin routing and listing.
+    ///
+    /// `topics = None` requests metadata for every topic (the Kafka "all topics"
+    /// convention); `Some(list)` limits it to the named topics. The broker
+    /// registry is updated so brokers discovered here — including the
+    /// controller — become directly reachable for follow-up requests.
+    #[cfg(feature = "admin")]
+    pub(crate) async fn admin_metadata(
+        &self,
+        topics: Option<&[String]>,
+    ) -> Result<Arc<ClusterMetadata>> {
+        let broker_id = self.refresh_broker_id()?;
+        let request = topics.map_or_else(super::metadata::metadata_request_all, |topics| {
+            metadata_request(topics, false)
+        });
+        let version = client_api_info(ApiKey::Metadata).max_version;
+        let response: MetadataResponseData = self
+            .send_to_broker(broker_id, ApiKey::Metadata, version, &request)
+            .await?;
+        let metadata = Arc::new(map_metadata(response)?);
+        self.update_broker_registry(metadata.as_ref()).await?;
+        Ok(metadata)
+    }
+
+    /// Lowest known broker id, for admin requests that target any live broker.
+    #[cfg(feature = "admin")]
+    pub(crate) fn admin_any_broker_id(&self) -> Result<i32> {
+        self.refresh_broker_id()
+    }
 }
 
 async fn resolve_broker_endpoints(brokers: &[BrokerMetadata]) -> Result<Vec<BrokerEndpoint>> {
@@ -588,6 +618,7 @@ mod tests {
             topics: vec![TopicMetadata {
                 name: "orders".to_owned(),
                 topic_id: KafkaUuid::ZERO,
+                is_internal: false,
                 partitions: vec![PartitionMetadata {
                     partition_index: 0,
                     leader_id: 7,
@@ -637,6 +668,7 @@ mod tests {
                 topics: vec![TopicMetadata {
                     name: "orders".to_owned(),
                     topic_id: KafkaUuid::ZERO,
+                    is_internal: false,
                     partitions: vec![PartitionMetadata {
                         partition_index: 0,
                         leader_id: 7,

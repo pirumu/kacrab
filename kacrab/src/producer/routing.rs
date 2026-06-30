@@ -190,6 +190,7 @@ mod tests {
             topics: vec![TopicMetadata {
                 name: "orders".to_owned(),
                 topic_id: KafkaUuid::ZERO,
+                is_internal: false,
                 partitions: vec![
                     PartitionMetadata {
                         partition_index: 0,

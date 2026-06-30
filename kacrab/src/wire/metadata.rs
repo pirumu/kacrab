@@ -12,7 +12,10 @@ pub(crate) use manager::{MetadataManager, MetadataRecoveryAction};
 
 use super::error::{Result, WireError};
 
-pub(crate) fn metadata_request<I, S>(topics: I) -> MetadataRequestData
+pub(crate) fn metadata_request<I, S>(
+    topics: I,
+    allow_auto_topic_creation: bool,
+) -> MetadataRequestData
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -28,6 +31,20 @@ where
                 })
                 .collect(),
         ),
+        allow_auto_topic_creation,
+        include_cluster_authorized_operations: false,
+        include_topic_authorized_operations: false,
+        _unknown_tagged_fields: Vec::new(),
+    }
+}
+
+/// Build a metadata request for every topic in the cluster. A `None` topic list
+/// is the Kafka wire convention for "all topics", used by admin discovery and
+/// full-cluster listing. Auto topic creation is never meaningful here.
+#[cfg(feature = "admin")]
+pub(crate) const fn metadata_request_all() -> MetadataRequestData {
+    MetadataRequestData {
+        topics: None,
         allow_auto_topic_creation: false,
         include_cluster_authorized_operations: false,
         include_topic_authorized_operations: false,
@@ -68,6 +85,9 @@ pub struct TopicMetadata {
     pub name: String,
     /// Stable Kafka topic ID.
     pub topic_id: KafkaUuid,
+    /// Whether the broker flags this as an internal topic (e.g.
+    /// `__consumer_offsets`), surfaced for admin topic listings.
+    pub is_internal: bool,
     /// Partition metadata for this topic.
     pub partitions: Vec<PartitionMetadata>,
 }
@@ -151,6 +171,7 @@ pub(crate) fn map_metadata(response: MetadataResponseData) -> Result<ClusterMeta
             return Err(WireError::MetadataTopic { topic: name, error });
         }
         let topic_id = topic.topic_id;
+        let is_internal = topic.is_internal;
         let mut partitions = Vec::with_capacity(topic.partitions.len());
         for partition in topic.partitions {
             let error = ErrorCode::from(partition.error_code);
@@ -173,6 +194,7 @@ pub(crate) fn map_metadata(response: MetadataResponseData) -> Result<ClusterMeta
         topics.push(TopicMetadata {
             name,
             topic_id,
+            is_internal,
             partitions,
         });
     }
@@ -233,7 +255,7 @@ mod tests {
 
     #[test]
     fn metadata_request_encodes_named_topics_without_auto_creation() {
-        let request = metadata_request(["orders", "payments"]);
+        let request = metadata_request(["orders", "payments"], false);
         let topics = request.topics.expect("topics");
 
         assert!(!request.allow_auto_topic_creation);
@@ -250,7 +272,7 @@ mod tests {
 
     #[test]
     fn metadata_request_encodes_empty_topic_list_explicitly() {
-        let request = metadata_request(std::iter::empty::<&str>());
+        let request = metadata_request(std::iter::empty::<&str>(), false);
 
         assert_eq!(request.topics.expect("topics"), []);
     }

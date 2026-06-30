@@ -113,6 +113,17 @@ impl ClientConfig {
     pub async fn create_producer(&self) -> crate::producer::Result<crate::producer::Producer> {
         crate::producer::Producer::from_client_config(self).await
     }
+
+    /// Builds an admin client directly from this Java-style config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an admin error when config validation, bootstrap resolution, or
+    /// admin client setup fails.
+    #[cfg(feature = "admin")]
+    pub async fn create_admin(&self) -> crate::admin::Result<crate::admin::AdminClient> {
+        crate::admin::AdminClient::from_client_config(self).await
+    }
 }
 
 impl From<Properties> for ClientConfig {
