@@ -1,7 +1,10 @@
 # kacrab
 
-The main `kacrab` crate: a pure Rust Kafka client runtime with Java-compatible
-auth and producer surfaces.
+The main `kacrab` crate: a Rust-native Kafka client with Java-compatible auth and
+producer surfaces. The protocol/wire/producer logic is pure Rust (not a
+`librdkafka` wrapper); the dependency tree is not fully C-free, though — TLS
+crypto (`rustls` + `aws-lc-rs`) is C/assembly and always present, and the
+optional `zstd` / `lz4-hc` / `gssapi` features add C.
 
 `kacrab` is pre-release. Core runtime pieces and protocol compatibility form
 the current base. The active runtime surface is:
@@ -62,8 +65,12 @@ kacrab = { git = "https://github.com/pirumu/kacrab", features = ["producer"] }
 Optional runtime features:
 
 - `producer` - enables the producer API.
-- `gzip`, `snappy`, `lz4`, `zstd` - enable individual record-batch compression
-  codecs (pure Rust); `compression` enables all four at once.
+- `gzip`, `snappy`, `lz4` - pure-Rust record-batch compression codecs (no C
+  toolchain).
+- `zstd` - record-batch compression via the C `libzstd` (`zstd-sys`); needs a C
+  compiler at build time. The `compression` meta-feature enables all four
+  (`gzip` + `snappy` + `lz4` + `zstd`), so it requires a C compiler too — for a
+  pure-Rust build, enable only the first three.
 - `lz4-hc` - C-FFI LZ4 backend adding high-compression levels
   (`compression.lz4.level` 3..=12); needs a C compiler at build time. Plain
   `lz4` is fast-mode only.

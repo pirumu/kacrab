@@ -1,15 +1,20 @@
 # Kacrab
 
-A pure-Rust Kafka client (producer-first), built from the Kafka protocol up.
-The producer is wire-compatible with the Java client — including the idempotent
-sequence/epoch recovery state machine — and is memory- and CPU-efficient
-(native, no JVM). Consumer/admin are not implemented yet.
+A Rust-native Kafka client (producer-first), built from the Kafka protocol up —
+a native implementation, not a `librdkafka` wrapper. The producer is
+wire-compatible with the Java client — including the idempotent sequence/epoch
+recovery state machine — and is memory- and CPU-efficient (native, no JVM).
+Consumer/admin are not implemented yet.
 
 * **Java-compatible auth and producer**: the authentication and producer
   surfaces use Kafka property names, defaults, protocol flow, and wire
   semantics as the compatibility target.
-* **Pure Rust runtime**: no `librdkafka`, no C client bindings, and workspace
-  `unsafe_code` is forbidden.
+* **Native Rust, not a `librdkafka` wrapper**: the Kafka protocol, wire, and
+  producer logic are pure Rust, with workspace `unsafe_code` forbidden. The
+  dependency tree is not entirely C-free, though: the TLS crypto provider
+  (`rustls` + `aws-lc-rs`) is C/assembly and is always pulled in, and the
+  optional `zstd`, `lz4-hc`, and `gssapi` features add C. A fully C-free build
+  uses a pure-Rust `rustls` provider and only the `gzip`/`snappy`/`lz4` codecs.
 * **Generated protocol**: Kafka request/response structs are generated from
   Apache Kafka schemas and checked against the Kafka Java client oracle.
 * **Efficient producer**: batching, linger, bounded memory, idempotence
