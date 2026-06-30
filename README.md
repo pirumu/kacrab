@@ -31,6 +31,15 @@ sequence/epoch recovery state machine — and is memory- and CPU-efficient
 [apache-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
 [apache-url]: LICENSE-APACHE
 
+## Documentation
+
+- **[Design & Internals book](https://pirumu.github.io/kacrab/)** — architecture,
+  the idempotent producer state machine, the SASL/TLS handshakes, protocol
+  codegen, and how every path is verified against real brokers. Source in
+  [`docs-book/`](docs-book/).
+- **API reference** — [docs.rs/kacrab](https://docs.rs/kacrab) (after the first
+  crates.io release).
+
 ## Status
 
 > Warning: `kacrab` is pre-release software. It has useful protocol, wire,
