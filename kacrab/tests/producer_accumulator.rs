@@ -16,6 +16,26 @@ use kacrab::producer::{
     internals::{AccumulatorConfig, RecordAccumulator},
 };
 
+/// The canonical single-byte `orders`/p0 test record, pinned to a *fixed*
+/// timestamp.
+///
+/// The accumulator's batch-size estimate encodes each record's timestamp delta
+/// from the batch's first record (exactly as Kafka's record-batch v2 format
+/// does), so leaving the timestamp to default to wall-clock makes the
+/// per-record encoded size — and therefore the record count at which a batch
+/// reaches `batch.size` — depend on how much real time elapses between
+/// appends. That is correct in production, but it makes exact record-count
+/// assertions flaky under slow execution (e.g. coverage instrumentation, where
+/// appends straddle more milliseconds and the delta varints grow). Pinning the
+/// timestamp makes every delta zero, so the counts are deterministic on any
+/// machine at any speed.
+fn order_record() -> ProducerRecord {
+    ProducerRecord::new("orders", 0)
+        .try_timestamp_ms(1_700_000_000_000)
+        .expect("fixed timestamp is non-negative")
+        .value(Bytes::from_static(b"a"))
+}
+
 #[test]
 fn accumulator_drains_batch_size_ready_records_by_topic_partition() {
     let mut accumulator = RecordAccumulator::new(
@@ -23,9 +43,7 @@ fn accumulator_drains_batch_size_ready_records_by_topic_partition() {
             .batch_size(1)
             .buffer_memory(16 * 1024),
     );
-    accumulator
-        .append(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .unwrap();
+    accumulator.append(order_record()).unwrap();
     accumulator
         .append(ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")))
         .unwrap();
@@ -58,12 +76,7 @@ fn accumulator_marks_linger_expired_partition_ready() {
             .linger(Duration::from_millis(5))
             .buffer_memory(16 * 1024),
     );
-    accumulator
-        .append_at(
-            ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
-            now,
-        )
-        .unwrap();
+    accumulator.append_at(order_record(), now).unwrap();
 
     assert!(accumulator.drain_ready(now).is_empty());
 
@@ -83,12 +96,7 @@ fn accumulator_splits_same_partition_batches_at_batch_size() {
             .buffer_memory(16 * 1024),
     );
     for _ in 0..24 {
-        accumulator
-            .append_at(
-                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
-                now,
-            )
-            .unwrap();
+        accumulator.append_at(order_record(), now).unwrap();
     }
 
     let ready = accumulator.drain_ready(now);
@@ -108,24 +116,14 @@ fn accumulator_batch_size_uses_encoded_batch_bytes_not_buffer_memory_overhead() 
             .buffer_memory(16 * 1024),
     );
     for _ in 0..4 {
-        accumulator
-            .append_at(
-                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
-                now,
-            )
-            .unwrap();
+        accumulator.append_at(order_record(), now).unwrap();
     }
 
     assert_eq!(accumulator.buffered_bytes(), 128);
     assert!(accumulator.drain_ready(now).is_empty());
 
     for _ in 0..6 {
-        accumulator
-            .append_at(
-                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
-                now,
-            )
-            .unwrap();
+        accumulator.append_at(order_record(), now).unwrap();
     }
 
     let ready = accumulator.drain_ready(now);
