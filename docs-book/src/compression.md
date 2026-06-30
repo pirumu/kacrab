@@ -18,10 +18,15 @@ Each codec is a feature, so you only pull in the backends you use:
 | `lz4-hc` | `lz4` (C-FFI to liblz4) | adds high-compression levels 3..=12; needs a C compiler |
 | `zstd` | `zstd` (C) | best ratio; the modern Kafka default |
 
-The `compression` meta-feature turns on all four pure-Rust codecs
-(`gzip` + `snappy` + `lz4` + `zstd`). `lz4-hc` is a separate opt-in because it
-adds a build-time C-compiler dependency; when both `lz4` and `lz4-hc` are
-enabled, the C-FFI backend wins.
+The `compression` meta-feature turns on `gzip` + `snappy` + `lz4` + `zstd`. The
+first three are pure Rust; **`zstd` uses the C libzstd** (via `zstd-sys`), so
+enabling `compression` — or `zstd` on its own — needs a **C compiler at build
+time**. `lz4-hc` is a separate opt-in for the same reason (C-FFI to liblz4);
+when both `lz4` and `lz4-hc` are enabled, the C-FFI backend wins.
+
+For a fully pure-Rust, no-C-toolchain build (e.g. easy cross-compilation),
+enable only `gzip` + `snappy` + `lz4` and skip `zstd` / `lz4-hc` / the
+`compression` meta-feature.
 
 ## Selecting a codec
 
