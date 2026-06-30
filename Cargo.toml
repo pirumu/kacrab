@@ -61,8 +61,8 @@ proc-macro2 = { version = "1", default-features = false }
 quote = { version = "1", default-features = false }
 syn = { version = "2", default-features = false }
 
-# Identifier case conversion — used by macros for derive-generated names and by
-# codegen when emitting Rust idents from Kafka schema field names.
+# Identifier case conversion — used by codegen when emitting Rust idents from
+# Kafka schema field names.
 heck = "0.5"
 
 # Serialization — `serde` derive is generally useful workspace-wide;
