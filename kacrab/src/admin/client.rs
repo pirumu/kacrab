@@ -730,12 +730,22 @@ impl AdminClient {
         group_id: &str,
         options: ListConsumerGroupOffsetsOptions,
     ) -> Result<Vec<GroupOffset>> {
+        // Newer OffsetFetch versions key topics by id, so resolve ids for the
+        // partition filter (the "all topics" case sends no per-topic entry).
+        let topic_names = unique_topics(
+            &options
+                .partitions
+                .iter()
+                .map(|tp| tp.topic.as_str())
+                .collect::<Vec<_>>(),
+        );
+        let topic_ids = self.resolve_topic_ids(&topic_names).await?;
         let request = OffsetFetchRequestData {
             groups: vec![OffsetFetchRequestGroup {
                 group_id: group_id.to_owned().into(),
                 member_id: None,
                 member_epoch: -1,
-                topics: group_offset_fetch_topics(&options.partitions),
+                topics: group_offset_fetch_topics(&options.partitions, &topic_ids),
                 _unknown_tagged_fields: Vec::new(),
             }],
             require_stable: options.require_stable,
@@ -789,13 +799,22 @@ impl AdminClient {
         group_id: &str,
         offsets: Vec<(TopicPartition, OffsetAndMetadata)>,
     ) -> Result<()> {
+        // OffsetCommit v10 drops the topic name in favour of the topic id, so
+        // resolve ids from metadata (older versions still serialize the name).
+        let topic_names = unique_topics(
+            &offsets
+                .iter()
+                .map(|(tp, _)| tp.topic.as_str())
+                .collect::<Vec<_>>(),
+        );
+        let topic_ids = self.resolve_topic_ids(&topic_names).await?;
         let request = OffsetCommitRequestData {
             group_id: group_id.to_owned().into(),
             generation_id_or_member_epoch: -1,
             member_id: String::new().into(),
             group_instance_id: None,
             retention_time_ms: -1,
-            topics: offset_commit_topics(offsets),
+            topics: offset_commit_topics(offsets, &topic_ids),
             _unknown_tagged_fields: Vec::new(),
         };
         let coordinator = self.group_coordinator(group_id).await?;
@@ -1351,7 +1370,13 @@ impl AdminClient {
     /// # Errors
     /// Returns the broker error code or a wire error.
     pub async fn describe_features(&self) -> Result<FeatureMetadata> {
-        let request = ApiVersionsRequestData::default();
+        // ApiVersions v3+ rejects an empty `client_software_name` with
+        // INVALID_REQUEST, so the request must identify the client.
+        let request = ApiVersionsRequestData {
+            client_software_name: "kacrab".to_owned().into(),
+            client_software_version: env!("CARGO_PKG_VERSION").to_owned().into(),
+            _unknown_tagged_fields: Vec::new(),
+        };
         let broker_id = self.wire.admin_any_broker_id()?;
         let version = client_api_info(ApiKey::ApiVersions).max_version;
         let response: ApiVersionsResponseData = self
@@ -2855,6 +2880,23 @@ impl AdminClient {
         Ok(listings)
     }
 
+    /// Resolve topic ids from metadata for the given topic names (newer
+    /// offset-commit/fetch versions key topics by id rather than name).
+    async fn resolve_topic_ids(
+        &self,
+        topic_names: &[String],
+    ) -> Result<HashMap<String, KafkaUuid>> {
+        if topic_names.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let metadata = self.wire.admin_metadata(Some(topic_names)).await?;
+        Ok(metadata
+            .topics
+            .iter()
+            .map(|topic| (topic.name.clone(), topic.topic_id))
+            .collect())
+    }
+
     /// Find the coordinator broker for a consumer group (`FindCoordinator`
     /// key type `0`), registering its endpoint so subsequent `send_to_broker`
     /// calls can reach it.
@@ -2952,6 +2994,7 @@ fn build_offset(
 /// all committed partitions) when the filter is empty.
 fn group_offset_fetch_topics(
     partitions: &[TopicPartition],
+    topic_ids: &HashMap<String, KafkaUuid>,
 ) -> Option<Vec<OffsetFetchRequestTopics>> {
     if partitions.is_empty() {
         return None;
@@ -2964,9 +3007,20 @@ fn group_offset_fetch_topics(
         {
             topic.partition_indexes.push(partition.partition);
         } else {
+            // As with OffsetCommit, newer OffsetFetch versions key by topic id
+            // and reject a stale name; only send the name when the id is unknown.
+            let topic_id = topic_ids
+                .get(&partition.topic)
+                .copied()
+                .unwrap_or(KafkaUuid::ZERO);
+            let name = if topic_id == KafkaUuid::ZERO {
+                partition.topic.clone().into()
+            } else {
+                KafkaString::default()
+            };
             topics.push(OffsetFetchRequestTopics {
-                name: partition.topic.clone().into(),
-                topic_id: KafkaUuid::ZERO,
+                name,
+                topic_id,
                 partition_indexes: vec![partition.partition],
                 _unknown_tagged_fields: Vec::new(),
             });
@@ -2978,6 +3032,7 @@ fn group_offset_fetch_topics(
 /// Group offset commits by topic into `OffsetCommit` topic entries.
 fn offset_commit_topics(
     offsets: Vec<(TopicPartition, OffsetAndMetadata)>,
+    topic_ids: &HashMap<String, KafkaUuid>,
 ) -> Vec<OffsetCommitRequestTopic> {
     let mut topics: Vec<OffsetCommitRequestTopic> = Vec::new();
     for (topic_partition, offset) in offsets {
@@ -2994,9 +3049,21 @@ fn offset_commit_topics(
         {
             topic.partitions.push(partition);
         } else {
+            // OffsetCommit v10 removed the topic `name` (keyed by id) and the
+            // strict codec rejects a non-default name at v10; send the name only
+            // when the id is unknown (older brokers / unresolved topic).
+            let topic_id = topic_ids
+                .get(&topic_partition.topic)
+                .copied()
+                .unwrap_or(KafkaUuid::ZERO);
+            let name = if topic_id == KafkaUuid::ZERO {
+                topic_partition.topic.clone().into()
+            } else {
+                KafkaString::default()
+            };
             topics.push(OffsetCommitRequestTopic {
-                name: topic_partition.topic.clone().into(),
-                topic_id: KafkaUuid::ZERO,
+                name,
+                topic_id,
                 partitions: vec![partition],
                 _unknown_tagged_fields: Vec::new(),
             });
@@ -3556,13 +3623,17 @@ mod tests {
 
     #[test]
     fn group_offset_fetch_topics_is_none_when_empty_else_groups_by_topic() {
-        assert!(group_offset_fetch_topics(&[]).is_none());
+        let topic_ids = HashMap::new();
+        assert!(group_offset_fetch_topics(&[], &topic_ids).is_none());
 
-        let topics = group_offset_fetch_topics(&[
-            TopicPartition::new("orders", 0),
-            TopicPartition::new("orders", 1),
-            TopicPartition::new("payments", 0),
-        ])
+        let topics = group_offset_fetch_topics(
+            &[
+                TopicPartition::new("orders", 0),
+                TopicPartition::new("orders", 1),
+                TopicPartition::new("payments", 0),
+            ],
+            &topic_ids,
+        )
         .expect("partitions present");
         assert_eq!(topics.len(), 2);
         let orders = topics
@@ -3574,13 +3645,16 @@ mod tests {
 
     #[test]
     fn offset_commit_topics_groups_and_maps_offset_fields() {
-        let topics = offset_commit_topics(vec![
-            (
-                TopicPartition::new("orders", 0),
-                OffsetAndMetadata::new(10).leader_epoch(2).metadata("m"),
-            ),
-            (TopicPartition::new("orders", 1), OffsetAndMetadata::new(20)),
-        ]);
+        let topics = offset_commit_topics(
+            vec![
+                (
+                    TopicPartition::new("orders", 0),
+                    OffsetAndMetadata::new(10).leader_epoch(2).metadata("m"),
+                ),
+                (TopicPartition::new("orders", 1), OffsetAndMetadata::new(20)),
+            ],
+            &HashMap::new(),
+        );
         assert_eq!(topics.len(), 1);
         let orders = &topics[0];
         assert_eq!(orders.partitions.len(), 2);
