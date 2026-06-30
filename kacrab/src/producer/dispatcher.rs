@@ -1905,6 +1905,19 @@ impl ProducerDispatcher {
         if self.metrics_are_enabled() {
             self.metrics.record_retry();
         }
+        // A wire/connection failure (e.g. a broker that went down) leaves this
+        // dispatch's leader metadata stale -- it still points at the broker that
+        // just dropped. Unlike a NotLeader broker response, a connection error
+        // carries no fresh leader, so invalidate the affected partitions to force
+        // the next attempt to re-fetch metadata and re-route to the new leaders.
+        // Without this the retry loops back to the same dead broker until the
+        // delivery timeout, wedging every partition batched into this dispatch
+        // (including ones whose own leader is still healthy). Mirrors Java's
+        // `NetworkClient` requesting a metadata update on server disconnect.
+        for batch in batches {
+            self.wire
+                .invalidate_topic_partition(&batch.topic, batch.partition);
+        }
         // A wire/connection failure left no broker response, so a final delivery
         // timeout here is an AMBIGUOUS loss (the records may have been written) and
         // must bump the idempotent epoch before the next produce.
@@ -2594,16 +2607,17 @@ impl ProducerDispatcher {
         loss_is_ambiguous: bool,
     ) -> Option<ProducerError> {
         let now = Instant::now();
-        let earliest = batches
-            .iter()
-            .map(|batch| batch.first_append_at)
-            .min()
-            .unwrap_or(now);
+        // Label any timeout with the batch that actually expired first (earliest
+        // append), not an arbitrary `batches.first()` -- a dispatch can carry
+        // batches for several partitions, so `.first()` could name a partition
+        // that had not yet timed out.
+        let earliest_batch = batches.iter().min_by_key(|batch| batch.first_append_at);
+        let earliest = earliest_batch.map_or(now, |batch| batch.first_append_at);
         let elapsed = now.duration_since(earliest);
         if elapsed >= self.delivery_timeout {
             self.mark_expired_idempotent_batches_unresolved(batches, now, loss_is_ambiguous)
                 .await;
-            return batches.first().map(|batch| ProducerError::DeliveryTimeout {
+            return earliest_batch.map(|batch| ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
                 partition: batch.partition,
             });
@@ -2636,15 +2650,12 @@ impl ProducerDispatcher {
         loss_is_ambiguous: bool,
     ) -> Option<ProducerError> {
         let now = Instant::now();
-        let earliest = batches
-            .iter()
-            .map(|batch| batch.first_append_at)
-            .min()
-            .unwrap_or(now);
+        let earliest_batch = batches.iter().min_by_key(|batch| batch.first_append_at);
+        let earliest = earliest_batch.map_or(now, |batch| batch.first_append_at);
         if now.duration_since(earliest) >= self.delivery_timeout {
             self.mark_expired_idempotent_batches_unresolved(batches, now, loss_is_ambiguous)
                 .await;
-            return batches.first().map(|batch| ProducerError::DeliveryTimeout {
+            return earliest_batch.map(|batch| ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
                 partition: batch.partition,
             });
