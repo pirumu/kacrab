@@ -3,8 +3,10 @@
 The `wire` module is the async transport every higher layer rides on. Its job:
 turn a stream of "send this request to broker N" commands into bytes on a socket
 and responses back to the caller — correctly, with bounded memory, surviving
-reconnects and broker failovers. It is built on Tokio and `rustls`, with no
-`librdkafka` and no C client bindings.
+reconnects and broker failovers. It is built on Tokio and `rustls` — the Kafka
+client logic is pure Rust, not a `librdkafka` wrapper. (The TLS crypto provider
+under `rustls` is `aws-lc-rs`, which is C/assembly; see
+[Design decisions](./design-decisions.md) for which dependencies are C.)
 
 ## One task per broker
 

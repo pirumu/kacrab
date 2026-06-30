@@ -1,6 +1,6 @@
 # kacrab — Design & Internals
 
-> A pure-Rust Apache Kafka client, built from the wire protocol up, that is
+> A Rust-native Apache Kafka client, built from the wire protocol up, that is
 > *outcome-faithful* to the Java client without a JVM.
 
 This book is the **why** and the **how** behind kacrab. The API docs on
