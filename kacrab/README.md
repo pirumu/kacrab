@@ -1,7 +1,10 @@
 # kacrab
 
-The main `kacrab` crate: a pure Rust Kafka client runtime with Java-compatible
-auth and producer surfaces.
+The main `kacrab` crate: a Rust-native Kafka client with Java-compatible auth and
+producer surfaces. The protocol/wire/producer logic is pure Rust (not a
+`librdkafka` wrapper); the dependency tree is not fully C-free, though — TLS
+crypto (`rustls` + `aws-lc-rs`) is C/assembly and always present, and the
+optional `zstd` / `lz4-hc` / `gssapi` features add C.
 
 `kacrab` is pre-release. Core runtime pieces and protocol compatibility form
 the current base. The active runtime surface is:
