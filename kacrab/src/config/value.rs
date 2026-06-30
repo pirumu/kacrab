@@ -1,9 +1,6 @@
 //! Typed parsing for Java-style configuration values.
 
-extern crate alloc;
-
-use alloc::{string::String, vec::Vec};
-use core::{str::FromStr, time::Duration};
+use std::{str::FromStr, string::String, time::Duration, vec::Vec};
 
 use super::{ConfigValue, ParseConfigValueError};
 

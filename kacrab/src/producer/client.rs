@@ -1293,7 +1293,7 @@ impl Producer {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_mut()
-            .map(core::mem::take)
+            .map(std::mem::take)
             .unwrap_or_default()
     }
 

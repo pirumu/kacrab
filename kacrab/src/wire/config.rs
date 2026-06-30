@@ -1,6 +1,6 @@
 //! TCP socket configuration view used by wire sessions.
 
-use core::time::Duration;
+use std::time::Duration;
 
 use super::{
     SaslClientAuthenticator, SaslClientAuthenticatorFactory, SaslConfig, SecurityConfig, TlsConfig,
@@ -586,7 +586,7 @@ mod tests {
         reason = "Unit test fixtures fail fastest with contextual unwrap/expect calls."
     )]
 
-    use core::time::Duration;
+    use std::time::Duration;
 
     use super::{ConnectionConfig, SocketConfig, TcpCongestionControl, TransportConfig};
 

@@ -640,7 +640,7 @@ impl RecordAccumulator {
 
     /// Drain every buffered topic-partition batch regardless of size or linger.
     pub fn drain_all(&mut self) -> Vec<ReadyBatch> {
-        let partitions = core::mem::take(&mut self.partitions);
+        let partitions = std::mem::take(&mut self.partitions);
         let mut batches = Vec::with_capacity(partitions.len());
         for (key, queue) in partitions {
             for batch in queue.batches {

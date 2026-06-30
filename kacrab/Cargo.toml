@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "A production-oriented Kafka client for Rust, built from the protocol up."
+description = "A Kafka client for Rust, built from the protocol up."
 readme = "README.md"
 categories = ["network-programming", "asynchronous"]
 keywords = ["kafka", "producer", "async", "client", "protocol"]
@@ -16,7 +16,7 @@ keywords = ["kafka", "producer", "async", "client", "protocol"]
 exclude = ["tests/**"]
 
 [features]
-default = ["std"]
+default = []
 # Meta-feature: enable kacrab's own codec features (each forwards to
 # `kacrab-protocol/<codec>`) so the codec cfgs gated on these — e.g. the lz4
 # round-trip test — are active too. Selects pure-Rust `lz4`; opt into `lz4-hc`
@@ -29,7 +29,6 @@ lz4-hc = ["kacrab-protocol/lz4-hc"]
 macros = []
 producer = []
 snappy = ["kacrab-protocol/snappy"]
-std = []
 zstd = ["kacrab-protocol/zstd"]
 
 [dependencies]

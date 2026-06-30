@@ -1,6 +1,6 @@
 //! Public Kafka-compatible producer API helper types.
 
-use core::fmt;
+use std::fmt;
 
 use kacrab_protocol::KafkaUuid;
 

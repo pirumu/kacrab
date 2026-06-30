@@ -3413,7 +3413,7 @@ impl ProducerSenderState {
     }
 
     fn complete_pending_accumulator_batches(&mut self, accumulator: &SharedAccumulator) {
-        let identities = core::mem::take(&mut self.pending_accumulator_completions);
+        let identities = std::mem::take(&mut self.pending_accumulator_completions);
         let _completed = accumulator.complete_batch_identities(identities);
     }
 
