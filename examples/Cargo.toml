@@ -9,13 +9,17 @@ publish = false
 readme = "README.md"
 
 [dev-dependencies]
-kacrab = { workspace = true, features = ["producer"] }
+kacrab = { workspace = true, features = ["producer", "admin"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 bytes = { workspace = true }
 
 [[example]]
 name = "producer"
 path = "producer.rs"
+
+[[example]]
+name = "admin"
+path = "admin.rs"
 
 [[example]]
 name = "config"

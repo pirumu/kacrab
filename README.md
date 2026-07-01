@@ -517,6 +517,11 @@ verified against a real Apache Kafka 4.3.0 broker
 types (`TopicPartition`, `OffsetAndMetadata`, `Node`, ...) live in
 `kacrab::common` and are re-exported by both `producer` and `admin`.
 
+A runnable version — describe cluster, create/list/describe topics, alter
+configs, add partitions, list offsets, and delete — lives in
+[`examples/admin.rs`](examples/admin.rs)
+(`cargo run -p kacrab-examples --example admin`).
+
 ## Auth
 
 Auth uses Kafka-compatible property names. For built-in `PLAIN` and `SCRAM`,

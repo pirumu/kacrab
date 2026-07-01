@@ -9,8 +9,8 @@
 //! - `config`: Java-style config facade, typed configs, metadata, and validation.
 //! - `wire`: TCP/TLS/SASL sessions, `ApiVersions`, metadata, and request dispatch.
 //! - `producer`: batching, routing, idempotence, transactions, and delivery handles.
-//! - `admin`: the full Apache Kafka 4.3.0 `Admin` operation surface (topics, configs, groups,
-//!   offsets, transactions, ACLs, quotas, tokens, and more).
+//! - `admin`: the full Apache Kafka 4.3.0 `Admin` operation surface (topics,
+//!   configs, groups, offsets, transactions, ACLs, quotas, tokens, and more).
 //!
 //! The companion crate [`kacrab-macros`] provides procedural macros.
 //!
