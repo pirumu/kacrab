@@ -7,11 +7,13 @@
 
 mod client;
 mod error;
+mod metrics;
 mod types;
 
 pub use self::{
     client::AdminClient,
     error::{AdminError, Result},
+    metrics::AdminMetricsSnapshot,
     types::{
         AbortTransactionSpec, AclBinding, AclBindingFilter, AclOperation, AclPatternType,
         AclPermissionType, AclResourceType, AlterConfigOp, AlterConfigOpType, AlterConfigsOptions,

@@ -5,7 +5,10 @@
 //! fresh controller when a broker reports `NOT_CONTROLLER`. Describe operations
 //! and broker-targeted config requests go directly to a relevant broker.
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use kacrab_protocol::{
     KafkaString, KafkaUuid,
@@ -91,6 +94,7 @@ use kacrab_protocol::{
 
 use super::{
     error::{AdminError, Result},
+    metrics::{AdminMetrics, AdminMetricsSnapshot},
     types::{
         AbortTransactionSpec, AclBinding, AclBindingFilter, AclOperation, AclPatternType,
         AclPermissionType, AclResourceType, AlterConfigOp, AlterConfigsOptions, BrokerLogDirs,
@@ -115,8 +119,7 @@ use crate::{
     common::{OffsetAndMetadata, TopicPartition},
     config::{AdminConfig, ClientConfig, ConfigKey, ConfigValue, Properties},
     wire::{
-        BrokerEndpoint, BufferPoolStats, ClusterMetadata, RequestMessage, ResponseMessage,
-        WireClient, WireError,
+        BrokerEndpoint, ClusterMetadata, RequestMessage, ResponseMessage, WireClient, WireError,
     },
 };
 
@@ -140,6 +143,7 @@ pub struct AdminClient {
     wire: WireClient,
     request_timeout_ms: i32,
     controller_attempts: u32,
+    metrics: AdminMetrics,
 }
 
 impl AdminClient {
@@ -164,6 +168,7 @@ impl AdminClient {
             wire,
             request_timeout_ms,
             controller_attempts,
+            metrics: AdminMetrics::default(),
         })
     }
 
@@ -175,6 +180,7 @@ impl AdminClient {
             wire,
             request_timeout_ms: request_timeout_ms.max(0),
             controller_attempts: MAX_CONTROLLER_ATTEMPTS,
+            metrics: AdminMetrics::default(),
         }
     }
 
@@ -351,8 +357,7 @@ impl AdminClient {
         let broker_id = self.wire.admin_any_broker_id()?;
         let version = client_api_info(ApiKey::DescribeCluster).max_version;
         let response: DescribeClusterResponseData = self
-            .wire
-            .send_to_broker(broker_id, ApiKey::DescribeCluster, version, &request)
+            .send_metered(broker_id, ApiKey::DescribeCluster, version, &request)
             .await?;
         check_code("", response.error_code, response.error_message.as_ref())?;
 
@@ -468,8 +473,7 @@ impl AdminClient {
         let broker_id = self.broker_for_configs(&resources)?;
         let version = client_api_info(ApiKey::DescribeConfigs).max_version;
         let response: DescribeConfigsResponseData = self
-            .wire
-            .send_to_broker(broker_id, ApiKey::DescribeConfigs, version, &request)
+            .send_metered(broker_id, ApiKey::DescribeConfigs, version, &request)
             .await?;
 
         let mut described = Vec::with_capacity(response.results.len());
@@ -529,8 +533,7 @@ impl AdminClient {
         let response: AlterConfigsResponseData = match broker_target(&resources) {
             Some(broker_id) => {
                 let version = client_api_info(ApiKey::AlterConfigs).max_version;
-                self.wire
-                    .send_to_broker(broker_id, ApiKey::AlterConfigs, version, &request)
+                self.send_metered(broker_id, ApiKey::AlterConfigs, version, &request)
                     .await?
             },
             None => {
@@ -575,8 +578,7 @@ impl AdminClient {
         // optional, so this may resolve to `UnsupportedApiVersion`).
         let version = client_api_info(ApiKey::GetTelemetrySubscriptions).max_version;
         let response: GetTelemetrySubscriptionsResponseData = self
-            .wire
-            .send_to_broker(
+            .send_metered(
                 broker_id,
                 ApiKey::GetTelemetrySubscriptions,
                 version,
@@ -587,14 +589,33 @@ impl AdminClient {
         Ok(response.client_instance_id)
     }
 
-    /// The client-side metrics this admin client tracks.
-    ///
-    /// kacrab exposes its wire buffer-pool counters here; this is the analogue of
-    /// Java's `Admin.metrics()` (kacrab does not maintain Java's full
-    /// `KafkaMetric` registry).
+    /// A snapshot of the admin client's metrics — request counts, request
+    /// latency, and the wire buffer-pool counters. kacrab's native analogue of
+    /// Java's `Admin.metrics()`.
     #[must_use]
-    pub fn metrics(&self) -> BufferPoolStats {
-        self.wire.buffer_pool_stats()
+    pub fn metrics(&self) -> AdminMetricsSnapshot {
+        self.metrics.snapshot(self.wire.buffer_pool_stats())
+    }
+
+    /// Send a request to a broker, recording it in the admin metrics.
+    async fn send_metered<Req, Resp>(
+        &self,
+        broker_id: i32,
+        api_key: ApiKey,
+        api_version: i16,
+        request: &Req,
+    ) -> Result<Resp>
+    where
+        Req: RequestMessage + Clone + Send + Sync + 'static,
+        Resp: ResponseMessage,
+    {
+        let started = Instant::now();
+        let wire = &self.wire;
+        let result = wire
+            .send_to_broker(broker_id, api_key, api_version, request)
+            .await;
+        self.metrics.record(started.elapsed(), result.is_err());
+        Ok(result?)
     }
 
     /// Send a controller-only request, retrying against a freshly discovered
@@ -615,8 +636,7 @@ impl AdminClient {
             attempt = attempt.saturating_add(1);
             let controller_id = self.controller_id().await?;
             let response: Resp = self
-                .wire
-                .send_to_broker(controller_id, api_key, version, request)
+                .send_metered(controller_id, api_key, version, request)
                 .await?;
             if is_not_controller(&response) {
                 if attempt >= self.controller_attempts {
@@ -669,8 +689,7 @@ impl AdminClient {
                 Err(error) => return Err(error),
             };
             let response: Resp = self
-                .wire
-                .send_to_broker(coordinator.id, api_key, version, request)
+                .send_metered(coordinator.id, api_key, version, request)
                 .await?;
             if has_coordinator_error(&response) && attempt < self.controller_attempts {
                 tokio::time::sleep(CONTROLLER_RETRY_BACKOFF).await;
@@ -724,8 +743,7 @@ impl AdminClient {
         let mut listings = Vec::new();
         for broker_id in broker_ids {
             let response: ListGroupsResponseData = self
-                .wire
-                .send_to_broker(broker_id, ApiKey::ListGroups, version, &request)
+                .send_metered(broker_id, ApiKey::ListGroups, version, &request)
                 .await?;
             check_code("", response.error_code, None)?;
             for group in response.groups {
@@ -1142,14 +1160,13 @@ impl AdminClient {
         let response: IncrementalAlterConfigsResponseData = match broker_target(&resources) {
             Some(broker_id) => {
                 let version = client_api_info(ApiKey::IncrementalAlterConfigs).max_version;
-                self.wire
-                    .send_to_broker(
-                        broker_id,
-                        ApiKey::IncrementalAlterConfigs,
-                        version,
-                        &request,
-                    )
-                    .await?
+                self.send_metered(
+                    broker_id,
+                    ApiKey::IncrementalAlterConfigs,
+                    version,
+                    &request,
+                )
+                .await?
             },
             None => {
                 self.route_to_controller(
@@ -1259,8 +1276,7 @@ impl AdminClient {
                 _unknown_tagged_fields: Vec::new(),
             };
             let response: ListOffsetsResponseData = self
-                .wire
-                .send_to_broker(leader, ApiKey::ListOffsets, version, &request)
+                .send_metered(leader, ApiKey::ListOffsets, version, &request)
                 .await?;
             for topic in response.topics {
                 for partition in topic.partitions {
@@ -1321,8 +1337,7 @@ impl AdminClient {
                 _unknown_tagged_fields: Vec::new(),
             };
             let response: DeleteRecordsResponseData = self
-                .wire
-                .send_to_broker(leader, ApiKey::DeleteRecords, version, &request)
+                .send_metered(leader, ApiKey::DeleteRecords, version, &request)
                 .await?;
             for topic in response.topics {
                 for partition in topic.partitions {
@@ -1372,8 +1387,7 @@ impl AdminClient {
         let broker_id = self.wire.admin_any_broker_id()?;
         let version = client_api_info(ApiKey::CreateDelegationToken).max_version;
         let response: CreateDelegationTokenResponseData = self
-            .wire
-            .send_to_broker(broker_id, ApiKey::CreateDelegationToken, version, &request)
+            .send_metered(broker_id, ApiKey::CreateDelegationToken, version, &request)
             .await?;
         check_code("", response.error_code, None)?;
         Ok(DelegationToken {
@@ -1401,8 +1415,7 @@ impl AdminClient {
         let broker_id = self.wire.admin_any_broker_id()?;
         let version = client_api_info(ApiKey::RenewDelegationToken).max_version;
         let response: RenewDelegationTokenResponseData = self
-            .wire
-            .send_to_broker(broker_id, ApiKey::RenewDelegationToken, version, &request)
+            .send_metered(broker_id, ApiKey::RenewDelegationToken, version, &request)
             .await?;
         check_code("", response.error_code, None)?;
         Ok(response.expiry_timestamp_ms)
@@ -1426,8 +1439,7 @@ impl AdminClient {
         let broker_id = self.wire.admin_any_broker_id()?;
         let version = client_api_info(ApiKey::ExpireDelegationToken).max_version;
         let response: ExpireDelegationTokenResponseData = self
-            .wire
-            .send_to_broker(broker_id, ApiKey::ExpireDelegationToken, version, &request)
+            .send_metered(broker_id, ApiKey::ExpireDelegationToken, version, &request)
             .await?;
         check_code("", response.error_code, None)?;
         Ok(response.expiry_timestamp_ms)
@@ -1465,8 +1477,7 @@ impl AdminClient {
         let broker_id = self.wire.admin_any_broker_id()?;
         let version = client_api_info(ApiKey::DescribeDelegationToken).max_version;
         let response: DescribeDelegationTokenResponseData = self
-            .wire
-            .send_to_broker(
+            .send_metered(
                 broker_id,
                 ApiKey::DescribeDelegationToken,
                 version,
@@ -1523,8 +1534,7 @@ impl AdminClient {
                 _unknown_tagged_fields: Vec::new(),
             };
             let response: AlterReplicaLogDirsResponseData = self
-                .wire
-                .send_to_broker(broker_id, ApiKey::AlterReplicaLogDirs, version, &request)
+                .send_metered(broker_id, ApiKey::AlterReplicaLogDirs, version, &request)
                 .await?;
             for result in &response.results {
                 for partition in &result.partitions {
@@ -1608,8 +1618,7 @@ impl AdminClient {
         };
         let version = client_api_info(ApiKey::WriteTxnMarkers).max_version;
         let response: WriteTxnMarkersResponseData = self
-            .wire
-            .send_to_broker(leader, ApiKey::WriteTxnMarkers, version, &request)
+            .send_metered(leader, ApiKey::WriteTxnMarkers, version, &request)
             .await?;
         for marker in &response.markers {
             for topic_result in &marker.topics {
@@ -1637,8 +1646,7 @@ impl AdminClient {
         let broker_id = self.wire.admin_any_broker_id()?;
         let version = client_api_info(ApiKey::ApiVersions).max_version;
         let response: ApiVersionsResponseData = self
-            .wire
-            .send_to_broker(broker_id, ApiKey::ApiVersions, version, &request)
+            .send_metered(broker_id, ApiKey::ApiVersions, version, &request)
             .await?;
         check_code("", response.error_code, None)?;
         let supported_features = response
@@ -1699,8 +1707,7 @@ impl AdminClient {
         let mut listings = Vec::new();
         for broker_id in broker_ids {
             let response: ListGroupsResponseData = self
-                .wire
-                .send_to_broker(broker_id, ApiKey::ListGroups, version, &request)
+                .send_metered(broker_id, ApiKey::ListGroups, version, &request)
                 .await?;
             check_code("", response.error_code, None)?;
             for group in response.groups {
@@ -1788,8 +1795,7 @@ impl AdminClient {
         let broker_id = self.wire.admin_any_broker_id()?;
         let version = client_api_info(ApiKey::ListConfigResources).max_version;
         let response: ListConfigResourcesResponseData = self
-            .wire
-            .send_to_broker(broker_id, ApiKey::ListConfigResources, version, &request)
+            .send_metered(broker_id, ApiKey::ListConfigResources, version, &request)
             .await?;
         check_code("", response.error_code, None)?;
         Ok(response
@@ -1841,8 +1847,7 @@ impl AdminClient {
                 _unknown_tagged_fields: Vec::new(),
             };
             let response: DescribeLogDirsResponseData = self
-                .wire
-                .send_to_broker(broker_id, ApiKey::DescribeLogDirs, version, &request)
+                .send_metered(broker_id, ApiKey::DescribeLogDirs, version, &request)
                 .await?;
             check_code("", response.error_code, None)?;
             for partition in partitions {
@@ -1901,8 +1906,7 @@ impl AdminClient {
         let broker_id = self.wire.admin_any_broker_id()?;
         let version = client_api_info(ApiKey::DescribeQuorum).max_version;
         let response: DescribeQuorumResponseData = self
-            .wire
-            .send_to_broker(broker_id, ApiKey::DescribeQuorum, version, &request)
+            .send_metered(broker_id, ApiKey::DescribeQuorum, version, &request)
             .await?;
         check_code("", response.error_code, response.error_message.as_ref())?;
         let partition = response
@@ -2449,8 +2453,7 @@ impl AdminClient {
         let broker_id = self.wire.admin_any_broker_id()?;
         let version = client_api_info(ApiKey::DescribeClientQuotas).max_version;
         let response: DescribeClientQuotasResponseData = self
-            .wire
-            .send_to_broker(broker_id, ApiKey::DescribeClientQuotas, version, &request)
+            .send_metered(broker_id, ApiKey::DescribeClientQuotas, version, &request)
             .await?;
         check_code("", response.error_code, response.error_message.as_ref())?;
         let mut entries = Vec::new();
@@ -2564,8 +2567,7 @@ impl AdminClient {
         let broker_id = self.wire.admin_any_broker_id()?;
         let version = client_api_info(ApiKey::DescribeUserScramCredentials).max_version;
         let response: DescribeUserScramCredentialsResponseData = self
-            .wire
-            .send_to_broker(
+            .send_metered(
                 broker_id,
                 ApiKey::DescribeUserScramCredentials,
                 version,
@@ -2668,8 +2670,7 @@ impl AdminClient {
         let broker_id = self.wire.admin_any_broker_id()?;
         let version = client_api_info(ApiKey::DescribeAcls).max_version;
         let response: DescribeAclsResponseData = self
-            .wire
-            .send_to_broker(broker_id, ApiKey::DescribeAcls, version, &request)
+            .send_metered(broker_id, ApiKey::DescribeAcls, version, &request)
             .await?;
         check_code("", response.error_code, response.error_message.as_ref())?;
         let mut bindings = Vec::new();
@@ -2818,8 +2819,7 @@ impl AdminClient {
         let mut all = Vec::with_capacity(broker_ids.len());
         for broker_id in broker_ids {
             let response: DescribeLogDirsResponseData = self
-                .wire
-                .send_to_broker(broker_id, ApiKey::DescribeLogDirs, version, &request)
+                .send_metered(broker_id, ApiKey::DescribeLogDirs, version, &request)
                 .await?;
             check_code("", response.error_code, None)?;
             let log_dirs = response
@@ -3040,8 +3040,7 @@ impl AdminClient {
                 _unknown_tagged_fields: Vec::new(),
             };
             let response: DescribeProducersResponseData = self
-                .wire
-                .send_to_broker(leader, ApiKey::DescribeProducers, version, &request)
+                .send_metered(leader, ApiKey::DescribeProducers, version, &request)
                 .await?;
             for topic in response.topics {
                 for partition in topic.partitions {
@@ -3163,8 +3162,7 @@ impl AdminClient {
         let mut listings = Vec::new();
         for broker_id in broker_ids {
             let response: ListTransactionsResponseData = self
-                .wire
-                .send_to_broker(broker_id, ApiKey::ListTransactions, version, &request)
+                .send_metered(broker_id, ApiKey::ListTransactions, version, &request)
                 .await?;
             check_code("", response.error_code, None)?;
             for state in response.transaction_states {
@@ -3207,8 +3205,7 @@ impl AdminClient {
         let broker_id = self.wire.admin_any_broker_id()?;
         let version = client_api_info(ApiKey::FindCoordinator).max_version;
         let response: FindCoordinatorResponseData = self
-            .wire
-            .send_to_broker(broker_id, ApiKey::FindCoordinator, version, &request)
+            .send_metered(broker_id, ApiKey::FindCoordinator, version, &request)
             .await?;
         let coordinator = response
             .coordinators

@@ -60,6 +60,24 @@ each pattern once:
   `list_transactions`, config-resource listings): sent to one live broker, or
   fanned out to every broker and aggregated.
 
+## Metrics
+
+`AdminClient::metrics()` returns an `AdminMetricsSnapshot` — kacrab's native
+analogue of Java's `Admin.metrics()`, a typed struct rather than a
+`Map<MetricName, KafkaMetric>`. Every broker request funnels through one
+`send_metered` helper, so the snapshot reflects all routing paths
+(controller-routed, coordinator-routed, per-leader, and broadcast) uniformly:
+
+- `request_total` / `request_error_total` — completed requests and how many
+  failed at the wire/transport layer;
+- `request_latency_avg_nanos` / `request_latency_max_nanos` — mean and peak
+  request latency;
+- `buffer_pool` — the shared wire `BufferPoolStats` (read/write buffer acquire /
+  reuse / release counters) at snapshot time.
+
+The counters live behind an `Arc`, so `AdminClient` clones report the same
+aggregate.
+
 ## Wire-version pitfalls (found by real-broker verification)
 
 Verifying against a real Apache Kafka 4.3.0 broker surfaced a few version-

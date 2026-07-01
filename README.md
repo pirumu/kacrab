@@ -186,6 +186,10 @@ implemented surface:
         reassignments, delegation tokens, client quotas, user SCRAM credentials,
         log dirs, features, `KRaft` quorum/voters, and the Kafka 4.x share &
         streams group families, plus `client_instance_id`/`metrics` accessors.
+  - [x] `metrics()` returns a typed `AdminMetricsSnapshot` (request totals,
+        error totals, average/max request latency, and the shared wire
+        buffer-pool counters) — kacrab's native analogue of Java's
+        `Admin.metrics()`.
   - [x] `AdminClient::new`/`from_client_config`/`from_properties`/`from_map` and
         `ClientConfig::create_admin`, wired through the same auth/transport stack
         (SASL/TLS) as the producer.

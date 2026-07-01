@@ -55,7 +55,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             CreateTopicsOptions::default(),
         )
         .await?;
-    println!("create_topics: {} ({} partitions)", args.topic, args.partitions);
+    println!(
+        "create_topics: {} ({} partitions)",
+        args.topic, args.partitions
+    );
 
     // --- list & describe ---
     let listed = admin.list_topics(ListTopicsOptions::default()).await?;
@@ -69,15 +72,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "describe_topics: {} has {} partitions, leader(p0)={:?}",
             topic.name,
             topic.partitions.len(),
-            topic.partitions.first().and_then(|p| p.leader.as_ref()).map(|node| node.id)
+            topic
+                .partitions
+                .first()
+                .and_then(|p| p.leader.as_ref())
+                .map(|node| node.id)
         );
     }
 
     // --- configs: describe then incrementally alter ---
-    let configs = admin.describe_configs(vec![ConfigResource::topic(&args.topic)]).await?;
+    let configs = admin
+        .describe_configs(vec![ConfigResource::topic(&args.topic)])
+        .await?;
     let retention = configs
         .first()
-        .and_then(|resource| resource.entries.iter().find(|entry| entry.name == "retention.ms"))
+        .and_then(|resource| {
+            resource
+                .entries
+                .iter()
+                .find(|entry| entry.name == "retention.ms")
+        })
         .and_then(|entry| entry.value.clone());
     println!("describe_configs: retention.ms={retention:?}");
 
@@ -104,7 +118,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // --- offsets (leader-routed): earliest per partition ---
     let specs: Vec<(TopicPartition, OffsetSpec)> = (0..args.partitions)
-        .map(|partition| (TopicPartition::new(&args.topic, partition), OffsetSpec::Earliest))
+        .map(|partition| {
+            (
+                TopicPartition::new(&args.topic, partition),
+                OffsetSpec::Earliest,
+            )
+        })
         .collect();
     let offsets = admin.list_offsets(specs).await?;
     for result in &offsets {
@@ -115,7 +134,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // --- groups ---
-    let groups = admin.list_consumer_groups(ListConsumerGroupsOptions::default()).await?;
+    let groups = admin
+        .list_consumer_groups(ListConsumerGroupsOptions::default())
+        .await?;
     println!("list_consumer_groups: {} group(s)", groups.len());
 
     // --- clean up ---
@@ -135,8 +156,13 @@ impl ExampleArgs {
     fn parse(args: impl IntoIterator<Item = String>) -> Self {
         let mut args = args.into_iter();
         let bootstrap = args.next().unwrap_or_else(|| "127.0.0.1:9092".to_owned());
-        let topic = args.next().unwrap_or_else(|| "kacrab-admin-example".to_owned());
-        let partitions = args.next().and_then(|value| value.parse().ok()).unwrap_or(3);
+        let topic = args
+            .next()
+            .unwrap_or_else(|| "kacrab-admin-example".to_owned());
+        let partitions = args
+            .next()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(3);
         Self {
             bootstrap,
             topic,
