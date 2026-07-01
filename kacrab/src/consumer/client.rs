@@ -2,11 +2,11 @@
 //!
 //! Supports both manual assignment (`assign`) and group `subscribe`, with
 //! position control (`seek`, `pause`, `resume`), `auto.offset.reset`, offset
-//! commit/fetch (`commit_sync`/`committed`), and classic eager group membership
-//! (join/sync/heartbeat + the `range` assignor). The consumer is single-owner
-//! and not `Sync`; `poll` drives all fetch and coordination I/O — including
-//! poll-throttled heartbeats — mirroring the Java consumer's thread model. A
-//! dedicated background heartbeat task is a later refinement.
+//! commit/fetch (`commit_sync`/`commit_async`/`committed`, plus background
+//! auto-commit), and classic eager group membership (join/sync + the `range`
+//! assignor). `poll` drives fetch and rejoin on the caller's task, while a
+//! dedicated background task heartbeats the group — mirroring the Java consumer's
+//! user thread + `HeartbeatThread`.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -18,7 +18,14 @@ use std::{
 };
 
 use bytes::Bytes;
-use kacrab_protocol::generated::ErrorCode;
+use kacrab_protocol::{
+    KafkaUuid,
+    generated::{
+        ApiKey, ErrorCode, GetTelemetrySubscriptionsRequestData,
+        GetTelemetrySubscriptionsResponseData,
+    },
+    version::client_api_info,
+};
 use tokio::task::JoinHandle;
 
 use super::{
@@ -70,6 +77,21 @@ pub struct Consumer {
 /// Callback invoked with the result of an asynchronous offset commit.
 pub type OffsetCommitCallback = Box<dyn FnOnce(Result<()>) + Send>;
 
+/// Max join/sync rounds in one rejoin before giving up (a rebalance can restart
+/// the round when another member joins mid-sync).
+const MAX_REJOIN_ATTEMPTS: u32 = 10;
+
+/// Whether an error is the coordinator's `REBALANCE_IN_PROGRESS` signal.
+const fn is_rebalance_in_progress(error: &ConsumerError) -> bool {
+    matches!(
+        error,
+        ConsumerError::Broker {
+            error: ErrorCode::RebalanceInProgress,
+            ..
+        }
+    )
+}
+
 /// Group identity the background heartbeat task heartbeats with.
 #[derive(Debug, Clone)]
 #[expect(
@@ -81,6 +103,7 @@ struct HeartbeatContext {
     group_id: String,
     generation_id: i32,
     member_id: String,
+    group_instance_id: Option<String>,
 }
 
 impl Drop for Consumer {
@@ -396,7 +419,44 @@ impl Consumer {
     /// generation is `-1` and the member id is empty.
     #[must_use]
     pub fn group_metadata(&self) -> ConsumerGroupMetadata {
-        ConsumerGroupMetadata::new(self.config.group_id.clone())
+        ConsumerGroupMetadata::from_parts(
+            self.config.group_id.clone(),
+            self.generation_id,
+            self.member_id.clone(),
+            (!self.config.group_instance_id.is_empty())
+                .then(|| self.config.group_instance_id.clone()),
+        )
+    }
+
+    /// Force a group rebalance on the next [`poll`](Consumer::poll): the member
+    /// rejoins the group. Mirrors Kafka's `enforceRebalance`.
+    pub fn enforce_rebalance(&self) {
+        self.needs_rejoin.store(true, Ordering::SeqCst);
+    }
+
+    /// The broker-assigned client instance id (`GetTelemetrySubscriptions`,
+    /// Kafka's `clientInstanceId`).
+    ///
+    /// # Errors
+    /// Returns a wire/broker error, or [`ConsumerError::Wire`] with
+    /// `UnsupportedApiVersion` when the broker has client telemetry disabled.
+    pub async fn client_instance_id(&self) -> Result<KafkaUuid> {
+        let request = GetTelemetrySubscriptionsRequestData::default();
+        let broker = self.wire.any_broker_id()?;
+        let version = client_api_info(ApiKey::GetTelemetrySubscriptions).max_version;
+        let response: GetTelemetrySubscriptionsResponseData = self
+            .wire
+            .send_to_broker(broker, ApiKey::GetTelemetrySubscriptions, version, &request)
+            .await?;
+        let error = ErrorCode::from(response.error_code);
+        if error.is_error() {
+            return Err(ConsumerError::broker(
+                "client_instance_id",
+                error,
+                "GetTelemetrySubscriptions failed",
+            ));
+        }
+        Ok(response.client_instance_id)
     }
 
     /// The earliest available offset for each partition.
@@ -550,7 +610,14 @@ impl Consumer {
     pub async fn close(mut self) {
         self.heartbeat_task.abort();
         let _committed = self.auto_commit_now().await;
-        if let (false, Some(coordinator)) = (self.member_id.is_empty(), self.coordinator_id) {
+        // Static members (`group.instance.id`) stay in the group across a close so
+        // a quick restart avoids a rebalance, matching Java.
+        let dynamic_member = self.config.group_instance_id.is_empty();
+        if let (true, false, Some(coordinator)) = (
+            dynamic_member,
+            self.member_id.is_empty(),
+            self.coordinator_id,
+        ) {
             coordinator::leave_group(
                 &self.wire,
                 coordinator,
@@ -645,35 +712,49 @@ impl Consumer {
         // Commit the current positions before the assignment is revoked.
         let _committed = self.auto_commit_now().await;
         let group_id = self.config.group_id.clone();
+        let group_instance_id = self.config.group_instance_id.clone();
+        let instance = (!group_instance_id.is_empty()).then_some(group_instance_id.as_str());
         let coordinator = self.ensure_coordinator(&group_id).await?;
-        let join = coordinator::join_group(
-            &coordinator::GroupContext {
-                wire: &self.wire,
-                coordinator_id: coordinator,
-                group_id: &group_id,
-            },
-            &self.member_id,
-            clamp_ms(self.config.session_timeout),
-            clamp_ms(self.config.rebalance_timeout),
-            &self.subscribed_topics,
-        )
-        .await?;
-        self.member_id.clone_from(&join.member_id);
-        self.generation_id = join.generation_id;
-
-        let assignments = if join.leader {
-            self.compute_assignments(&join.members).await?
-        } else {
-            Vec::new()
-        };
         let context = coordinator::GroupContext {
             wire: &self.wire,
             coordinator_id: coordinator,
             group_id: &group_id,
+            group_instance_id: instance,
         };
-        let assigned =
-            coordinator::sync_group(&context, self.generation_id, &self.member_id, assignments)
-                .await?;
+        // A rebalance that starts between our JoinGroup and SyncGroup makes the
+        // coordinator answer REBALANCE_IN_PROGRESS; rejoin and retry.
+        let mut attempts = 0_u32;
+        let assigned = loop {
+            attempts = attempts.saturating_add(1);
+            let join = coordinator::join_group(
+                &context,
+                &self.member_id,
+                clamp_ms(self.config.session_timeout),
+                clamp_ms(self.config.rebalance_timeout),
+                &self.subscribed_topics,
+            )
+            .await?;
+            self.member_id.clone_from(&join.member_id);
+            self.generation_id = join.generation_id;
+            let assignments = if join.leader {
+                self.compute_assignments(&join.members).await?
+            } else {
+                Vec::new()
+            };
+            match coordinator::sync_group(
+                &context,
+                self.generation_id,
+                &self.member_id,
+                assignments,
+            )
+            .await
+            {
+                Ok(assigned) => break assigned,
+                Err(error)
+                    if is_rebalance_in_progress(&error) && attempts < MAX_REJOIN_ATTEMPTS => {},
+                Err(error) => return Err(error),
+            }
+        };
 
         self.subscription.assign(&assigned);
         let committed =
@@ -690,6 +771,7 @@ impl Consumer {
             group_id,
             generation_id: self.generation_id,
             member_id: self.member_id.clone(),
+            group_instance_id: instance.map(str::to_owned),
         }));
         Ok(())
     }
@@ -876,15 +958,13 @@ async fn heartbeat_loop(
         let Some(group) = snapshot else {
             continue;
         };
-        match coordinator::heartbeat(
-            &wire,
-            group.coordinator_id,
-            &group.group_id,
-            group.generation_id,
-            &group.member_id,
-        )
-        .await
-        {
+        let context = coordinator::GroupContext {
+            wire: &wire,
+            coordinator_id: group.coordinator_id,
+            group_id: &group.group_id,
+            group_instance_id: group.group_instance_id.as_deref(),
+        };
+        match coordinator::heartbeat(&context, group.generation_id, &group.member_id).await {
             Ok(ErrorCode::None) => {},
             Ok(_) => needs_rejoin.store(true, Ordering::SeqCst),
             Err(_transient) => {},

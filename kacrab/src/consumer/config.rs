@@ -61,6 +61,8 @@ impl IsolationLevel {
 pub struct ConsumerRuntimeConfig {
     /// Consumer group id (empty when consuming without group management).
     pub group_id: String,
+    /// Static group instance id (empty when not a static member).
+    pub group_instance_id: String,
     /// Logical client id sent to brokers.
     pub client_id: String,
     /// Rack id for rack-aware (follower) fetches.
@@ -104,6 +106,7 @@ impl ConsumerRuntimeConfig {
     pub fn from_config(config: &ConsumerConfig) -> Result<Self> {
         Ok(Self {
             group_id: config.group_id.clone(),
+            group_instance_id: config.group_instance_id.clone(),
             client_id: config.client_id.clone(),
             client_rack: config.client_rack.clone(),
             auto_offset_reset: AutoOffsetReset::parse(&config.auto_offset_reset)?,

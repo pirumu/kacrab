@@ -243,6 +243,15 @@ pub(super) struct GroupContext<'a> {
     pub wire: &'a WireClient,
     pub coordinator_id: i32,
     pub group_id: &'a str,
+    /// Static membership id (`group.instance.id`), or `None`.
+    pub group_instance_id: Option<&'a str>,
+}
+
+/// Convert a static-membership id into the wire's optional `KafkaString`.
+fn instance_id(group_instance_id: Option<&str>) -> Option<KafkaString> {
+    group_instance_id
+        .filter(|id| !id.is_empty())
+        .map(|id| id.to_owned().into())
 }
 
 /// The outcome of a `JoinGroup` round.
@@ -277,7 +286,7 @@ pub(super) async fn join_group(
             session_timeout_ms,
             rebalance_timeout_ms,
             member_id: member_id.clone().into(),
-            group_instance_id: None,
+            group_instance_id: instance_id(context.group_instance_id),
             protocol_type: assignor::PROTOCOL_TYPE.to_owned().into(),
             protocols: vec![JoinGroupRequestProtocol {
                 name: assignor::RANGE_ASSIGNOR.to_owned().into(),
@@ -346,7 +355,7 @@ pub(super) async fn sync_group(
         group_id: context.group_id.to_owned().into(),
         generation_id,
         member_id: member_id.to_owned().into(),
-        group_instance_id: None,
+        group_instance_id: instance_id(context.group_instance_id),
         protocol_type: Some(assignor::PROTOCOL_TYPE.to_owned().into()),
         protocol_name: Some(assignor::RANGE_ASSIGNOR.to_owned().into()),
         assignments: assignments
@@ -379,22 +388,21 @@ pub(super) async fn sync_group(
 /// `REBALANCE_IN_PROGRESS`/`ILLEGAL_GENERATION`/`UNKNOWN_MEMBER_ID` signal a
 /// rejoin).
 pub(super) async fn heartbeat(
-    wire: &WireClient,
-    coordinator_id: i32,
-    group_id: &str,
+    context: &GroupContext<'_>,
     generation_id: i32,
     member_id: &str,
 ) -> Result<ErrorCode> {
     let request = HeartbeatRequestData {
-        group_id: group_id.to_owned().into(),
+        group_id: context.group_id.to_owned().into(),
         generation_id,
         member_id: member_id.to_owned().into(),
-        group_instance_id: None,
+        group_instance_id: instance_id(context.group_instance_id),
         _unknown_tagged_fields: Vec::new(),
     };
     let version = client_api_info(ApiKey::Heartbeat).max_version;
-    let response: HeartbeatResponseData = wire
-        .send_to_broker(coordinator_id, ApiKey::Heartbeat, version, &request)
+    let response: HeartbeatResponseData = context
+        .wire
+        .send_to_broker(context.coordinator_id, ApiKey::Heartbeat, version, &request)
         .await?;
     Ok(ErrorCode::from(response.error_code))
 }
