@@ -14,6 +14,13 @@ plus record fetching with incremental fetch sessions, offset commit/fetch, and
 interceptors. The design of record and the phased plan live in
 `docs/consumer-design.md`.
 
+This chapter is the architectural tour. The algorithms behind it get their own
+deep dives: [Group membership & rebalancing](./consumer/rebalancing.md) (the two
+protocols, the assignors, cooperative-sticky and KIP-848 reconciliation) and
+[Fetching, positions & offsets](./consumer/fetching.md) (the position state
+machine, incremental fetch sessions, per-partition error recovery, truncation
+detection, and in-order commits).
+
 ## Shape and conventions
 
 The consumer follows the producer/admin conventions rather than Java's:
