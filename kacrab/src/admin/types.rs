@@ -556,6 +556,9 @@ pub struct MemberDescription {
     pub client_id: String,
     /// The host the member connected from.
     pub host: String,
+    /// The partitions currently assigned to this member. Empty for members whose
+    /// assignment is not partition-shaped (e.g. streams-group task assignments).
+    pub assignment: Vec<TopicPartition>,
 }
 
 /// A consumer group description returned by
@@ -575,6 +578,9 @@ pub struct ConsumerGroupDescription {
     pub state: String,
     /// The group's coordinator broker.
     pub coordinator: Node,
+    /// The operations the caller is authorized to perform on the group, if the
+    /// request asked for them (empty otherwise).
+    pub authorized_operations: Vec<AclOperation>,
 }
 
 /// A committed offset for one partition, returned by
@@ -1523,6 +1529,9 @@ pub struct ShareGroupDescription {
     pub members: Vec<MemberDescription>,
     /// The group's coordinator broker.
     pub coordinator: Node,
+    /// The operations the caller is authorized to perform on the group, if the
+    /// request asked for them (empty otherwise).
+    pub authorized_operations: Vec<AclOperation>,
 }
 
 /// A streams-group description from
@@ -1540,6 +1549,9 @@ pub struct StreamsGroupDescription {
     pub members: Vec<MemberDescription>,
     /// The group's coordinator broker.
     pub coordinator: Node,
+    /// The operations the caller is authorized to perform on the group, if the
+    /// request asked for them (empty otherwise).
+    pub authorized_operations: Vec<AclOperation>,
 }
 
 #[cfg(test)]

@@ -16,8 +16,8 @@ use kacrab_protocol::{
         AlterReplicaLogDirsRequestData, AlterReplicaLogDirsResponseData,
         AlterShareGroupOffsetsRequestData, AlterShareGroupOffsetsResponseData,
         AlterUserScramCredentialsRequestData, AlterUserScramCredentialsResponseData, ApiKey,
-        ApiVersionsRequestData, ApiVersionsResponseData, CreateAclsRequestData,
-        CreateAclsResponseData, CreateDelegationTokenRequestData,
+        ApiVersionsRequestData, ApiVersionsResponseData, ConsumerProtocolAssignmentData,
+        CreateAclsRequestData, CreateAclsResponseData, CreateDelegationTokenRequestData,
         CreateDelegationTokenResponseData, CreatePartitionsRequestData,
         CreatePartitionsResponseData, CreateTopicsRequestData, CreateTopicsResponseData,
         DeleteAclsRequestData, DeleteAclsResponseData, DeleteGroupsRequestData,
@@ -785,6 +785,7 @@ impl AdminClient {
                     group_instance_id: member.group_instance_id.map(|id| id.as_str().to_owned()),
                     client_id: member.client_id.as_str().to_owned(),
                     host: member.client_host.as_str().to_owned(),
+                    assignment: decode_member_assignment(&member.member_assignment),
                 })
                 .collect();
             described.push(ConsumerGroupDescription {
@@ -794,6 +795,7 @@ impl AdminClient {
                 partition_assignor: group.protocol_data.as_str().to_owned(),
                 state: group.group_state.as_str().to_owned(),
                 coordinator,
+                authorized_operations: decode_authorized_operations(group.authorized_operations),
             });
         }
         Ok(described)
@@ -1947,6 +1949,18 @@ impl AdminClient {
                     group_instance_id: None,
                     client_id: member.client_id.as_str().to_owned(),
                     host: member.client_host.as_str().to_owned(),
+                    assignment: member
+                        .assignment
+                        .topic_partitions
+                        .into_iter()
+                        .flat_map(|topic| {
+                            let name = topic.topic_name.as_str().to_owned();
+                            topic
+                                .partitions
+                                .into_iter()
+                                .map(move |partition| TopicPartition::new(name.clone(), partition))
+                        })
+                        .collect(),
                 })
                 .collect();
             described.push(ShareGroupDescription {
@@ -1956,6 +1970,7 @@ impl AdminClient {
                 assignor_name: group.assignor_name.as_str().to_owned(),
                 members,
                 coordinator,
+                authorized_operations: decode_authorized_operations(group.authorized_operations),
             });
         }
         Ok(described)
@@ -2007,6 +2022,8 @@ impl AdminClient {
                     group_instance_id: member.instance_id.map(|id| id.as_str().to_owned()),
                     client_id: member.client_id.as_str().to_owned(),
                     host: member.client_host.as_str().to_owned(),
+                    // Streams members are assigned tasks, not partitions.
+                    assignment: Vec::new(),
                 })
                 .collect();
             described.push(StreamsGroupDescription {
@@ -2015,6 +2032,7 @@ impl AdminClient {
                 group_epoch: group.group_epoch,
                 members,
                 coordinator,
+                authorized_operations: decode_authorized_operations(group.authorized_operations),
             });
         }
         Ok(described)
@@ -3480,6 +3498,48 @@ fn delete_records_topics(entries: Vec<(String, i32, i64)>) -> Vec<DeleteRecordsT
     topics
 }
 
+/// Decode a classic consumer-group member assignment blob (a version-prefixed
+/// `ConsumerProtocolAssignment`) into the partitions the member owns. Returns an
+/// empty list for an absent or non-consumer-protocol assignment.
+fn decode_member_assignment(assignment: &bytes::Bytes) -> Vec<TopicPartition> {
+    use bytes::Buf as _;
+
+    if assignment.len() < 2 {
+        return Vec::new();
+    }
+    let mut buf = assignment.clone();
+    let version = buf.get_i16();
+    let Ok(decoded) = ConsumerProtocolAssignmentData::read(&mut buf, version) else {
+        return Vec::new();
+    };
+    decoded
+        .assigned_partitions
+        .into_iter()
+        .flat_map(|topic| {
+            let name = topic.topic.as_str().to_owned();
+            topic
+                .partitions
+                .into_iter()
+                .map(move |partition| TopicPartition::new(name.clone(), partition))
+        })
+        .collect()
+}
+
+/// Decode a Kafka `authorized_operations` bit field into the authorized ACL
+/// operations. `Integer.MIN_VALUE` marks "not requested" and yields an empty
+/// list.
+fn decode_authorized_operations(bits: i32) -> Vec<AclOperation> {
+    if bits == i32::MIN {
+        return Vec::new();
+    }
+    let bits = bits.cast_unsigned();
+    (2_i8..15)
+        .filter(|code| bits & (1_u32 << u32::from(code.unsigned_abs())) != 0)
+        .map(AclOperation::from_wire)
+        .filter(|operation| !matches!(operation, AclOperation::Unknown))
+        .collect()
+}
+
 /// If every resource targets the same specific broker id, return it; otherwise
 /// `None` (mixed/non-broker resources, or the cluster-wide broker default whose
 /// empty name does not parse).
@@ -3963,5 +4023,50 @@ mod tests {
         ]);
         assert_eq!(delete.len(), 2);
         assert_eq!(delete[0].partitions[0].offset, 100);
+    }
+
+    #[test]
+    fn decode_authorized_operations_maps_bits_and_omitted() {
+        // Integer.MIN_VALUE = "not requested", 0 = none.
+        assert!(decode_authorized_operations(i32::MIN).is_empty());
+        assert!(decode_authorized_operations(0).is_empty());
+
+        // Read (code 3), Write (4), Describe (8).
+        let bits = (1 << 3) | (1 << 4) | (1 << 8);
+        let ops = decode_authorized_operations(bits);
+        assert_eq!(ops.len(), 3);
+        assert!(ops.contains(&AclOperation::Read));
+        assert!(ops.contains(&AclOperation::Write));
+        assert!(ops.contains(&AclOperation::Describe));
+    }
+
+    #[test]
+    fn decode_member_assignment_round_trips_consumer_protocol() {
+        use bytes::{BufMut, BytesMut};
+        use kacrab_protocol::generated::consumer_protocol_assignment::TopicPartition as WireTopic;
+
+        let mut buf = BytesMut::new();
+        buf.put_i16(3); // ConsumerProtocol assignment version prefix
+        ConsumerProtocolAssignmentData {
+            assigned_partitions: vec![WireTopic {
+                topic: "orders".to_owned().into(),
+                partitions: vec![0, 2],
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            user_data: None,
+            _unknown_tagged_fields: Vec::new(),
+        }
+        .write(&mut buf, 3)
+        .expect("write assignment");
+
+        assert_eq!(
+            decode_member_assignment(&buf.freeze()),
+            vec![
+                TopicPartition::new("orders", 0),
+                TopicPartition::new("orders", 2)
+            ]
+        );
+        // Absent / too-short assignment decodes to empty.
+        assert!(decode_member_assignment(&bytes::Bytes::new()).is_empty());
     }
 }
