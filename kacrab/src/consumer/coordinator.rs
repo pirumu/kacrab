@@ -9,20 +9,27 @@
 //! (the same trap seen on the admin offset paths). Join/sync/heartbeat and
 //! server-side membership arrive in Phase 2b.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, net::SocketAddr};
 
+use bytes::Bytes;
 use kacrab_protocol::{
     KafkaString,
     generated::{
         ApiKey, ErrorCode, FindCoordinatorRequestData, FindCoordinatorResponseData,
-        OffsetCommitRequestData, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
-        OffsetCommitResponseData, OffsetFetchRequestData, OffsetFetchRequestTopic,
-        OffsetFetchResponseData,
+        HeartbeatRequestData, HeartbeatResponseData, JoinGroupRequestData, JoinGroupResponseData,
+        LeaveGroupRequestData, LeaveGroupResponseData, OffsetCommitRequestData,
+        OffsetCommitRequestPartition, OffsetCommitRequestTopic, OffsetCommitResponseData,
+        OffsetFetchRequestData, OffsetFetchRequestTopic, OffsetFetchResponseData,
+        SyncGroupRequestData, SyncGroupResponseData, join_group_request::JoinGroupRequestProtocol,
+        sync_group_request::SyncGroupRequestAssignment,
     },
     version::client_api_info,
 };
 
-use super::error::{ConsumerError, Result};
+use super::{
+    assignor::{self, MemberSubscription},
+    error::{ConsumerError, Result},
+};
 use crate::{
     common::{OffsetAndMetadata, TopicPartition},
     wire::{BrokerEndpoint, WireClient, WireError},
@@ -38,6 +45,23 @@ const OFFSET_FETCH_MAX_VERSION: i16 = 7;
 const FIND_COORDINATOR_MAX_ATTEMPTS: u32 = 20;
 /// Backoff between `FindCoordinator` retries.
 const FIND_COORDINATOR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Pick a coordinator socket address, preferring IPv4. A hostname like
+/// `localhost` often resolves to `[::1]` first, and a dead IPv6 loopback (e.g. a
+/// broker only bound on IPv4) makes a pinned IPv6 connection hang — so prefer an
+/// IPv4 address when one is present, matching the producer's coordinator lookup.
+fn choose_coordinator_addr(addresses: impl IntoIterator<Item = SocketAddr>) -> Option<SocketAddr> {
+    let mut first = None;
+    for address in addresses {
+        if first.is_none() {
+            first = Some(address);
+        }
+        if address.is_ipv4() {
+            return Some(address);
+        }
+    }
+    first
+}
 
 /// Resolve the group coordinator, register its endpoint, and return its node id.
 ///
@@ -91,17 +115,16 @@ pub(super) async fn find_coordinator(wire: &WireClient, group_id: &str) -> Resul
         )
     })?;
     let host = coordinator.host.to_string();
-    let mut addresses = tokio::net::lookup_host((host.as_str(), port))
+    let addresses = tokio::net::lookup_host((host.as_str(), port))
         .await
         .map_err(WireError::from)?;
-    let addr = addresses.next().ok_or_else(|| {
+    let addr = choose_coordinator_addr(addresses).ok_or_else(|| {
         ConsumerError::broker(
             "find_coordinator",
             ErrorCode::CoordinatorNotAvailable,
             "coordinator host did not resolve",
         )
     })?;
-    drop(addresses);
     wire.upsert_broker(BrokerEndpoint::from_resolved(
         coordinator.node_id,
         host,
@@ -221,6 +244,189 @@ pub(super) async fn fetch_committed(
         }
     }
     Ok(committed)
+}
+
+/// Highest `LeaveGroup` version to negotiate; v3+ moves to the batch `members`
+/// form, so v2 keeps the single top-level `member_id`.
+const LEAVE_GROUP_MAX_VERSION: i16 = 2;
+
+/// The routing context shared by group-membership RPCs: the wire client, the
+/// coordinator broker id, and the group id.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct GroupContext<'a> {
+    pub wire: &'a WireClient,
+    pub coordinator_id: i32,
+    pub group_id: &'a str,
+}
+
+/// The outcome of a `JoinGroup` round.
+#[derive(Debug)]
+pub(super) struct JoinResult {
+    /// The group generation this member joined.
+    pub generation_id: i32,
+    /// The member id the coordinator assigned (or echoed).
+    pub member_id: String,
+    /// Whether this member is the group leader (runs the assignor).
+    pub leader: bool,
+    /// Decoded member subscriptions — populated only for the leader.
+    pub members: Vec<MemberSubscription>,
+}
+
+/// Run one `JoinGroup` round for the classic (eager) `range` protocol,
+/// transparently retrying once with the coordinator-assigned member id when the
+/// broker demands one (`MEMBER_ID_REQUIRED`).
+pub(super) async fn join_group(
+    context: &GroupContext<'_>,
+    member_id: &str,
+    session_timeout_ms: i32,
+    rebalance_timeout_ms: i32,
+    topics: &[String],
+) -> Result<JoinResult> {
+    let metadata = assignor::encode_subscription(topics);
+    let version = client_api_info(ApiKey::JoinGroup).max_version;
+    let mut member_id = member_id.to_owned();
+    loop {
+        let request = JoinGroupRequestData {
+            group_id: context.group_id.to_owned().into(),
+            session_timeout_ms,
+            rebalance_timeout_ms,
+            member_id: member_id.clone().into(),
+            group_instance_id: None,
+            protocol_type: assignor::PROTOCOL_TYPE.to_owned().into(),
+            protocols: vec![JoinGroupRequestProtocol {
+                name: assignor::RANGE_ASSIGNOR.to_owned().into(),
+                metadata: metadata.clone(),
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            reason: None,
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let response: JoinGroupResponseData = context
+            .wire
+            .send_to_broker(context.coordinator_id, ApiKey::JoinGroup, version, &request)
+            .await?;
+        let error = ErrorCode::from(response.error_code);
+        if error == ErrorCode::MemberIdRequired {
+            member_id = response.member_id.to_string();
+            continue;
+        }
+        if error.is_error() {
+            return Err(ConsumerError::broker(
+                "join_group",
+                error,
+                "join group failed",
+            ));
+        }
+        let leader = response.leader.as_str() == response.member_id.as_str();
+        let members = if leader {
+            response
+                .members
+                .into_iter()
+                .map(|member| MemberSubscription {
+                    member_id: member.member_id.to_string(),
+                    topics: assignor::decode_subscription(&member.metadata),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        return Ok(JoinResult {
+            generation_id: response.generation_id,
+            member_id: response.member_id.to_string(),
+            leader,
+            members,
+        });
+    }
+}
+
+/// Send `SyncGroup` (with the leader's computed assignments, or empty for a
+/// follower) and return this member's assigned partitions.
+pub(super) async fn sync_group(
+    context: &GroupContext<'_>,
+    generation_id: i32,
+    member_id: &str,
+    assignments: Vec<(String, Bytes)>,
+) -> Result<Vec<TopicPartition>> {
+    let request = SyncGroupRequestData {
+        group_id: context.group_id.to_owned().into(),
+        generation_id,
+        member_id: member_id.to_owned().into(),
+        group_instance_id: None,
+        protocol_type: Some(assignor::PROTOCOL_TYPE.to_owned().into()),
+        protocol_name: Some(assignor::RANGE_ASSIGNOR.to_owned().into()),
+        assignments: assignments
+            .into_iter()
+            .map(|(member, assignment)| SyncGroupRequestAssignment {
+                member_id: member.into(),
+                assignment,
+                _unknown_tagged_fields: Vec::new(),
+            })
+            .collect(),
+        _unknown_tagged_fields: Vec::new(),
+    };
+    let version = client_api_info(ApiKey::SyncGroup).max_version;
+    let response: SyncGroupResponseData = context
+        .wire
+        .send_to_broker(context.coordinator_id, ApiKey::SyncGroup, version, &request)
+        .await?;
+    let error = ErrorCode::from(response.error_code);
+    if error.is_error() {
+        return Err(ConsumerError::broker(
+            "sync_group",
+            error,
+            "sync group failed",
+        ));
+    }
+    Ok(assignor::decode_assignment(&response.assignment))
+}
+
+/// Send one `Heartbeat` and return the broker error code (`NONE` when healthy;
+/// `REBALANCE_IN_PROGRESS`/`ILLEGAL_GENERATION`/`UNKNOWN_MEMBER_ID` signal a
+/// rejoin).
+pub(super) async fn heartbeat(
+    wire: &WireClient,
+    coordinator_id: i32,
+    group_id: &str,
+    generation_id: i32,
+    member_id: &str,
+) -> Result<ErrorCode> {
+    let request = HeartbeatRequestData {
+        group_id: group_id.to_owned().into(),
+        generation_id,
+        member_id: member_id.to_owned().into(),
+        group_instance_id: None,
+        _unknown_tagged_fields: Vec::new(),
+    };
+    let version = client_api_info(ApiKey::Heartbeat).max_version;
+    let response: HeartbeatResponseData = wire
+        .send_to_broker(coordinator_id, ApiKey::Heartbeat, version, &request)
+        .await?;
+    Ok(ErrorCode::from(response.error_code))
+}
+
+/// Best-effort `LeaveGroup` on close; failures are ignored.
+pub(super) async fn leave_group(
+    wire: &WireClient,
+    coordinator_id: i32,
+    group_id: &str,
+    member_id: &str,
+) {
+    if member_id.is_empty() {
+        return;
+    }
+    let request = LeaveGroupRequestData {
+        group_id: group_id.to_owned().into(),
+        member_id: member_id.to_owned().into(),
+        members: Vec::new(),
+        _unknown_tagged_fields: Vec::new(),
+    };
+    let version = client_api_info(ApiKey::LeaveGroup)
+        .max_version
+        .min(LEAVE_GROUP_MAX_VERSION);
+    let _outcome: Result<LeaveGroupResponseData> = wire
+        .send_to_broker(coordinator_id, ApiKey::LeaveGroup, version, &request)
+        .await
+        .map_err(Into::into);
 }
 
 fn commit_topics(

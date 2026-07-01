@@ -1,12 +1,12 @@
 //! The public [`Consumer`] facade and its `poll` loop.
 //!
-//! A manual-assignment consumer: `assign` + `poll` + position control
-//! (`seek`, `pause`, `resume`), with `auto.offset.reset` resolved lazily on the
-//! first poll, plus offset commit/fetch against the group coordinator
-//! (`commit_sync`/`committed`) for a consumer carrying a `group.id`. Group
-//! *subscription* (join/sync/heartbeat rebalancing) arrives in Phase 2b. The
-//! consumer is single-owner and not `Sync`; `poll` drives all fetch I/O,
-//! mirroring the Java consumer's thread model.
+//! Supports both manual assignment (`assign`) and group `subscribe`, with
+//! position control (`seek`, `pause`, `resume`), `auto.offset.reset`, offset
+//! commit/fetch (`commit_sync`/`committed`), and classic eager group membership
+//! (join/sync/heartbeat + the `range` assignor). The consumer is single-owner
+//! and not `Sync`; `poll` drives all fetch and coordination I/O — including
+//! poll-throttled heartbeats — mirroring the Java consumer's thread model. A
+//! dedicated background heartbeat task is a later refinement.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -17,7 +17,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bytes::Bytes;
+use kacrab_protocol::generated::ErrorCode;
+
 use super::{
+    assignor::{self, MemberSubscription},
     config::{AutoOffsetReset, ConsumerRuntimeConfig},
     coordinator,
     error::{ConsumerError, Result},
@@ -34,8 +38,9 @@ use crate::{
 
 /// A native, Java-compatible Kafka consumer.
 ///
-/// See `docs/consumer-design.md`. Phase 1 supports manual partition assignment
-/// and fetching; group management is not yet wired.
+/// See `docs/consumer-design.md`. Supports manual assignment and classic group
+/// subscription (eager rebalancing with the `range` assignor), fetching, and
+/// offset commit/fetch.
 #[derive(Debug)]
 pub struct Consumer {
     wire: WireClient,
@@ -43,6 +48,16 @@ pub struct Consumer {
     subscription: SubscriptionState,
     wakeup: Arc<AtomicBool>,
     coordinator_id: Option<i32>,
+    /// Topics this consumer subscribed to; empty means manual-assignment mode.
+    subscribed_topics: Vec<String>,
+    /// Group member id once joined (empty before the first `JoinGroup`).
+    member_id: String,
+    /// Current group generation, or `-1` when not a member.
+    generation_id: i32,
+    /// Whether a (re)join is needed before the next fetch.
+    needs_rejoin: bool,
+    /// When the last heartbeat was sent (throttles poll-driven heartbeats).
+    last_heartbeat: Option<Instant>,
 }
 
 impl Consumer {
@@ -63,6 +78,11 @@ impl Consumer {
             config: runtime,
             wakeup: Arc::new(AtomicBool::new(false)),
             coordinator_id: None,
+            subscribed_topics: Vec::new(),
+            member_id: String::new(),
+            generation_id: -1,
+            needs_rejoin: false,
+            last_heartbeat: None,
         })
     }
 
@@ -122,6 +142,48 @@ impl Consumer {
     #[must_use]
     pub fn assignment(&self) -> Vec<TopicPartition> {
         self.subscription.assigned_partitions()
+    }
+
+    /// Subscribe to a set of topics, joining the consumer group on the next
+    /// [`poll`](Consumer::poll). Replaces any prior subscription and clears a
+    /// manual assignment.
+    ///
+    /// # Errors
+    /// Returns [`ConsumerError::InvalidState`] if `group.id` is unset.
+    pub fn subscribe(&mut self, topics: impl IntoIterator<Item = impl Into<String>>) -> Result<()> {
+        if self.config.group_id.is_empty() {
+            return Err(ConsumerError::InvalidState(
+                "group.id must be set to subscribe to topics",
+            ));
+        }
+        let mut topics: Vec<String> = topics.into_iter().map(Into::into).collect();
+        topics.sort();
+        topics.dedup();
+        self.subscribed_topics = topics;
+        self.subscription.assign(&[]);
+        self.member_id.clear();
+        self.generation_id = -1;
+        self.needs_rejoin = true;
+        self.last_heartbeat = None;
+        Ok(())
+    }
+
+    /// Unsubscribe from all topics and drop the current assignment. Does not send
+    /// a `LeaveGroup`; call [`close`](Consumer::close) to leave the group.
+    pub fn unsubscribe(&mut self) {
+        self.subscribed_topics.clear();
+        self.subscription.assign(&[]);
+        self.member_id.clear();
+        self.generation_id = -1;
+        self.needs_rejoin = false;
+        self.last_heartbeat = None;
+    }
+
+    /// The topics this consumer is subscribed to (empty in manual-assignment
+    /// mode).
+    #[must_use]
+    pub fn subscription(&self) -> Vec<String> {
+        self.subscribed_topics.clone()
     }
 
     /// Override the fetch position of a partition to an absolute offset.
@@ -276,48 +338,59 @@ impl Consumer {
         let start = Instant::now();
 
         loop {
-            let topics = self.assigned_topics();
-            if topics.is_empty() {
-                return Ok(ConsumerRecords::empty());
+            // Group members join/sync and heartbeat before fetching; manual
+            // assignment skips all of this.
+            if self.is_subscribed() {
+                self.ensure_active_group().await?;
+                self.maybe_heartbeat().await?;
             }
-            let metadata = self.wire.metadata_for_topics(topics).await?;
-            self.reset_positions(&metadata).await?;
 
-            let fetchable = self.subscription.fetchable_partitions();
-            if !fetchable.is_empty() {
-                let fetched = fetch::fetch(
-                    &self.wire,
-                    &self.config,
-                    &metadata,
-                    &fetchable,
-                    self.config.max_poll_records,
-                )
-                .await?;
-                let mut records = ConsumerRecords::empty();
-                for partition_fetch in fetched {
-                    self.subscription.advance_position(
-                        &partition_fetch.partition,
-                        partition_fetch.next_offset,
-                        partition_fetch.next_leader_epoch,
-                    );
-                    records.push_partition(
-                        partition_fetch.partition.topic,
-                        partition_fetch.partition.partition,
-                        partition_fetch.records,
-                    );
+            let topics = self.assigned_topics();
+            let mut fetchable_empty = true;
+            if !topics.is_empty() {
+                let metadata = self.wire.metadata_for_topics(topics).await?;
+                self.reset_positions(&metadata).await?;
+
+                let fetchable = self.subscription.fetchable_partitions();
+                fetchable_empty = fetchable.is_empty();
+                if !fetchable.is_empty() {
+                    let fetched = fetch::fetch(
+                        &self.wire,
+                        &self.config,
+                        &metadata,
+                        &fetchable,
+                        self.config.max_poll_records,
+                    )
+                    .await?;
+                    let mut records = ConsumerRecords::empty();
+                    for partition_fetch in fetched {
+                        self.subscription.advance_position(
+                            &partition_fetch.partition,
+                            partition_fetch.next_offset,
+                            partition_fetch.next_leader_epoch,
+                        );
+                        records.push_partition(
+                            partition_fetch.partition.topic,
+                            partition_fetch.partition.partition,
+                            partition_fetch.records,
+                        );
+                    }
+                    if !records.is_empty() {
+                        return Ok(records);
+                    }
                 }
-                if !records.is_empty() {
-                    return Ok(records);
-                }
+            } else if !self.is_subscribed() {
+                // Manual assignment with nothing assigned — nothing to do.
+                return Ok(ConsumerRecords::empty());
             }
 
             self.check_wakeup()?;
             if start.elapsed() >= timeout {
                 return Ok(ConsumerRecords::empty());
             }
-            // Nothing fetchable this round (e.g. leaders not yet resolved) — back
-            // off briefly so we don't spin against the deadline.
-            if fetchable.is_empty() {
+            // Nothing fetchable this round (leaders unresolved, or subscribed but
+            // not yet assigned) — back off briefly so we don't spin.
+            if fetchable_empty {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
@@ -329,9 +402,18 @@ impl Consumer {
         self.wakeup.store(true, Ordering::SeqCst);
     }
 
-    /// Close the consumer, releasing its broker connections. The wire client
-    /// shuts its broker tasks down on drop.
-    pub fn close(self) {
+    /// Close the consumer: leave the group (best effort) and release its broker
+    /// connections. The wire client shuts its broker tasks down on drop.
+    pub async fn close(self) {
+        if let (false, Some(coordinator)) = (self.member_id.is_empty(), self.coordinator_id) {
+            coordinator::leave_group(
+                &self.wire,
+                coordinator,
+                &self.config.group_id,
+                &self.member_id,
+            )
+            .await;
+        }
         drop(self);
     }
 
@@ -370,6 +452,136 @@ impl Consumer {
         let id = coordinator::find_coordinator(&self.wire, group_id).await?;
         self.coordinator_id = Some(id);
         Ok(id)
+    }
+
+    const fn is_subscribed(&self) -> bool {
+        !self.subscribed_topics.is_empty()
+    }
+
+    /// (Re)join the group and sync an assignment when needed, then resume each
+    /// assigned partition from its committed offset.
+    async fn ensure_active_group(&mut self) -> Result<()> {
+        if !self.needs_rejoin && !self.member_id.is_empty() {
+            return Ok(());
+        }
+        let group_id = self.config.group_id.clone();
+        let coordinator = self.ensure_coordinator(&group_id).await?;
+        let join = coordinator::join_group(
+            &coordinator::GroupContext {
+                wire: &self.wire,
+                coordinator_id: coordinator,
+                group_id: &group_id,
+            },
+            &self.member_id,
+            clamp_ms(self.config.session_timeout),
+            clamp_ms(self.config.rebalance_timeout),
+            &self.subscribed_topics,
+        )
+        .await?;
+        self.member_id.clone_from(&join.member_id);
+        self.generation_id = join.generation_id;
+
+        let assignments = if join.leader {
+            self.compute_assignments(&join.members).await?
+        } else {
+            Vec::new()
+        };
+        let context = coordinator::GroupContext {
+            wire: &self.wire,
+            coordinator_id: coordinator,
+            group_id: &group_id,
+        };
+        let assigned =
+            coordinator::sync_group(&context, self.generation_id, &self.member_id, assignments)
+                .await?;
+
+        self.subscription.assign(&assigned);
+        let committed =
+            coordinator::fetch_committed(&self.wire, coordinator, &group_id, &assigned).await?;
+        for (partition, offset) in committed {
+            self.subscription.set_position(
+                &partition,
+                FetchPosition::new(offset.offset, offset.leader_epoch),
+            );
+        }
+        self.needs_rejoin = false;
+        self.last_heartbeat = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Leader-only: run the `range` assignor over the members' subscriptions,
+    /// using cluster metadata for partition counts, and encode each member's
+    /// assignment blob.
+    async fn compute_assignments(
+        &self,
+        members: &[MemberSubscription],
+    ) -> Result<Vec<(String, Bytes)>> {
+        let mut topics: BTreeSet<String> = BTreeSet::new();
+        for member in members {
+            for topic in &member.topics {
+                let _inserted = topics.insert(topic.clone());
+            }
+        }
+        let metadata = self
+            .wire
+            .metadata_for_topics(topics.iter().cloned())
+            .await?;
+        let mut partitions_per_topic: HashMap<String, i32> = HashMap::new();
+        for topic in &topics {
+            let count = metadata.topic(topic).map_or(0, |topic| {
+                i32::try_from(topic.partitions.len()).unwrap_or(i32::MAX)
+            });
+            let _previous = partitions_per_topic.insert(topic.clone(), count);
+        }
+        let assignment = assignor::range_assign(members, &partitions_per_topic);
+        Ok(assignment
+            .into_iter()
+            .map(|(member, partitions)| (member, assignor::encode_assignment(&partitions)))
+            .collect())
+    }
+
+    /// Send a throttled heartbeat, flagging a rejoin on the coordinator's signal.
+    async fn maybe_heartbeat(&mut self) -> Result<()> {
+        if self.member_id.is_empty() || self.needs_rejoin {
+            return Ok(());
+        }
+        let due = self
+            .last_heartbeat
+            .is_none_or(|last| last.elapsed() >= self.config.heartbeat_interval);
+        if !due {
+            return Ok(());
+        }
+        let Some(coordinator) = self.coordinator_id else {
+            return Ok(());
+        };
+        let group_id = self.config.group_id.clone();
+        let code = coordinator::heartbeat(
+            &self.wire,
+            coordinator,
+            &group_id,
+            self.generation_id,
+            &self.member_id,
+        )
+        .await?;
+        self.last_heartbeat = Some(Instant::now());
+        match code {
+            ErrorCode::None => {},
+            ErrorCode::RebalanceInProgress => self.needs_rejoin = true,
+            ErrorCode::IllegalGeneration | ErrorCode::UnknownMemberId => {
+                self.needs_rejoin = true;
+                self.member_id.clear();
+                self.generation_id = -1;
+            },
+            other if other.is_error() => {
+                return Err(ConsumerError::broker(
+                    "heartbeat",
+                    other,
+                    "heartbeat failed",
+                ));
+            },
+            _ => {},
+        }
+        Ok(())
     }
 
     fn ensure_assigned(&self, partition: &TopicPartition) -> Result<()> {
@@ -453,6 +665,11 @@ impl Consumer {
         }
         Ok(())
     }
+}
+
+/// Clamp a duration to a millisecond `i32` for wire timeout fields.
+fn clamp_ms(duration: Duration) -> i32 {
+    i32::try_from(duration.as_millis()).unwrap_or(i32::MAX)
 }
 
 /// Resolve `bootstrap.servers` into wire broker endpoints.

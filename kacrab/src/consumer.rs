@@ -9,6 +9,7 @@
 //! This module is under active construction: Phase 1 lands manual-assignment
 //! fetch (no group coordination yet).
 
+mod assignor;
 mod client;
 mod config;
 mod coordinator;

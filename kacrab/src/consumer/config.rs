@@ -87,6 +87,12 @@ pub struct ConsumerRuntimeConfig {
     pub enable_auto_commit: bool,
     /// Background auto-commit interval (used from Phase 2).
     pub auto_commit_interval: Duration,
+    /// Group session timeout (`session.timeout.ms`).
+    pub session_timeout: Duration,
+    /// Heartbeat cadence (`heartbeat.interval.ms`).
+    pub heartbeat_interval: Duration,
+    /// Rebalance timeout — how long `JoinGroup` may block (`max.poll.interval.ms`).
+    pub rebalance_timeout: Duration,
 }
 
 impl ConsumerRuntimeConfig {
@@ -111,6 +117,9 @@ impl ConsumerRuntimeConfig {
             request_timeout: config.request_timeout_ms.duration(),
             enable_auto_commit: config.enable_auto_commit,
             auto_commit_interval: config.auto_commit_interval_ms.duration(),
+            session_timeout: config.session_timeout_ms.duration(),
+            heartbeat_interval: config.heartbeat_interval_ms.duration(),
+            rebalance_timeout: config.max_poll_interval_ms.duration(),
         })
     }
 }
