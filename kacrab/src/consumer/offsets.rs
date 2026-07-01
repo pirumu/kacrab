@@ -31,11 +31,13 @@ pub(super) const EARLIEST_TIMESTAMP: i64 = -2;
 /// `ListOffsets` timestamp sentinel for the latest offset (log end).
 pub(super) const LATEST_TIMESTAMP: i64 = -1;
 
-/// A resolved offset for a partition, with the leader epoch the broker reported.
+/// A resolved offset for a partition, with the leader epoch and (for
+/// timestamp lookups) the record timestamp the broker reported.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ResolvedOffset {
     pub offset: i64,
     pub leader_epoch: Option<i32>,
+    pub timestamp: i64,
 }
 
 impl ResolvedOffset {
@@ -101,6 +103,7 @@ pub(super) async fn list_offsets(
                         offset: partition.offset,
                         leader_epoch: (partition.leader_epoch >= 0)
                             .then_some(partition.leader_epoch),
+                        timestamp: partition.timestamp,
                     },
                 );
             }

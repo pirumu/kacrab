@@ -324,3 +324,64 @@ async fn produce(bootstrap: &str, topic: &str, partition: i32, count: usize) {
             .expect("delivery");
     }
 }
+
+/// `beginning_offsets`/`end_offsets`, `offsets_for_times`, and `current_lag`
+/// against a topic with a known number of records.
+#[tokio::test]
+#[ignore = "requires local Kafka from docker-compose.kafka.yml"]
+async fn real_kafka_offset_queries() {
+    let bootstrap = bootstrap();
+    let topic = topic();
+    let count = 8;
+    println!("real Kafka offset-queries smoke: topic={topic}");
+
+    create_topic(&bootstrap, &topic, 1).await;
+    produce(&bootstrap, &topic, 0, count).await;
+
+    let mut consumer = Consumer::from_map([
+        ("bootstrap.servers", bootstrap.as_str()),
+        ("group.id", format!("group-off-{topic}").as_str()),
+        ("auto.offset.reset", "earliest"),
+        ("enable.auto.commit", "false"),
+    ])
+    .await
+    .expect("consumer should connect");
+
+    let partition = TopicPartition::new(topic.clone(), 0);
+    let parts = std::slice::from_ref(&partition);
+
+    let begin = consumer
+        .beginning_offsets(parts)
+        .await
+        .expect("beginning_offsets");
+    let end = consumer.end_offsets(parts).await.expect("end_offsets");
+    println!(
+        "  begin={:?} end={:?}",
+        begin.get(&partition),
+        end.get(&partition)
+    );
+    assert_eq!(begin.get(&partition), Some(&0));
+    assert_eq!(
+        end.get(&partition).copied(),
+        Some(i64::try_from(count).unwrap())
+    );
+
+    // offsets_for_times at time 0 should return the first record (offset 0).
+    let mut want = std::collections::HashMap::new();
+    let _ = want.insert(partition.clone(), 0_i64);
+    let times = consumer
+        .offsets_for_times(want)
+        .await
+        .expect("offsets_for_times");
+    assert_eq!(times.get(&partition).map(|o| o.offset), Some(0));
+
+    // current_lag: assign + seek to 0 → lag == count.
+    consumer.assign([partition.clone()]);
+    consumer.seek(&partition, 0).expect("seek");
+    let lag = consumer.current_lag(&partition).await.expect("current_lag");
+    println!("  current_lag={lag:?}");
+    assert_eq!(lag, Some(i64::try_from(count).unwrap()));
+
+    consumer.close().await;
+    println!("real Kafka offset-queries smoke: ALL OK");
+}

@@ -23,5 +23,5 @@ pub use self::{
     client::Consumer,
     config::{AutoOffsetReset, ConsumerRuntimeConfig, IsolationLevel},
     error::{ConsumerError, Result},
-    record::{ConsumerRecord, ConsumerRecords, RecordHeader, TimestampType},
+    record::{ConsumerRecord, ConsumerRecords, OffsetAndTimestamp, RecordHeader, TimestampType},
 };

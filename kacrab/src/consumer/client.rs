@@ -27,7 +27,7 @@ use super::{
     error::{ConsumerError, Result},
     fetch,
     offsets::{self, EARLIEST_TIMESTAMP, LATEST_TIMESTAMP},
-    record::ConsumerRecords,
+    record::{ConsumerRecords, OffsetAndTimestamp},
     subscription::{FetchPosition, SubscriptionState},
 };
 use crate::{
@@ -324,6 +324,74 @@ impl Consumer {
         ConsumerGroupMetadata::new(self.config.group_id.clone())
     }
 
+    /// The earliest available offset for each partition.
+    ///
+    /// # Errors
+    /// Returns a wire/broker error, or [`ConsumerError::Broker`] with
+    /// `LEADER_NOT_AVAILABLE` when a partition has no known leader.
+    pub async fn beginning_offsets(
+        &self,
+        partitions: &[TopicPartition],
+    ) -> Result<HashMap<TopicPartition, i64>> {
+        self.offsets_at_timestamp(partitions, EARLIEST_TIMESTAMP)
+            .await
+    }
+
+    /// The end offset (next offset to be produced) for each partition.
+    ///
+    /// # Errors
+    /// Returns a wire/broker error, or [`ConsumerError::Broker`] with
+    /// `LEADER_NOT_AVAILABLE` when a partition has no known leader.
+    pub async fn end_offsets(
+        &self,
+        partitions: &[TopicPartition],
+    ) -> Result<HashMap<TopicPartition, i64>> {
+        self.offsets_at_timestamp(partitions, LATEST_TIMESTAMP)
+            .await
+    }
+
+    /// For each partition, the earliest offset whose record timestamp is at or
+    /// after the requested time. Partitions with no such record are omitted.
+    ///
+    /// # Errors
+    /// Returns a wire/broker error.
+    pub async fn offsets_for_times(
+        &self,
+        timestamps: HashMap<TopicPartition, i64>,
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>> {
+        let entries: Vec<(TopicPartition, i64)> = timestamps.into_iter().collect();
+        let resolved = self.list_offsets_for(&entries).await?;
+        Ok(resolved
+            .into_iter()
+            .filter(|(_, offset)| offset.offset >= 0)
+            .map(|(partition, offset)| {
+                (
+                    partition,
+                    OffsetAndTimestamp {
+                        offset: offset.offset,
+                        timestamp: offset.timestamp,
+                        leader_epoch: offset.leader_epoch,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    /// The lag (end offset minus current position) of an assigned partition, or
+    /// `None` when the partition has no position yet.
+    ///
+    /// # Errors
+    /// Returns a wire/broker error.
+    pub async fn current_lag(&self, partition: &TopicPartition) -> Result<Option<i64>> {
+        let Some(position) = self.subscription.position(partition) else {
+            return Ok(None);
+        };
+        let end = self.end_offsets(std::slice::from_ref(partition)).await?;
+        Ok(end
+            .get(partition)
+            .map(|end_offset| end_offset.saturating_sub(position.offset).max(0)))
+    }
+
     /// Fetch records for the assigned partitions, blocking up to `timeout`.
     ///
     /// Returns as soon as any records are available, or an empty batch when the
@@ -452,6 +520,37 @@ impl Consumer {
         let id = coordinator::find_coordinator(&self.wire, group_id).await?;
         self.coordinator_id = Some(id);
         Ok(id)
+    }
+
+    async fn offsets_at_timestamp(
+        &self,
+        partitions: &[TopicPartition],
+        timestamp: i64,
+    ) -> Result<HashMap<TopicPartition, i64>> {
+        let entries: Vec<(TopicPartition, i64)> = partitions
+            .iter()
+            .map(|partition| (partition.clone(), timestamp))
+            .collect();
+        let resolved = self.list_offsets_for(&entries).await?;
+        Ok(resolved
+            .into_iter()
+            .map(|(partition, offset)| (partition, offset.offset))
+            .collect())
+    }
+
+    async fn list_offsets_for(
+        &self,
+        entries: &[(TopicPartition, i64)],
+    ) -> Result<HashMap<TopicPartition, offsets::ResolvedOffset>> {
+        if entries.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let topics: BTreeSet<String> = entries
+            .iter()
+            .map(|(partition, _)| partition.topic.clone())
+            .collect();
+        let metadata = self.wire.metadata_for_topics(topics).await?;
+        offsets::list_offsets(&self.wire, &self.config, &metadata, entries).await
     }
 
     const fn is_subscribed(&self) -> bool {

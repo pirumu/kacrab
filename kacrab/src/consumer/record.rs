@@ -7,6 +7,19 @@ pub use kacrab_protocol::record::RecordHeader;
 
 use crate::common::TopicPartition;
 
+/// An offset resolved for a timestamp, returned by
+/// [`Consumer::offsets_for_times`](super::Consumer::offsets_for_times) — the
+/// analogue of Kafka's `OffsetAndTimestamp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OffsetAndTimestamp {
+    /// The earliest offset whose record timestamp is `>=` the requested time.
+    pub offset: i64,
+    /// The timestamp of that record.
+    pub timestamp: i64,
+    /// The leader epoch of that record, when known.
+    pub leader_epoch: Option<i32>,
+}
+
 /// How a record's timestamp was assigned, mirroring Kafka's `TimestampType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimestampType {
