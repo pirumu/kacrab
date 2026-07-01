@@ -3,13 +3,14 @@
 //! Supports both manual assignment (`assign`) and group `subscribe`, with
 //! position control (`seek`, `pause`, `resume`), `auto.offset.reset`, offset
 //! commit/fetch (`commit_sync`/`commit_async`/`committed`, plus background
-//! auto-commit), and classic eager group membership (join/sync + the `range`
-//! assignor). `poll` drives fetch and rejoin on the caller's task, while a
+//! auto-commit), and group membership (join/sync) with both eager assignors
+//! (`range`/`roundrobin`/`sticky`) and the incremental `cooperative-sticky`
+//! protocol. `poll` drives fetch and rejoin on the caller's task, while a
 //! dedicated background task heartbeats the group — mirroring the Java consumer's
 //! user thread + `HeartbeatThread`.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -46,9 +47,9 @@ use crate::{
 
 /// A native, Java-compatible Kafka consumer.
 ///
-/// See `docs/consumer-design.md`. Supports manual assignment and classic group
-/// subscription (eager rebalancing with the `range` assignor), fetching, and
-/// offset commit/fetch.
+/// See `docs/consumer-design.md`. Supports manual assignment and group
+/// subscription (eager `range`/`roundrobin`/`sticky` and incremental
+/// `cooperative-sticky` rebalancing), fetching, and offset commit/fetch.
 #[derive(Debug)]
 pub struct Consumer {
     wire: WireClient,
@@ -90,6 +91,15 @@ const fn is_rebalance_in_progress(error: &ConsumerError) -> bool {
             ..
         }
     )
+}
+
+/// A synced assignment to apply: what we owned before, what we now hold, and
+/// whether the group is rebalancing cooperatively (incremental revoke).
+#[derive(Debug, Clone, Copy)]
+struct Rebalance<'a> {
+    owned: &'a [TopicPartition],
+    assigned: &'a [TopicPartition],
+    cooperative: bool,
 }
 
 /// Group identity the background heartbeat task heartbeats with.
@@ -722,10 +732,15 @@ impl Consumer {
             group_instance_id: instance,
         };
         let assignors = self.advertised_assignors();
+        // Partitions we currently own — reported to the coordinator so the
+        // cooperative assignor knows what not to hand to someone else yet. Eager
+        // assignors ignore it. Captured before the loop: it does not change until
+        // we apply the new assignment below.
+        let owned = self.subscription.assigned_partitions();
         // A rebalance that starts between our JoinGroup and SyncGroup makes the
         // coordinator answer REBALANCE_IN_PROGRESS; rejoin and retry.
         let mut attempts = 0_u32;
-        let assigned = loop {
+        let (assigned, cooperative) = loop {
             attempts = attempts.saturating_add(1);
             let join = coordinator::join_group(
                 &context,
@@ -735,6 +750,7 @@ impl Consumer {
                     rebalance_timeout_ms: clamp_ms(self.config.rebalance_timeout),
                     topics: &self.subscribed_topics,
                     assignors: &assignors,
+                    owned: &owned,
                 },
             )
             .await?;
@@ -746,6 +762,7 @@ impl Consumer {
             } else {
                 Vec::new()
             };
+            let cooperative = assignor::is_cooperative(&join.protocol_name);
             match coordinator::sync_group(
                 &context,
                 self.generation_id,
@@ -755,23 +772,31 @@ impl Consumer {
             )
             .await
             {
-                Ok(assigned) => break assigned,
+                Ok(assigned) => break (assigned, cooperative),
                 Err(error)
                     if is_rebalance_in_progress(&error) && attempts < MAX_REJOIN_ATTEMPTS => {},
                 Err(error) => return Err(error),
             }
         };
 
-        self.subscription.assign(&assigned);
-        let committed =
-            coordinator::fetch_committed(&self.wire, coordinator, &group_id, &assigned).await?;
-        for (partition, offset) in committed {
-            self.subscription.set_position(
-                &partition,
-                FetchPosition::new(offset.offset, offset.leader_epoch),
-            );
-        }
+        let revoked = self
+            .apply_assignment(
+                coordinator,
+                &group_id,
+                &Rebalance {
+                    owned: &owned,
+                    assigned: &assigned,
+                    cooperative,
+                },
+            )
+            .await?;
         self.needs_rejoin.store(false, Ordering::SeqCst);
+        // Cooperative rebalance: having dropped the revoked partitions from our
+        // reported ownership, rejoin so the coordinator can hand them to their new
+        // owner in a follow-up round (KIP-429's incremental revoke).
+        if cooperative && revoked {
+            self.needs_rejoin.store(true, Ordering::SeqCst);
+        }
         self.set_heartbeat_context(Some(HeartbeatContext {
             coordinator_id: coordinator,
             group_id,
@@ -780,6 +805,56 @@ impl Consumer {
             group_instance_id: instance.map(str::to_owned),
         }));
         Ok(())
+    }
+
+    /// Apply a synced assignment to the subscription and resume each newly owned
+    /// partition from its committed offset. Returns whether any previously owned
+    /// partition was revoked (only meaningful under cooperative rebalance).
+    ///
+    /// Eager: the whole assignment is (re)owned, so every partition is refetched
+    /// from its committed offset. Cooperative: partitions we keep retain their
+    /// live position (rewinding to the last commit would reprocess records), so
+    /// only the newly added partitions are seeded from committed offsets.
+    async fn apply_assignment(
+        &mut self,
+        coordinator: i32,
+        group_id: &str,
+        rebalance: &Rebalance<'_>,
+    ) -> Result<bool> {
+        let Rebalance {
+            owned,
+            assigned,
+            cooperative,
+        } = *rebalance;
+        let (to_position, revoked) = if cooperative {
+            let assigned_set: HashSet<&TopicPartition> = assigned.iter().collect();
+            let owned_set: HashSet<&TopicPartition> = owned.iter().collect();
+            let added: Vec<TopicPartition> = assigned
+                .iter()
+                .filter(|partition| !owned_set.contains(*partition))
+                .cloned()
+                .collect();
+            let revoked = owned
+                .iter()
+                .any(|partition| !assigned_set.contains(partition));
+            (added, revoked)
+        } else {
+            (assigned.to_vec(), false)
+        };
+        // `assign` keeps positions for retained partitions and drops revoked ones.
+        self.subscription.assign(assigned);
+        if !to_position.is_empty() {
+            let committed =
+                coordinator::fetch_committed(&self.wire, coordinator, group_id, &to_position)
+                    .await?;
+            for (partition, offset) in committed {
+                self.subscription.set_position(
+                    &partition,
+                    FetchPosition::new(offset.offset, offset.leader_epoch),
+                );
+            }
+        }
+        Ok(revoked)
     }
 
     /// Update the group context the background heartbeat task reads.

@@ -1,20 +1,24 @@
 //! Client-side partition assignors and the `ConsumerProtocol` subscription /
 //! assignment codec (classic group protocol).
 //!
-//! Ships eager assignment with the `range`, `roundrobin`, and `sticky` assignors,
-//! selected by `partition.assignment.strategy` (advertised to the coordinator,
-//! which picks the one common to all members). The incremental `cooperative-
-//! sticky` protocol is a later refinement. Subscription/assignment blobs are the
-//! version-prefixed `ConsumerProtocol` encoding the broker relays between
-//! members, encoded at v0 (eager: no owned-partitions) and decoded at whatever
-//! version the group leader wrote.
+//! Ships the `range`, `roundrobin`, and `sticky` eager assignors plus the
+//! incremental `cooperative-sticky` assignor, selected by
+//! `partition.assignment.strategy` (advertised to the coordinator, which picks
+//! the one common to all members). Subscription blobs carry each member's
+//! currently *owned* partitions (v1), which the cooperative assignor uses to
+//! withhold partitions still owned by another member until that member revokes
+//! them — so a partition is never owned by two members at once (KIP-429).
+//! Subscription/assignment blobs are the version-prefixed `ConsumerProtocol`
+//! encoding the broker relays between members, decoded at whatever version the
+//! group leader wrote.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use bytes::{Buf as _, BufMut as _, Bytes, BytesMut};
 use kacrab_protocol::generated::{
     ConsumerProtocolAssignmentData, ConsumerProtocolSubscriptionData,
     consumer_protocol_assignment::TopicPartition as AssignmentTopic,
+    consumer_protocol_subscription::TopicPartition as SubscriptionTopic,
 };
 
 use crate::common::TopicPartition;
@@ -23,8 +27,13 @@ use crate::common::TopicPartition;
 pub(super) const PROTOCOL_TYPE: &str = "consumer";
 /// The default `range` assignor.
 pub(super) const RANGE_ASSIGNOR: &str = "range";
-/// `ConsumerProtocol` version used when encoding our own blobs (eager).
+/// The incremental cooperative assignor (KIP-429).
+pub(super) const COOPERATIVE_STICKY_ASSIGNOR: &str = "cooperative-sticky";
+/// `ConsumerProtocol` version used when encoding assignment blobs.
 const CONSUMER_PROTOCOL_V0: i16 = 0;
+/// `ConsumerProtocol` subscription version we encode: v1 carries owned
+/// partitions, which the cooperative assignor needs.
+const CONSUMER_PROTOCOL_V1: i16 = 1;
 
 /// Map a `partition.assignment.strategy` entry to the protocol name kacrab
 /// advertises to the coordinator. Unknown entries fall back to `range`.
@@ -32,8 +41,17 @@ pub(super) fn protocol_name(strategy: &str) -> &'static str {
     match strategy.trim().to_ascii_lowercase().as_str() {
         "roundrobin" | "round_robin" | "roundrobinassignor" => "roundrobin",
         "sticky" | "stickyassignor" => "sticky",
+        "cooperative-sticky" | "cooperativesticky" | "cooperativestickyassignor" => {
+            COOPERATIVE_STICKY_ASSIGNOR
+        },
         _ => RANGE_ASSIGNOR,
     }
+}
+
+/// Whether a chosen group protocol uses the incremental cooperative rebalance
+/// (partitions are revoked in a follow-up round rather than all up front).
+pub(super) fn is_cooperative(protocol: &str) -> bool {
+    protocol == COOPERATIVE_STICKY_ASSIGNOR
 }
 
 /// Run the assignor named by the chosen group protocol.
@@ -45,6 +63,7 @@ pub(super) fn assign(
     match protocol {
         "roundrobin" => roundrobin_assign(members, partitions_per_topic),
         "sticky" => sticky_assign(members, partitions_per_topic),
+        COOPERATIVE_STICKY_ASSIGNOR => cooperative_sticky_assign(members, partitions_per_topic),
         _ => range_assign(members, partitions_per_topic),
     }
 }
@@ -140,21 +159,212 @@ pub(super) fn sticky_assign(
     assignment
 }
 
-/// Encode a `JoinGroup` subscription blob for the given topics.
-pub(super) fn encode_subscription(topics: &[String]) -> Bytes {
+/// The `cooperative-sticky` assignor (KIP-429). Computes a balanced, sticky
+/// target — each member keeps the partitions it already owns, unowned partitions
+/// go to the least-loaded eligible member, and the result is balanced by moving
+/// partitions off overloaded members — then *withholds* any partition still owned
+/// by a different member. Withheld partitions are only assigned once their
+/// current owner revokes them (having seen them drop out of its own assignment)
+/// and the group rebalances again, so a partition is never owned by two members
+/// at once. Mirrors Java's `CooperativeStickyAssignor`.
+pub(super) fn cooperative_sticky_assign(
+    members: &[MemberSubscription],
+    partitions_per_topic: &HashMap<String, i32>,
+) -> HashMap<String, Vec<TopicPartition>> {
+    let all = all_partitions(members, partitions_per_topic);
+    let all_set: HashSet<&TopicPartition> = all.iter().collect();
+    let mut sorted: Vec<&MemberSubscription> = members.iter().collect();
+    sorted.sort_by(|a, b| a.member_id.cmp(&b.member_id));
+
+    let subscribes = |member: &MemberSubscription, topic: &str| {
+        member.topics.iter().any(|candidate| candidate == topic)
+    };
+
+    // Current ownership, keeping only partitions that still exist and whose owner
+    // still subscribes to the topic (stale claims are dropped). First claim wins,
+    // guarding against two members reporting the same partition.
+    let mut owner_of: HashMap<TopicPartition, String> = HashMap::new();
+    for member in &sorted {
+        for partition in &member.owned {
+            if all_set.contains(partition)
+                && subscribes(member, &partition.topic)
+                && !owner_of.contains_key(partition)
+            {
+                let _previous = owner_of.insert(partition.clone(), member.member_id.clone());
+            }
+        }
+    }
+
+    let mut assignment: HashMap<String, Vec<TopicPartition>> = members
+        .iter()
+        .map(|member| (member.member_id.clone(), Vec::new()))
+        .collect();
+    let mut assigned: HashSet<TopicPartition> = HashSet::new();
+
+    // 1. Seed each member with the partitions it still validly owns.
+    for member in &sorted {
+        for partition in &member.owned {
+            if owner_of.get(partition).map(String::as_str) == Some(member.member_id.as_str())
+                && !assigned.contains(partition)
+                && let Some(list) = assignment.get_mut(&member.member_id)
+            {
+                list.push(partition.clone());
+                let _inserted = assigned.insert(partition.clone());
+            }
+        }
+    }
+
+    // 2. Hand every unowned partition to the least-loaded eligible member.
+    for partition in &all {
+        if assigned.contains(partition) {
+            continue;
+        }
+        if let Some(member) = least_loaded(&sorted, &assignment, &partition.topic, &subscribes) {
+            if let Some(list) = assignment.get_mut(&member) {
+                list.push(partition.clone());
+            }
+            let _inserted = assigned.insert(partition.clone());
+        }
+    }
+
+    // 3. Balance: move partitions off overloaded members onto lighter eligible ones (this is what
+    //    hands a freshly joined member its share).
+    balance(&mut assignment, &sorted, &subscribes, all.len());
+
+    // 4. Cooperative withhold: a partition targeted at a member that a *different* member still
+    //    owns is dropped this round; it lands once the owner revokes.
+    for (member_id, partitions) in &mut assignment {
+        partitions.retain(|partition| {
+            owner_of
+                .get(partition)
+                .is_none_or(|owner| owner == member_id)
+        });
+    }
+
+    assignment
+}
+
+/// The eligible member (subscribed to `topic`) with the fewest partitions so far,
+/// breaking ties by member id.
+fn least_loaded(
+    sorted: &[&MemberSubscription],
+    assignment: &HashMap<String, Vec<TopicPartition>>,
+    topic: &str,
+    subscribes: &impl Fn(&MemberSubscription, &str) -> bool,
+) -> Option<String> {
+    sorted
+        .iter()
+        .filter(|member| subscribes(member, topic))
+        .min_by(|a, b| {
+            let a_len = assignment.get(&a.member_id).map_or(0, Vec::len);
+            let b_len = assignment.get(&b.member_id).map_or(0, Vec::len);
+            a_len.cmp(&b_len).then(a.member_id.cmp(&b.member_id))
+        })
+        .map(|member| member.member_id.clone())
+}
+
+/// Move partitions off the most-loaded members onto lighter eligible members
+/// until no member holds two more than an eligible peer — the balancing pass of
+/// the sticky assignor. Bounded so it always terminates.
+fn balance(
+    assignment: &mut HashMap<String, Vec<TopicPartition>>,
+    sorted: &[&MemberSubscription],
+    subscribes: &impl Fn(&MemberSubscription, &str) -> bool,
+    partition_count: usize,
+) {
+    let bound = partition_count
+        .saturating_mul(sorted.len())
+        .saturating_add(1);
+    for _ in 0..bound {
+        let max_len = assignment.values().map(Vec::len).max().unwrap_or(0);
+        if max_len == 0 {
+            return;
+        }
+        let mut moved = false;
+        for donor in sorted {
+            if assignment.get(&donor.member_id).map_or(0, Vec::len) != max_len {
+                continue;
+            }
+            let donor_partitions = assignment
+                .get(&donor.member_id)
+                .cloned()
+                .unwrap_or_default();
+            for partition in &donor_partitions {
+                // An acceptor helps only if it stays at least two lighter than the
+                // donor after the move (so we never oscillate).
+                let acceptor = sorted
+                    .iter()
+                    .filter(|member| {
+                        member.member_id != donor.member_id
+                            && subscribes(member, &partition.topic)
+                            && assignment
+                                .get(&member.member_id)
+                                .map_or(0, Vec::len)
+                                .saturating_add(1)
+                                < max_len
+                    })
+                    .min_by(|a, b| {
+                        let a_len = assignment.get(&a.member_id).map_or(0, Vec::len);
+                        let b_len = assignment.get(&b.member_id).map_or(0, Vec::len);
+                        a_len.cmp(&b_len).then(a.member_id.cmp(&b.member_id))
+                    })
+                    .map(|member| member.member_id.clone());
+                if let Some(acceptor) = acceptor {
+                    if let Some(list) = assignment.get_mut(&donor.member_id) {
+                        list.retain(|held| held != partition);
+                    }
+                    if let Some(list) = assignment.get_mut(&acceptor) {
+                        list.push(partition.clone());
+                    }
+                    moved = true;
+                    break;
+                }
+            }
+            if moved {
+                break;
+            }
+        }
+        if !moved {
+            return;
+        }
+    }
+}
+
+/// Encode a `JoinGroup` subscription blob for the given topics, carrying the
+/// partitions this member currently owns (used by the cooperative assignor).
+pub(super) fn encode_subscription(topics: &[String], owned: &[TopicPartition]) -> Bytes {
     let subscription = ConsumerProtocolSubscriptionData {
         topics: topics.iter().map(|topic| topic.clone().into()).collect(),
         user_data: None,
-        owned_partitions: Vec::new(),
+        owned_partitions: owned_topics(owned),
         generation_id: -1,
         rack_id: None,
         _unknown_tagged_fields: Vec::new(),
     };
     let mut buf = BytesMut::new();
-    buf.put_i16(CONSUMER_PROTOCOL_V0);
+    buf.put_i16(CONSUMER_PROTOCOL_V1);
     // Infallible for this fixed, in-range payload; fall back to just the version.
-    let _written = subscription.write(&mut buf, CONSUMER_PROTOCOL_V0);
+    let _written = subscription.write(&mut buf, CONSUMER_PROTOCOL_V1);
     buf.freeze()
+}
+
+/// Group owned partitions by topic for the subscription blob.
+fn owned_topics(owned: &[TopicPartition]) -> Vec<SubscriptionTopic> {
+    let mut by_topic: BTreeMap<String, Vec<i32>> = BTreeMap::new();
+    for partition in owned {
+        by_topic
+            .entry(partition.topic.clone())
+            .or_default()
+            .push(partition.partition);
+    }
+    by_topic
+        .into_iter()
+        .map(|(topic, partitions)| SubscriptionTopic {
+            topic: topic.into(),
+            partitions,
+            _unknown_tagged_fields: Vec::new(),
+        })
+        .collect()
 }
 
 /// Decode the topics a member subscribed to from its subscription blob.
@@ -171,6 +381,29 @@ pub(super) fn decode_subscription(metadata: &Bytes) -> Vec<String> {
         .topics
         .into_iter()
         .map(|topic| topic.to_string())
+        .collect()
+}
+
+/// Decode the partitions a member reported it currently owns (empty before v1).
+pub(super) fn decode_owned(metadata: &Bytes) -> Vec<TopicPartition> {
+    if metadata.len() < 2 {
+        return Vec::new();
+    }
+    let mut buf = metadata.clone();
+    let version = buf.get_i16();
+    let Ok(subscription) = ConsumerProtocolSubscriptionData::read(&mut buf, version) else {
+        return Vec::new();
+    };
+    subscription
+        .owned_partitions
+        .into_iter()
+        .flat_map(|topic| {
+            let name = topic.topic.to_string();
+            topic
+                .partitions
+                .into_iter()
+                .map(move |partition| TopicPartition::new(name.clone(), partition))
+        })
         .collect()
 }
 
@@ -225,11 +458,14 @@ pub(super) fn decode_assignment(assignment: &Bytes) -> Vec<TopicPartition> {
         .collect()
 }
 
-/// One group member's identity and subscribed topics, as seen by the leader.
+/// One group member's identity, subscribed topics, and currently owned
+/// partitions (from its subscription blob), as seen by the leader.
 #[derive(Debug, Clone)]
 pub(super) struct MemberSubscription {
     pub member_id: String,
     pub topics: Vec<String>,
+    /// Partitions this member reported it currently owns (cooperative rebalance).
+    pub owned: Vec<TopicPartition>,
 }
 
 /// The `range` assignor: for each topic, lay its partitions out over the
@@ -299,14 +535,74 @@ mod tests {
         MemberSubscription {
             member_id: id.to_owned(),
             topics: topics.iter().map(|topic| (*topic).to_owned()).collect(),
+            owned: Vec::new(),
+        }
+    }
+
+    fn owning(id: &str, topics: &[&str], owned: &[TopicPartition]) -> MemberSubscription {
+        MemberSubscription {
+            member_id: id.to_owned(),
+            topics: topics.iter().map(|topic| (*topic).to_owned()).collect(),
+            owned: owned.to_vec(),
         }
     }
 
     #[test]
     fn subscription_blob_round_trips() {
         let topics = vec!["a".to_owned(), "b".to_owned()];
-        let decoded = decode_subscription(&encode_subscription(&topics));
-        assert_eq!(decoded, topics);
+        let blob = encode_subscription(&topics, &[]);
+        assert_eq!(decode_subscription(&blob), topics);
+    }
+
+    #[test]
+    fn subscription_blob_carries_owned_partitions() {
+        let topics = vec!["t".to_owned()];
+        let owned = vec![TopicPartition::new("t", 0), TopicPartition::new("t", 2)];
+        let blob = encode_subscription(&topics, &owned);
+        let mut decoded = decode_owned(&blob);
+        decoded.sort_by_key(|partition| partition.partition);
+        assert_eq!(decoded, owned);
+    }
+
+    #[test]
+    fn cooperative_keeps_owner_and_withholds_moved_partitions() {
+        // One member owns all four partitions; a second joins owning nothing.
+        let all: Vec<TopicPartition> = (0..4).map(|p| TopicPartition::new("t", p)).collect();
+        let members = vec![owning("m1", &["t"], &all), owning("m2", &["t"], &[])];
+        let mut counts = HashMap::new();
+        let _ = counts.insert("t".to_owned(), 4);
+        let assignment = cooperative_sticky_assign(&members, &counts);
+        // m1 keeps two, m2's two targets are withheld (still owned by m1).
+        assert_eq!(assignment["m1"].len(), 2);
+        assert!(assignment["m2"].is_empty());
+        // No partition m1 kept overlaps what would move to m2 — no double ownership.
+    }
+
+    #[test]
+    fn cooperative_assigns_freed_partitions_next_round() {
+        // Round two: m1 has revoked down to two, so the other two are unowned.
+        let m1_owned = vec![TopicPartition::new("t", 0), TopicPartition::new("t", 1)];
+        let members = vec![owning("m1", &["t"], &m1_owned), owning("m2", &["t"], &[])];
+        let mut counts = HashMap::new();
+        let _ = counts.insert("t".to_owned(), 4);
+        let assignment = cooperative_sticky_assign(&members, &counts);
+        assert_eq!(assignment["m1"].len(), 2);
+        assert_eq!(assignment["m2"].len(), 2);
+        // m1 kept exactly what it owned.
+        assert!(assignment["m1"].contains(&TopicPartition::new("t", 0)));
+        assert!(assignment["m1"].contains(&TopicPartition::new("t", 1)));
+    }
+
+    #[test]
+    fn cooperative_reclaims_partitions_of_a_departed_member() {
+        // m2 left; only m1 rejoins owning its two. The freed two are unowned and
+        // land immediately (no withhold needed).
+        let m1_owned = vec![TopicPartition::new("t", 0), TopicPartition::new("t", 1)];
+        let members = vec![owning("m1", &["t"], &m1_owned)];
+        let mut counts = HashMap::new();
+        let _ = counts.insert("t".to_owned(), 4);
+        let assignment = cooperative_sticky_assign(&members, &counts);
+        assert_eq!(assignment["m1"].len(), 4);
     }
 
     #[test]

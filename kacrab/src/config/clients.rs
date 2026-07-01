@@ -1702,7 +1702,7 @@ kafka_config! {
         auto_offset_reset: String,
 
         #[key("partition.assignment.strategy")]
-        #[default(ConfigList::from_csv("range,roundrobin,sticky"))]
+        #[default(ConfigList::from_csv("range,cooperative-sticky"))]
         #[kafka_type("list")]
         #[kafka_default("[RangeAssignor, CooperativeStickyAssignor]")]
         #[status(native)]

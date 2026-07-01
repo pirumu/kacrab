@@ -325,6 +325,79 @@ async fn produce(bootstrap: &str, topic: &str, partition: i32, count: usize) {
     }
 }
 
+/// Two consumers negotiating `cooperative-sticky` split a two-partition topic
+/// one apiece and together consume every record. Exercises the incremental
+/// rebalance path: when the second member joins, its target partition is
+/// withheld until the first member sees it drop from its own assignment, revokes
+/// it, and rejoins so the coordinator can hand it over (KIP-429) — no partition
+/// is ever owned by both at once.
+#[tokio::test]
+#[ignore = "requires local Kafka from docker-compose.kafka.yml"]
+async fn real_kafka_cooperative_sticky_incremental() {
+    let bootstrap = bootstrap();
+    let topic = topic();
+    let per_partition = 5;
+    println!("real Kafka cooperative-sticky smoke: topic={topic}");
+
+    create_topic(&bootstrap, &topic, 2).await;
+    produce(&bootstrap, &topic, 0, per_partition).await;
+    produce(&bootstrap, &topic, 1, per_partition).await;
+
+    let group_id = format!("group-coop-{topic}");
+    let expected = per_partition * 2;
+    let total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let run = |client: &'static str| {
+        let bootstrap = bootstrap.clone();
+        let group_id = group_id.clone();
+        let topic = topic.clone();
+        let total = std::sync::Arc::clone(&total);
+        tokio::spawn(async move {
+            let mut consumer = Consumer::from_map([
+                ("bootstrap.servers", bootstrap.as_str()),
+                ("client.id", client),
+                ("group.id", group_id.as_str()),
+                ("auto.offset.reset", "earliest"),
+                ("enable.auto.commit", "false"),
+                ("heartbeat.interval.ms", "300"),
+                ("partition.assignment.strategy", "cooperative-sticky"),
+            ])
+            .await
+            .expect("consumer should connect");
+            consumer.subscribe([topic]).expect("subscribe");
+            let deadline = std::time::Instant::now() + Duration::from_secs(50);
+            while total.load(std::sync::atomic::Ordering::SeqCst) < expected
+                && std::time::Instant::now() < deadline
+            {
+                let count = consumer
+                    .poll(Duration::from_secs(1))
+                    .await
+                    .expect("poll")
+                    .count();
+                let _prev = total.fetch_add(count, std::sync::atomic::Ordering::SeqCst);
+            }
+            let assignment = consumer.assignment();
+            consumer.close().await;
+            assignment
+        })
+    };
+
+    let task_a = run("kacrab-coop-a");
+    let task_b = run("kacrab-coop-b");
+    let a_assign = task_a.await.expect("task a");
+    let b_assign = task_b.await.expect("task b");
+
+    let consumed = total.load(std::sync::atomic::Ordering::SeqCst);
+    println!("  a={a_assign:?} b={b_assign:?} consumed={consumed}");
+    assert_eq!(consumed, expected, "the pair should consume every record");
+    assert_eq!(a_assign.len(), 1, "consumer a owns one partition");
+    assert_eq!(b_assign.len(), 1, "consumer b owns one partition");
+    assert_ne!(
+        a_assign, b_assign,
+        "the two consumers own different partitions"
+    );
+    println!("real Kafka cooperative-sticky smoke: ALL OK");
+}
+
 /// `beginning_offsets`/`end_offsets`, `offsets_for_times`, and `current_lag`
 /// against a topic with a known number of records.
 #[tokio::test]

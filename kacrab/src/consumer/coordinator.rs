@@ -279,13 +279,15 @@ pub(super) struct JoinRequest<'a> {
     pub rebalance_timeout_ms: i32,
     pub topics: &'a [String],
     pub assignors: &'a [&'a str],
+    /// Partitions this member currently owns (for the cooperative assignor).
+    pub owned: &'a [TopicPartition],
 }
 
 pub(super) async fn join_group(
     context: &GroupContext<'_>,
     join: &JoinRequest<'_>,
 ) -> Result<JoinResult> {
-    let metadata = assignor::encode_subscription(join.topics);
+    let metadata = assignor::encode_subscription(join.topics, join.owned);
     let protocols: Vec<JoinGroupRequestProtocol> = join
         .assignors
         .iter()
@@ -342,6 +344,7 @@ pub(super) async fn join_group(
                 .map(|member| MemberSubscription {
                     member_id: member.member_id.to_string(),
                     topics: assignor::decode_subscription(&member.metadata),
+                    owned: assignor::decode_owned(&member.metadata),
                 })
                 .collect()
         } else {
