@@ -190,7 +190,7 @@ implemented surface:
   - [ ] Production acceptance: sustained multi-broker stress, memory soak, and
         latency-percentile gates on realistic multi-broker workloads (scoped
         under [Production acceptance](#production-acceptance)).
-- [x] Consumer usable baseline (`consumer` feature)
+- [x] Consumer client at full Apache Kafka 4.3.0 parity (`consumer` feature)
   - [x] Manual assignment, `Fetch` (per-leader), `auto.offset.reset`
         (`earliest`/`latest`/`none` via `ListOffsets`), `max.poll.records`, and
         `seek`/`seek_to_beginning`/`seek_to_end`/`position`/`pause`/`resume`/
@@ -208,10 +208,21 @@ implemented surface:
         (`kacrab/tests/real_kafka_consumer.rs`): manual assign + commit, a single
         subscriber owning both partitions, and two consumers rebalancing to one
         partition each.
-  - [ ] Refinements: a dedicated background heartbeat task, cooperative-sticky
-        assignment, incremental fetch sessions (KIP-227), `OffsetForLeaderEpoch`
-        validation, `offsets_for_times`/`beginning`/`end_offsets`, and the
-        KIP-848 consumer group protocol.
+  - [x] Full assignor set and rebalancing: `range`/`roundrobin`/`sticky` eager
+        assignors and the incremental `cooperative-sticky` (KIP-429), a dedicated
+        background heartbeat task, static membership (`group.instance.id`), and
+        `enforce_rebalance`.
+  - [x] KIP-848 server-side protocol (`group.protocol=consumer`): a single
+        `ConsumerGroupHeartbeat` RPC with server-computed, topic-id-keyed
+        assignments reconciled incrementally.
+  - [x] Fetch and offset refinements: incremental fetch sessions (KIP-227),
+        `OffsetForLeaderEpoch` truncation validation (KIP-320), `commit_async`
+        with background auto-commit, and
+        `offsets_for_times`/`beginning`/`end_offsets`/`current_lag`.
+  - [x] Surface completeness: topic pattern (regex) subscription, typed
+        `ConsumerDeserializer`s, `ConsumerInterceptor`s (`on_consume`/`on_commit`),
+        `client_instance_id`, and `metrics()`. Verified end-to-end across ten
+        real-broker scenarios (cooperative-sticky, pattern, interceptors, KIP-848).
 - [x] Admin usable baseline (`admin` feature)
   - [x] Full Apache Kafka 4.3.0 `Admin` operation surface — 62 operations:
         topics/partitions, describe/incremental-alter configs, ACLs, consumer
