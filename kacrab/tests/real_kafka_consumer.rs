@@ -367,6 +367,54 @@ fn regex_escape(literal: &str) -> String {
         .collect()
 }
 
+/// A subscriber using the KIP-848 protocol (`group.protocol=consumer`) joins via
+/// `ConsumerGroupHeartbeat`, gets a server-computed assignment, and consumes
+/// every record of a two-partition topic.
+#[tokio::test]
+#[ignore = "requires local Kafka from docker-compose.kafka.yml"]
+async fn real_kafka_consumer_protocol_kip848() {
+    let bootstrap = bootstrap();
+    let topic = topic();
+    let per_partition = 5;
+    println!("real Kafka KIP-848 smoke: topic={topic}");
+
+    create_topic(&bootstrap, &topic, 2).await;
+    produce(&bootstrap, &topic, 0, per_partition).await;
+    produce(&bootstrap, &topic, 1, per_partition).await;
+
+    let mut consumer = Consumer::from_map([
+        ("bootstrap.servers", bootstrap.as_str()),
+        ("group.id", format!("group-kip848-{topic}").as_str()),
+        ("group.protocol", "consumer"),
+        ("auto.offset.reset", "earliest"),
+        ("enable.auto.commit", "false"),
+    ])
+    .await
+    .expect("consumer should connect");
+    consumer.subscribe([topic.clone()]).expect("subscribe");
+
+    let expected = per_partition * 2;
+    let mut total = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    while total < expected && std::time::Instant::now() < deadline {
+        total += consumer
+            .poll(Duration::from_secs(2))
+            .await
+            .expect("poll")
+            .count();
+    }
+
+    println!(
+        "  KIP-848 assignment={:?} consumed={total}",
+        consumer.assignment().len()
+    );
+    assert_eq!(total, expected, "the consumer should read every record");
+    assert_eq!(consumer.assignment().len(), 2, "assigned both partitions");
+    consumer.commit_sync().await.expect("commit");
+    consumer.close().await;
+    println!("real Kafka KIP-848 smoke: ALL OK");
+}
+
 async fn create_topic(bootstrap: &str, topic: &str, partitions: i32) {
     let admin = AdminClient::from_map([("bootstrap.servers", bootstrap)])
         .await

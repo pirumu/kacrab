@@ -18,13 +18,14 @@ mod error;
 mod fetch;
 mod interceptor;
 mod metrics;
+mod next_gen;
 mod offsets;
 mod record;
 mod subscription;
 
 pub use self::{
     client::{Consumer, OffsetCommitCallback},
-    config::{AutoOffsetReset, ConsumerRuntimeConfig, IsolationLevel},
+    config::{AutoOffsetReset, ConsumerRuntimeConfig, GroupProtocol, IsolationLevel},
     deserializer::{
         ByteArrayDeserializer, BytesDeserializer, ConsumerDeserializer, StringDeserializer,
     },

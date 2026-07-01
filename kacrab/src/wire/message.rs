@@ -12,8 +12,9 @@ use kacrab_protocol::{
         AlterReplicaLogDirsResponseData, AlterShareGroupOffsetsRequestData,
         AlterShareGroupOffsetsResponseData, AlterUserScramCredentialsRequestData,
         AlterUserScramCredentialsResponseData, ApiVersionsRequestData, ApiVersionsResponseData,
-        ConsumerGroupDescribeRequestData, ConsumerGroupDescribeResponseData, CreateAclsRequestData,
-        CreateAclsResponseData, CreateDelegationTokenRequestData,
+        ConsumerGroupDescribeRequestData, ConsumerGroupDescribeResponseData,
+        ConsumerGroupHeartbeatRequestData, ConsumerGroupHeartbeatResponseData,
+        CreateAclsRequestData, CreateAclsResponseData, CreateDelegationTokenRequestData,
         CreateDelegationTokenResponseData, CreatePartitionsRequestData,
         CreatePartitionsResponseData, CreateTopicsRequestData, CreateTopicsResponseData,
         DeleteAclsRequestData, DeleteAclsResponseData, DeleteGroupsRequestData,
@@ -344,6 +345,7 @@ impl_passthrough_message! {
     SyncGroupRequestData => SyncGroupResponseData,
     HeartbeatRequestData => HeartbeatResponseData,
     OffsetForLeaderEpochRequestData => OffsetForLeaderEpochResponseData,
+    ConsumerGroupHeartbeatRequestData => ConsumerGroupHeartbeatResponseData,
 }
 
 fn normalize_produce_request(request: &ProduceRequestData, version: i16) -> ProduceRequestData {

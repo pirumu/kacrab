@@ -3,11 +3,13 @@
 //! Supports both manual assignment (`assign`) and group `subscribe`, with
 //! position control (`seek`, `pause`, `resume`), `auto.offset.reset`, offset
 //! commit/fetch (`commit_sync`/`commit_async`/`committed`, plus background
-//! auto-commit), and group membership (join/sync) with both eager assignors
-//! (`range`/`roundrobin`/`sticky`) and the incremental `cooperative-sticky`
-//! protocol. `poll` drives fetch and rejoin on the caller's task, while a
-//! dedicated background task heartbeats the group — mirroring the Java consumer's
-//! user thread + `HeartbeatThread`.
+//! auto-commit), and group membership under both protocols: the classic
+//! client-side-assignment protocol (`JoinGroup`/`SyncGroup` with the eager
+//! `range`/`roundrobin`/`sticky` and incremental `cooperative-sticky` assignors)
+//! and the KIP-848 server-side protocol (`group.protocol=consumer`, a single
+//! `ConsumerGroupHeartbeat` RPC). `poll` drives fetch and rejoin on the caller's
+//! task; the classic path also runs a dedicated background heartbeat task,
+//! mirroring the Java consumer's user thread + `HeartbeatThread`.
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -32,12 +34,15 @@ use tokio::task::JoinHandle;
 
 use super::{
     assignor::{self, MemberSubscription},
-    config::{AutoOffsetReset, ConsumerRuntimeConfig},
+    config::{AutoOffsetReset, ConsumerRuntimeConfig, GroupProtocol},
     coordinator,
     error::{ConsumerError, Result},
     fetch,
     interceptor::{ConsumerInterceptor, ConsumerInterceptors, InterceptorConfigs},
     metrics::{ConsumerMetrics, ConsumerMetricsSnapshot},
+    next_gen::{
+        self, AssignedTopic, EPOCH_JOINING, EPOCH_LEAVING, HeartbeatRequest, ModernGroupState,
+    },
     offsets::{self, EARLIEST_TIMESTAMP, LATEST_TIMESTAMP},
     record::{ConsumerRecords, OffsetAndTimestamp},
     subscription::{FetchPosition, SubscriptionState},
@@ -87,6 +92,10 @@ pub struct Consumer {
     subscription_pattern: Option<Regex>,
     /// When the pattern's matched-topic set was last refreshed from metadata.
     last_pattern_refresh: Option<Instant>,
+    /// KIP-848 membership state, present only under `group.protocol=consumer`.
+    modern_group: Option<ModernGroupState>,
+    /// When the last KIP-848 `ConsumerGroupHeartbeat` was sent.
+    last_modern_heartbeat: Option<Instant>,
 }
 
 /// Callback invoked with the result of an asynchronous offset commit.
@@ -184,6 +193,8 @@ impl Consumer {
             interceptor_configs,
             subscription_pattern: None,
             last_pattern_refresh: None,
+            modern_group: None,
+            last_modern_heartbeat: None,
         })
     }
 
@@ -429,13 +440,39 @@ impl Consumer {
         }
         let group_id = self.require_group_id()?;
         let coordinator = self.ensure_coordinator(&group_id).await?;
-        let result =
-            coordinator::commit_offsets(&self.wire, coordinator, &group_id, &offsets).await;
+        let (generation_id, member_id) = self.commit_identity();
+        let result = coordinator::commit_offsets(
+            &self.wire,
+            &coordinator::CommitTarget {
+                coordinator_id: coordinator,
+                group_id: &group_id,
+                generation_id,
+                member_id: &member_id,
+            },
+            &offsets,
+        )
+        .await;
         if result.is_ok() {
             self.metrics.record_commit();
             self.interceptors.on_commit(&offsets);
         }
         result
+    }
+
+    /// The `(generation-or-epoch, member id)` a commit identifies itself with:
+    /// the KIP-848 member epoch/id, else the classic generation/member id, else
+    /// the `-1`/empty manual-assignment convention.
+    fn commit_identity(&self) -> (i32, String) {
+        self.modern_group.as_ref().map_or_else(
+            || {
+                if self.member_id.is_empty() {
+                    (-1, String::new())
+                } else {
+                    (self.generation_id, self.member_id.clone())
+                }
+            },
+            |state| (state.member_epoch, state.member_id.clone()),
+        )
     }
 
     /// Commit the current position of every assigned partition without blocking;
@@ -469,8 +506,19 @@ impl Consumer {
         let wire = self.wire.clone();
         let metrics = self.metrics.clone();
         let interceptors = self.interceptors.clone();
+        let (generation_id, member_id) = self.commit_identity();
         let _handle = tokio::spawn(async move {
-            let result = coordinator::commit_offsets(&wire, coordinator, &group_id, &offsets).await;
+            let result = coordinator::commit_offsets(
+                &wire,
+                &coordinator::CommitTarget {
+                    coordinator_id: coordinator,
+                    group_id: &group_id,
+                    generation_id,
+                    member_id: &member_id,
+                },
+                &offsets,
+            )
+            .await;
             if result.is_ok() {
                 metrics.record_commit();
                 interceptors.on_commit(&offsets);
@@ -645,10 +693,14 @@ impl Consumer {
             // A pattern subscription re-matches the regex against live topics
             // before joining, so new topics are folded in.
             self.refresh_pattern_subscription().await?;
-            // Group members join/sync and heartbeat before fetching; manual
-            // assignment skips all of this.
+            // Group members (re)join before fetching; manual assignment skips all
+            // of this. KIP-848 uses the single-RPC heartbeat protocol; the classic
+            // path runs JoinGroup/SyncGroup.
             if self.is_subscribed() {
-                self.ensure_active_group().await?;
+                match self.config.group_protocol {
+                    GroupProtocol::Consumer => self.ensure_active_group_modern().await?,
+                    GroupProtocol::Classic => self.ensure_active_group().await?,
+                }
             }
             self.maybe_auto_commit().await;
 
@@ -724,18 +776,48 @@ impl Consumer {
         // Static members (`group.instance.id`) stay in the group across a close so
         // a quick restart avoids a rebalance, matching Java.
         let dynamic_member = self.config.group_instance_id.is_empty();
-        if let (true, false, Some(coordinator)) = (
-            dynamic_member,
-            self.member_id.is_empty(),
-            self.coordinator_id,
-        ) {
-            coordinator::leave_group(
-                &self.wire,
-                coordinator,
-                &self.config.group_id,
-                &self.member_id,
-            )
-            .await;
+        match self.config.group_protocol {
+            GroupProtocol::Consumer => {
+                if let (true, Some(state), Some(coordinator)) = (
+                    dynamic_member,
+                    self.modern_group.as_ref(),
+                    self.coordinator_id,
+                ) {
+                    let member_id = state.member_id.clone();
+                    // A leaving heartbeat (epoch -1) releases the assignment.
+                    let _left = next_gen::heartbeat(
+                        &self.wire,
+                        coordinator,
+                        &HeartbeatRequest {
+                            group_id: &self.config.group_id,
+                            member_id: &member_id,
+                            member_epoch: EPOCH_LEAVING,
+                            instance_id: None,
+                            rack_id: None,
+                            rebalance_timeout_ms: -1,
+                            subscribed_topics: &[],
+                            server_assignor: None,
+                            owned: &[],
+                        },
+                    )
+                    .await;
+                }
+            },
+            GroupProtocol::Classic => {
+                if let (true, false, Some(coordinator)) = (
+                    dynamic_member,
+                    self.member_id.is_empty(),
+                    self.coordinator_id,
+                ) {
+                    coordinator::leave_group(
+                        &self.wire,
+                        coordinator,
+                        &self.config.group_id,
+                        &self.member_id,
+                    )
+                    .await;
+                }
+            },
         }
         drop(self);
     }
@@ -995,6 +1077,167 @@ impl Consumer {
         Ok(revoked)
     }
 
+    /// KIP-848 membership: send a `ConsumerGroupHeartbeat` when due and reconcile
+    /// toward the coordinator-computed target assignment. Unlike the classic
+    /// path, this never blocks — reconciliation is incremental across heartbeats.
+    async fn ensure_active_group_modern(&mut self) -> Result<()> {
+        let interval = self
+            .modern_group
+            .as_ref()
+            .map_or(self.config.heartbeat_interval, |state| {
+                state.heartbeat_interval
+            });
+        let due = self.modern_group.is_none()
+            || self.needs_rejoin.load(Ordering::SeqCst)
+            || self
+                .last_modern_heartbeat
+                .is_none_or(|last| last.elapsed() >= interval);
+        if !due {
+            return Ok(());
+        }
+
+        let group_id = self.config.group_id.clone();
+        let coordinator = self.ensure_coordinator(&group_id).await?;
+        if self.modern_group.is_none() {
+            self.modern_group = Some(ModernGroupState::new(self.config.heartbeat_interval)?);
+        }
+
+        // Resolve topic ids for the reconciliation and the owned set we report.
+        let metadata = self
+            .wire
+            .metadata_for_topics(self.subscribed_topics.clone())
+            .await?;
+        let owned = self.owned_as_topic_ids(&metadata);
+
+        let (member_id, member_epoch) = self
+            .modern_group
+            .as_ref()
+            .map(|state| (state.member_id.clone(), state.member_epoch))
+            .unwrap_or_default();
+        let instance = (!self.config.group_instance_id.is_empty())
+            .then_some(self.config.group_instance_id.as_str());
+        let rack =
+            (!self.config.client_rack.is_empty()).then_some(self.config.client_rack.as_str());
+        let assignor = self.config.group_remote_assignor.as_deref();
+
+        let outcome = next_gen::heartbeat(
+            &self.wire,
+            coordinator,
+            &HeartbeatRequest {
+                group_id: &group_id,
+                member_id: &member_id,
+                member_epoch,
+                instance_id: instance,
+                rack_id: rack,
+                rebalance_timeout_ms: clamp_ms(self.config.rebalance_timeout),
+                subscribed_topics: &self.subscribed_topics,
+                server_assignor: assignor,
+                owned: &owned,
+            },
+        )
+        .await?;
+        self.last_modern_heartbeat = Some(Instant::now());
+
+        match outcome.error {
+            ErrorCode::None => {
+                if let Some(state) = self.modern_group.as_mut() {
+                    state.member_epoch = outcome.member_epoch;
+                    if outcome.heartbeat_interval > Duration::ZERO {
+                        state.heartbeat_interval = outcome.heartbeat_interval;
+                    }
+                    if let Some(id) = outcome.member_id.filter(|id| !id.is_empty()) {
+                        state.member_id = id;
+                    }
+                }
+                self.needs_rejoin.store(false, Ordering::SeqCst);
+                if let Some(assignment) = outcome.assignment {
+                    self.reconcile_modern(coordinator, &group_id, &metadata, assignment)
+                        .await?;
+                    self.metrics.record_rebalance();
+                }
+            },
+            // Lost membership — abandon the assignment and rejoin from epoch 0.
+            ErrorCode::FencedMemberEpoch => {
+                if let Some(state) = self.modern_group.as_mut() {
+                    state.member_epoch = EPOCH_JOINING;
+                }
+                self.subscription.assign(&[]);
+                self.needs_rejoin.store(true, Ordering::SeqCst);
+            },
+            // The coordinator forgot us — start over with a fresh member id.
+            ErrorCode::UnknownMemberId => {
+                self.modern_group = Some(ModernGroupState::new(self.config.heartbeat_interval)?);
+                self.subscription.assign(&[]);
+                self.needs_rejoin.store(true, Ordering::SeqCst);
+            },
+            // Coordinator moved or is loading — re-find it on the next heartbeat.
+            code if code.is_retriable() => {
+                self.coordinator_id = None;
+            },
+            code => {
+                return Err(ConsumerError::broker(
+                    "consumer_group_heartbeat",
+                    code,
+                    "consumer group heartbeat failed",
+                ));
+            },
+        }
+        Ok(())
+    }
+
+    /// Reconcile the subscription toward a KIP-848 target assignment: resolve its
+    /// topic ids to names, then apply it with cooperative semantics (retained
+    /// partitions keep their positions; newly added ones resume from committed).
+    async fn reconcile_modern(
+        &mut self,
+        coordinator: i32,
+        group_id: &str,
+        metadata: &ClusterMetadata,
+        assignment: Vec<AssignedTopic>,
+    ) -> Result<()> {
+        let mut target: Vec<TopicPartition> = Vec::new();
+        for topic in assignment {
+            let Some(name) = topic_name_for_id(metadata, topic.topic_id) else {
+                continue;
+            };
+            for partition in topic.partitions {
+                target.push(TopicPartition::new(name.clone(), partition));
+            }
+        }
+        let owned = self.subscription.assigned_partitions();
+        let _revoked = self
+            .apply_assignment(
+                coordinator,
+                group_id,
+                &Rebalance {
+                    owned: &owned,
+                    assigned: &target,
+                    cooperative: true,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// The current assignment grouped by topic id, for the heartbeat's owned set.
+    fn owned_as_topic_ids(&self, metadata: &ClusterMetadata) -> Vec<AssignedTopic> {
+        let mut by_id: Vec<AssignedTopic> = Vec::new();
+        for partition in self.subscription.assigned_partitions() {
+            let Some(topic_id) = topic_id_for_name(metadata, &partition.topic) else {
+                continue;
+            };
+            if let Some(topic) = by_id.iter_mut().find(|topic| topic.topic_id == topic_id) {
+                topic.partitions.push(partition.partition);
+            } else {
+                by_id.push(AssignedTopic {
+                    topic_id,
+                    partitions: vec![partition.partition],
+                });
+            }
+        }
+        by_id
+    }
+
     /// Update the group context the background heartbeat task reads.
     fn set_heartbeat_context(&self, context: Option<HeartbeatContext>) {
         *self
@@ -1079,8 +1322,18 @@ impl Consumer {
         }
         let group_id = self.config.group_id.clone();
         let coordinator = self.ensure_coordinator(&group_id).await?;
-        let result =
-            coordinator::commit_offsets(&self.wire, coordinator, &group_id, &offsets).await;
+        let (generation_id, member_id) = self.commit_identity();
+        let result = coordinator::commit_offsets(
+            &self.wire,
+            &coordinator::CommitTarget {
+                coordinator_id: coordinator,
+                group_id: &group_id,
+                generation_id,
+                member_id: &member_id,
+            },
+            &offsets,
+        )
+        .await;
         if result.is_ok() {
             self.metrics.record_commit();
             self.interceptors.on_commit(&offsets);
@@ -1222,6 +1475,24 @@ impl Consumer {
 /// Clamp a duration to a millisecond `i32` for wire timeout fields.
 fn clamp_ms(duration: Duration) -> i32 {
     i32::try_from(duration.as_millis()).unwrap_or(i32::MAX)
+}
+
+/// Resolve a KIP-848 assignment topic id to its name via cluster metadata.
+fn topic_name_for_id(metadata: &ClusterMetadata, topic_id: KafkaUuid) -> Option<String> {
+    metadata
+        .topics
+        .iter()
+        .find(|topic| topic.topic_id == topic_id)
+        .map(|topic| topic.name.clone())
+}
+
+/// Resolve a topic name to its id for the heartbeat's owned set (`None` when the
+/// broker reported no stable id).
+fn topic_id_for_name(metadata: &ClusterMetadata, name: &str) -> Option<KafkaUuid> {
+    metadata
+        .topic(name)
+        .map(|topic| topic.topic_id)
+        .filter(|topic_id| *topic_id != KafkaUuid::ZERO)
 }
 
 /// The background heartbeat task: while joined, send a `Heartbeat` every

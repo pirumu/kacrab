@@ -28,6 +28,26 @@ impl AutoOffsetReset {
     }
 }
 
+/// Which consumer group rebalance protocol to use, mirroring Kafka's
+/// `group.protocol`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupProtocol {
+    /// The classic client-side-assignment protocol (`JoinGroup`/`SyncGroup`).
+    Classic,
+    /// The KIP-848 server-side protocol (`ConsumerGroupHeartbeat`).
+    Consumer,
+}
+
+impl GroupProtocol {
+    fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "classic" => Ok(Self::Classic),
+            "consumer" => Ok(Self::Consumer),
+            _ => Err(invalid("group.protocol", value)),
+        }
+    }
+}
+
 /// Transactional read visibility, mirroring Kafka's `isolation.level`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IsolationLevel {
@@ -100,6 +120,11 @@ pub struct ConsumerRuntimeConfig {
     /// Whether internal topics (e.g. `__consumer_offsets`) are excluded from a
     /// pattern subscription (`exclude.internal.topics`).
     pub exclude_internal_topics: bool,
+    /// Rebalance protocol to use (`group.protocol`).
+    pub group_protocol: GroupProtocol,
+    /// Server-side assignor name for the KIP-848 protocol
+    /// (`group.remote.assignor`); `None` lets the coordinator choose.
+    pub group_remote_assignor: Option<String>,
 }
 
 impl ConsumerRuntimeConfig {
@@ -130,6 +155,9 @@ impl ConsumerRuntimeConfig {
             heartbeat_interval: config.heartbeat_interval_ms.duration(),
             rebalance_timeout: config.max_poll_interval_ms.duration(),
             exclude_internal_topics: config.exclude_internal_topics,
+            group_protocol: GroupProtocol::parse(&config.group_protocol)?,
+            group_remote_assignor: (!config.group_remote_assignor.is_empty())
+                .then(|| config.group_remote_assignor.clone()),
         })
     }
 }
@@ -142,6 +170,7 @@ fn invalid(key: &'static str, _value: &str) -> ConsumerError {
     ConsumerError::InvalidState(match key {
         "auto.offset.reset" => "invalid auto.offset.reset (expected earliest|latest|none)",
         "isolation.level" => "invalid isolation.level (expected read_uncommitted|read_committed)",
+        "group.protocol" => "invalid group.protocol (expected classic|consumer)",
         _ => "invalid consumer config value",
     })
 }
@@ -165,6 +194,19 @@ mod tests {
             AutoOffsetReset::None
         );
         assert!(AutoOffsetReset::parse("sideways").is_err());
+    }
+
+    #[test]
+    fn group_protocol_parses_classic_and_consumer() {
+        assert_eq!(
+            GroupProtocol::parse("classic").unwrap(),
+            GroupProtocol::Classic
+        );
+        assert_eq!(
+            GroupProtocol::parse(" Consumer ").unwrap(),
+            GroupProtocol::Consumer
+        );
+        assert!(GroupProtocol::parse("streams").is_err());
     }
 
     #[test]

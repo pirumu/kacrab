@@ -120,22 +120,36 @@ pub(super) async fn find_coordinator(wire: &WireClient, group_id: &str) -> Resul
     Ok(coordinator.node_id)
 }
 
-/// Commit the given offsets for `group_id` to its coordinator, using the
-/// "no active generation" values (generation `-1`, empty member) that a
-/// manual-assignment consumer uses.
+/// Who is committing: the coordinator to route to, the group, and the member
+/// identity. A manual-assignment consumer uses generation `-1` and an empty
+/// member id; a group member (classic or KIP-848) uses its generation/epoch and
+/// member id, which the coordinator requires.
+#[derive(Debug, Clone, Copy)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "These are the Kafka commit-identity fields; the shared suffix is theirs."
+)]
+pub(super) struct CommitTarget<'a> {
+    pub coordinator_id: i32,
+    pub group_id: &'a str,
+    pub generation_id: i32,
+    pub member_id: &'a str,
+}
+
+/// Commit the given offsets for a group to its coordinator with the member
+/// identity in `target`.
 pub(super) async fn commit_offsets(
     wire: &WireClient,
-    coordinator_id: i32,
-    group_id: &str,
+    target: &CommitTarget<'_>,
     offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
 ) -> Result<()> {
     if offsets.is_empty() {
         return Ok(());
     }
     let request = OffsetCommitRequestData {
-        group_id: group_id.to_owned().into(),
-        generation_id_or_member_epoch: -1,
-        member_id: KafkaString::default(),
+        group_id: target.group_id.to_owned().into(),
+        generation_id_or_member_epoch: target.generation_id,
+        member_id: target.member_id.to_owned().into(),
         group_instance_id: None,
         retention_time_ms: -1,
         topics: commit_topics(offsets),
@@ -145,7 +159,12 @@ pub(super) async fn commit_offsets(
         .max_version
         .min(OFFSET_COMMIT_MAX_VERSION);
     let response: OffsetCommitResponseData = wire
-        .send_to_broker(coordinator_id, ApiKey::OffsetCommit, version, &request)
+        .send_to_broker(
+            target.coordinator_id,
+            ApiKey::OffsetCommit,
+            version,
+            &request,
+        )
         .await?;
     for topic in response.topics {
         for partition in topic.partitions {
