@@ -9,7 +9,7 @@
 //! (the same trap seen on the admin offset paths). Join/sync/heartbeat and
 //! server-side membership arrive in Phase 2b.
 
-use std::{collections::HashMap, net::SocketAddr};
+use std::collections::HashMap;
 
 use bytes::Bytes;
 use kacrab_protocol::{
@@ -45,23 +45,6 @@ const OFFSET_FETCH_MAX_VERSION: i16 = 7;
 const FIND_COORDINATOR_MAX_ATTEMPTS: u32 = 20;
 /// Backoff between `FindCoordinator` retries.
 const FIND_COORDINATOR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// Pick a coordinator socket address, preferring IPv4. A hostname like
-/// `localhost` often resolves to `[::1]` first, and a dead IPv6 loopback (e.g. a
-/// broker only bound on IPv4) makes a pinned IPv6 connection hang — so prefer an
-/// IPv4 address when one is present, matching the producer's coordinator lookup.
-fn choose_coordinator_addr(addresses: impl IntoIterator<Item = SocketAddr>) -> Option<SocketAddr> {
-    let mut first = None;
-    for address in addresses {
-        if first.is_none() {
-            first = Some(address);
-        }
-        if address.is_ipv4() {
-            return Some(address);
-        }
-    }
-    first
-}
 
 /// Resolve the group coordinator, register its endpoint, and return its node id.
 ///
@@ -114,17 +97,20 @@ pub(super) async fn find_coordinator(wire: &WireClient, group_id: &str) -> Resul
             "coordinator returned an invalid port",
         )
     })?;
+    // The wire re-resolves the host (IPv4-first, honoring `client.dns.lookup`)
+    // when it connects, so this seed address is only a fallback.
     let host = coordinator.host.to_string();
-    let addresses = tokio::net::lookup_host((host.as_str(), port))
+    let addr = tokio::net::lookup_host((host.as_str(), port))
         .await
-        .map_err(WireError::from)?;
-    let addr = choose_coordinator_addr(addresses).ok_or_else(|| {
-        ConsumerError::broker(
-            "find_coordinator",
-            ErrorCode::CoordinatorNotAvailable,
-            "coordinator host did not resolve",
-        )
-    })?;
+        .map_err(WireError::from)?
+        .next()
+        .ok_or_else(|| {
+            ConsumerError::broker(
+                "find_coordinator",
+                ErrorCode::CoordinatorNotAvailable,
+                "coordinator host did not resolve",
+            )
+        })?;
     wire.upsert_broker(BrokerEndpoint::from_resolved(
         coordinator.node_id,
         host,

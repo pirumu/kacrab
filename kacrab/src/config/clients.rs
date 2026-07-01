@@ -958,6 +958,7 @@ impl ProducerConfig {
             broker_queue_capacity: self.broker_queue_capacity,
             buffer_pool_capacity: self.buffer_pool_capacity,
             allow_auto_topic_creation: false,
+            client_dns_lookup: self.client_dns_lookup.clone(),
             security_protocol: self.security_protocol.clone(),
             ssl_truststore_location: self.ssl_truststore_location.clone(),
             ssl_truststore_password: self.ssl_truststore_password.clone(),
@@ -1062,6 +1063,7 @@ impl ConsumerConfig {
             broker_queue_capacity: None,
             buffer_pool_capacity: None,
             allow_auto_topic_creation: self.allow_auto_create_topics,
+            client_dns_lookup: self.client_dns_lookup.clone(),
             security_protocol: self.security_protocol.clone(),
             ssl_truststore_location: self.ssl_truststore_location.clone(),
             ssl_truststore_password: self.ssl_truststore_password.clone(),
@@ -1158,6 +1160,7 @@ impl AdminConfig {
             broker_queue_capacity: None,
             buffer_pool_capacity: None,
             allow_auto_topic_creation: false,
+            client_dns_lookup: self.client_dns_lookup.clone(),
             security_protocol: self.security_protocol.clone(),
             ssl_truststore_location: self.ssl_truststore_location.clone(),
             ssl_truststore_password: self.ssl_truststore_password.clone(),
@@ -1256,6 +1259,7 @@ struct ConnectionConfigFields {
     broker_queue_capacity: Option<usize>,
     buffer_pool_capacity: Option<usize>,
     allow_auto_topic_creation: bool,
+    client_dns_lookup: String,
     security_protocol: String,
     ssl_truststore_location: Option<String>,
     ssl_truststore_password: Option<String>,
@@ -1358,6 +1362,7 @@ fn connection_config_from_fields(fields: &ConnectionConfigFields) -> crate::wire
             .buffer_pool_capacity
             .unwrap_or(default.buffer_pool_capacity),
         allow_auto_topic_creation: fields.allow_auto_topic_creation,
+        use_all_dns_ips: dns_lookup_uses_all_ips(&fields.client_dns_lookup),
     }
 }
 
@@ -1380,6 +1385,13 @@ fn metadata_recovery_strategy(value: &str) -> crate::wire::MetadataRecoveryStrat
         "none" => crate::wire::MetadataRecoveryStrategy::None,
         _ => crate::wire::MetadataRecoveryStrategy::Rebootstrap,
     }
+}
+
+/// Whether `client.dns.lookup` asks for every resolved IP to be tried. Kafka's
+/// two 4.x modes (`use_all_dns_ips`, `resolve_canonical_bootstrap_servers_only`)
+/// both try all addresses; the removed legacy `default` uses only the first.
+fn dns_lookup_uses_all_ips(value: &str) -> bool {
+    !matches!(value, "default")
 }
 
 fn tls_config_from_fields(fields: &ConnectionConfigFields) -> crate::wire::TlsConfig {

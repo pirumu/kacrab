@@ -591,10 +591,15 @@ impl BrokerTask {
     async fn connect_and_negotiate(&self) -> Result<(BrokerStream, BrokerCapabilities)> {
         let tcp = match self.config.transport {
             TransportConfig::Plaintext => {
-                socket::connect(
+                socket::resolve_and_connect(
                     &self.config.socket,
                     self.config.socket_connection_setup_timeout,
-                    self.endpoint.addr,
+                    &socket::ResolveTarget {
+                        host: &self.endpoint.host,
+                        port: self.endpoint.port,
+                        use_all_dns_ips: self.config.use_all_dns_ips,
+                        fallback: self.endpoint.addr,
+                    },
                 )
                 .await?
             },

@@ -2,7 +2,6 @@
 
 use std::{
     collections::{BTreeSet, VecDeque},
-    net::SocketAddr,
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -3471,12 +3470,15 @@ impl ProducerDispatcher {
         let port = u16::try_from(coordinator.port).map_err(|_error| {
             ProducerError::InvalidTransactionState("transaction coordinator returned invalid port")
         })?;
-        let addresses = tokio::net::lookup_host((coordinator.host.to_string(), port))
+        // The wire re-resolves the host (IPv4-first, honoring `client.dns.lookup`)
+        // when it connects, so this seed address is only a fallback.
+        let addr = tokio::net::lookup_host((coordinator.host.to_string(), port))
             .await
-            .map_err(crate::wire::WireError::from)?;
-        let addr = choose_coordinator_addr(addresses).ok_or(
-            ProducerError::InvalidTransactionState("transaction coordinator host did not resolve"),
-        )?;
+            .map_err(crate::wire::WireError::from)?
+            .next()
+            .ok_or(ProducerError::InvalidTransactionState(
+                "transaction coordinator host did not resolve",
+            ))?;
         self.wire.upsert_broker(BrokerEndpoint::from_resolved(
             coordinator.node_id,
             coordinator.host.to_string(),
@@ -4645,19 +4647,6 @@ fn end_txn_version(transaction_two_phase_commit: bool) -> i16 {
             .max_version
             .min(TRANSACTION_V1_END_TXN_MAX_VERSION)
     }
-}
-
-fn choose_coordinator_addr(addresses: impl IntoIterator<Item = SocketAddr>) -> Option<SocketAddr> {
-    let mut first = None;
-    for address in addresses {
-        if first.is_none() {
-            first = Some(address);
-        }
-        if address.is_ipv4() {
-            return Some(address);
-        }
-    }
-    first
 }
 
 #[cfg(test)]

@@ -7,6 +7,59 @@ use tokio::net::TcpStream;
 
 use super::config::SocketConfig;
 
+/// A broker address to resolve and connect to.
+pub(crate) struct ResolveTarget<'a> {
+    /// Advertised or configured broker hostname (may be a literal IP).
+    pub host: &'a str,
+    /// Broker port.
+    pub port: u16,
+    /// Try every resolved IP (`client.dns.lookup=use_all_dns_ips`) rather than
+    /// only the first.
+    pub use_all_dns_ips: bool,
+    /// Address used when the hostname does not resolve.
+    pub fallback: SocketAddr,
+}
+
+/// Resolve `host:port` and connect, trying candidate addresses in IPv4-first
+/// order so a dead IPv6 loopback (e.g. `localhost` → `[::1]` with a broker bound
+/// only on IPv4) never stalls the connect. With `use_all_dns_ips` every resolved
+/// address is tried until one succeeds (`client.dns.lookup=use_all_dns_ips`);
+/// otherwise only the first (IPv4-preferred) address is used. `fallback` is used
+/// when the hostname does not resolve (e.g. it is already a literal address).
+pub(crate) async fn resolve_and_connect(
+    config: &SocketConfig,
+    connect_timeout: Duration,
+    target: &ResolveTarget<'_>,
+) -> io::Result<TcpStream> {
+    let mut addresses: Vec<SocketAddr> = tokio::net::lookup_host((target.host, target.port))
+        .await
+        .map(Iterator::collect)
+        .unwrap_or_default();
+    order_ipv4_first(&mut addresses);
+    if addresses.is_empty() {
+        addresses.push(target.fallback);
+    }
+    let take = if target.use_all_dns_ips {
+        addresses.len()
+    } else {
+        1
+    };
+    let mut last_error = None;
+    for address in addresses.into_iter().take(take) {
+        match connect(config, connect_timeout, address).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| io::Error::other("no broker address to connect")))
+}
+
+/// Order resolved addresses IPv4-first so a dead IPv6 loopback never stalls a
+/// connect; ties keep their resolved order (stable sort).
+fn order_ipv4_first(addresses: &mut [SocketAddr]) {
+    addresses.sort_by_key(|address| !address.is_ipv4());
+}
+
 pub(crate) async fn connect(
     config: &SocketConfig,
     connect_timeout: Duration,
@@ -157,8 +210,22 @@ mod tests {
 
     use tokio::net::TcpListener;
 
-    use super::{connect, is_connect_in_progress, new_socket};
+    use super::{connect, is_connect_in_progress, new_socket, order_ipv4_first};
     use crate::wire::{SocketConfig, TcpKeepaliveConfig};
+
+    #[test]
+    fn order_ipv4_first_moves_ipv4_ahead_of_ipv6() {
+        let ipv6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 9092);
+        let ipv4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9092);
+        let mut addresses = vec![ipv6, ipv4];
+        order_ipv4_first(&mut addresses);
+        assert_eq!(addresses, vec![ipv4, ipv6]);
+
+        // Already IPv4-first / single-family lists are left in order.
+        let mut only_ipv6 = vec![ipv6];
+        order_ipv4_first(&mut only_ipv6);
+        assert_eq!(only_ipv6, vec![ipv6]);
+    }
 
     #[test]
     fn connect_in_progress_detection_accepts_async_connect_errors() {
