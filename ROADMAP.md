@@ -25,6 +25,9 @@ the workspace.
   linger, bounded memory, compression hooks, default/keyed partitioning,
   metadata routing, multi-broker dispatch, idempotent producer state,
   transactions, retries, delivery timeout, and delivery handles.
+- `admin` owns the `AdminClient` API — the full Apache Kafka 4.3.0 `Admin`
+  operation surface (62 operations) with controller/coordinator/per-leader/
+  broadcast routing, verified against a real broker.
 - `benches` contains accumulator, wire-pipeline, producer-dispatcher, mock
   broker, and real Kafka benchmark hooks with local baselines.
 
@@ -46,7 +49,6 @@ the workspace.
 ## Not Ready Yet
 
 - Consumer APIs are not implemented.
-- Admin APIs are not implemented.
 - Streams APIs are not implemented.
 - Release stability is not guaranteed.
 - Local benchmark baselines are not production acceptance claims.
