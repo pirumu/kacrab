@@ -1,9 +1,8 @@
 //! Consumer subscription and per-partition fetch state.
 //!
-//! Phase 1 supports user (manual) assignment only; topic/pattern subscription
-//! and group-managed assignment arrive with Phase 2. The type is deliberately
-//! shaped so that group management layers on top without reworking the
-//! per-partition position machinery.
+//! Tracks the assigned partitions and each one's fetch position for both user
+//! (manual) assignment and group-managed assignment, plus pause/resume and the
+//! reset-needed set that `auto.offset.reset` resolves.
 
 use std::collections::BTreeMap;
 
@@ -37,11 +36,13 @@ struct TopicPartitionState {
     paused: bool,
 }
 
-/// How partitions came to be assigned. Phase 1 only exposes `UserAssigned`.
+/// How partitions came to be assigned: not assigned, user (manual) `assign`, or
+/// group-managed rebalancing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubscriptionType {
     None,
     UserAssigned,
+    AutoAssigned,
 }
 
 /// Tracks the assigned partitions and each one's fetch position, mirroring
@@ -74,10 +75,20 @@ impl SubscriptionState {
     /// Replace the assignment with a manual (user) partition set. Positions for
     /// partitions already assigned are retained; new partitions start unpositioned.
     pub(super) fn assign(&mut self, partitions: &[TopicPartition]) {
+        self.assign_as(partitions, SubscriptionType::UserAssigned);
+    }
+
+    /// Replace the assignment with one computed by group management (marks the
+    /// subscription `AutoAssigned` rather than `UserAssigned`).
+    pub(super) fn assign_grouped(&mut self, partitions: &[TopicPartition]) {
+        self.assign_as(partitions, SubscriptionType::AutoAssigned);
+    }
+
+    fn assign_as(&mut self, partitions: &[TopicPartition], kind: SubscriptionType) {
         self.subscription_type = if partitions.is_empty() {
             SubscriptionType::None
         } else {
-            SubscriptionType::UserAssigned
+            kind
         };
         let mut next = BTreeMap::new();
         for partition in partitions {
@@ -105,6 +116,14 @@ impl SubscriptionState {
     pub(super) fn set_position(&mut self, partition: &TopicPartition, position: FetchPosition) {
         if let Some(state) = self.assignment.get_mut(&Self::key(partition)) {
             state.position = Some(position);
+        }
+    }
+
+    /// Clear a partition's position so it is re-resolved via `auto.offset.reset`
+    /// on the next poll (used when the broker reports the position out of range).
+    pub(super) fn request_reset(&mut self, partition: &TopicPartition) {
+        if let Some(state) = self.assignment.get_mut(&Self::key(partition)) {
+            state.position = None;
         }
     }
 

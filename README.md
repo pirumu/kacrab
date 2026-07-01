@@ -60,10 +60,14 @@ interceptors, and metrics, verified end-to-end against a real broker.
 
 ## Documentation
 
-- **[Design & Internals book](https://pirumu.github.io/kacrab/)** — architecture,
-  the idempotent producer state machine, the SASL/TLS handshakes, protocol
-  codegen, and how every path is verified against real brokers. Source in
-  [`docs-book/`](docs-book/).
+- **[Design & Internals book](https://pirumu.github.io/kacrab/)** — architecture
+  and algorithm deep dives: the idempotent producer state machine, consumer
+  [group membership & rebalancing](docs-book/src/consumer/rebalancing.md)
+  (cooperative-sticky + KIP-848) and
+  [fetching, positions & offsets](docs-book/src/consumer/fetching.md) (fetch
+  sessions, truncation detection, in-order commits), the SASL/TLS handshakes,
+  protocol codegen, and how every path is verified against real brokers. Source
+  in [`docs-book/`](docs-book/).
 - **API reference** — [docs.rs/kacrab](https://docs.rs/kacrab) (after the first
   crates.io release).
 
@@ -190,7 +194,7 @@ implemented surface:
   - [ ] Production acceptance: sustained multi-broker stress, memory soak, and
         latency-percentile gates on realistic multi-broker workloads (scoped
         under [Production acceptance](#production-acceptance)).
-- [x] Consumer usable baseline (`consumer` feature)
+- [x] Consumer client at full Apache Kafka 4.3.0 parity (`consumer` feature)
   - [x] Manual assignment, `Fetch` (per-leader), `auto.offset.reset`
         (`earliest`/`latest`/`none` via `ListOffsets`), `max.poll.records`, and
         `seek`/`seek_to_beginning`/`seek_to_end`/`position`/`pause`/`resume`/
@@ -208,10 +212,21 @@ implemented surface:
         (`kacrab/tests/real_kafka_consumer.rs`): manual assign + commit, a single
         subscriber owning both partitions, and two consumers rebalancing to one
         partition each.
-  - [ ] Refinements: a dedicated background heartbeat task, cooperative-sticky
-        assignment, incremental fetch sessions (KIP-227), `OffsetForLeaderEpoch`
-        validation, `offsets_for_times`/`beginning`/`end_offsets`, and the
-        KIP-848 consumer group protocol.
+  - [x] Full assignor set and rebalancing: `range`/`roundrobin`/`sticky` eager
+        assignors and the incremental `cooperative-sticky` (KIP-429), a dedicated
+        background heartbeat task, static membership (`group.instance.id`), and
+        `enforce_rebalance`.
+  - [x] KIP-848 server-side protocol (`group.protocol=consumer`): a single
+        `ConsumerGroupHeartbeat` RPC with server-computed, topic-id-keyed
+        assignments reconciled incrementally.
+  - [x] Fetch and offset refinements: incremental fetch sessions (KIP-227),
+        `OffsetForLeaderEpoch` truncation validation (KIP-320), `commit_async`
+        with background auto-commit, and
+        `offsets_for_times`/`beginning`/`end_offsets`/`current_lag`.
+  - [x] Surface completeness: topic pattern (regex) subscription, typed
+        `ConsumerDeserializer`s, `ConsumerInterceptor`s (`on_consume`/`on_commit`),
+        `client_instance_id`, and `metrics()`. Verified end-to-end across ten
+        real-broker scenarios (cooperative-sticky, pattern, interceptors, KIP-848).
 - [x] Admin usable baseline (`admin` feature)
   - [x] Full Apache Kafka 4.3.0 `Admin` operation surface — 62 operations:
         topics/partitions, describe/incremental-alter configs, ACLs, consumer
@@ -565,11 +580,12 @@ configs, add partitions, list offsets, and delete — lives in
 
 The consumer client (`consumer` feature) mirrors Java's `Consumer` with
 snake_case methods and the same constructors as the other clients. It supports
-manual partition assignment and classic consumer-group subscription:
+manual partition assignment, topic and pattern subscription, and both group
+protocols (classic and KIP-848):
 
 ```rust
 use std::time::Duration;
-use kacrab::{common::TopicPartition, consumer::Consumer};
+use kacrab::consumer::{Consumer, StringDeserializer};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -578,29 +594,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("bootstrap.servers", "localhost:9092"),
         ("group.id", "orders-workers"),
         ("auto.offset.reset", "earliest"),
+        // Incremental rebalancing; use ("group.protocol", "consumer") for KIP-848.
+        ("partition.assignment.strategy", "cooperative-sticky"),
     ])
     .await?;
     consumer.subscribe(["orders"])?;
 
+    // Decode the bytes-first records with a typed deserializer.
+    let (keys, values) = (StringDeserializer, StringDeserializer);
     loop {
         let records = consumer.poll(Duration::from_secs(1)).await?;
         for record in &records {
-            println!("{}-{}@{}", record.topic, record.partition, record.offset);
+            let (key, value) = record.deserialized(&keys, &values)?;
+            println!(
+                "{}-{}@{}: {key:?} = {value:?}",
+                record.topic, record.partition, record.offset
+            );
         }
         consumer.commit_sync().await?;
     }
 }
 ```
 
-Or take direct control with `assign(vec![TopicPartition::new("orders", 0)])` and
-`seek`/`position`/`pause`. Records are bytes-first (`ConsumerRecord.key/value:
-Option<Bytes>`). The classic group path runs `FindCoordinator` +
-`JoinGroup`/`SyncGroup`/`Heartbeat` with the `range` assignor and eager
-rebalancing; `commit_sync`/`committed` carry the leader epoch. Everything is
+Or take direct control with `assign` + `seek`/`position`/`pause`, or subscribe by
+regex with `subscribe_pattern`. Records are bytes-first
+(`ConsumerRecord.key/value: Option<Bytes>`), with the typed `ConsumerDeserializer`
+layer above. Offsets commit sync, async, or automatically
+(`commit_sync`/`commit_async`/`committed`, leader-epoch aware);
+`ConsumerInterceptor`s and `metrics()` round out the surface. Everything is
 verified end-to-end against a real Apache Kafka 4.3.0 broker
 (`kacrab/tests/real_kafka_consumer.rs`). See the book's
-[consumer chapter](docs-book/src/consumer.md) and `docs/consumer-design.md` for
-the design and the phased plan.
+[consumer chapter](docs-book/src/consumer.md) — with algorithm deep dives on
+[rebalancing](docs-book/src/consumer/rebalancing.md) and
+[fetching & offsets](docs-book/src/consumer/fetching.md) — for how it works.
 
 ## Auth
 

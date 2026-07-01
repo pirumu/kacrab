@@ -1,13 +1,13 @@
-//! Group coordinator lookup and committed-offset commit/fetch.
+//! Group coordinator lookup, offset commit/fetch, and classic group membership.
 //!
-//! Phase 2a wires the offset side of group membership: find the group
-//! coordinator (`FindCoordinator`), commit offsets (`OffsetCommit`), and read
-//! committed offsets (`OffsetFetch`). This works for a manual-assignment
-//! consumer that carries a `group.id` — no join/sync is required to own offsets.
-//! `OffsetCommit` is capped at v9 and `OffsetFetch` at v7 so both stay
-//! topic-*name* keyed, sidestepping the v10/v8 topic-id strict-codec forms
-//! (the same trap seen on the admin offset paths). Join/sync/heartbeat and
-//! server-side membership arrive in Phase 2b.
+//! Finds the group coordinator (`FindCoordinator`), commits and reads committed
+//! offsets (`OffsetCommit`/`OffsetFetch`, carrying the member identity), and runs
+//! the classic membership RPCs (`JoinGroup`/`SyncGroup`/`Heartbeat`/`LeaveGroup`).
+//! A manual-assignment consumer that carries a `group.id` can commit/fetch offsets
+//! without joining. `OffsetCommit` is capped at v9 and `OffsetFetch` at v7 so both
+//! stay topic-*name* keyed, sidestepping the v10/v8 topic-id strict-codec forms
+//! (the same trap seen on the admin offset paths). The KIP-848 server-side
+//! protocol lives in `next_gen`.
 
 use std::collections::HashMap;
 

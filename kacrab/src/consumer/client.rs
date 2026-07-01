@@ -98,6 +98,24 @@ pub struct Consumer {
     last_modern_heartbeat: Option<Instant>,
     /// Per-broker incremental fetch sessions (KIP-227).
     fetch_sessions: fetch::FetchSessions,
+    /// Ordered queue of asynchronous commits, drained one at a time by
+    /// `async_commit_task` so two `commit_async` calls never land out of order —
+    /// otherwise a stale commit could move the committed offset backwards (Java's
+    /// single network thread serializes commits the same way).
+    async_commits: tokio::sync::mpsc::UnboundedSender<AsyncCommit>,
+    /// The background task draining `async_commits`, aborted on close.
+    async_commit_task: JoinHandle<()>,
+}
+
+/// A queued asynchronous commit, applied in send order by the commit worker.
+struct AsyncCommit {
+    offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    callback: OffsetCommitCallback,
+    coordinator_id: i32,
+    group_id: String,
+    generation_id: i32,
+    member_id: String,
+    interceptors: ConsumerInterceptors,
 }
 
 /// Callback invoked with the result of an asynchronous offset commit.
@@ -117,6 +135,20 @@ const fn is_rebalance_in_progress(error: &ConsumerError) -> bool {
         error,
         ConsumerError::Broker {
             error: ErrorCode::RebalanceInProgress,
+            ..
+        }
+    )
+}
+
+/// Whether an error means the group coordinator moved or is unavailable, so the
+/// cached coordinator must be dropped and re-discovered (`FindCoordinator`).
+const fn is_coordinator_moved(error: &ConsumerError) -> bool {
+    matches!(
+        error,
+        ConsumerError::Broker {
+            error: ErrorCode::NotCoordinator
+                | ErrorCode::CoordinatorNotAvailable
+                | ErrorCode::CoordinatorLoadInProgress,
             ..
         }
     )
@@ -148,6 +180,7 @@ struct HeartbeatContext {
 impl Drop for Consumer {
     fn drop(&mut self) {
         self.heartbeat_task.abort();
+        self.async_commit_task.abort();
     }
 }
 
@@ -177,6 +210,12 @@ impl Consumer {
             runtime.heartbeat_interval,
             metrics.clone(),
         ));
+        let (async_commits, async_commit_rx) = tokio::sync::mpsc::unbounded_channel();
+        let async_commit_task = tokio::spawn(async_commit_loop(
+            async_commit_rx,
+            wire.clone(),
+            metrics.clone(),
+        ));
         Ok(Self {
             wire,
             subscription: SubscriptionState::new(runtime.auto_offset_reset),
@@ -198,6 +237,8 @@ impl Consumer {
             modern_group: None,
             last_modern_heartbeat: None,
             fetch_sessions: fetch::FetchSessions::default(),
+            async_commits,
+            async_commit_task,
         })
     }
 
@@ -442,19 +483,26 @@ impl Consumer {
             return Ok(());
         }
         let group_id = self.require_group_id()?;
-        let coordinator = self.ensure_coordinator(&group_id).await?;
         let (generation_id, member_id) = self.commit_identity();
-        let result = coordinator::commit_offsets(
-            &self.wire,
-            &coordinator::CommitTarget {
-                coordinator_id: coordinator,
-                group_id: &group_id,
-                generation_id,
-                member_id: &member_id,
-            },
-            &offsets,
-        )
-        .await;
+        let mut refound = false;
+        let result = loop {
+            let coordinator = self.ensure_coordinator(&group_id).await?;
+            let attempt = coordinator::commit_offsets(
+                &self.wire,
+                &coordinator::CommitTarget {
+                    coordinator_id: coordinator,
+                    group_id: &group_id,
+                    generation_id,
+                    member_id: &member_id,
+                },
+                &offsets,
+            )
+            .await;
+            match attempt {
+                Err(error) if !refound && self.note_coordinator_error(&error) => refound = true,
+                outcome => break outcome,
+            }
+        };
         if result.is_ok() {
             self.metrics.record_commit();
             self.interceptors.on_commit(&offsets);
@@ -506,28 +554,22 @@ impl Consumer {
         }
         let group_id = self.require_group_id()?;
         let coordinator = self.ensure_coordinator(&group_id).await?;
-        let wire = self.wire.clone();
-        let metrics = self.metrics.clone();
-        let interceptors = self.interceptors.clone();
         let (generation_id, member_id) = self.commit_identity();
-        let _handle = tokio::spawn(async move {
-            let result = coordinator::commit_offsets(
-                &wire,
-                &coordinator::CommitTarget {
-                    coordinator_id: coordinator,
-                    group_id: &group_id,
-                    generation_id,
-                    member_id: &member_id,
-                },
-                &offsets,
-            )
-            .await;
-            if result.is_ok() {
-                metrics.record_commit();
-                interceptors.on_commit(&offsets);
-            }
-            callback(result);
-        });
+        // Enqueue rather than spawn, so the single worker applies commits in call
+        // order and a later commit never loses to an earlier, slower one.
+        let commit = AsyncCommit {
+            offsets,
+            callback,
+            coordinator_id: coordinator,
+            group_id,
+            generation_id,
+            member_id,
+            interceptors: self.interceptors.clone(),
+        };
+        if let Err(tokio::sync::mpsc::error::SendError(commit)) = self.async_commits.send(commit) {
+            // The worker is gone (consumer closing) — report rather than drop.
+            (commit.callback)(Err(ConsumerError::InvalidState("consumer is closing")));
+        }
         Ok(())
     }
 
@@ -545,8 +587,15 @@ impl Consumer {
             return Ok(HashMap::new());
         }
         let group_id = self.require_group_id()?;
-        let coordinator = self.ensure_coordinator(&group_id).await?;
-        coordinator::fetch_committed(&self.wire, coordinator, &group_id, partitions).await
+        let mut refound = false;
+        loop {
+            let coordinator = self.ensure_coordinator(&group_id).await?;
+            match coordinator::fetch_committed(&self.wire, coordinator, &group_id, partitions).await
+            {
+                Err(error) if !refound && self.note_coordinator_error(&error) => refound = true,
+                outcome => return outcome,
+            }
+        }
     }
 
     /// This consumer's group metadata. For a manual-assignment consumer the
@@ -718,19 +767,36 @@ impl Consumer {
                 fetchable_empty = fetchable.is_empty();
                 if !fetchable.is_empty() {
                     self.metrics.record_fetch();
-                    let fetched = fetch::fetch(
+                    // Clamp the broker's long-poll wait to what's left of the
+                    // caller's poll timeout, so a short `poll` isn't blocked for
+                    // the full `fetch.max.wait.ms`.
+                    let remaining = clamp_ms(timeout.saturating_sub(start.elapsed()));
+                    let max_wait_ms = remaining.min(self.config.fetch_max_wait_ms);
+                    let progress = fetch::fetch(
                         &fetch::FetchContext {
                             wire: &self.wire,
                             config: &self.config,
                             metadata: &metadata,
+                            max_wait_ms,
                         },
                         &fetchable,
                         self.config.max_poll_records,
                         &mut self.fetch_sessions,
                     )
                     .await?;
+                    // Out-of-range partitions clear their position so the next poll
+                    // re-resolves it via `auto.offset.reset` (KIP behaviour parity).
+                    for partition in &progress.resets {
+                        self.subscription.request_reset(partition);
+                    }
+                    // Stale-leader partitions invalidate cached metadata so the next
+                    // poll re-resolves their leaders.
+                    for partition in &progress.stale {
+                        self.wire
+                            .invalidate_topic_partition(&partition.topic, partition.partition);
+                    }
                     let mut records = ConsumerRecords::empty();
-                    for partition_fetch in fetched {
+                    for partition_fetch in progress.partitions {
                         self.subscription.advance_position(
                             &partition_fetch.partition,
                             partition_fetch.next_offset,
@@ -773,12 +839,23 @@ impl Consumer {
         self.wakeup.store(true, Ordering::SeqCst);
     }
 
-    /// Close the consumer: leave the group (best effort) and release its broker
-    /// connections. The wire client shuts its broker tasks down on drop.
+    /// Close the consumer: commit (auto-commit) and leave the group (best effort)
+    /// and release its broker connections. Bounded by `request.timeout.ms` so a
+    /// hung coordinator cannot hang close (Java's `default.api.timeout.ms`). The
+    /// wire client shuts its broker tasks down on drop.
     pub async fn close(mut self) {
         self.heartbeat_task.abort();
-        let _committed = self.auto_commit_now().await;
+        self.async_commit_task.abort();
         self.interceptors.close();
+        let close_timeout = self.config.request_timeout;
+        let _timed_out = tokio::time::timeout(close_timeout, self.commit_and_leave()).await;
+        drop(self);
+    }
+
+    /// Commit the current positions (auto-commit) and leave the group under
+    /// whichever protocol is active. Awaited under a timeout by [`close`](Self::close).
+    async fn commit_and_leave(&mut self) {
+        let _committed = self.auto_commit_now().await;
         // Static members (`group.instance.id`) stay in the group across a close so
         // a quick restart avoids a rebalance, matching Java.
         let dynamic_member = self.config.group_instance_id.is_empty();
@@ -825,7 +902,6 @@ impl Consumer {
                 }
             },
         }
-        drop(self);
     }
 
     /// The current fetch position of each assigned, positioned partition as an
@@ -863,6 +939,20 @@ impl Consumer {
         let id = coordinator::find_coordinator(&self.wire, group_id).await?;
         self.coordinator_id = Some(id);
         Ok(id)
+    }
+
+    /// If `error` means the coordinator moved, drop the cached coordinator so the
+    /// next [`ensure_coordinator`](Self::ensure_coordinator) re-discovers it, and
+    /// report that a re-find is warranted. A coordinator moves on broker restart
+    /// or `__consumer_offsets` reassignment — otherwise the stale id would fail
+    /// every commit/heartbeat/rejoin until the consumer is recreated.
+    const fn note_coordinator_error(&mut self, error: &ConsumerError) -> bool {
+        if is_coordinator_moved(error) {
+            self.coordinator_id = None;
+            true
+        } else {
+            false
+        }
     }
 
     async fn offsets_at_timestamp(
@@ -949,13 +1039,6 @@ impl Consumer {
         let group_id = self.config.group_id.clone();
         let group_instance_id = self.config.group_instance_id.clone();
         let instance = (!group_instance_id.is_empty()).then_some(group_instance_id.as_str());
-        let coordinator = self.ensure_coordinator(&group_id).await?;
-        let context = coordinator::GroupContext {
-            wire: &self.wire,
-            coordinator_id: coordinator,
-            group_id: &group_id,
-            group_instance_id: instance,
-        };
         let assignors = self.advertised_assignors();
         // Partitions we currently own — reported to the coordinator so the
         // cooperative assignor knows what not to hand to someone else yet. Eager
@@ -963,11 +1046,20 @@ impl Consumer {
         // we apply the new assignment below.
         let owned = self.subscription.assigned_partitions();
         // A rebalance that starts between our JoinGroup and SyncGroup makes the
-        // coordinator answer REBALANCE_IN_PROGRESS; rejoin and retry.
+        // coordinator answer REBALANCE_IN_PROGRESS; a coordinator move answers
+        // NOT_COORDINATOR. Both rejoin and retry — the latter after re-finding the
+        // coordinator (`coordinator_id` is looked up fresh each iteration).
         let mut attempts = 0_u32;
-        let (assigned, cooperative) = loop {
+        let (assigned, cooperative, coordinator) = loop {
             attempts = attempts.saturating_add(1);
-            let join = coordinator::join_group(
+            let coordinator = self.ensure_coordinator(&group_id).await?;
+            let context = coordinator::GroupContext {
+                wire: &self.wire,
+                coordinator_id: coordinator,
+                group_id: &group_id,
+                group_instance_id: instance,
+            };
+            let join = match coordinator::join_group(
                 &context,
                 &coordinator::JoinRequest {
                     member_id: &self.member_id,
@@ -978,7 +1070,15 @@ impl Consumer {
                     owned: &owned,
                 },
             )
-            .await?;
+            .await
+            {
+                Ok(join) => join,
+                Err(error) if attempts < MAX_REJOIN_ATTEMPTS && is_coordinator_moved(&error) => {
+                    self.coordinator_id = None;
+                    continue;
+                },
+                Err(error) => return Err(error),
+            };
             self.member_id.clone_from(&join.member_id);
             self.generation_id = join.generation_id;
             let assignments = if join.leader {
@@ -997,9 +1097,12 @@ impl Consumer {
             )
             .await
             {
-                Ok(assigned) => break (assigned, cooperative),
+                Ok(assigned) => break (assigned, cooperative, coordinator),
                 Err(error)
                     if is_rebalance_in_progress(&error) && attempts < MAX_REJOIN_ATTEMPTS => {},
+                Err(error) if is_coordinator_moved(&error) && attempts < MAX_REJOIN_ATTEMPTS => {
+                    self.coordinator_id = None;
+                },
                 Err(error) => return Err(error),
             }
         };
@@ -1067,8 +1170,9 @@ impl Consumer {
         } else {
             (assigned.to_vec(), false)
         };
-        // `assign` keeps positions for retained partitions and drops revoked ones.
-        self.subscription.assign(assigned);
+        // `assign_grouped` keeps positions for retained partitions, drops revoked
+        // ones, and marks the subscription group-managed (`AutoAssigned`).
+        self.subscription.assign_grouped(assigned);
         if !to_position.is_empty() {
             let committed =
                 coordinator::fetch_committed(&self.wire, coordinator, group_id, &to_position)
@@ -1194,6 +1298,13 @@ impl Consumer {
     /// Reconcile the subscription toward a KIP-848 target assignment: resolve its
     /// topic ids to names, then apply it with cooperative semantics (retained
     /// partitions keep their positions; newly added ones resume from committed).
+    ///
+    /// The reconciliation is server-driven: the group coordinator withholds a
+    /// partition from a member's target until its previous owner has revoked it
+    /// (reported a reduced owned set in a heartbeat), so applying the target
+    /// directly never double-owns a partition. Revocation is reflected in the next
+    /// heartbeat's `owned` set. (The multi-member handoff is exercised against a
+    /// real broker only for the classic cooperative path, not yet KIP-848.)
     async fn reconcile_modern(
         &mut self,
         coordinator: i32,
@@ -1327,19 +1438,26 @@ impl Consumer {
             return Ok(());
         }
         let group_id = self.config.group_id.clone();
-        let coordinator = self.ensure_coordinator(&group_id).await?;
         let (generation_id, member_id) = self.commit_identity();
-        let result = coordinator::commit_offsets(
-            &self.wire,
-            &coordinator::CommitTarget {
-                coordinator_id: coordinator,
-                group_id: &group_id,
-                generation_id,
-                member_id: &member_id,
-            },
-            &offsets,
-        )
-        .await;
+        let mut refound = false;
+        let result = loop {
+            let coordinator = self.ensure_coordinator(&group_id).await?;
+            let attempt = coordinator::commit_offsets(
+                &self.wire,
+                &coordinator::CommitTarget {
+                    coordinator_id: coordinator,
+                    group_id: &group_id,
+                    generation_id,
+                    member_id: &member_id,
+                },
+                &offsets,
+            )
+            .await;
+            match attempt {
+                Err(error) if !refound && self.note_coordinator_error(&error) => refound = true,
+                outcome => break outcome,
+            }
+        };
         if result.is_ok() {
             self.metrics.record_commit();
             self.interceptors.on_commit(&offsets);
@@ -1540,6 +1658,35 @@ async fn heartbeat_loop(
     }
 }
 
+/// The asynchronous-commit worker: drain the queue and apply each commit to
+/// completion before the next, so commits reach the coordinator in the order
+/// `commit_async` was called (mirroring Java's single network thread). Exits when
+/// the consumer drops its `async_commits` sender.
+async fn async_commit_loop(
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<AsyncCommit>,
+    wire: WireClient,
+    metrics: ConsumerMetrics,
+) {
+    while let Some(commit) = receiver.recv().await {
+        let result = coordinator::commit_offsets(
+            &wire,
+            &coordinator::CommitTarget {
+                coordinator_id: commit.coordinator_id,
+                group_id: &commit.group_id,
+                generation_id: commit.generation_id,
+                member_id: &commit.member_id,
+            },
+            &commit.offsets,
+        )
+        .await;
+        if result.is_ok() {
+            metrics.record_commit();
+            commit.interceptors.on_commit(&commit.offsets);
+        }
+        (commit.callback)(result);
+    }
+}
+
 /// Resolve `bootstrap.servers` into wire broker endpoints.
 async fn resolve_bootstrap_brokers(config: &ConsumerConfig) -> Result<Vec<BrokerEndpoint>> {
     let mut endpoints = Vec::new();
@@ -1591,4 +1738,203 @@ fn parse_bootstrap_server(server: &str) -> Result<(String, u16)> {
         });
     }
     Ok((host.to_owned(), port))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use bytes::Bytes;
+
+    use super::*;
+    use crate::consumer::{ConsumerRecord, ConsumerRecords, StringDeserializer, TimestampType};
+
+    // A consumer pointed at a dead literal-IP broker: `from_map` resolves the
+    // address but never connects, so every synchronous method below runs without
+    // any broker I/O.
+    async fn consumer_with_group() -> Consumer {
+        Consumer::from_map([
+            ("bootstrap.servers", "127.0.0.1:9092"),
+            ("group.id", "cov-group"),
+            ("auto.offset.reset", "earliest"),
+            ("enable.auto.commit", "false"),
+        ])
+        .await
+        .expect("consumer builds")
+    }
+
+    async fn consumer_no_group() -> Consumer {
+        Consumer::from_map([("bootstrap.servers", "127.0.0.1:9092")])
+            .await
+            .expect("consumer builds")
+    }
+
+    #[tokio::test]
+    async fn manual_assignment_and_position_control() {
+        let mut consumer = consumer_no_group().await;
+        let p0 = TopicPartition::new("t", 0);
+        let p1 = TopicPartition::new("t", 1);
+        consumer.assign([p0.clone(), p1.clone()]);
+        assert_eq!(consumer.assignment().len(), 2);
+
+        // Seek sets a position on an assigned partition; unassigned seeks error.
+        consumer.seek(&p0, 42).expect("seek assigned");
+        consumer
+            .seek_with_leader_epoch(&p1, 7, Some(3))
+            .expect("seek epoch");
+        assert!(matches!(
+            consumer.seek(&TopicPartition::new("t", 9), 0),
+            Err(ConsumerError::PartitionNotAssigned { .. })
+        ));
+
+        // Pause/resume flow.
+        consumer.pause(std::slice::from_ref(&p0));
+        assert_eq!(consumer.paused(), vec![p0.clone()]);
+        consumer.resume(std::slice::from_ref(&p0));
+        assert!(consumer.paused().is_empty());
+    }
+
+    #[tokio::test]
+    async fn subscribe_requires_group_and_toggles_pattern() {
+        let mut no_group = consumer_no_group().await;
+        assert!(matches!(
+            no_group.subscribe(["t"]),
+            Err(ConsumerError::InvalidState(_))
+        ));
+        assert!(matches!(
+            no_group.subscribe_pattern("t.*"),
+            Err(ConsumerError::InvalidState(_))
+        ));
+
+        let mut consumer = consumer_with_group().await;
+        consumer.subscribe(["b", "a", "a"]).expect("subscribe");
+        assert_eq!(
+            consumer.subscription(),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+        // A pattern subscription clears the explicit topic list until the first poll.
+        consumer
+            .subscribe_pattern("^prefix-.*$")
+            .expect("valid regex");
+        assert!(consumer.subscription().is_empty());
+        assert!(matches!(
+            consumer.subscribe_pattern("("),
+            Err(ConsumerError::InvalidArgument { .. })
+        ));
+        consumer.unsubscribe();
+        assert!(consumer.subscription().is_empty());
+    }
+
+    #[tokio::test]
+    async fn coordinator_error_drops_the_cached_coordinator() {
+        let mut consumer = consumer_with_group().await;
+        consumer.coordinator_id = Some(7);
+        // A non-coordinator error leaves the cache intact.
+        let unrelated = ConsumerError::broker("commit", ErrorCode::InvalidGroupId, "x");
+        assert!(!consumer.note_coordinator_error(&unrelated));
+        assert_eq!(consumer.coordinator_id, Some(7));
+        // A coordinator-moved error clears it so the next op re-discovers it.
+        for code in [
+            ErrorCode::NotCoordinator,
+            ErrorCode::CoordinatorNotAvailable,
+            ErrorCode::CoordinatorLoadInProgress,
+        ] {
+            consumer.coordinator_id = Some(7);
+            let moved = ConsumerError::broker("commit", code, "moved");
+            assert!(consumer.note_coordinator_error(&moved));
+            assert_eq!(consumer.coordinator_id, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn group_metadata_and_enforce_rebalance() {
+        let consumer = consumer_with_group().await;
+        let metadata = consumer.group_metadata();
+        assert_eq!(metadata.group_id, "cov-group");
+        assert_eq!(metadata.generation_id, -1);
+        assert!(metadata.member_id.is_empty());
+        // enforce_rebalance just flags a rejoin (no broker I/O).
+        consumer.enforce_rebalance();
+    }
+
+    #[tokio::test]
+    async fn empty_commits_and_reads_short_circuit() {
+        let mut consumer = consumer_with_group().await;
+        // Empty commits and reads resolve without touching the coordinator.
+        consumer
+            .commit_sync_offsets(HashMap::new())
+            .await
+            .expect("empty commit");
+        assert!(
+            consumer
+                .committed(&[])
+                .await
+                .expect("empty read")
+                .is_empty()
+        );
+        // A non-empty commit on a consumer with no group.id fails fast.
+        let mut no_group = consumer_no_group().await;
+        let mut offsets = HashMap::new();
+        let _prev = offsets.insert(TopicPartition::new("t", 0), OffsetAndMetadata::new(1));
+        assert!(matches!(
+            no_group.commit_sync_offsets(offsets).await,
+            Err(ConsumerError::InvalidState(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn poll_wakeup_and_idle_manual_assignment() {
+        let mut consumer = consumer_no_group().await;
+        // Nothing assigned and not subscribed — poll returns an empty batch.
+        let records = consumer
+            .poll(Duration::from_millis(0))
+            .await
+            .expect("idle poll");
+        assert!(records.is_empty());
+        // Wakeup makes the next poll return immediately with Wakeup.
+        consumer.wakeup();
+        assert!(matches!(
+            consumer.poll(Duration::from_secs(5)).await,
+            Err(ConsumerError::Wakeup)
+        ));
+    }
+
+    #[tokio::test]
+    async fn metrics_interceptors_and_deserialized_records() {
+        let mut consumer = consumer_with_group().await;
+        consumer.add_interceptor(NoopInterceptor);
+        let snapshot = consumer.metrics();
+        assert_eq!(snapshot.poll_total, 0);
+
+        // A typed deserializer maps record bytes.
+        let mut records = ConsumerRecords::empty();
+        records.push_partition(
+            "t".to_owned(),
+            0,
+            vec![ConsumerRecord {
+                topic: "t".to_owned(),
+                partition: 0,
+                offset: 0,
+                timestamp: 0,
+                timestamp_type: TimestampType::CreateTime,
+                key: None,
+                value: Some(Bytes::from_static(b"hi")),
+                headers: Vec::new(),
+                leader_epoch: None,
+            }],
+        );
+        let record = records.iter().next().expect("one record");
+        let (key, value) = record
+            .deserialized(&StringDeserializer, &StringDeserializer)
+            .expect("deserialize");
+        assert_eq!(key, None);
+        assert_eq!(value, Some("hi".to_owned()));
+    }
+
+    struct NoopInterceptor;
+    impl ConsumerInterceptor for NoopInterceptor {
+        fn on_consume(&self, records: ConsumerRecords) -> ConsumerRecords {
+            records
+        }
+    }
 }

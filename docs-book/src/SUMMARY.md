@@ -14,6 +14,8 @@
 
 - [Idempotency & transactions](./producer/idempotency.md)
 - [Partitioning (murmur2 + sticky/adaptive)](./producer/partitioning.md)
+- [Group membership & rebalancing](./consumer/rebalancing.md)
+- [Fetching, positions & offsets](./consumer/fetching.md)
 - [Compression](./compression.md)
 - [Security: SASL & TLS](./security.md)
 - [Protocol code generation](./codegen.md)

@@ -5,9 +5,11 @@
 //! producer and admin clients. "Java-compatible" means Kafka-protocol- and
 //! behaviour-compatible, not a literal port.
 //!
-//! See `docs/consumer-design.md` for the design of record and the phased plan.
-//! This module is under active construction: Phase 1 lands manual-assignment
-//! fetch (no group coordination yet).
+//! See `docs/consumer-design.md` for the design and rationale. The consumer
+//! supports manual assignment, topic and pattern subscription, both group
+//! protocols (classic `JoinGroup`/`SyncGroup` and KIP-848
+//! `ConsumerGroupHeartbeat`), fetch with incremental sessions, and offset
+//! commit/fetch.
 
 mod assignor;
 mod client;
