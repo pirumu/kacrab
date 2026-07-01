@@ -459,7 +459,7 @@ async fn real_kafka_poll_respects_short_timeout() {
     println!("  empty poll returned in {elapsed:?}");
     assert!(empty.is_empty());
     assert!(
-        elapsed < Duration::from_millis(1000),
+        elapsed < Duration::from_secs(1),
         "poll(200ms) must not block for fetch.max.wait.ms=2000 (took {elapsed:?})"
     );
     consumer.close().await;
