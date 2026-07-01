@@ -97,6 +97,9 @@ pub struct ConsumerRuntimeConfig {
     pub heartbeat_interval: Duration,
     /// Rebalance timeout — how long `JoinGroup` may block (`max.poll.interval.ms`).
     pub rebalance_timeout: Duration,
+    /// Whether internal topics (e.g. `__consumer_offsets`) are excluded from a
+    /// pattern subscription (`exclude.internal.topics`).
+    pub exclude_internal_topics: bool,
 }
 
 impl ConsumerRuntimeConfig {
@@ -126,6 +129,7 @@ impl ConsumerRuntimeConfig {
             session_timeout: config.session_timeout_ms.duration(),
             heartbeat_interval: config.heartbeat_interval_ms.duration(),
             rebalance_timeout: config.max_poll_interval_ms.duration(),
+            exclude_internal_topics: config.exclude_internal_topics,
         })
     }
 }

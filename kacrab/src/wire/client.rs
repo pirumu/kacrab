@@ -493,7 +493,10 @@ impl WireClient {
     /// convention); `Some(list)` limits it to the named topics. The broker
     /// registry is updated so brokers discovered here — including the
     /// controller — become directly reachable for follow-up requests.
-    #[cfg(feature = "admin")]
+    ///
+    /// Also used by the consumer to resolve pattern subscriptions against the
+    /// full topic list.
+    #[cfg(any(feature = "admin", feature = "consumer"))]
     pub(crate) async fn admin_metadata(
         &self,
         topics: Option<&[String]>,

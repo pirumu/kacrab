@@ -24,8 +24,9 @@ admin = []
 # explicitly for the C-FFI high-compression backend.
 compression = ["gzip", "snappy", "lz4", "zstd"]
 # The consumer needs record-batch decompression for fetched data, so pull in the
-# codec meta-feature (gzip/snappy/lz4/zstd) alongside the consumer surface.
-consumer = ["compression"]
+# codec meta-feature (gzip/snappy/lz4/zstd) alongside the consumer surface. The
+# `regex` engine backs pattern subscription (`subscribe` to a topic regex).
+consumer = ["compression", "dep:regex"]
 gssapi = ["dep:libgssapi"]
 gzip = ["kacrab-protocol/gzip"]
 lz4 = ["kacrab-protocol/lz4"]
@@ -49,6 +50,7 @@ kacrab-macros = { workspace = true }
 libgssapi = { workspace = true, optional = true }
 p12-keystore = { workspace = true }
 pkcs8 = { workspace = true }
+regex = { workspace = true, optional = true }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
 serde_json = { workspace = true }

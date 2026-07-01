@@ -27,6 +27,7 @@ use kacrab_protocol::{
     },
     version::client_api_info,
 };
+use regex::Regex;
 use tokio::task::JoinHandle;
 
 use super::{
@@ -81,6 +82,11 @@ pub struct Consumer {
     interceptors: ConsumerInterceptors,
     /// Config handed to a late-added interceptor's `configure`.
     interceptor_configs: InterceptorConfigs,
+    /// Topic regex when subscribed by pattern (`subscribe(Pattern)`); `None` for
+    /// an explicit topic subscription or manual assignment.
+    subscription_pattern: Option<Regex>,
+    /// When the pattern's matched-topic set was last refreshed from metadata.
+    last_pattern_refresh: Option<Instant>,
 }
 
 /// Callback invoked with the result of an asynchronous offset commit.
@@ -89,6 +95,10 @@ pub type OffsetCommitCallback = Box<dyn FnOnce(Result<()>) + Send>;
 /// Max join/sync rounds in one rejoin before giving up (a rebalance can restart
 /// the round when another member joins mid-sync).
 const MAX_REJOIN_ATTEMPTS: u32 = 10;
+
+/// How often a pattern subscription re-matches its regex against the cluster's
+/// topic list, so newly created (or deleted) topics are picked up.
+const PATTERN_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Whether an error is the coordinator's `REBALANCE_IN_PROGRESS` signal.
 const fn is_rebalance_in_progress(error: &ConsumerError) -> bool {
@@ -172,6 +182,8 @@ impl Consumer {
             metrics,
             interceptors: ConsumerInterceptors::default(),
             interceptor_configs,
+            subscription_pattern: None,
+            last_pattern_refresh: None,
         })
     }
 
@@ -248,6 +260,7 @@ impl Consumer {
         let mut topics: Vec<String> = topics.into_iter().map(Into::into).collect();
         topics.sort();
         topics.dedup();
+        self.subscription_pattern = None;
         self.subscribed_topics = topics;
         self.subscription.assign(&[]);
         self.member_id.clear();
@@ -257,9 +270,40 @@ impl Consumer {
         Ok(())
     }
 
+    /// Subscribe to every topic whose name matches `pattern`, joining the group on
+    /// the next [`poll`](Consumer::poll) and re-matching as topics come and go —
+    /// the analogue of Kafka's `subscribe(Pattern)`. Internal topics are excluded
+    /// unless `exclude.internal.topics=false`.
+    ///
+    /// # Errors
+    /// Returns [`ConsumerError::InvalidState`] if `group.id` is unset, or
+    /// [`ConsumerError::InvalidArgument`] if `pattern` is not a valid regex.
+    pub fn subscribe_pattern(&mut self, pattern: &str) -> Result<()> {
+        if self.config.group_id.is_empty() {
+            return Err(ConsumerError::InvalidState(
+                "group.id must be set to subscribe to a pattern",
+            ));
+        }
+        let regex = Regex::new(pattern).map_err(|error| ConsumerError::InvalidArgument {
+            field: "subscribe pattern",
+            message: error.to_string(),
+        })?;
+        self.subscription_pattern = Some(regex);
+        self.subscribed_topics.clear();
+        self.subscription.assign(&[]);
+        self.member_id.clear();
+        self.generation_id = -1;
+        self.last_pattern_refresh = None;
+        // The first poll resolves the pattern to concrete topics and joins.
+        self.needs_rejoin.store(true, Ordering::SeqCst);
+        self.set_heartbeat_context(None);
+        Ok(())
+    }
+
     /// Unsubscribe from all topics and drop the current assignment. Does not send
     /// a `LeaveGroup`; call [`close`](Consumer::close) to leave the group.
     pub fn unsubscribe(&mut self) {
+        self.subscription_pattern = None;
         self.subscribed_topics.clear();
         self.subscription.assign(&[]);
         self.member_id.clear();
@@ -598,6 +642,9 @@ impl Consumer {
         let start = Instant::now();
 
         loop {
+            // A pattern subscription re-matches the regex against live topics
+            // before joining, so new topics are folded in.
+            self.refresh_pattern_subscription().await?;
             // Group members join/sync and heartbeat before fetching; manual
             // assignment skips all of this.
             if self.is_subscribed() {
@@ -762,6 +809,42 @@ impl Consumer {
 
     const fn is_subscribed(&self) -> bool {
         !self.subscribed_topics.is_empty()
+    }
+
+    /// Re-resolve a pattern subscription against the cluster's current topic list
+    /// (throttled to [`PATTERN_REFRESH_INTERVAL`]). When the matched set changes,
+    /// swap in the new topics and trigger a rejoin. No-op unless subscribed by
+    /// pattern.
+    async fn refresh_pattern_subscription(&mut self) -> Result<()> {
+        let due = self.subscription_pattern.is_some()
+            && self
+                .last_pattern_refresh
+                .is_none_or(|last| last.elapsed() >= PATTERN_REFRESH_INTERVAL);
+        if !due {
+            return Ok(());
+        }
+        // Cheap clone (compiled program is shared) so no borrow is held across
+        // the metadata fetch and the assignment mutation below.
+        let Some(pattern) = self.subscription_pattern.clone() else {
+            return Ok(());
+        };
+        self.last_pattern_refresh = Some(Instant::now());
+        let exclude_internal = self.config.exclude_internal_topics;
+        let metadata = self.wire.admin_metadata(None).await?;
+        let mut matched: Vec<String> = metadata
+            .topics
+            .iter()
+            .filter(|topic| !(exclude_internal && topic.is_internal))
+            .filter(|topic| pattern.is_match(&topic.name))
+            .map(|topic| topic.name.clone())
+            .collect();
+        matched.sort();
+        matched.dedup();
+        if matched != self.subscribed_topics {
+            self.subscribed_topics = matched;
+            self.needs_rejoin.store(true, Ordering::SeqCst);
+        }
+        Ok(())
     }
 
     /// (Re)join the group and sync an assignment when needed, then resume each

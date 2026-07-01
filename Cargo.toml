@@ -42,6 +42,8 @@ bytes = { version = "1.11", default-features = false }
 base64 = { version = "0.22", default-features = false, features = ["std"] }
 ahash = "0.8"
 crossbeam-queue = "0.3"
+# Regex engine for consumer pattern subscription (`subscribe` to a topic regex).
+regex = { version = "1", default-features = false, features = ["std", "unicode"] }
 getrandom = "0.3"
 hmac = "0.12"
 jks = { version = "0.3", default-features = false, features = ["rand"] }

@@ -292,6 +292,81 @@ async fn real_kafka_two_consumers_split_partitions() {
     println!("real Kafka rebalance smoke: ALL OK");
 }
 
+/// A pattern subscription joins only the topics whose names match the regex,
+/// resolved from the cluster's live topic list, and consumes their records.
+#[tokio::test]
+#[ignore = "requires local Kafka from docker-compose.kafka.yml"]
+async fn real_kafka_pattern_subscription_matches_topics() {
+    let bootstrap = bootstrap();
+    let nonce = topic();
+    let matched_a = format!("{nonce}-pat-a");
+    let matched_b = format!("{nonce}-pat-b");
+    let unmatched = format!("{nonce}-other");
+    println!("real Kafka pattern smoke: prefix={nonce}");
+
+    create_topic(&bootstrap, &matched_a, 1).await;
+    create_topic(&bootstrap, &matched_b, 1).await;
+    create_topic(&bootstrap, &unmatched, 1).await;
+    produce(&bootstrap, &matched_a, 0, 3).await;
+    produce(&bootstrap, &matched_b, 0, 4).await;
+    produce(&bootstrap, &unmatched, 0, 5).await;
+
+    let mut consumer = Consumer::from_map([
+        ("bootstrap.servers", bootstrap.as_str()),
+        ("group.id", format!("group-pat-{nonce}").as_str()),
+        ("auto.offset.reset", "earliest"),
+        ("enable.auto.commit", "false"),
+    ])
+    .await
+    .expect("consumer should connect");
+    // Match only the `-pat-*` topics, not the `-other` one.
+    consumer
+        .subscribe_pattern(&format!("^{}-pat-.*$", regex_escape(&nonce)))
+        .expect("valid pattern");
+
+    let expected = 3 + 4;
+    let mut total = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    while total < expected && std::time::Instant::now() < deadline {
+        total += consumer
+            .poll(Duration::from_secs(2))
+            .await
+            .expect("poll")
+            .count();
+    }
+
+    let mut topics: Vec<String> = consumer
+        .assignment()
+        .into_iter()
+        .map(|partition| partition.topic)
+        .collect();
+    topics.sort();
+    topics.dedup();
+    println!("  pattern matched topics={topics:?} consumed={total}");
+    assert_eq!(topics, vec![matched_a.clone(), matched_b.clone()]);
+    assert_eq!(
+        total, expected,
+        "only matching topics' records are consumed"
+    );
+    consumer.close().await;
+    println!("real Kafka pattern smoke: ALL OK");
+}
+
+/// Escape regex metacharacters in a literal topic prefix (the nonce contains
+/// none in practice, but keep the pattern anchored to exactly this run).
+fn regex_escape(literal: &str) -> String {
+    literal
+        .chars()
+        .flat_map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                vec![c]
+            } else {
+                vec!['\\', c]
+            }
+        })
+        .collect()
+}
+
 async fn create_topic(bootstrap: &str, topic: &str, partitions: i32) {
     let admin = AdminClient::from_map([("bootstrap.servers", bootstrap)])
         .await

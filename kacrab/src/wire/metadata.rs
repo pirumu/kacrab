@@ -40,8 +40,9 @@ where
 
 /// Build a metadata request for every topic in the cluster. A `None` topic list
 /// is the Kafka wire convention for "all topics", used by admin discovery and
-/// full-cluster listing. Auto topic creation is never meaningful here.
-#[cfg(feature = "admin")]
+/// full-cluster listing, and by consumer pattern subscription. Auto topic
+/// creation is never meaningful here.
+#[cfg(any(feature = "admin", feature = "consumer"))]
 pub(crate) const fn metadata_request_all() -> MetadataRequestData {
     MetadataRequestData {
         topics: None,
