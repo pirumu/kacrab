@@ -415,6 +415,57 @@ async fn real_kafka_consumer_protocol_kip848() {
     println!("real Kafka KIP-848 smoke: ALL OK");
 }
 
+/// `poll(timeout)` returns near the timeout even when `fetch.max.wait.ms` is much
+/// larger — the long-poll is clamped to the remaining poll budget (B4).
+#[tokio::test]
+#[ignore = "requires local Kafka from docker-compose.kafka.yml"]
+async fn real_kafka_poll_respects_short_timeout() {
+    let bootstrap = bootstrap();
+    let topic = topic();
+    create_topic(&bootstrap, &topic, 1).await;
+    produce(&bootstrap, &topic, 0, 3).await;
+
+    let mut consumer = Consumer::from_map([
+        ("bootstrap.servers", bootstrap.as_str()),
+        ("group.id", format!("group-polltmo-{topic}").as_str()),
+        ("auto.offset.reset", "earliest"),
+        ("enable.auto.commit", "false"),
+        // A deliberately long broker wait; the poll timeout must still win.
+        ("fetch.max.wait.ms", "2000"),
+    ])
+    .await
+    .expect("consumer should connect");
+    consumer.assign([TopicPartition::new(topic.clone(), 0)]);
+
+    // Drain the existing records so the next poll finds no new data.
+    let mut drained = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while drained < 3 && std::time::Instant::now() < deadline {
+        drained += consumer
+            .poll(Duration::from_secs(2))
+            .await
+            .expect("poll")
+            .count();
+    }
+
+    // With nothing to fetch, a 200ms poll must return in well under the 2s
+    // fetch.max.wait — proving the wait was clamped to the poll budget.
+    let start = std::time::Instant::now();
+    let empty = consumer
+        .poll(Duration::from_millis(200))
+        .await
+        .expect("poll");
+    let elapsed = start.elapsed();
+    println!("  empty poll returned in {elapsed:?}");
+    assert!(empty.is_empty());
+    assert!(
+        elapsed < Duration::from_millis(1000),
+        "poll(200ms) must not block for fetch.max.wait.ms=2000 (took {elapsed:?})"
+    );
+    consumer.close().await;
+    println!("real Kafka poll-timeout smoke: ALL OK");
+}
+
 /// Asynchronous commits are applied in call order by a single worker, so a later
 /// commit never loses to an earlier one — the final committed offset is the last
 /// one issued and the callbacks fire in order. Verifies B3.

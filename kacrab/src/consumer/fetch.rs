@@ -163,6 +163,10 @@ pub(super) struct FetchContext<'a> {
     pub wire: &'a WireClient,
     pub config: &'a ConsumerRuntimeConfig,
     pub metadata: &'a ClusterMetadata,
+    /// The broker's max long-poll wait for this fetch — `fetch.max.wait.ms`
+    /// clamped to the caller's remaining `poll` budget so a short `poll` timeout
+    /// is honoured.
+    pub max_wait_ms: i32,
 }
 
 /// Fetch from every fetchable partition (grouped by leader), decode the record
@@ -185,6 +189,7 @@ pub(super) async fn fetch(
         wire,
         config,
         metadata,
+        max_wait_ms,
     } = *context;
 
     let mut by_leader: HashMap<i32, Vec<(TopicPartition, FetchPosition)>> = HashMap::new();
@@ -211,7 +216,7 @@ pub(super) async fn fetch(
             break;
         }
         let session = sessions.by_broker.entry(leader).or_default();
-        let request = build_fetch_request(config, session, &entries);
+        let request = build_fetch_request(config, session, &entries, max_wait_ms);
         let response: FetchResponseData = wire
             .send_to_broker(leader, ApiKey::Fetch, version, &request)
             .await?;
@@ -295,6 +300,7 @@ fn build_fetch_request(
     config: &ConsumerRuntimeConfig,
     session: &BrokerFetchSession,
     entries: &[(TopicPartition, FetchPosition)],
+    max_wait_ms: i32,
 ) -> FetchRequestData {
     let full = session.is_full();
     let mut topics: Vec<FetchTopic> = Vec::new();
@@ -348,7 +354,7 @@ fn build_fetch_request(
             replica_epoch: -1,
             _unknown_tagged_fields: Vec::new(),
         },
-        max_wait_ms: config.fetch_max_wait_ms,
+        max_wait_ms,
         min_bytes: config.fetch_min_bytes,
         max_bytes: config.fetch_max_bytes,
         isolation_level: config.isolation_level.wire(),
@@ -595,7 +601,7 @@ mod tests {
 
         // A full fetch (epoch 0) sends every partition and no forgotten list.
         let entries = vec![entry("t", 0, 10), entry("t", 1, 20)];
-        let full = build_fetch_request(&config, &session, &entries);
+        let full = build_fetch_request(&config, &session, &entries, 500);
         assert_eq!(full.session_epoch, INITIAL_SESSION_EPOCH);
         assert_eq!(
             full.topics
@@ -610,7 +616,7 @@ mod tests {
 
         // Incrementally, only the partition whose offset changed is resent.
         let changed = vec![entry("t", 0, 10), entry("t", 1, 25)];
-        let incremental = build_fetch_request(&config, &session, &changed);
+        let incremental = build_fetch_request(&config, &session, &changed, 500);
         assert_eq!(incremental.session_id, 99);
         assert_eq!(incremental.session_epoch, 1);
         let sent: Vec<i32> = incremental

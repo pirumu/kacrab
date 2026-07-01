@@ -1,10 +1,10 @@
 //! Offset lookup and `auto.offset.reset` handling via `ListOffsets`.
 //!
-//! Phase 1 needs two things from offsets: resolving an initial fetch position
-//! for freshly assigned partitions (`auto.offset.reset`), and the
-//! `seek_to_beginning`/`seek_to_end` primitives — both are `ListOffsets` queries
-//! grouped by partition leader. Committed-offset fetch and commit arrive with
-//! group coordination in Phase 2.
+//! Resolves an initial fetch position for freshly assigned partitions
+//! (`auto.offset.reset`) and backs `seek_to_beginning`/`seek_to_end` — both are
+//! `ListOffsets` queries grouped by partition leader. Also validates positions
+//! against a leader's epoch history via `OffsetForLeaderEpoch` (KIP-320
+//! truncation detection). Committed-offset commit/fetch live in `coordinator`.
 
 use std::collections::HashMap;
 

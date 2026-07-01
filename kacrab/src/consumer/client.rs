@@ -767,11 +767,17 @@ impl Consumer {
                 fetchable_empty = fetchable.is_empty();
                 if !fetchable.is_empty() {
                     self.metrics.record_fetch();
+                    // Clamp the broker's long-poll wait to what's left of the
+                    // caller's poll timeout, so a short `poll` isn't blocked for
+                    // the full `fetch.max.wait.ms`.
+                    let remaining = clamp_ms(timeout.saturating_sub(start.elapsed()));
+                    let max_wait_ms = remaining.min(self.config.fetch_max_wait_ms);
                     let progress = fetch::fetch(
                         &fetch::FetchContext {
                             wire: &self.wire,
                             config: &self.config,
                             metadata: &metadata,
+                            max_wait_ms,
                         },
                         &fetchable,
                         self.config.max_poll_records,
@@ -833,13 +839,23 @@ impl Consumer {
         self.wakeup.store(true, Ordering::SeqCst);
     }
 
-    /// Close the consumer: leave the group (best effort) and release its broker
-    /// connections. The wire client shuts its broker tasks down on drop.
+    /// Close the consumer: commit (auto-commit) and leave the group (best effort)
+    /// and release its broker connections. Bounded by `request.timeout.ms` so a
+    /// hung coordinator cannot hang close (Java's `default.api.timeout.ms`). The
+    /// wire client shuts its broker tasks down on drop.
     pub async fn close(mut self) {
         self.heartbeat_task.abort();
         self.async_commit_task.abort();
-        let _committed = self.auto_commit_now().await;
         self.interceptors.close();
+        let close_timeout = self.config.request_timeout;
+        let _timed_out = tokio::time::timeout(close_timeout, self.commit_and_leave()).await;
+        drop(self);
+    }
+
+    /// Commit the current positions (auto-commit) and leave the group under
+    /// whichever protocol is active. Awaited under a timeout by [`close`](Self::close).
+    async fn commit_and_leave(&mut self) {
+        let _committed = self.auto_commit_now().await;
         // Static members (`group.instance.id`) stay in the group across a close so
         // a quick restart avoids a rebalance, matching Java.
         let dynamic_member = self.config.group_instance_id.is_empty();
@@ -886,7 +902,6 @@ impl Consumer {
                 }
             },
         }
-        drop(self);
     }
 
     /// The current fetch position of each assigned, positioned partition as an
@@ -1155,8 +1170,9 @@ impl Consumer {
         } else {
             (assigned.to_vec(), false)
         };
-        // `assign` keeps positions for retained partitions and drops revoked ones.
-        self.subscription.assign(assigned);
+        // `assign_grouped` keeps positions for retained partitions, drops revoked
+        // ones, and marks the subscription group-managed (`AutoAssigned`).
+        self.subscription.assign_grouped(assigned);
         if !to_position.is_empty() {
             let committed =
                 coordinator::fetch_committed(&self.wire, coordinator, group_id, &to_position)
@@ -1282,6 +1298,13 @@ impl Consumer {
     /// Reconcile the subscription toward a KIP-848 target assignment: resolve its
     /// topic ids to names, then apply it with cooperative semantics (retained
     /// partitions keep their positions; newly added ones resume from committed).
+    ///
+    /// The reconciliation is server-driven: the group coordinator withholds a
+    /// partition from a member's target until its previous owner has revoked it
+    /// (reported a reduced owned set in a heartbeat), so applying the target
+    /// directly never double-owns a partition. Revocation is reflected in the next
+    /// heartbeat's `owned` set. (The multi-member handoff is exercised against a
+    /// real broker only for the classic cooperative path, not yet KIP-848.)
     async fn reconcile_modern(
         &mut self,
         coordinator: i32,
