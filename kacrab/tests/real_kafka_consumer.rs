@@ -1,9 +1,10 @@
 #![cfg(all(feature = "producer", feature = "consumer", feature = "admin"))]
-//! Real Kafka consumer integration test (Phase 1: manual assignment + fetch).
+//! Real Kafka consumer integration test (manual assignment + fetch + commit).
 //!
 //! Creates a topic (admin), produces a known set of records with the kacrab
-//! producer, then consumes them back with the kacrab consumer via manual
-//! partition assignment against a real Apache Kafka 4.3.0 broker from
+//! producer, consumes them back with the kacrab consumer via manual partition
+//! assignment, then commits and reads the committed offset (Phase 2a), against a
+//! real Apache Kafka 4.3.0 broker from
 //! `docker-compose.kafka.yml` (which disables broker auto topic creation). Run:
 //! `cargo test --features producer,consumer,admin --test real_kafka_consumer -- --ignored
 //! --nocapture`.
@@ -70,14 +71,17 @@ async fn real_kafka_consumes_produced_records() {
     }
 
     // --- consume them back with manual assignment ---
+    let group_id = format!("group-{topic}");
     let mut consumer = Consumer::from_map([
         ("bootstrap.servers", bootstrap.as_str()),
         ("client.id", "kacrab-real-kafka-consumer"),
+        ("group.id", group_id.as_str()),
         ("auto.offset.reset", "earliest"),
         ("enable.auto.commit", "false"),
     ])
     .await
     .expect("consumer should connect to local Kafka");
+    assert_eq!(consumer.group_metadata().group_id, group_id);
 
     let partition = TopicPartition::new(topic.clone(), 0);
     consumer.assign([partition.clone()]);
@@ -117,6 +121,24 @@ async fn real_kafka_consumes_produced_records() {
         .await
         .expect("position should resolve");
     assert_eq!(usize::try_from(position).unwrap(), RECORD_COUNT);
+
+    // --- commit and read back the committed offset (Phase 2a) ---
+    consumer
+        .commit_sync()
+        .await
+        .expect("commit_sync should succeed");
+    let committed = consumer
+        .committed(std::slice::from_ref(&partition))
+        .await
+        .expect("committed should succeed");
+    let committed_offset = committed
+        .get(&partition)
+        .expect("committed offset should be present after commit");
+    println!("  committed offset={}", committed_offset.offset);
+    assert_eq!(
+        usize::try_from(committed_offset.offset).unwrap(),
+        RECORD_COUNT
+    );
 
     consumer.close();
     println!("real Kafka consumer smoke: ALL OK");

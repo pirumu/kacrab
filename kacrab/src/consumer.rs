@@ -11,6 +11,7 @@
 
 mod client;
 mod config;
+mod coordinator;
 mod error;
 mod fetch;
 mod offsets;

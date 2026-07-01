@@ -2,12 +2,14 @@
 //!
 //! A manual-assignment consumer: `assign` + `poll` + position control
 //! (`seek`, `pause`, `resume`), with `auto.offset.reset` resolved lazily on the
-//! first poll. Group subscription, commits, and coordination arrive in Phase 2.
-//! The consumer is single-owner and not `Sync`; `poll` drives all fetch I/O,
+//! first poll, plus offset commit/fetch against the group coordinator
+//! (`commit_sync`/`committed`) for a consumer carrying a `group.id`. Group
+//! *subscription* (join/sync/heartbeat rebalancing) arrives in Phase 2b. The
+//! consumer is single-owner and not `Sync`; `poll` drives all fetch I/O,
 //! mirroring the Java consumer's thread model.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -17,6 +19,7 @@ use std::{
 
 use super::{
     config::{AutoOffsetReset, ConsumerRuntimeConfig},
+    coordinator,
     error::{ConsumerError, Result},
     fetch,
     offsets::{self, EARLIEST_TIMESTAMP, LATEST_TIMESTAMP},
@@ -24,7 +27,7 @@ use super::{
     subscription::{FetchPosition, SubscriptionState},
 };
 use crate::{
-    common::TopicPartition,
+    common::{ConsumerGroupMetadata, OffsetAndMetadata, TopicPartition},
     config::{ClientConfig, ConfigKey, ConfigValue, ConsumerConfig, Properties},
     wire::{BrokerEndpoint, ClusterMetadata, WireClient, WireError},
 };
@@ -39,6 +42,7 @@ pub struct Consumer {
     config: ConsumerRuntimeConfig,
     subscription: SubscriptionState,
     wakeup: Arc<AtomicBool>,
+    coordinator_id: Option<i32>,
 }
 
 impl Consumer {
@@ -58,6 +62,7 @@ impl Consumer {
             subscription: SubscriptionState::new(runtime.auto_offset_reset),
             config: runtime,
             wakeup: Arc::new(AtomicBool::new(false)),
+            coordinator_id: None,
         })
     }
 
@@ -203,6 +208,60 @@ impl Consumer {
         self.subscription.paused()
     }
 
+    /// Commit the current fetch position of every assigned partition to the group
+    /// coordinator, blocking until the broker acknowledges.
+    ///
+    /// # Errors
+    /// Returns [`ConsumerError::InvalidState`] if `group.id` is unset, or a
+    /// wire/broker error.
+    pub async fn commit_sync(&mut self) -> Result<()> {
+        let offsets = self.current_position_offsets();
+        self.commit_sync_offsets(offsets).await
+    }
+
+    /// Commit explicit offsets to the group coordinator, blocking until the
+    /// broker acknowledges.
+    ///
+    /// # Errors
+    /// Returns [`ConsumerError::InvalidState`] if `group.id` is unset, or a
+    /// wire/broker error.
+    pub async fn commit_sync_offsets(
+        &mut self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    ) -> Result<()> {
+        if offsets.is_empty() {
+            return Ok(());
+        }
+        let group_id = self.require_group_id()?;
+        let coordinator = self.ensure_coordinator(&group_id).await?;
+        coordinator::commit_offsets(&self.wire, coordinator, &group_id, &offsets).await
+    }
+
+    /// Fetch the last committed offset for each of the given partitions.
+    /// Partitions with no committed offset are omitted from the result.
+    ///
+    /// # Errors
+    /// Returns [`ConsumerError::InvalidState`] if `group.id` is unset, or a
+    /// wire/broker error.
+    pub async fn committed(
+        &mut self,
+        partitions: &[TopicPartition],
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>> {
+        if partitions.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let group_id = self.require_group_id()?;
+        let coordinator = self.ensure_coordinator(&group_id).await?;
+        coordinator::fetch_committed(&self.wire, coordinator, &group_id, partitions).await
+    }
+
+    /// This consumer's group metadata. For a manual-assignment consumer the
+    /// generation is `-1` and the member id is empty.
+    #[must_use]
+    pub fn group_metadata(&self) -> ConsumerGroupMetadata {
+        ConsumerGroupMetadata::new(self.config.group_id.clone())
+    }
+
     /// Fetch records for the assigned partitions, blocking up to `timeout`.
     ///
     /// Returns as soon as any records are available, or an empty batch when the
@@ -274,6 +333,43 @@ impl Consumer {
     /// shuts its broker tasks down on drop.
     pub fn close(self) {
         drop(self);
+    }
+
+    /// The current fetch position of each assigned, positioned partition as an
+    /// [`OffsetAndMetadata`] ready to commit.
+    fn current_position_offsets(&self) -> HashMap<TopicPartition, OffsetAndMetadata> {
+        self.subscription
+            .assigned_partitions()
+            .into_iter()
+            .filter_map(|partition| {
+                self.subscription.position(&partition).map(|position| {
+                    let mut offset = OffsetAndMetadata::new(position.offset);
+                    if let Some(leader_epoch) = position.leader_epoch {
+                        offset = offset.leader_epoch(leader_epoch);
+                    }
+                    (partition, offset)
+                })
+            })
+            .collect()
+    }
+
+    fn require_group_id(&self) -> Result<String> {
+        if self.config.group_id.is_empty() {
+            Err(ConsumerError::InvalidState(
+                "group.id must be set to commit or fetch committed offsets",
+            ))
+        } else {
+            Ok(self.config.group_id.clone())
+        }
+    }
+
+    async fn ensure_coordinator(&mut self, group_id: &str) -> Result<i32> {
+        if let Some(id) = self.coordinator_id {
+            return Ok(id);
+        }
+        let id = coordinator::find_coordinator(&self.wire, group_id).await?;
+        self.coordinator_id = Some(id);
+        Ok(id)
     }
 
     fn ensure_assigned(&self, partition: &TopicPartition) -> Result<()> {
