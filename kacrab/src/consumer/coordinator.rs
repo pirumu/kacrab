@@ -296,6 +296,15 @@ pub(super) async fn join_group(
             member_id = response.member_id.to_string();
             continue;
         }
+        // A fenced member id / stale generation self-heals: drop the id and let
+        // the broker assign a fresh one on the retry.
+        if matches!(
+            error,
+            ErrorCode::UnknownMemberId | ErrorCode::IllegalGeneration
+        ) {
+            member_id = String::new();
+            continue;
+        }
         if error.is_error() {
             return Err(ConsumerError::broker(
                 "join_group",

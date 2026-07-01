@@ -11,7 +11,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     sync::{
-        Arc,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -19,6 +19,7 @@ use std::{
 
 use bytes::Bytes;
 use kacrab_protocol::generated::ErrorCode;
+use tokio::task::JoinHandle;
 
 use super::{
     assignor::{self, MemberSubscription},
@@ -54,16 +55,39 @@ pub struct Consumer {
     member_id: String,
     /// Current group generation, or `-1` when not a member.
     generation_id: i32,
-    /// Whether a (re)join is needed before the next fetch.
-    needs_rejoin: bool,
-    /// When the last heartbeat was sent (throttles poll-driven heartbeats).
-    last_heartbeat: Option<Instant>,
+    /// Whether a (re)join is needed before the next fetch; set by the background
+    /// heartbeat task and cleared after a successful join.
+    needs_rejoin: Arc<AtomicBool>,
+    /// The group context the background heartbeat task reads (`None` until
+    /// joined). Updated after each (re)join.
+    heartbeat_context: Arc<Mutex<Option<HeartbeatContext>>>,
+    /// The background heartbeat task, aborted on close.
+    heartbeat_task: JoinHandle<()>,
     /// When the last background auto-commit ran.
     last_auto_commit: Option<Instant>,
 }
 
 /// Callback invoked with the result of an asynchronous offset commit.
 pub type OffsetCommitCallback = Box<dyn FnOnce(Result<()>) + Send>;
+
+/// Group identity the background heartbeat task heartbeats with.
+#[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "Field names mirror the Kafka group-membership identifiers."
+)]
+struct HeartbeatContext {
+    coordinator_id: i32,
+    group_id: String,
+    generation_id: i32,
+    member_id: String,
+}
+
+impl Drop for Consumer {
+    fn drop(&mut self) {
+        self.heartbeat_task.abort();
+    }
+}
 
 impl Consumer {
     /// Build a consumer from public typed Kafka config.
@@ -77,6 +101,14 @@ impl Consumer {
         let connection = config.to_connection_config();
         let wire =
             WireClient::connect_with_brokers(connection, config.client_id.clone(), endpoints);
+        let needs_rejoin = Arc::new(AtomicBool::new(false));
+        let heartbeat_context: Arc<Mutex<Option<HeartbeatContext>>> = Arc::new(Mutex::new(None));
+        let heartbeat_task = tokio::spawn(heartbeat_loop(
+            wire.clone(),
+            Arc::clone(&heartbeat_context),
+            Arc::clone(&needs_rejoin),
+            runtime.heartbeat_interval,
+        ));
         Ok(Self {
             wire,
             subscription: SubscriptionState::new(runtime.auto_offset_reset),
@@ -86,8 +118,9 @@ impl Consumer {
             subscribed_topics: Vec::new(),
             member_id: String::new(),
             generation_id: -1,
-            needs_rejoin: false,
-            last_heartbeat: None,
+            needs_rejoin,
+            heartbeat_context,
+            heartbeat_task,
             last_auto_commit: None,
         })
     }
@@ -169,8 +202,8 @@ impl Consumer {
         self.subscription.assign(&[]);
         self.member_id.clear();
         self.generation_id = -1;
-        self.needs_rejoin = true;
-        self.last_heartbeat = None;
+        self.needs_rejoin.store(true, Ordering::SeqCst);
+        self.set_heartbeat_context(None);
         Ok(())
     }
 
@@ -181,8 +214,8 @@ impl Consumer {
         self.subscription.assign(&[]);
         self.member_id.clear();
         self.generation_id = -1;
-        self.needs_rejoin = false;
-        self.last_heartbeat = None;
+        self.needs_rejoin.store(false, Ordering::SeqCst);
+        self.set_heartbeat_context(None);
     }
 
     /// The topics this consumer is subscribed to (empty in manual-assignment
@@ -452,7 +485,6 @@ impl Consumer {
             // assignment skips all of this.
             if self.is_subscribed() {
                 self.ensure_active_group().await?;
-                self.maybe_heartbeat().await?;
             }
             self.maybe_auto_commit().await;
 
@@ -516,6 +548,7 @@ impl Consumer {
     /// Close the consumer: leave the group (best effort) and release its broker
     /// connections. The wire client shuts its broker tasks down on drop.
     pub async fn close(mut self) {
+        self.heartbeat_task.abort();
         let _committed = self.auto_commit_now().await;
         if let (false, Some(coordinator)) = (self.member_id.is_empty(), self.coordinator_id) {
             coordinator::leave_group(
@@ -604,9 +637,11 @@ impl Consumer {
     /// (Re)join the group and sync an assignment when needed, then resume each
     /// assigned partition from its committed offset.
     async fn ensure_active_group(&mut self) -> Result<()> {
-        if !self.needs_rejoin && !self.member_id.is_empty() {
+        if !self.needs_rejoin.load(Ordering::SeqCst) && !self.member_id.is_empty() {
             return Ok(());
         }
+        // Pause the heartbeat task while we rejoin (stale generation would fence).
+        self.set_heartbeat_context(None);
         // Commit the current positions before the assignment is revoked.
         let _committed = self.auto_commit_now().await;
         let group_id = self.config.group_id.clone();
@@ -649,9 +684,22 @@ impl Consumer {
                 FetchPosition::new(offset.offset, offset.leader_epoch),
             );
         }
-        self.needs_rejoin = false;
-        self.last_heartbeat = Some(Instant::now());
+        self.needs_rejoin.store(false, Ordering::SeqCst);
+        self.set_heartbeat_context(Some(HeartbeatContext {
+            coordinator_id: coordinator,
+            group_id,
+            generation_id: self.generation_id,
+            member_id: self.member_id.clone(),
+        }));
         Ok(())
+    }
+
+    /// Update the group context the background heartbeat task reads.
+    fn set_heartbeat_context(&self, context: Option<HeartbeatContext>) {
+        *self
+            .heartbeat_context
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = context;
     }
 
     /// Leader-only: run the `range` assignor over the members' subscriptions,
@@ -714,50 +762,6 @@ impl Consumer {
         let group_id = self.config.group_id.clone();
         let coordinator = self.ensure_coordinator(&group_id).await?;
         coordinator::commit_offsets(&self.wire, coordinator, &group_id, &offsets).await
-    }
-
-    /// Send a throttled heartbeat, flagging a rejoin on the coordinator's signal.
-    async fn maybe_heartbeat(&mut self) -> Result<()> {
-        if self.member_id.is_empty() || self.needs_rejoin {
-            return Ok(());
-        }
-        let due = self
-            .last_heartbeat
-            .is_none_or(|last| last.elapsed() >= self.config.heartbeat_interval);
-        if !due {
-            return Ok(());
-        }
-        let Some(coordinator) = self.coordinator_id else {
-            return Ok(());
-        };
-        let group_id = self.config.group_id.clone();
-        let code = coordinator::heartbeat(
-            &self.wire,
-            coordinator,
-            &group_id,
-            self.generation_id,
-            &self.member_id,
-        )
-        .await?;
-        self.last_heartbeat = Some(Instant::now());
-        match code {
-            ErrorCode::None => {},
-            ErrorCode::RebalanceInProgress => self.needs_rejoin = true,
-            ErrorCode::IllegalGeneration | ErrorCode::UnknownMemberId => {
-                self.needs_rejoin = true;
-                self.member_id.clear();
-                self.generation_id = -1;
-            },
-            other if other.is_error() => {
-                return Err(ConsumerError::broker(
-                    "heartbeat",
-                    other,
-                    "heartbeat failed",
-                ));
-            },
-            _ => {},
-        }
-        Ok(())
     }
 
     fn ensure_assigned(&self, partition: &TopicPartition) -> Result<()> {
@@ -846,6 +850,46 @@ impl Consumer {
 /// Clamp a duration to a millisecond `i32` for wire timeout fields.
 fn clamp_ms(duration: Duration) -> i32 {
     i32::try_from(duration.as_millis()).unwrap_or(i32::MAX)
+}
+
+/// The background heartbeat task: while joined, send a `Heartbeat` every
+/// `heartbeat.interval.ms` so the session stays alive independent of poll
+/// cadence (Java's `HeartbeatThread`). Any group-level signal — rebalance, or a
+/// fenced generation/member — flags a rejoin for `poll` to pick up; a transient
+/// wire error is retried on the next tick.
+#[expect(
+    clippy::infinite_loop,
+    reason = "The heartbeat task runs until the consumer aborts its JoinHandle."
+)]
+async fn heartbeat_loop(
+    wire: WireClient,
+    context: Arc<Mutex<Option<HeartbeatContext>>>,
+    needs_rejoin: Arc<AtomicBool>,
+    interval: Duration,
+) {
+    loop {
+        tokio::time::sleep(interval).await;
+        let snapshot = context
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let Some(group) = snapshot else {
+            continue;
+        };
+        match coordinator::heartbeat(
+            &wire,
+            group.coordinator_id,
+            &group.group_id,
+            group.generation_id,
+            &group.member_id,
+        )
+        .await
+        {
+            Ok(ErrorCode::None) => {},
+            Ok(_) => needs_rejoin.store(true, Ordering::SeqCst),
+            Err(_transient) => {},
+        }
+    }
 }
 
 /// Resolve `bootstrap.servers` into wire broker endpoints.
