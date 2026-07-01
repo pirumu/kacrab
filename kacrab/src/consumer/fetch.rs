@@ -111,6 +111,51 @@ pub(super) struct PartitionFetch {
     pub next_leader_epoch: Option<i32>,
 }
 
+/// The aggregate outcome of one `fetch` across every leader.
+#[derive(Debug, Default)]
+pub(super) struct FetchProgress {
+    /// Decoded records, per partition.
+    pub partitions: Vec<PartitionFetch>,
+    /// Partitions the broker reported out of range — their position must be
+    /// reset via `auto.offset.reset`.
+    pub resets: Vec<TopicPartition>,
+    /// Partitions whose leader/metadata looked stale — the caller should refresh
+    /// metadata and retry on the next poll.
+    pub stale: Vec<TopicPartition>,
+}
+
+/// How a partition-level fetch error is handled. Only genuinely fatal codes fail
+/// the whole `poll`; the rest are recovered per partition, mirroring Java's
+/// `AbstractFetch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartitionErrorAction {
+    /// The fetch position is invalid; reset it via `auto.offset.reset`.
+    Reset,
+    /// Stale leader/metadata; refresh metadata and retry next poll.
+    Retriable,
+    /// A fatal error to surface to the caller.
+    Fatal,
+}
+
+/// Classify a partition-level fetch error code.
+const fn classify_partition_error(error: ErrorCode) -> PartitionErrorAction {
+    match error {
+        // The committed/current offset fell outside the log (retention, truncation)
+        // — a normal condition handled by re-resolving the position.
+        ErrorCode::OffsetOutOfRange => PartitionErrorAction::Reset,
+        // Leadership moved or the cached metadata is stale — re-resolve and retry.
+        ErrorCode::NotLeaderOrFollower
+        | ErrorCode::FencedLeaderEpoch
+        | ErrorCode::UnknownLeaderEpoch
+        | ErrorCode::UnknownTopicOrPartition
+        | ErrorCode::ReplicaNotAvailable
+        | ErrorCode::LeaderNotAvailable
+        | ErrorCode::KafkaStorageError
+        | ErrorCode::OffsetNotAvailable => PartitionErrorAction::Retriable,
+        _ => PartitionErrorAction::Fatal,
+    }
+}
+
 /// The read-only inputs a fetch needs: the wire client, runtime config, and the
 /// cluster metadata used to route each partition to its leader.
 #[derive(Debug, Clone, Copy)]
@@ -131,9 +176,10 @@ pub(super) async fn fetch(
     fetchable: &[(TopicPartition, FetchPosition)],
     max_records: usize,
     sessions: &mut FetchSessions,
-) -> Result<Vec<PartitionFetch>> {
+) -> Result<FetchProgress> {
+    let mut progress = FetchProgress::default();
     if fetchable.is_empty() || max_records == 0 {
-        return Ok(Vec::new());
+        return Ok(progress);
     }
     let FetchContext {
         wire,
@@ -158,7 +204,6 @@ pub(super) async fn fetch(
     // name-keyed regardless of how high the broker goes.
     let version = FETCH_MAX_VERSION;
 
-    let mut results = Vec::new();
     let mut budget = max_records;
 
     for (leader, entries) in by_leader {
@@ -194,38 +239,56 @@ pub(super) async fn fetch(
             .map(|(tp, pos)| ((tp.topic.clone(), tp.partition), *pos))
             .collect();
 
-        for topic in response.responses {
-            for partition in topic.partitions {
-                let tp =
-                    TopicPartition::new(topic.topic.as_str().to_owned(), partition.partition_index);
-                let Some(position) = want.get(&(tp.topic.clone(), tp.partition)).copied() else {
-                    continue;
-                };
-                let error = ErrorCode::from(partition.error_code);
-                if error.is_error() {
-                    return Err(ConsumerError::broker(
-                        "fetch",
-                        error,
-                        format!("{}-{} fetch failed", tp.topic, tp.partition),
-                    ));
-                }
-                let decoded = decode_partition(&tp, position.offset, partition.records, budget)?;
-                if decoded.records.is_empty() && decoded.next_offset == position.offset {
-                    continue;
-                }
-                budget = budget.saturating_sub(decoded.records.len());
-                results.push(decoded);
-                if budget == 0 {
-                    break;
-                }
-            }
-            if budget == 0 {
-                break;
-            }
-        }
+        collect_fetches(response, &want, &mut budget, &mut progress)?;
     }
 
-    Ok(results)
+    Ok(progress)
+}
+
+/// Process one broker's fetch response into decoded records, recovering
+/// partition-level errors per partition (reset out-of-range positions, flag
+/// stale-leader partitions for a metadata refresh) and only failing on a
+/// genuinely fatal code. Partitions the caller did not ask for are ignored.
+fn collect_fetches(
+    response: FetchResponseData,
+    want: &HashMap<(String, i32), FetchPosition>,
+    budget: &mut usize,
+    progress: &mut FetchProgress,
+) -> Result<()> {
+    for topic in response.responses {
+        for partition in topic.partitions {
+            if *budget == 0 {
+                return Ok(());
+            }
+            let tp =
+                TopicPartition::new(topic.topic.as_str().to_owned(), partition.partition_index);
+            let Some(position) = want.get(&(tp.topic.clone(), tp.partition)).copied() else {
+                continue;
+            };
+            let error = ErrorCode::from(partition.error_code);
+            if error.is_error() {
+                match classify_partition_error(error) {
+                    PartitionErrorAction::Reset => progress.resets.push(tp),
+                    PartitionErrorAction::Retriable => progress.stale.push(tp),
+                    PartitionErrorAction::Fatal => {
+                        return Err(ConsumerError::broker(
+                            "fetch",
+                            error,
+                            format!("{}-{} fetch failed", tp.topic, tp.partition),
+                        ));
+                    },
+                }
+                continue;
+            }
+            let decoded = decode_partition(&tp, position.offset, partition.records, *budget)?;
+            if decoded.records.is_empty() && decoded.next_offset == position.offset {
+                continue;
+            }
+            *budget = budget.saturating_sub(decoded.records.len());
+            progress.partitions.push(decoded);
+        }
+    }
+    Ok(())
 }
 
 fn build_fetch_request(
@@ -557,6 +620,89 @@ mod tests {
             .collect();
         assert_eq!(sent, vec![1]);
         assert!(incremental.forgotten_topics_data.is_empty());
+    }
+
+    use kacrab_protocol::generated::{
+        FetchResponseData,
+        fetch_response::{FetchableTopicResponse, PartitionData},
+    };
+
+    fn partition_data(index: i32, error: ErrorCode, records: Option<Bytes>) -> PartitionData {
+        PartitionData {
+            partition_index: index,
+            error_code: error.code(),
+            records,
+            ..PartitionData::default()
+        }
+    }
+
+    fn fetch_response(topic: &str, partitions: Vec<PartitionData>) -> FetchResponseData {
+        FetchResponseData {
+            responses: vec![FetchableTopicResponse {
+                topic: topic.to_owned().into(),
+                partitions,
+                ..FetchableTopicResponse::default()
+            }],
+            ..FetchResponseData::default()
+        }
+    }
+
+    fn want_two() -> HashMap<(String, i32), FetchPosition> {
+        [
+            (("t".to_owned(), 0), FetchPosition::new(100, None)),
+            (("t".to_owned(), 1), FetchPosition::new(0, None)),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn out_of_range_partition_resets_while_healthy_partition_survives() {
+        // t-0 is out of range; t-1 has records. The whole fetch must NOT error —
+        // t-0 is reset and t-1's records are still returned.
+        let response = fetch_response(
+            "t",
+            vec![
+                partition_data(0, ErrorCode::OffsetOutOfRange, None),
+                partition_data(1, ErrorCode::None, Some(encode_batch(0, 2))),
+            ],
+        );
+        let mut budget = 100;
+        let mut progress = FetchProgress::default();
+        collect_fetches(response, &want_two(), &mut budget, &mut progress).expect("no fatal error");
+        assert_eq!(progress.resets, vec![TopicPartition::new("t", 0)]);
+        assert!(progress.stale.is_empty());
+        assert_eq!(progress.partitions.len(), 1);
+        assert_eq!(
+            progress.partitions[0].partition,
+            TopicPartition::new("t", 1)
+        );
+        assert_eq!(progress.partitions[0].records.len(), 2);
+    }
+
+    #[test]
+    fn stale_leader_partition_is_flagged_not_fatal() {
+        let response = fetch_response(
+            "t",
+            vec![partition_data(0, ErrorCode::NotLeaderOrFollower, None)],
+        );
+        let mut budget = 100;
+        let mut progress = FetchProgress::default();
+        collect_fetches(response, &want_two(), &mut budget, &mut progress).expect("retriable");
+        assert_eq!(progress.stale, vec![TopicPartition::new("t", 0)]);
+        assert!(progress.resets.is_empty());
+        assert!(progress.partitions.is_empty());
+    }
+
+    #[test]
+    fn genuinely_fatal_partition_error_propagates() {
+        let response = fetch_response(
+            "t",
+            vec![partition_data(0, ErrorCode::CorruptMessage, None)],
+        );
+        let mut budget = 100;
+        let mut progress = FetchProgress::default();
+        assert!(collect_fetches(response, &want_two(), &mut budget, &mut progress).is_err());
     }
 
     #[test]

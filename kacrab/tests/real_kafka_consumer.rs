@@ -415,6 +415,46 @@ async fn real_kafka_consumer_protocol_kip848() {
     println!("real Kafka KIP-848 smoke: ALL OK");
 }
 
+/// Seeking past the log end makes the broker answer `OFFSET_OUT_OF_RANGE`; the
+/// consumer must reset via `auto.offset.reset` and recover, not error forever.
+/// Verifies the per-partition fetch error handling (B1) end to end.
+#[tokio::test]
+#[ignore = "requires local Kafka from docker-compose.kafka.yml"]
+async fn real_kafka_out_of_range_resets_and_recovers() {
+    let bootstrap = bootstrap();
+    let topic = topic();
+    let count = 6;
+    create_topic(&bootstrap, &topic, 1).await;
+    produce(&bootstrap, &topic, 0, count).await;
+
+    let mut consumer = Consumer::from_map([
+        ("bootstrap.servers", bootstrap.as_str()),
+        ("group.id", format!("group-oor-{topic}").as_str()),
+        ("auto.offset.reset", "earliest"),
+        ("enable.auto.commit", "false"),
+    ])
+    .await
+    .expect("consumer should connect");
+    let partition = TopicPartition::new(topic.clone(), 0);
+    consumer.assign([partition.clone()]);
+    // Position the fetch well past the log end → OFFSET_OUT_OF_RANGE on fetch.
+    consumer.seek(&partition, 9_999).expect("seek");
+
+    let mut total = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while total < count && std::time::Instant::now() < deadline {
+        total += consumer
+            .poll(Duration::from_secs(2))
+            .await
+            .expect("poll must recover, not error")
+            .count();
+    }
+    println!("  out-of-range recovered, consumed={total}");
+    assert_eq!(total, count, "reset to earliest and consumed every record");
+    consumer.close().await;
+    println!("real Kafka out-of-range smoke: ALL OK");
+}
+
 async fn create_topic(bootstrap: &str, topic: &str, partitions: i32) {
     let admin = AdminClient::from_map([("bootstrap.servers", bootstrap)])
         .await

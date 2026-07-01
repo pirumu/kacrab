@@ -718,7 +718,7 @@ impl Consumer {
                 fetchable_empty = fetchable.is_empty();
                 if !fetchable.is_empty() {
                     self.metrics.record_fetch();
-                    let fetched = fetch::fetch(
+                    let progress = fetch::fetch(
                         &fetch::FetchContext {
                             wire: &self.wire,
                             config: &self.config,
@@ -729,8 +729,19 @@ impl Consumer {
                         &mut self.fetch_sessions,
                     )
                     .await?;
+                    // Out-of-range partitions clear their position so the next poll
+                    // re-resolves it via `auto.offset.reset` (KIP behaviour parity).
+                    for partition in &progress.resets {
+                        self.subscription.request_reset(partition);
+                    }
+                    // Stale-leader partitions invalidate cached metadata so the next
+                    // poll re-resolves their leaders.
+                    for partition in &progress.stale {
+                        self.wire
+                            .invalidate_topic_partition(&partition.topic, partition.partition);
+                    }
                     let mut records = ConsumerRecords::empty();
-                    for partition_fetch in fetched {
+                    for partition_fetch in progress.partitions {
                         self.subscription.advance_position(
                             &partition_fetch.partition,
                             partition_fetch.next_offset,

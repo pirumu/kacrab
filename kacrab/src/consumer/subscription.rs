@@ -108,6 +108,14 @@ impl SubscriptionState {
         }
     }
 
+    /// Clear a partition's position so it is re-resolved via `auto.offset.reset`
+    /// on the next poll (used when the broker reports the position out of range).
+    pub(super) fn request_reset(&mut self, partition: &TopicPartition) {
+        if let Some(state) = self.assignment.get_mut(&Self::key(partition)) {
+            state.position = None;
+        }
+    }
+
     /// The current fetch position (next offset) of a partition, if positioned.
     pub(super) fn position(&self, partition: &TopicPartition) -> Option<FetchPosition> {
         self.assignment.get(&Self::key(partition))?.position
