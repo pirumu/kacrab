@@ -19,13 +19,10 @@ use kacrab::config::{ClientKind, ConfigOrigin, ConfigStatus, catalog_for};
 
 const CLIENTS_SOURCE: &str = include_str!("../src/config/clients.rs");
 
-/// Typed keys knowingly absent from the generated catalog. `bootstrap.controllers`
-/// is a real `AdminClientConfig` key (defined via a `BOOTSTRAP_CONTROLLERS_CONFIG`
-/// constant in the Kafka source, not a string literal) that the codegen's config
-/// extractor does not yet pick up, so it is missing from the catalog even though
-/// kacrab exposes it. Tracked as a codegen extraction gap; remove from this
-/// allowlist once the generator captures constant-keyed `define(...)` calls.
-const KNOWN_UNCATALOGED: &[(ClientKind, &str)] = &[(ClientKind::Admin, "bootstrap.controllers")];
+/// Typed keys knowingly absent from the generated catalog. Empty: the codegen
+/// now extracts constant-keyed and line-broken `define(...)` calls, so every
+/// exposed key is cataloged.
+const KNOWN_UNCATALOGED: &[(ClientKind, &str)] = &[];
 
 fn is_known_uncataloged(client: ClientKind, key: &str) -> bool {
     KNOWN_UNCATALOGED

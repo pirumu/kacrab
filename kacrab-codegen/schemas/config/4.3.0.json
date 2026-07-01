@@ -2703,6 +2703,17 @@
           "documentation": "A list of host/port pairs used to establish the initial connection to the Kafka cluster. Clients use this list to bootstrap and discover the full set of Kafka brokers. While the order of servers in the list does not matter, we recommend including more than one server to ensure resilience if any servers are down. This list does not need to contain the entire set of brokers, as Kafka clients automatically manage and update connections to the cluster efficiently. This list must be in the form <code>host1:port1,host2:port2,...</code>."
         },
         {
+          "key": "bootstrap.controllers",
+          "java_constant": "BOOTSTRAP_CONTROLLERS_CONFIG",
+          "java_type": "list",
+          "default": {
+            "kind": "symbol",
+            "value": "List.of()"
+          },
+          "importance": "HIGH",
+          "documentation": "A list of host/port pairs to use for establishing the initial connection to the KRaft controller quorum. This list should be in the form <code>host1:port1,host2:port2,...</code>."
+        },
+        {
           "key": "client.id",
           "java_constant": "CLIENT_ID_CONFIG",
           "java_type": "string",
