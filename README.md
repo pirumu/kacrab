@@ -585,7 +585,7 @@ protocols (classic and KIP-848):
 
 ```rust
 use std::time::Duration;
-use kacrab::{common::TopicPartition, consumer::Consumer};
+use kacrab::consumer::{Consumer, StringDeserializer};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -594,38 +594,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("bootstrap.servers", "localhost:9092"),
         ("group.id", "orders-workers"),
         ("auto.offset.reset", "earliest"),
+        // Incremental rebalancing; use ("group.protocol", "consumer") for KIP-848.
+        ("partition.assignment.strategy", "cooperative-sticky"),
     ])
     .await?;
     consumer.subscribe(["orders"])?;
 
+    // Decode the bytes-first records with a typed deserializer.
+    let (keys, values) = (StringDeserializer, StringDeserializer);
     loop {
         let records = consumer.poll(Duration::from_secs(1)).await?;
         for record in &records {
-            println!("{}-{}@{}", record.topic, record.partition, record.offset);
+            let (key, value) = record.deserialized(&keys, &values)?;
+            println!(
+                "{}-{}@{}: {key:?} = {value:?}",
+                record.topic, record.partition, record.offset
+            );
         }
         consumer.commit_sync().await?;
     }
 }
 ```
 
-Or take direct control with `assign(vec![TopicPartition::new("orders", 0)])` and
-`seek`/`position`/`pause`, or subscribe by regex with `subscribe_pattern`. Records
-are bytes-first (`ConsumerRecord.key/value: Option<Bytes>`); a typed
-`ConsumerDeserializer` layers on top. The classic group path runs
-`FindCoordinator` + `JoinGroup`/`SyncGroup`/`Heartbeat` with the
-`range`/`roundrobin`/`sticky` eager assignors and the incremental
-`cooperative-sticky` assignor; `group.protocol=consumer` switches to the KIP-848
-server-side protocol (one `ConsumerGroupHeartbeat` RPC). Fetches use incremental
-sessions (KIP-227) and validate positions for truncation (KIP-320);
-`commit_sync`/`commit_async`/`committed` carry the leader epoch, with async
-commits applied in order and a coordinator that is re-discovered on failover.
+Or take direct control with `assign` + `seek`/`position`/`pause`, or subscribe by
+regex with `subscribe_pattern`. Records are bytes-first
+(`ConsumerRecord.key/value: Option<Bytes>`), with the typed `ConsumerDeserializer`
+layer above. Offsets commit sync, async, or automatically
+(`commit_sync`/`commit_async`/`committed`, leader-epoch aware);
 `ConsumerInterceptor`s and `metrics()` round out the surface. Everything is
-verified end-to-end against a real Apache Kafka 4.3.0 broker across thirteen
-scenarios (`kacrab/tests/real_kafka_consumer.rs`). See the book's
+verified end-to-end against a real Apache Kafka 4.3.0 broker
+(`kacrab/tests/real_kafka_consumer.rs`). See the book's
 [consumer chapter](docs-book/src/consumer.md) — with algorithm deep dives on
 [rebalancing](docs-book/src/consumer/rebalancing.md) and
-[fetching & offsets](docs-book/src/consumer/fetching.md) — and
-`docs/consumer-design.md`.
+[fetching & offsets](docs-book/src/consumer/fetching.md) — for how it works.
 
 ## Auth
 
