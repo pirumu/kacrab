@@ -98,6 +98,24 @@ pub struct Consumer {
     last_modern_heartbeat: Option<Instant>,
     /// Per-broker incremental fetch sessions (KIP-227).
     fetch_sessions: fetch::FetchSessions,
+    /// Ordered queue of asynchronous commits, drained one at a time by
+    /// `async_commit_task` so two `commit_async` calls never land out of order —
+    /// otherwise a stale commit could move the committed offset backwards (Java's
+    /// single network thread serializes commits the same way).
+    async_commits: tokio::sync::mpsc::UnboundedSender<AsyncCommit>,
+    /// The background task draining `async_commits`, aborted on close.
+    async_commit_task: JoinHandle<()>,
+}
+
+/// A queued asynchronous commit, applied in send order by the commit worker.
+struct AsyncCommit {
+    offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    callback: OffsetCommitCallback,
+    coordinator_id: i32,
+    group_id: String,
+    generation_id: i32,
+    member_id: String,
+    interceptors: ConsumerInterceptors,
 }
 
 /// Callback invoked with the result of an asynchronous offset commit.
@@ -162,6 +180,7 @@ struct HeartbeatContext {
 impl Drop for Consumer {
     fn drop(&mut self) {
         self.heartbeat_task.abort();
+        self.async_commit_task.abort();
     }
 }
 
@@ -191,6 +210,12 @@ impl Consumer {
             runtime.heartbeat_interval,
             metrics.clone(),
         ));
+        let (async_commits, async_commit_rx) = tokio::sync::mpsc::unbounded_channel();
+        let async_commit_task = tokio::spawn(async_commit_loop(
+            async_commit_rx,
+            wire.clone(),
+            metrics.clone(),
+        ));
         Ok(Self {
             wire,
             subscription: SubscriptionState::new(runtime.auto_offset_reset),
@@ -212,6 +237,8 @@ impl Consumer {
             modern_group: None,
             last_modern_heartbeat: None,
             fetch_sessions: fetch::FetchSessions::default(),
+            async_commits,
+            async_commit_task,
         })
     }
 
@@ -527,28 +554,22 @@ impl Consumer {
         }
         let group_id = self.require_group_id()?;
         let coordinator = self.ensure_coordinator(&group_id).await?;
-        let wire = self.wire.clone();
-        let metrics = self.metrics.clone();
-        let interceptors = self.interceptors.clone();
         let (generation_id, member_id) = self.commit_identity();
-        let _handle = tokio::spawn(async move {
-            let result = coordinator::commit_offsets(
-                &wire,
-                &coordinator::CommitTarget {
-                    coordinator_id: coordinator,
-                    group_id: &group_id,
-                    generation_id,
-                    member_id: &member_id,
-                },
-                &offsets,
-            )
-            .await;
-            if result.is_ok() {
-                metrics.record_commit();
-                interceptors.on_commit(&offsets);
-            }
-            callback(result);
-        });
+        // Enqueue rather than spawn, so the single worker applies commits in call
+        // order and a later commit never loses to an earlier, slower one.
+        let commit = AsyncCommit {
+            offsets,
+            callback,
+            coordinator_id: coordinator,
+            group_id,
+            generation_id,
+            member_id,
+            interceptors: self.interceptors.clone(),
+        };
+        if let Err(tokio::sync::mpsc::error::SendError(commit)) = self.async_commits.send(commit) {
+            // The worker is gone (consumer closing) — report rather than drop.
+            (commit.callback)(Err(ConsumerError::InvalidState("consumer is closing")));
+        }
         Ok(())
     }
 
@@ -816,6 +837,7 @@ impl Consumer {
     /// connections. The wire client shuts its broker tasks down on drop.
     pub async fn close(mut self) {
         self.heartbeat_task.abort();
+        self.async_commit_task.abort();
         let _committed = self.auto_commit_now().await;
         self.interceptors.close();
         // Static members (`group.instance.id`) stay in the group across a close so
@@ -1610,6 +1632,35 @@ async fn heartbeat_loop(
             Ok(_) => needs_rejoin.store(true, Ordering::SeqCst),
             Err(_transient) => {},
         }
+    }
+}
+
+/// The asynchronous-commit worker: drain the queue and apply each commit to
+/// completion before the next, so commits reach the coordinator in the order
+/// `commit_async` was called (mirroring Java's single network thread). Exits when
+/// the consumer drops its `async_commits` sender.
+async fn async_commit_loop(
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<AsyncCommit>,
+    wire: WireClient,
+    metrics: ConsumerMetrics,
+) {
+    while let Some(commit) = receiver.recv().await {
+        let result = coordinator::commit_offsets(
+            &wire,
+            &coordinator::CommitTarget {
+                coordinator_id: commit.coordinator_id,
+                group_id: &commit.group_id,
+                generation_id: commit.generation_id,
+                member_id: &commit.member_id,
+            },
+            &commit.offsets,
+        )
+        .await;
+        if result.is_ok() {
+            metrics.record_commit();
+            commit.interceptors.on_commit(&commit.offsets);
+        }
+        (commit.callback)(result);
     }
 }
 

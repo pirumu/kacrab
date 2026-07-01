@@ -415,6 +415,76 @@ async fn real_kafka_consumer_protocol_kip848() {
     println!("real Kafka KIP-848 smoke: ALL OK");
 }
 
+/// Asynchronous commits are applied in call order by a single worker, so a later
+/// commit never loses to an earlier one — the final committed offset is the last
+/// one issued and the callbacks fire in order. Verifies B3.
+#[tokio::test]
+#[ignore = "requires local Kafka from docker-compose.kafka.yml"]
+async fn real_kafka_async_commits_apply_in_order() {
+    let bootstrap = bootstrap();
+    let topic = topic();
+    create_topic(&bootstrap, &topic, 1).await;
+    produce(&bootstrap, &topic, 0, 20).await;
+
+    let mut consumer = Consumer::from_map([
+        ("bootstrap.servers", bootstrap.as_str()),
+        ("group.id", format!("group-asynccommit-{topic}").as_str()),
+        ("auto.offset.reset", "earliest"),
+        ("enable.auto.commit", "false"),
+    ])
+    .await
+    .expect("consumer should connect");
+    let partition = TopicPartition::new(topic.clone(), 0);
+    consumer.assign([partition.clone()]);
+
+    let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Issue ten commits with strictly increasing offsets, back to back.
+    for offset in 1..=10_i64 {
+        let mut offsets = std::collections::HashMap::new();
+        let _prev = offsets.insert(partition.clone(), OffsetAndMetadata::new(offset));
+        let order = std::sync::Arc::clone(&order);
+        let done = std::sync::Arc::clone(&done);
+        consumer
+            .commit_async_offsets(
+                offsets,
+                Box::new(move |result| {
+                    result.expect("async commit should succeed");
+                    order.lock().unwrap().push(offset);
+                    let _prev = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+            )
+            .await
+            .expect("enqueue");
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while done.load(std::sync::atomic::Ordering::SeqCst) < 10
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let recorded = order.lock().unwrap().clone();
+    println!("  async commit callback order = {recorded:?}");
+    assert_eq!(
+        recorded,
+        (1..=10).collect::<Vec<i64>>(),
+        "callbacks fire in call order (serialized worker)"
+    );
+    let committed = consumer
+        .committed(std::slice::from_ref(&partition))
+        .await
+        .expect("committed");
+    assert_eq!(
+        committed.get(&partition).map(|meta| meta.offset),
+        Some(10),
+        "the last-issued commit wins; no regression"
+    );
+    consumer.close().await;
+    println!("real Kafka async-commit-order smoke: ALL OK");
+}
+
 /// Seeking past the log end makes the broker answer `OFFSET_OUT_OF_RANGE`; the
 /// consumer must reset via `auto.offset.reset` and recover, not error forever.
 /// Verifies the per-partition fetch error handling (B1) end to end.
