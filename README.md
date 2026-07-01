@@ -6,8 +6,9 @@ wire-compatible with the Java client — including the idempotent sequence/epoch
 recovery state machine — and is memory- and CPU-efficient (native, no JVM). The
 admin client covers the full Apache Kafka 4.3.0 `Admin` operation surface (62
 operations) and is verified against a real broker. The consumer supports manual
-assignment and classic consumer-group subscription (fetch, offsets, and eager
-rebalancing), verified end-to-end against a real broker.
+assignment, topic and pattern subscription, and both group protocols — classic
+(eager and `cooperative-sticky`) and KIP-848 server-side — with fetch, offsets,
+interceptors, and metrics, verified end-to-end against a real broker.
 
 * **Java-compatible auth, producer, admin, and consumer**: the authentication,
   producer, admin, and consumer surfaces use Kafka property names, defaults,
@@ -17,14 +18,19 @@ rebalancing), verified end-to-end against a real broker.
   tokens, quotas, SCRAM credentials, partition reassignments, `KRaft` quorum,
   and the Kafka 4.x share/streams group families — 62 operations at Apache Kafka
   4.3.0 parity, verified end-to-end against a real broker.
-* **Consumer client** (`consumer` feature): manual partition assignment and
-  classic consumer-group subscription — `Fetch` with `auto.offset.reset`,
-  `max.poll.records`, and `seek`/`pause`/`resume`; `FindCoordinator` +
-  `JoinGroup`/`SyncGroup`/`Heartbeat`/`LeaveGroup` with the `range` assignor and
-  eager rebalancing; and `commit_sync`/`committed` offset handling. Verified
-  end-to-end against a real broker (single subscriber, and two consumers
-  rebalancing a topic). Background-heartbeat task and cooperative-sticky
-  assignment are the next refinements.
+* **Consumer client** (`consumer` feature): manual partition assignment,
+  topic and pattern (regex) subscription, and both group protocols — the classic
+  `JoinGroup`/`SyncGroup` protocol with the `range`/`roundrobin`/`sticky` eager
+  assignors and the incremental `cooperative-sticky` assignor, plus the KIP-848
+  server-side protocol (`group.protocol=consumer`, single `ConsumerGroupHeartbeat`
+  RPC). `Fetch` with `auto.offset.reset`, `max.poll.records`, incremental fetch
+  sessions (KIP-227), and `seek`/`pause`/`resume`; offset
+  `commit_sync`/`commit_async`/`committed` with background auto-commit;
+  OffsetForLeaderEpoch truncation detection (KIP-320); a background heartbeat
+  task; typed deserializers; `ConsumerInterceptor`s; and `metrics()`. Verified
+  end-to-end against a real Apache Kafka 4.3.0 broker across ten scenarios
+  (single subscriber, two-consumer rebalance, cooperative-sticky, roundrobin,
+  pattern, interceptors, offset queries, and KIP-848).
 * **Native Rust, not a `librdkafka` wrapper**: the Kafka protocol, wire, and
   producer logic are pure Rust, with workspace `unsafe_code` forbidden. The
   dependency tree is not entirely C-free, though: the TLS crypto provider

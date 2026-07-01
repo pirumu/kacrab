@@ -22,6 +22,24 @@ issues.
   (`ConsumerRecord.key/value: Option<Bytes>`). Verified end-to-end against a real
   Apache Kafka 4.3.0 broker (manual assign + commit, a single subscriber, and two
   consumers rebalancing a topic).
+- Consumer group parity: the `roundrobin`, `sticky`, and incremental
+  `cooperative-sticky` assignors (`partition.assignment.strategy`, default aligned
+  to Java's `range,cooperative-sticky`); the KIP-848 server-side protocol
+  (`group.protocol=consumer`, a single `ConsumerGroupHeartbeat` RPC with
+  server-computed, topic-id-keyed assignments reconciled incrementally); a
+  dedicated background heartbeat task; static membership (`group.instance.id`);
+  and `enforce_rebalance`.
+- Consumer offset and fetch parity: offset queries
+  (`beginning_offsets`/`end_offsets`/`offsets_for_times`/`current_lag`),
+  `commit_async` with background auto-commit, incremental fetch sessions
+  (KIP-227), and OffsetForLeaderEpoch position validation / truncation detection
+  (KIP-320).
+- Consumer surface parity: topic pattern subscription (`subscribe_pattern`, regex,
+  honouring `exclude.internal.topics`), typed `ConsumerDeserializer`s
+  (bytes/byte-array/string), `ConsumerInterceptor`s (`on_consume`/`on_commit`),
+  `client_instance_id`, and `metrics()`. All verified end-to-end across ten
+  scenarios against a real Apache Kafka 4.3.0 broker (including cooperative-sticky,
+  pattern, interceptors, and KIP-848).
 - Config drift guard (`kacrab/tests/config_drift.rs`) cross-checking the typed
   `config/clients.rs` against the generated `config/catalog.rs`, so a Kafka
   version bump is regenerate-and-reconcile.
