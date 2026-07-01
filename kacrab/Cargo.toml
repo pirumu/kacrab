@@ -23,6 +23,9 @@ admin = []
 # round-trip test — are active too. Selects pure-Rust `lz4`; opt into `lz4-hc`
 # explicitly for the C-FFI high-compression backend.
 compression = ["gzip", "snappy", "lz4", "zstd"]
+# The consumer needs record-batch decompression for fetched data, so pull in the
+# codec meta-feature (gzip/snappy/lz4/zstd) alongside the consumer surface.
+consumer = ["compression"]
 gssapi = ["dep:libgssapi"]
 gzip = ["kacrab-protocol/gzip"]
 lz4 = ["kacrab-protocol/lz4"]

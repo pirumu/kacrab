@@ -1795,6 +1795,15 @@ kafka_config! {
         #[comment("Whether the consumer should periodically commit offsets in the background.")]
         enable_auto_commit: bool,
 
+        #[key("auto.offset.reset")]
+        #[default(String::from("latest"))]
+        #[kafka_type("string")]
+        #[kafka_default("latest")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/consumer-configs/#consumerconfigs_auto.offset.reset")]
+        #[comment("Reset policy when there is no initial or committed offset, or the committed offset is out of range.")]
+        auto_offset_reset: String,
+
         #[key("exclude.internal.topics")]
         #[default(true)]
         #[kafka_type("boolean")]
