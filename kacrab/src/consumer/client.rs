@@ -1592,3 +1592,181 @@ fn parse_bootstrap_server(server: &str) -> Result<(String, u16)> {
     }
     Ok((host.to_owned(), port))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use bytes::Bytes;
+
+    use super::*;
+    use crate::consumer::{ConsumerRecord, ConsumerRecords, StringDeserializer, TimestampType};
+
+    // A consumer pointed at a dead literal-IP broker: `from_map` resolves the
+    // address but never connects, so every synchronous method below runs without
+    // any broker I/O.
+    async fn consumer_with_group() -> Consumer {
+        Consumer::from_map([
+            ("bootstrap.servers", "127.0.0.1:9092"),
+            ("group.id", "cov-group"),
+            ("auto.offset.reset", "earliest"),
+            ("enable.auto.commit", "false"),
+        ])
+        .await
+        .expect("consumer builds")
+    }
+
+    async fn consumer_no_group() -> Consumer {
+        Consumer::from_map([("bootstrap.servers", "127.0.0.1:9092")])
+            .await
+            .expect("consumer builds")
+    }
+
+    #[tokio::test]
+    async fn manual_assignment_and_position_control() {
+        let mut consumer = consumer_no_group().await;
+        let p0 = TopicPartition::new("t", 0);
+        let p1 = TopicPartition::new("t", 1);
+        consumer.assign([p0.clone(), p1.clone()]);
+        assert_eq!(consumer.assignment().len(), 2);
+
+        // Seek sets a position on an assigned partition; unassigned seeks error.
+        consumer.seek(&p0, 42).expect("seek assigned");
+        consumer
+            .seek_with_leader_epoch(&p1, 7, Some(3))
+            .expect("seek epoch");
+        assert!(matches!(
+            consumer.seek(&TopicPartition::new("t", 9), 0),
+            Err(ConsumerError::PartitionNotAssigned { .. })
+        ));
+
+        // Pause/resume flow.
+        consumer.pause(std::slice::from_ref(&p0));
+        assert_eq!(consumer.paused(), vec![p0.clone()]);
+        consumer.resume(std::slice::from_ref(&p0));
+        assert!(consumer.paused().is_empty());
+    }
+
+    #[tokio::test]
+    async fn subscribe_requires_group_and_toggles_pattern() {
+        let mut no_group = consumer_no_group().await;
+        assert!(matches!(
+            no_group.subscribe(["t"]),
+            Err(ConsumerError::InvalidState(_))
+        ));
+        assert!(matches!(
+            no_group.subscribe_pattern("t.*"),
+            Err(ConsumerError::InvalidState(_))
+        ));
+
+        let mut consumer = consumer_with_group().await;
+        consumer.subscribe(["b", "a", "a"]).expect("subscribe");
+        assert_eq!(
+            consumer.subscription(),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+        // A pattern subscription clears the explicit topic list until the first poll.
+        consumer
+            .subscribe_pattern("^prefix-.*$")
+            .expect("valid regex");
+        assert!(consumer.subscription().is_empty());
+        assert!(matches!(
+            consumer.subscribe_pattern("("),
+            Err(ConsumerError::InvalidArgument { .. })
+        ));
+        consumer.unsubscribe();
+        assert!(consumer.subscription().is_empty());
+    }
+
+    #[tokio::test]
+    async fn group_metadata_and_enforce_rebalance() {
+        let consumer = consumer_with_group().await;
+        let metadata = consumer.group_metadata();
+        assert_eq!(metadata.group_id, "cov-group");
+        assert_eq!(metadata.generation_id, -1);
+        assert!(metadata.member_id.is_empty());
+        // enforce_rebalance just flags a rejoin (no broker I/O).
+        consumer.enforce_rebalance();
+    }
+
+    #[tokio::test]
+    async fn empty_commits_and_reads_short_circuit() {
+        let mut consumer = consumer_with_group().await;
+        // Empty commits and reads resolve without touching the coordinator.
+        consumer
+            .commit_sync_offsets(HashMap::new())
+            .await
+            .expect("empty commit");
+        assert!(
+            consumer
+                .committed(&[])
+                .await
+                .expect("empty read")
+                .is_empty()
+        );
+        // A non-empty commit on a consumer with no group.id fails fast.
+        let mut no_group = consumer_no_group().await;
+        let mut offsets = HashMap::new();
+        let _prev = offsets.insert(TopicPartition::new("t", 0), OffsetAndMetadata::new(1));
+        assert!(matches!(
+            no_group.commit_sync_offsets(offsets).await,
+            Err(ConsumerError::InvalidState(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn poll_wakeup_and_idle_manual_assignment() {
+        let mut consumer = consumer_no_group().await;
+        // Nothing assigned and not subscribed — poll returns an empty batch.
+        let records = consumer
+            .poll(Duration::from_millis(0))
+            .await
+            .expect("idle poll");
+        assert!(records.is_empty());
+        // Wakeup makes the next poll return immediately with Wakeup.
+        consumer.wakeup();
+        assert!(matches!(
+            consumer.poll(Duration::from_secs(5)).await,
+            Err(ConsumerError::Wakeup)
+        ));
+    }
+
+    #[tokio::test]
+    async fn metrics_interceptors_and_deserialized_records() {
+        let mut consumer = consumer_with_group().await;
+        consumer.add_interceptor(NoopInterceptor);
+        let snapshot = consumer.metrics();
+        assert_eq!(snapshot.poll_total, 0);
+
+        // A typed deserializer maps record bytes.
+        let mut records = ConsumerRecords::empty();
+        records.push_partition(
+            "t".to_owned(),
+            0,
+            vec![ConsumerRecord {
+                topic: "t".to_owned(),
+                partition: 0,
+                offset: 0,
+                timestamp: 0,
+                timestamp_type: TimestampType::CreateTime,
+                key: None,
+                value: Some(Bytes::from_static(b"hi")),
+                headers: Vec::new(),
+                leader_epoch: None,
+            }],
+        );
+        let record = records.iter().next().expect("one record");
+        let (key, value) = record
+            .deserialized(&StringDeserializer, &StringDeserializer)
+            .expect("deserialize");
+        assert_eq!(key, None);
+        assert_eq!(value, Some("hi".to_owned()));
+    }
+
+    struct NoopInterceptor;
+    impl ConsumerInterceptor for NoopInterceptor {
+        fn on_consume(&self, records: ConsumerRecords) -> ConsumerRecords {
+            records
+        }
+    }
+}

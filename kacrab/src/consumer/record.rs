@@ -168,3 +168,71 @@ impl IntoIterator for ConsumerRecords {
         self.by_partition.into_values().flatten()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+
+    fn record(topic: &str, partition: i32, offset: i64) -> ConsumerRecord {
+        ConsumerRecord {
+            topic: topic.to_owned(),
+            partition,
+            offset,
+            timestamp: offset,
+            timestamp_type: TimestampType::CreateTime,
+            key: None,
+            value: Some(Bytes::from(format!("v{offset}"))),
+            headers: Vec::new(),
+            leader_epoch: Some(4),
+        }
+    }
+
+    #[test]
+    fn records_group_by_partition_and_iterate_in_order() {
+        let mut records = ConsumerRecords::empty();
+        assert!(records.is_empty());
+        // Empty pushes are ignored.
+        records.push_partition("t".to_owned(), 0, Vec::new());
+        assert!(records.is_empty());
+
+        records.push_partition("t".to_owned(), 1, vec![record("t", 1, 5)]);
+        records.push_partition(
+            "t".to_owned(),
+            0,
+            vec![record("t", 0, 0), record("t", 0, 1)],
+        );
+        assert_eq!(records.count(), 3);
+        assert!(!records.is_empty());
+
+        // Partitions come back in sorted (topic, partition) order.
+        assert_eq!(
+            records.partitions(),
+            vec![TopicPartition::new("t", 0), TopicPartition::new("t", 1)]
+        );
+        assert_eq!(records.records(&TopicPartition::new("t", 0)).len(), 2);
+        assert!(records.records(&TopicPartition::new("t", 9)).is_empty());
+
+        // `iter` and both `IntoIterator`s walk every record in partition order.
+        let offsets: Vec<i64> = records.iter().map(|record| record.offset).collect();
+        assert_eq!(offsets, vec![0, 1, 5]);
+        let by_ref: Vec<i64> = (&records).into_iter().map(|record| record.offset).collect();
+        assert_eq!(by_ref, vec![0, 1, 5]);
+        let owned: Vec<i64> = records.into_iter().map(|record| record.offset).collect();
+        assert_eq!(owned, vec![0, 1, 5]);
+    }
+
+    #[test]
+    fn record_exposes_topic_partition_and_timestamp() {
+        let record = record("orders", 3, 9);
+        assert_eq!(record.topic_partition(), TopicPartition::new("orders", 3));
+        assert_eq!(record.leader_epoch, Some(4));
+        let timestamp = OffsetAndTimestamp {
+            offset: 9,
+            timestamp: 100,
+            leader_epoch: Some(4),
+        };
+        assert_eq!(timestamp.offset, 9);
+    }
+}

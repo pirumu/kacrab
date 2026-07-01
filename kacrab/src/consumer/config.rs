@@ -197,6 +197,49 @@ mod tests {
     }
 
     #[test]
+    fn from_config_maps_public_config_to_runtime() {
+        use crate::config::ClientConfig;
+
+        let client: ClientConfig = [
+            ("bootstrap.servers", "127.0.0.1:9092"),
+            ("group.id", "g"),
+            ("group.instance.id", "static-1"),
+            ("group.protocol", "consumer"),
+            ("group.remote.assignor", "uniform"),
+            ("auto.offset.reset", "earliest"),
+            ("isolation.level", "read_committed"),
+            ("enable.auto.commit", "true"),
+            ("partition.assignment.strategy", "roundrobin"),
+        ]
+        .into_iter()
+        .collect();
+        let consumer = client.consumer_config().expect("valid consumer config");
+        let runtime = ConsumerRuntimeConfig::from_config(&consumer).expect("runtime");
+
+        assert_eq!(runtime.group_id, "g");
+        assert_eq!(runtime.group_instance_id, "static-1");
+        assert_eq!(runtime.group_protocol, GroupProtocol::Consumer);
+        assert_eq!(runtime.group_remote_assignor.as_deref(), Some("uniform"));
+        assert_eq!(runtime.auto_offset_reset, AutoOffsetReset::Earliest);
+        assert_eq!(runtime.isolation_level, IsolationLevel::ReadCommitted);
+        assert!(runtime.enable_auto_commit);
+        assert_eq!(
+            runtime.partition_assignment_strategy,
+            vec!["roundrobin".to_owned()]
+        );
+
+        // An empty remote assignor maps to `None`.
+        let plain: ClientConfig = [("bootstrap.servers", "127.0.0.1:9092"), ("group.id", "g")]
+            .into_iter()
+            .collect();
+        let plain =
+            ConsumerRuntimeConfig::from_config(&plain.consumer_config().expect("valid config"))
+                .expect("runtime");
+        assert_eq!(plain.group_protocol, GroupProtocol::Classic);
+        assert_eq!(plain.group_remote_assignor, None);
+    }
+
+    #[test]
     fn group_protocol_parses_classic_and_consumer() {
         assert_eq!(
             GroupProtocol::parse("classic").unwrap(),

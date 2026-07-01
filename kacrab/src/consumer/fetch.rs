@@ -516,6 +516,49 @@ mod tests {
         assert!(session.sent.is_empty());
     }
 
+    fn test_config() -> ConsumerRuntimeConfig {
+        let client: crate::config::ClientConfig =
+            [("bootstrap.servers", "127.0.0.1:9092"), ("group.id", "g")]
+                .into_iter()
+                .collect();
+        ConsumerRuntimeConfig::from_config(&client.consumer_config().expect("config"))
+            .expect("runtime")
+    }
+
+    #[test]
+    fn full_fetch_sends_all_partitions_then_incremental_sends_only_changes() {
+        let config = test_config();
+        let mut session = BrokerFetchSession::default();
+
+        // A full fetch (epoch 0) sends every partition and no forgotten list.
+        let entries = vec![entry("t", 0, 10), entry("t", 1, 20)];
+        let full = build_fetch_request(&config, &session, &entries);
+        assert_eq!(full.session_epoch, INITIAL_SESSION_EPOCH);
+        assert_eq!(
+            full.topics
+                .iter()
+                .map(|t| t.partitions.len())
+                .sum::<usize>(),
+            2
+        );
+        assert!(full.forgotten_topics_data.is_empty());
+
+        session.advance(99, &entries);
+
+        // Incrementally, only the partition whose offset changed is resent.
+        let changed = vec![entry("t", 0, 10), entry("t", 1, 25)];
+        let incremental = build_fetch_request(&config, &session, &changed);
+        assert_eq!(incremental.session_id, 99);
+        assert_eq!(incremental.session_epoch, 1);
+        let sent: Vec<i32> = incremental
+            .topics
+            .iter()
+            .flat_map(|topic| topic.partitions.iter().map(|p| p.partition))
+            .collect();
+        assert_eq!(sent, vec![1]);
+        assert!(incremental.forgotten_topics_data.is_empty());
+    }
+
     #[test]
     fn forgotten_lists_partitions_dropped_from_the_session() {
         let mut session = BrokerFetchSession::default();
