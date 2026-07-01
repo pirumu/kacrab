@@ -60,10 +60,14 @@ interceptors, and metrics, verified end-to-end against a real broker.
 
 ## Documentation
 
-- **[Design & Internals book](https://pirumu.github.io/kacrab/)** — architecture,
-  the idempotent producer state machine, the SASL/TLS handshakes, protocol
-  codegen, and how every path is verified against real brokers. Source in
-  [`docs-book/`](docs-book/).
+- **[Design & Internals book](https://pirumu.github.io/kacrab/)** — architecture
+  and algorithm deep dives: the idempotent producer state machine, consumer
+  [group membership & rebalancing](docs-book/src/consumer/rebalancing.md)
+  (cooperative-sticky + KIP-848) and
+  [fetching, positions & offsets](docs-book/src/consumer/fetching.md) (fetch
+  sessions, truncation detection, in-order commits), the SASL/TLS handshakes,
+  protocol codegen, and how every path is verified against real brokers. Source
+  in [`docs-book/`](docs-book/).
 - **API reference** — [docs.rs/kacrab](https://docs.rs/kacrab) (after the first
   crates.io release).
 
@@ -576,7 +580,8 @@ configs, add partitions, list offsets, and delete — lives in
 
 The consumer client (`consumer` feature) mirrors Java's `Consumer` with
 snake_case methods and the same constructors as the other clients. It supports
-manual partition assignment and classic consumer-group subscription:
+manual partition assignment, topic and pattern subscription, and both group
+protocols (classic and KIP-848):
 
 ```rust
 use std::time::Duration;
@@ -604,14 +609,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Or take direct control with `assign(vec![TopicPartition::new("orders", 0)])` and
-`seek`/`position`/`pause`. Records are bytes-first (`ConsumerRecord.key/value:
-Option<Bytes>`). The classic group path runs `FindCoordinator` +
-`JoinGroup`/`SyncGroup`/`Heartbeat` with the `range` assignor and eager
-rebalancing; `commit_sync`/`committed` carry the leader epoch. Everything is
-verified end-to-end against a real Apache Kafka 4.3.0 broker
-(`kacrab/tests/real_kafka_consumer.rs`). See the book's
-[consumer chapter](docs-book/src/consumer.md) and `docs/consumer-design.md` for
-the design and the phased plan.
+`seek`/`position`/`pause`, or subscribe by regex with `subscribe_pattern`. Records
+are bytes-first (`ConsumerRecord.key/value: Option<Bytes>`); a typed
+`ConsumerDeserializer` layers on top. The classic group path runs
+`FindCoordinator` + `JoinGroup`/`SyncGroup`/`Heartbeat` with the
+`range`/`roundrobin`/`sticky` eager assignors and the incremental
+`cooperative-sticky` assignor; `group.protocol=consumer` switches to the KIP-848
+server-side protocol (one `ConsumerGroupHeartbeat` RPC). Fetches use incremental
+sessions (KIP-227) and validate positions for truncation (KIP-320);
+`commit_sync`/`commit_async`/`committed` carry the leader epoch, with async
+commits applied in order and a coordinator that is re-discovered on failover.
+`ConsumerInterceptor`s and `metrics()` round out the surface. Everything is
+verified end-to-end against a real Apache Kafka 4.3.0 broker across thirteen
+scenarios (`kacrab/tests/real_kafka_consumer.rs`). See the book's
+[consumer chapter](docs-book/src/consumer.md) — with algorithm deep dives on
+[rebalancing](docs-book/src/consumer/rebalancing.md) and
+[fetching & offsets](docs-book/src/consumer/fetching.md) — and
+`docs/consumer-design.md`.
 
 ## Auth
 
