@@ -122,6 +122,20 @@ const fn is_rebalance_in_progress(error: &ConsumerError) -> bool {
     )
 }
 
+/// Whether an error means the group coordinator moved or is unavailable, so the
+/// cached coordinator must be dropped and re-discovered (`FindCoordinator`).
+const fn is_coordinator_moved(error: &ConsumerError) -> bool {
+    matches!(
+        error,
+        ConsumerError::Broker {
+            error: ErrorCode::NotCoordinator
+                | ErrorCode::CoordinatorNotAvailable
+                | ErrorCode::CoordinatorLoadInProgress,
+            ..
+        }
+    )
+}
+
 /// A synced assignment to apply: what we owned before, what we now hold, and
 /// whether the group is rebalancing cooperatively (incremental revoke).
 #[derive(Debug, Clone, Copy)]
@@ -442,19 +456,26 @@ impl Consumer {
             return Ok(());
         }
         let group_id = self.require_group_id()?;
-        let coordinator = self.ensure_coordinator(&group_id).await?;
         let (generation_id, member_id) = self.commit_identity();
-        let result = coordinator::commit_offsets(
-            &self.wire,
-            &coordinator::CommitTarget {
-                coordinator_id: coordinator,
-                group_id: &group_id,
-                generation_id,
-                member_id: &member_id,
-            },
-            &offsets,
-        )
-        .await;
+        let mut refound = false;
+        let result = loop {
+            let coordinator = self.ensure_coordinator(&group_id).await?;
+            let attempt = coordinator::commit_offsets(
+                &self.wire,
+                &coordinator::CommitTarget {
+                    coordinator_id: coordinator,
+                    group_id: &group_id,
+                    generation_id,
+                    member_id: &member_id,
+                },
+                &offsets,
+            )
+            .await;
+            match attempt {
+                Err(error) if !refound && self.note_coordinator_error(&error) => refound = true,
+                outcome => break outcome,
+            }
+        };
         if result.is_ok() {
             self.metrics.record_commit();
             self.interceptors.on_commit(&offsets);
@@ -545,8 +566,15 @@ impl Consumer {
             return Ok(HashMap::new());
         }
         let group_id = self.require_group_id()?;
-        let coordinator = self.ensure_coordinator(&group_id).await?;
-        coordinator::fetch_committed(&self.wire, coordinator, &group_id, partitions).await
+        let mut refound = false;
+        loop {
+            let coordinator = self.ensure_coordinator(&group_id).await?;
+            match coordinator::fetch_committed(&self.wire, coordinator, &group_id, partitions).await
+            {
+                Err(error) if !refound && self.note_coordinator_error(&error) => refound = true,
+                outcome => return outcome,
+            }
+        }
     }
 
     /// This consumer's group metadata. For a manual-assignment consumer the
@@ -876,6 +904,20 @@ impl Consumer {
         Ok(id)
     }
 
+    /// If `error` means the coordinator moved, drop the cached coordinator so the
+    /// next [`ensure_coordinator`](Self::ensure_coordinator) re-discovers it, and
+    /// report that a re-find is warranted. A coordinator moves on broker restart
+    /// or `__consumer_offsets` reassignment — otherwise the stale id would fail
+    /// every commit/heartbeat/rejoin until the consumer is recreated.
+    const fn note_coordinator_error(&mut self, error: &ConsumerError) -> bool {
+        if is_coordinator_moved(error) {
+            self.coordinator_id = None;
+            true
+        } else {
+            false
+        }
+    }
+
     async fn offsets_at_timestamp(
         &self,
         partitions: &[TopicPartition],
@@ -960,13 +1002,6 @@ impl Consumer {
         let group_id = self.config.group_id.clone();
         let group_instance_id = self.config.group_instance_id.clone();
         let instance = (!group_instance_id.is_empty()).then_some(group_instance_id.as_str());
-        let coordinator = self.ensure_coordinator(&group_id).await?;
-        let context = coordinator::GroupContext {
-            wire: &self.wire,
-            coordinator_id: coordinator,
-            group_id: &group_id,
-            group_instance_id: instance,
-        };
         let assignors = self.advertised_assignors();
         // Partitions we currently own — reported to the coordinator so the
         // cooperative assignor knows what not to hand to someone else yet. Eager
@@ -974,11 +1009,20 @@ impl Consumer {
         // we apply the new assignment below.
         let owned = self.subscription.assigned_partitions();
         // A rebalance that starts between our JoinGroup and SyncGroup makes the
-        // coordinator answer REBALANCE_IN_PROGRESS; rejoin and retry.
+        // coordinator answer REBALANCE_IN_PROGRESS; a coordinator move answers
+        // NOT_COORDINATOR. Both rejoin and retry — the latter after re-finding the
+        // coordinator (`coordinator_id` is looked up fresh each iteration).
         let mut attempts = 0_u32;
-        let (assigned, cooperative) = loop {
+        let (assigned, cooperative, coordinator) = loop {
             attempts = attempts.saturating_add(1);
-            let join = coordinator::join_group(
+            let coordinator = self.ensure_coordinator(&group_id).await?;
+            let context = coordinator::GroupContext {
+                wire: &self.wire,
+                coordinator_id: coordinator,
+                group_id: &group_id,
+                group_instance_id: instance,
+            };
+            let join = match coordinator::join_group(
                 &context,
                 &coordinator::JoinRequest {
                     member_id: &self.member_id,
@@ -989,7 +1033,15 @@ impl Consumer {
                     owned: &owned,
                 },
             )
-            .await?;
+            .await
+            {
+                Ok(join) => join,
+                Err(error) if attempts < MAX_REJOIN_ATTEMPTS && is_coordinator_moved(&error) => {
+                    self.coordinator_id = None;
+                    continue;
+                },
+                Err(error) => return Err(error),
+            };
             self.member_id.clone_from(&join.member_id);
             self.generation_id = join.generation_id;
             let assignments = if join.leader {
@@ -1008,9 +1060,12 @@ impl Consumer {
             )
             .await
             {
-                Ok(assigned) => break (assigned, cooperative),
+                Ok(assigned) => break (assigned, cooperative, coordinator),
                 Err(error)
                     if is_rebalance_in_progress(&error) && attempts < MAX_REJOIN_ATTEMPTS => {},
+                Err(error) if is_coordinator_moved(&error) && attempts < MAX_REJOIN_ATTEMPTS => {
+                    self.coordinator_id = None;
+                },
                 Err(error) => return Err(error),
             }
         };
@@ -1338,19 +1393,26 @@ impl Consumer {
             return Ok(());
         }
         let group_id = self.config.group_id.clone();
-        let coordinator = self.ensure_coordinator(&group_id).await?;
         let (generation_id, member_id) = self.commit_identity();
-        let result = coordinator::commit_offsets(
-            &self.wire,
-            &coordinator::CommitTarget {
-                coordinator_id: coordinator,
-                group_id: &group_id,
-                generation_id,
-                member_id: &member_id,
-            },
-            &offsets,
-        )
-        .await;
+        let mut refound = false;
+        let result = loop {
+            let coordinator = self.ensure_coordinator(&group_id).await?;
+            let attempt = coordinator::commit_offsets(
+                &self.wire,
+                &coordinator::CommitTarget {
+                    coordinator_id: coordinator,
+                    group_id: &group_id,
+                    generation_id,
+                    member_id: &member_id,
+                },
+                &offsets,
+            )
+            .await;
+            match attempt {
+                Err(error) if !refound && self.note_coordinator_error(&error) => refound = true,
+                outcome => break outcome,
+            }
+        };
         if result.is_ok() {
             self.metrics.record_commit();
             self.interceptors.on_commit(&offsets);
@@ -1687,6 +1749,27 @@ mod tests {
         ));
         consumer.unsubscribe();
         assert!(consumer.subscription().is_empty());
+    }
+
+    #[tokio::test]
+    async fn coordinator_error_drops_the_cached_coordinator() {
+        let mut consumer = consumer_with_group().await;
+        consumer.coordinator_id = Some(7);
+        // A non-coordinator error leaves the cache intact.
+        let unrelated = ConsumerError::broker("commit", ErrorCode::InvalidGroupId, "x");
+        assert!(!consumer.note_coordinator_error(&unrelated));
+        assert_eq!(consumer.coordinator_id, Some(7));
+        // A coordinator-moved error clears it so the next op re-discovers it.
+        for code in [
+            ErrorCode::NotCoordinator,
+            ErrorCode::CoordinatorNotAvailable,
+            ErrorCode::CoordinatorLoadInProgress,
+        ] {
+            consumer.coordinator_id = Some(7);
+            let moved = ConsumerError::broker("commit", code, "moved");
+            assert!(consumer.note_coordinator_error(&moved));
+            assert_eq!(consumer.coordinator_id, None);
+        }
     }
 
     #[tokio::test]
