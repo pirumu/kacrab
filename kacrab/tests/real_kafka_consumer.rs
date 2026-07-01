@@ -482,3 +482,43 @@ async fn real_kafka_auto_and_async_commit() {
     checker.close().await;
     println!("real Kafka auto/async commit smoke: ALL OK");
 }
+
+/// A subscriber with the `roundrobin` assignor negotiates that protocol and is
+/// assigned every partition of a four-partition topic.
+#[tokio::test]
+#[ignore = "requires local Kafka from docker-compose.kafka.yml"]
+async fn real_kafka_roundrobin_assignor() {
+    let bootstrap = bootstrap();
+    let topic = topic();
+    create_topic(&bootstrap, &topic, 4).await;
+    for p in 0..4 {
+        produce(&bootstrap, &topic, p, 2).await;
+    }
+    let mut consumer = Consumer::from_map([
+        ("bootstrap.servers", bootstrap.as_str()),
+        ("group.id", format!("group-rr-{topic}").as_str()),
+        ("auto.offset.reset", "earliest"),
+        ("enable.auto.commit", "false"),
+        ("partition.assignment.strategy", "roundrobin"),
+    ])
+    .await
+    .expect("consumer");
+    consumer.subscribe([topic.clone()]).expect("subscribe");
+    let mut total = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while total < 8 && std::time::Instant::now() < deadline {
+        total += consumer
+            .poll(Duration::from_secs(2))
+            .await
+            .expect("poll")
+            .count();
+    }
+    println!(
+        "  roundrobin assignment={:?} consumed={total}",
+        consumer.assignment().len()
+    );
+    assert_eq!(consumer.assignment().len(), 4);
+    assert_eq!(total, 8);
+    consumer.close().await;
+    println!("real Kafka roundrobin smoke: ALL OK");
+}

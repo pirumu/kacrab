@@ -69,6 +69,8 @@ pub struct ConsumerRuntimeConfig {
     pub client_rack: String,
     /// Reset policy when a partition has no valid position.
     pub auto_offset_reset: AutoOffsetReset,
+    /// Ordered client-side assignor names (`partition.assignment.strategy`).
+    pub partition_assignment_strategy: Vec<String>,
     /// Transactional read visibility.
     pub isolation_level: IsolationLevel,
     /// Minimum bytes the broker should accumulate before answering a fetch.
@@ -110,6 +112,7 @@ impl ConsumerRuntimeConfig {
             client_id: config.client_id.clone(),
             client_rack: config.client_rack.clone(),
             auto_offset_reset: AutoOffsetReset::parse(&config.auto_offset_reset)?,
+            partition_assignment_strategy: config.partition_assignment_strategy.as_slice().to_vec(),
             isolation_level: IsolationLevel::parse(&config.isolation_level)?,
             fetch_min_bytes: config.fetch_min_bytes,
             fetch_max_bytes: clamp_i32(config.fetch_max_bytes.get()),

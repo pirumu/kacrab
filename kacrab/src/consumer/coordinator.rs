@@ -261,6 +261,8 @@ pub(super) struct JoinResult {
     pub generation_id: i32,
     /// The member id the coordinator assigned (or echoed).
     pub member_id: String,
+    /// The assignor protocol the coordinator selected for this generation.
+    pub protocol_name: String,
     /// Whether this member is the group leader (runs the assignor).
     pub leader: bool,
     /// Decoded member subscriptions — populated only for the leader.
@@ -270,29 +272,40 @@ pub(super) struct JoinResult {
 /// Run one `JoinGroup` round for the classic (eager) `range` protocol,
 /// transparently retrying once with the coordinator-assigned member id when the
 /// broker demands one (`MEMBER_ID_REQUIRED`).
+/// The per-round `JoinGroup` inputs beyond the routing context.
+pub(super) struct JoinRequest<'a> {
+    pub member_id: &'a str,
+    pub session_timeout_ms: i32,
+    pub rebalance_timeout_ms: i32,
+    pub topics: &'a [String],
+    pub assignors: &'a [&'a str],
+}
+
 pub(super) async fn join_group(
     context: &GroupContext<'_>,
-    member_id: &str,
-    session_timeout_ms: i32,
-    rebalance_timeout_ms: i32,
-    topics: &[String],
+    join: &JoinRequest<'_>,
 ) -> Result<JoinResult> {
-    let metadata = assignor::encode_subscription(topics);
+    let metadata = assignor::encode_subscription(join.topics);
+    let protocols: Vec<JoinGroupRequestProtocol> = join
+        .assignors
+        .iter()
+        .map(|name| JoinGroupRequestProtocol {
+            name: (*name).to_owned().into(),
+            metadata: metadata.clone(),
+            _unknown_tagged_fields: Vec::new(),
+        })
+        .collect();
     let version = client_api_info(ApiKey::JoinGroup).max_version;
-    let mut member_id = member_id.to_owned();
+    let mut member_id = join.member_id.to_owned();
     loop {
         let request = JoinGroupRequestData {
             group_id: context.group_id.to_owned().into(),
-            session_timeout_ms,
-            rebalance_timeout_ms,
+            session_timeout_ms: join.session_timeout_ms,
+            rebalance_timeout_ms: join.rebalance_timeout_ms,
             member_id: member_id.clone().into(),
             group_instance_id: instance_id(context.group_instance_id),
             protocol_type: assignor::PROTOCOL_TYPE.to_owned().into(),
-            protocols: vec![JoinGroupRequestProtocol {
-                name: assignor::RANGE_ASSIGNOR.to_owned().into(),
-                metadata: metadata.clone(),
-                _unknown_tagged_fields: Vec::new(),
-            }],
+            protocols: protocols.clone(),
             reason: None,
             _unknown_tagged_fields: Vec::new(),
         };
@@ -337,6 +350,10 @@ pub(super) async fn join_group(
         return Ok(JoinResult {
             generation_id: response.generation_id,
             member_id: response.member_id.to_string(),
+            protocol_name: response
+                .protocol_name
+                .map(|name| name.to_string())
+                .unwrap_or_default(),
             leader,
             members,
         });
@@ -349,6 +366,7 @@ pub(super) async fn sync_group(
     context: &GroupContext<'_>,
     generation_id: i32,
     member_id: &str,
+    protocol_name: &str,
     assignments: Vec<(String, Bytes)>,
 ) -> Result<Vec<TopicPartition>> {
     let request = SyncGroupRequestData {
@@ -357,7 +375,7 @@ pub(super) async fn sync_group(
         member_id: member_id.to_owned().into(),
         group_instance_id: instance_id(context.group_instance_id),
         protocol_type: Some(assignor::PROTOCOL_TYPE.to_owned().into()),
-        protocol_name: Some(assignor::RANGE_ASSIGNOR.to_owned().into()),
+        protocol_name: Some(protocol_name.to_owned().into()),
         assignments: assignments
             .into_iter()
             .map(|(member, assignment)| SyncGroupRequestAssignment {

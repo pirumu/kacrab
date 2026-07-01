@@ -1701,6 +1701,15 @@ kafka_config! {
         #[comment("Reset policy when there is no initial or committed offset, or the committed offset is out of range.")]
         auto_offset_reset: String,
 
+        #[key("partition.assignment.strategy")]
+        #[default(ConfigList::from_csv("range,roundrobin,sticky"))]
+        #[kafka_type("list")]
+        #[kafka_default("[RangeAssignor, CooperativeStickyAssignor]")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/consumer-configs/#consumerconfigs_partition.assignment.strategy")]
+        #[comment("Ordered client-side partition assignors advertised to the group coordinator.")]
+        partition_assignment_strategy: ConfigList,
+
         #[key("exclude.internal.topics")]
         #[default(true)]
         #[kafka_type("boolean")]

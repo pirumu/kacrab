@@ -721,6 +721,7 @@ impl Consumer {
             group_id: &group_id,
             group_instance_id: instance,
         };
+        let assignors = self.advertised_assignors();
         // A rebalance that starts between our JoinGroup and SyncGroup makes the
         // coordinator answer REBALANCE_IN_PROGRESS; rejoin and retry.
         let mut attempts = 0_u32;
@@ -728,16 +729,20 @@ impl Consumer {
             attempts = attempts.saturating_add(1);
             let join = coordinator::join_group(
                 &context,
-                &self.member_id,
-                clamp_ms(self.config.session_timeout),
-                clamp_ms(self.config.rebalance_timeout),
-                &self.subscribed_topics,
+                &coordinator::JoinRequest {
+                    member_id: &self.member_id,
+                    session_timeout_ms: clamp_ms(self.config.session_timeout),
+                    rebalance_timeout_ms: clamp_ms(self.config.rebalance_timeout),
+                    topics: &self.subscribed_topics,
+                    assignors: &assignors,
+                },
             )
             .await?;
             self.member_id.clone_from(&join.member_id);
             self.generation_id = join.generation_id;
             let assignments = if join.leader {
-                self.compute_assignments(&join.members).await?
+                self.compute_assignments(&join.protocol_name, &join.members)
+                    .await?
             } else {
                 Vec::new()
             };
@@ -745,6 +750,7 @@ impl Consumer {
                 &context,
                 self.generation_id,
                 &self.member_id,
+                &join.protocol_name,
                 assignments,
             )
             .await
@@ -784,11 +790,28 @@ impl Consumer {
             .unwrap_or_else(PoisonError::into_inner) = context;
     }
 
-    /// Leader-only: run the `range` assignor over the members' subscriptions,
+    /// The assignor protocol names to advertise (`partition.assignment.strategy`,
+    /// mapped and de-duplicated; defaults to `range`).
+    fn advertised_assignors(&self) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = Vec::new();
+        for strategy in &self.config.partition_assignment_strategy {
+            let name = assignor::protocol_name(strategy);
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        if names.is_empty() {
+            names.push(assignor::RANGE_ASSIGNOR);
+        }
+        names
+    }
+
+    /// Leader-only: run the selected assignor over the members' subscriptions,
     /// using cluster metadata for partition counts, and encode each member's
     /// assignment blob.
     async fn compute_assignments(
         &self,
+        protocol_name: &str,
         members: &[MemberSubscription],
     ) -> Result<Vec<(String, Bytes)>> {
         let mut topics: BTreeSet<String> = BTreeSet::new();
@@ -808,7 +831,7 @@ impl Consumer {
             });
             let _previous = partitions_per_topic.insert(topic.clone(), count);
         }
-        let assignment = assignor::range_assign(members, &partitions_per_topic);
+        let assignment = assignor::assign(protocol_name, members, &partitions_per_topic);
         Ok(assignment
             .into_iter()
             .map(|(member, partitions)| (member, assignor::encode_assignment(&partitions)))
