@@ -21,7 +21,7 @@ pub use self::{
         CreateDelegationTokenOptions, CreatePartitionsOptions, CreateTopicsOptions,
         DelegationToken, DeletedRecords, DescribeConsumerGroupsOptions, DescribeTopicsOptions,
         ElectionType, FeatureMetadata, FeatureUpdate, FeatureUpdateUpgradeType, FencedProducer,
-        FinalizedVersionRange, GroupOffset, ListConsumerGroupOffsetsOptions,
+        FinalizedVersionRange, GroupOffset, GroupState, GroupType, ListConsumerGroupOffsetsOptions,
         ListConsumerGroupsOptions, ListOffsetsResult, ListTopicsOptions, ListTransactionsOptions,
         LogDirDescription, LogDirReplicaInfo, MemberDescription, MemberToRemove,
         NewPartitionReassignment, NewPartitions, NewTopic, Node, OffsetSpec,

@@ -539,10 +539,66 @@ pub struct ConsumerGroupListing {
     /// Whether this is a "simple" consumer group (one with no protocol type, i.e.
     /// managed directly via the offset APIs rather than the group protocol).
     pub is_simple_consumer_group: bool,
-    /// The broker-reported group state name (e.g. `Stable`, `Empty`), if any.
-    pub state: Option<String>,
-    /// The broker-reported group type name (e.g. `classic`, `consumer`), if any.
-    pub group_type: Option<String>,
+    /// The group state, if the broker reported one.
+    pub state: Option<GroupState>,
+    /// The group protocol type, if the broker reported one.
+    pub group_type: Option<GroupType>,
+}
+
+/// A consumer/share/streams group state, mirroring Kafka's `GroupState`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(missing_docs, reason = "Variants mirror Kafka's GroupState names 1:1.")]
+pub enum GroupState {
+    Unknown,
+    PreparingRebalance,
+    CompletingRebalance,
+    Stable,
+    Dead,
+    Empty,
+    Assigning,
+    Reconciling,
+}
+
+impl GroupState {
+    /// Parse the broker-reported group state name.
+    #[must_use]
+    pub fn from_broker(state: &str) -> Self {
+        match state {
+            "PreparingRebalance" => Self::PreparingRebalance,
+            "CompletingRebalance" => Self::CompletingRebalance,
+            "Stable" => Self::Stable,
+            "Dead" => Self::Dead,
+            "Empty" => Self::Empty,
+            "Assigning" => Self::Assigning,
+            "Reconciling" => Self::Reconciling,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// A group protocol type, mirroring Kafka's `GroupType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(missing_docs, reason = "Variants mirror Kafka's GroupType names 1:1.")]
+pub enum GroupType {
+    Unknown,
+    Classic,
+    Consumer,
+    Share,
+    Streams,
+}
+
+impl GroupType {
+    /// Parse the broker-reported group type name (case-insensitive).
+    #[must_use]
+    pub fn from_broker(group_type: &str) -> Self {
+        match group_type.to_ascii_lowercase().as_str() {
+            "classic" => Self::Classic,
+            "consumer" => Self::Consumer,
+            "share" => Self::Share,
+            "streams" => Self::Streams,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 /// One member of a consumer group, mirroring Java's `MemberDescription`.
@@ -552,6 +608,8 @@ pub struct MemberDescription {
     pub member_id: String,
     /// The static group instance id, if the member joined with one.
     pub group_instance_id: Option<String>,
+    /// The member's rack id, if it advertised one (consumer protocol).
+    pub rack_id: Option<String>,
     /// The client id the member connected with.
     pub client_id: String,
     /// The host the member connected from.
@@ -559,6 +617,12 @@ pub struct MemberDescription {
     /// The partitions currently assigned to this member. Empty for members whose
     /// assignment is not partition-shaped (e.g. streams-group task assignments).
     pub assignment: Vec<TopicPartition>,
+    /// The partitions in the member's target assignment (consumer protocol).
+    pub target_assignment: Vec<TopicPartition>,
+    /// The member epoch (consumer protocol), if known.
+    pub member_epoch: Option<i32>,
+    /// Whether the member uses the new consumer rebalance protocol, if known.
+    pub upgraded: Option<bool>,
 }
 
 /// A consumer group description returned by
@@ -574,13 +638,20 @@ pub struct ConsumerGroupDescription {
     pub members: Vec<MemberDescription>,
     /// The partition assignor / protocol the group settled on.
     pub partition_assignor: String,
-    /// The broker-reported group state name (e.g. `Stable`, `Empty`).
-    pub state: String,
+    /// The group state.
+    pub state: GroupState,
+    /// The group protocol type (`Classic` for `DescribeGroups` groups,
+    /// `Consumer` for `ConsumerGroupDescribe` groups).
+    pub group_type: GroupType,
     /// The group's coordinator broker.
     pub coordinator: Node,
     /// The operations the caller is authorized to perform on the group, if the
     /// request asked for them (empty otherwise).
     pub authorized_operations: Vec<AclOperation>,
+    /// The group epoch (consumer protocol only), if known.
+    pub group_epoch: Option<i32>,
+    /// The target-assignment epoch (consumer protocol only), if known.
+    pub target_assignment_epoch: Option<i32>,
 }
 
 /// A committed offset for one partition, returned by
@@ -1519,8 +1590,8 @@ pub struct RaftVoterEndpoint {
 pub struct ShareGroupDescription {
     /// The share group id.
     pub group_id: String,
-    /// The broker-reported group state name.
-    pub state: String,
+    /// The group state.
+    pub state: GroupState,
     /// The group epoch.
     pub group_epoch: i32,
     /// The assignor the group settled on.
@@ -1541,8 +1612,8 @@ pub struct ShareGroupDescription {
 pub struct StreamsGroupDescription {
     /// The streams group id.
     pub group_id: String,
-    /// The broker-reported group state name.
-    pub state: String,
+    /// The group state.
+    pub state: GroupState,
     /// The group epoch.
     pub group_epoch: i32,
     /// The group members.

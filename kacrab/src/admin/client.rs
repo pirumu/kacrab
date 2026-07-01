@@ -16,8 +16,9 @@ use kacrab_protocol::{
         AlterReplicaLogDirsRequestData, AlterReplicaLogDirsResponseData,
         AlterShareGroupOffsetsRequestData, AlterShareGroupOffsetsResponseData,
         AlterUserScramCredentialsRequestData, AlterUserScramCredentialsResponseData, ApiKey,
-        ApiVersionsRequestData, ApiVersionsResponseData, ConsumerProtocolAssignmentData,
-        CreateAclsRequestData, CreateAclsResponseData, CreateDelegationTokenRequestData,
+        ApiVersionsRequestData, ApiVersionsResponseData, ConsumerGroupDescribeRequestData,
+        ConsumerGroupDescribeResponseData, ConsumerProtocolAssignmentData, CreateAclsRequestData,
+        CreateAclsResponseData, CreateDelegationTokenRequestData,
         CreateDelegationTokenResponseData, CreatePartitionsRequestData,
         CreatePartitionsResponseData, CreateTopicsRequestData, CreateTopicsResponseData,
         DeleteAclsRequestData, DeleteAclsResponseData, DeleteGroupsRequestData,
@@ -69,6 +70,7 @@ use kacrab_protocol::{
             ScramCredentialDeletion as WireScramCredentialDeletion,
             ScramCredentialUpsertion as WireScramCredentialUpsertion,
         },
+        consumer_group_describe_response::Assignment as ConsumerGroupDescribeAssignment,
         create_acls_request::AclCreation,
         create_delegation_token_request::CreatableRenewers,
         delete_acls_request::DeleteAclsFilter,
@@ -97,7 +99,7 @@ use super::{
         ConsumerGroupDescription, ConsumerGroupListing, CreateDelegationTokenOptions,
         CreatePartitionsOptions, CreateTopicsOptions, DelegationToken, DeletedRecords,
         DescribeConsumerGroupsOptions, DescribeTopicsOptions, ElectionType, FeatureMetadata,
-        FeatureUpdate, FencedProducer, FinalizedVersionRange, GroupOffset,
+        FeatureUpdate, FencedProducer, FinalizedVersionRange, GroupOffset, GroupState, GroupType,
         ListConsumerGroupOffsetsOptions, ListConsumerGroupsOptions, ListOffsetsResult,
         ListTopicsOptions, ListTransactionsOptions, LogDirDescription, LogDirReplicaInfo,
         MemberDescription, MemberToRemove, NewPartitionReassignment, NewPartitions, NewTopic, Node,
@@ -730,8 +732,10 @@ impl AdminClient {
                 listings.push(ConsumerGroupListing {
                     group_id: group.group_id.as_str().to_owned(),
                     is_simple_consumer_group: group.protocol_type.as_str().is_empty(),
-                    state: non_empty(group.group_state.as_str()),
-                    group_type: non_empty(group.group_type.as_str()),
+                    state: non_empty(group.group_state.as_str())
+                        .map(|state| GroupState::from_broker(&state)),
+                    group_type: non_empty(group.group_type.as_str())
+                        .map(|group_type| GroupType::from_broker(&group_type)),
                 });
             }
         }
@@ -739,6 +743,10 @@ impl AdminClient {
     }
 
     /// Describe the given consumer groups, routing each to its coordinator.
+    ///
+    /// Consumer-protocol groups (KIP-848) are described via `ConsumerGroupDescribe`
+    /// and classic groups via `DescribeGroups`; each id is tried on the new API
+    /// first and falls back automatically.
     ///
     /// # Errors
     /// Returns the coordinator-lookup error, the first per-group broker error
@@ -750,55 +758,159 @@ impl AdminClient {
     ) -> Result<Vec<ConsumerGroupDescription>> {
         let mut described = Vec::with_capacity(group_ids.len());
         for group_id in &group_ids {
-            let request = DescribeGroupsRequestData {
-                groups: vec![group_id.clone().into()],
-                include_authorized_operations: options.include_authorized_operations,
-                _unknown_tagged_fields: Vec::new(),
+            let description = match self
+                .describe_consumer_group_consumer_protocol(group_id, &options)
+                .await?
+            {
+                Some(description) => description,
+                None => {
+                    self.describe_consumer_group_classic(group_id, &options)
+                        .await?
+                },
             };
-            let (response, coordinator) = self
-                .route_to_coordinator(
-                    group_id,
-                    0,
-                    ApiKey::DescribeGroups,
-                    &request,
-                    |response: &DescribeGroupsResponseData| {
-                        response
-                            .groups
-                            .iter()
-                            .any(|group| is_coordinator_error(group.error_code))
-                    },
-                )
-                .await?;
-            let group = response
-                .groups
-                .into_iter()
-                .find(|group| group.group_id.as_str() == group_id)
-                .ok_or_else(|| AdminError::MissingResult {
-                    target: group_id.clone(),
-                })?;
-            check_code(group_id, group.error_code, group.error_message.as_ref())?;
-            let members = group
-                .members
-                .into_iter()
-                .map(|member| MemberDescription {
-                    member_id: member.member_id.as_str().to_owned(),
-                    group_instance_id: member.group_instance_id.map(|id| id.as_str().to_owned()),
-                    client_id: member.client_id.as_str().to_owned(),
-                    host: member.client_host.as_str().to_owned(),
-                    assignment: decode_member_assignment(&member.member_assignment),
-                })
-                .collect();
-            described.push(ConsumerGroupDescription {
-                group_id: group.group_id.as_str().to_owned(),
-                is_simple_consumer_group: group.protocol_type.as_str().is_empty(),
-                members,
-                partition_assignor: group.protocol_data.as_str().to_owned(),
-                state: group.group_state.as_str().to_owned(),
-                coordinator,
-                authorized_operations: decode_authorized_operations(group.authorized_operations),
-            });
+            described.push(description);
         }
         Ok(described)
+    }
+
+    /// Describe a consumer-protocol group via `ConsumerGroupDescribe`. Returns
+    /// `Ok(None)` when the group is not a consumer-protocol group (or the broker
+    /// does not support the API), so the caller falls back to `DescribeGroups`.
+    async fn describe_consumer_group_consumer_protocol(
+        &self,
+        group_id: &str,
+        options: &DescribeConsumerGroupsOptions,
+    ) -> Result<Option<ConsumerGroupDescription>> {
+        let request = ConsumerGroupDescribeRequestData {
+            group_ids: vec![group_id.to_owned().into()],
+            include_authorized_operations: options.include_authorized_operations,
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let (response, coordinator) = match self
+            .route_to_coordinator(
+                group_id,
+                0,
+                ApiKey::ConsumerGroupDescribe,
+                &request,
+                |response: &ConsumerGroupDescribeResponseData| {
+                    response
+                        .groups
+                        .iter()
+                        .any(|group| is_coordinator_error(group.error_code))
+                },
+            )
+            .await
+        {
+            Ok(pair) => pair,
+            // Broker predates ConsumerGroupDescribe — fall back to DescribeGroups.
+            Err(AdminError::Wire(WireError::UnsupportedApiVersion(_))) => return Ok(None),
+            Err(other) => return Err(other),
+        };
+        let Some(group) = response
+            .groups
+            .into_iter()
+            .find(|group| group.group_id.as_str() == group_id)
+        else {
+            return Ok(None);
+        };
+        // GROUP_ID_NOT_FOUND here means the group is a classic group.
+        if ErrorCode::from(group.error_code) == ErrorCode::GroupIdNotFound {
+            return Ok(None);
+        }
+        check_code(group_id, group.error_code, group.error_message.as_ref())?;
+        let members = group
+            .members
+            .into_iter()
+            .map(|member| MemberDescription {
+                member_id: member.member_id.as_str().to_owned(),
+                group_instance_id: member.instance_id.map(|id| id.as_str().to_owned()),
+                rack_id: member.rack_id.map(|id| id.as_str().to_owned()),
+                client_id: member.client_id.as_str().to_owned(),
+                host: member.client_host.as_str().to_owned(),
+                assignment: consumer_assignment_partitions(member.assignment),
+                target_assignment: consumer_assignment_partitions(member.target_assignment),
+                member_epoch: Some(member.member_epoch),
+                upgraded: match member.member_type {
+                    0 => Some(false),
+                    1 => Some(true),
+                    _ => None,
+                },
+            })
+            .collect();
+        Ok(Some(ConsumerGroupDescription {
+            group_id: group.group_id.as_str().to_owned(),
+            is_simple_consumer_group: false,
+            members,
+            partition_assignor: group.assignor_name.as_str().to_owned(),
+            state: GroupState::from_broker(group.group_state.as_str()),
+            group_type: GroupType::Consumer,
+            coordinator,
+            authorized_operations: decode_authorized_operations(group.authorized_operations),
+            group_epoch: Some(group.group_epoch),
+            target_assignment_epoch: Some(group.assignment_epoch),
+        }))
+    }
+
+    /// Describe a classic group via `DescribeGroups`.
+    async fn describe_consumer_group_classic(
+        &self,
+        group_id: &str,
+        options: &DescribeConsumerGroupsOptions,
+    ) -> Result<ConsumerGroupDescription> {
+        let request = DescribeGroupsRequestData {
+            groups: vec![group_id.to_owned().into()],
+            include_authorized_operations: options.include_authorized_operations,
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let (response, coordinator) = self
+            .route_to_coordinator(
+                group_id,
+                0,
+                ApiKey::DescribeGroups,
+                &request,
+                |response: &DescribeGroupsResponseData| {
+                    response
+                        .groups
+                        .iter()
+                        .any(|group| is_coordinator_error(group.error_code))
+                },
+            )
+            .await?;
+        let group = response
+            .groups
+            .into_iter()
+            .find(|group| group.group_id.as_str() == group_id)
+            .ok_or_else(|| AdminError::MissingResult {
+                target: group_id.to_owned(),
+            })?;
+        check_code(group_id, group.error_code, group.error_message.as_ref())?;
+        let members = group
+            .members
+            .into_iter()
+            .map(|member| MemberDescription {
+                member_id: member.member_id.as_str().to_owned(),
+                group_instance_id: member.group_instance_id.map(|id| id.as_str().to_owned()),
+                rack_id: None,
+                client_id: member.client_id.as_str().to_owned(),
+                host: member.client_host.as_str().to_owned(),
+                assignment: decode_member_assignment(&member.member_assignment),
+                target_assignment: Vec::new(),
+                member_epoch: None,
+                upgraded: None,
+            })
+            .collect();
+        Ok(ConsumerGroupDescription {
+            group_id: group.group_id.as_str().to_owned(),
+            is_simple_consumer_group: group.protocol_type.as_str().is_empty(),
+            members,
+            partition_assignor: group.protocol_data.as_str().to_owned(),
+            state: GroupState::from_broker(group.group_state.as_str()),
+            group_type: GroupType::Classic,
+            coordinator,
+            authorized_operations: decode_authorized_operations(group.authorized_operations),
+            group_epoch: None,
+            target_assignment_epoch: None,
+        })
     }
 
     /// Delete consumer groups by id, routing each to its coordinator.
@@ -1595,8 +1707,10 @@ impl AdminClient {
                 listings.push(ConsumerGroupListing {
                     group_id: group.group_id.as_str().to_owned(),
                     is_simple_consumer_group: group.protocol_type.as_str().is_empty(),
-                    state: non_empty(group.group_state.as_str()),
-                    group_type: non_empty(group.group_type.as_str()),
+                    state: non_empty(group.group_state.as_str())
+                        .map(|state| GroupState::from_broker(&state)),
+                    group_type: non_empty(group.group_type.as_str())
+                        .map(|group_type| GroupType::from_broker(&group_type)),
                 });
             }
         }
@@ -1947,6 +2061,7 @@ impl AdminClient {
                 .map(|member| MemberDescription {
                     member_id: member.member_id.as_str().to_owned(),
                     group_instance_id: None,
+                    rack_id: member.rack_id.map(|id| id.as_str().to_owned()),
                     client_id: member.client_id.as_str().to_owned(),
                     host: member.client_host.as_str().to_owned(),
                     assignment: member
@@ -1961,11 +2076,14 @@ impl AdminClient {
                                 .map(move |partition| TopicPartition::new(name.clone(), partition))
                         })
                         .collect(),
+                    target_assignment: Vec::new(),
+                    member_epoch: Some(member.member_epoch),
+                    upgraded: None,
                 })
                 .collect();
             described.push(ShareGroupDescription {
                 group_id: group.group_id.as_str().to_owned(),
-                state: group.group_state.as_str().to_owned(),
+                state: GroupState::from_broker(group.group_state.as_str()),
                 group_epoch: group.group_epoch,
                 assignor_name: group.assignor_name.as_str().to_owned(),
                 members,
@@ -2020,15 +2138,19 @@ impl AdminClient {
                 .map(|member| MemberDescription {
                     member_id: member.member_id.as_str().to_owned(),
                     group_instance_id: member.instance_id.map(|id| id.as_str().to_owned()),
+                    rack_id: member.rack_id.map(|id| id.as_str().to_owned()),
                     client_id: member.client_id.as_str().to_owned(),
                     host: member.client_host.as_str().to_owned(),
                     // Streams members are assigned tasks, not partitions.
                     assignment: Vec::new(),
+                    target_assignment: Vec::new(),
+                    member_epoch: Some(member.member_epoch),
+                    upgraded: None,
                 })
                 .collect();
             described.push(StreamsGroupDescription {
                 group_id: group.group_id.as_str().to_owned(),
-                state: group.group_state.as_str().to_owned(),
+                state: GroupState::from_broker(group.group_state.as_str()),
                 group_epoch: group.group_epoch,
                 members,
                 coordinator,
@@ -3517,6 +3639,24 @@ fn decode_member_assignment(assignment: &bytes::Bytes) -> Vec<TopicPartition> {
         .into_iter()
         .flat_map(|topic| {
             let name = topic.topic.as_str().to_owned();
+            topic
+                .partitions
+                .into_iter()
+                .map(move |partition| TopicPartition::new(name.clone(), partition))
+        })
+        .collect()
+}
+
+/// Flatten a `ConsumerGroupDescribe` structured assignment into the partitions
+/// it covers.
+fn consumer_assignment_partitions(
+    assignment: ConsumerGroupDescribeAssignment,
+) -> Vec<TopicPartition> {
+    assignment
+        .topic_partitions
+        .into_iter()
+        .flat_map(|topic| {
+            let name = topic.topic_name.as_str().to_owned();
             topic
                 .partitions
                 .into_iter()

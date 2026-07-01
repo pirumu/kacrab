@@ -234,10 +234,12 @@ async fn real_kafka_admin_smoke() {
         )
         .await
         .expect("describe_consumer_groups");
-    println!(
-        "  describe_consumer_groups: state={:?}",
-        group_descs.first().map(|g| &g.state)
-    );
+    if let Some(group) = group_descs.first() {
+        println!(
+            "  describe_consumer_groups: type={:?} state={:?} epoch={:?}",
+            group.group_type, group.state, group.group_epoch
+        );
+    }
     admin
         .delete_consumer_group_offsets(&group, vec![TopicPartition::new(&topic, 0)])
         .await
