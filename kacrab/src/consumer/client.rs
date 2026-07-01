@@ -35,6 +35,7 @@ use super::{
     coordinator,
     error::{ConsumerError, Result},
     fetch,
+    interceptor::{ConsumerInterceptor, ConsumerInterceptors, InterceptorConfigs},
     metrics::{ConsumerMetrics, ConsumerMetricsSnapshot},
     offsets::{self, EARLIEST_TIMESTAMP, LATEST_TIMESTAMP},
     record::{ConsumerRecords, OffsetAndTimestamp},
@@ -76,6 +77,10 @@ pub struct Consumer {
     last_auto_commit: Option<Instant>,
     /// Native request/record counters (Java's `Consumer.metrics()`).
     metrics: ConsumerMetrics,
+    /// User interceptors run on poll/commit (Java's `ConsumerInterceptor`s).
+    interceptors: ConsumerInterceptors,
+    /// Config handed to a late-added interceptor's `configure`.
+    interceptor_configs: InterceptorConfigs,
 }
 
 /// Callback invoked with the result of an asynchronous offset commit.
@@ -134,6 +139,10 @@ impl Consumer {
     pub async fn from_config(config: ConsumerConfig) -> Result<Self> {
         let runtime = ConsumerRuntimeConfig::from_config(&config)?;
         let endpoints = resolve_bootstrap_brokers(&config).await?;
+        let interceptor_configs = InterceptorConfigs {
+            client_id: (!config.client_id.is_empty()).then(|| config.client_id.clone()),
+            group_id: (!runtime.group_id.is_empty()).then(|| runtime.group_id.clone()),
+        };
         let connection = config.to_connection_config();
         let wire =
             WireClient::connect_with_brokers(connection, config.client_id.clone(), endpoints);
@@ -161,6 +170,8 @@ impl Consumer {
             heartbeat_task,
             last_auto_commit: None,
             metrics,
+            interceptors: ConsumerInterceptors::default(),
+            interceptor_configs,
         })
     }
 
@@ -378,6 +389,7 @@ impl Consumer {
             coordinator::commit_offsets(&self.wire, coordinator, &group_id, &offsets).await;
         if result.is_ok() {
             self.metrics.record_commit();
+            self.interceptors.on_commit(&offsets);
         }
         result
     }
@@ -412,10 +424,12 @@ impl Consumer {
         let coordinator = self.ensure_coordinator(&group_id).await?;
         let wire = self.wire.clone();
         let metrics = self.metrics.clone();
+        let interceptors = self.interceptors.clone();
         let _handle = tokio::spawn(async move {
             let result = coordinator::commit_offsets(&wire, coordinator, &group_id, &offsets).await;
             if result.is_ok() {
                 metrics.record_commit();
+                interceptors.on_commit(&offsets);
             }
             callback(result);
         });
@@ -490,6 +504,15 @@ impl Consumer {
     #[must_use]
     pub fn metrics(&self) -> ConsumerMetricsSnapshot {
         self.metrics.snapshot(self.wire.buffer_pool_stats())
+    }
+
+    /// Register a [`ConsumerInterceptor`] on this consumer. It is `configure`d
+    /// immediately (with the consumer's `client.id`/`group.id`) and thereafter
+    /// observes each `poll`'s records (`on_consume`) and every successful commit
+    /// (`on_commit`). Mirrors Kafka's `interceptor.classes`, added programmatically.
+    pub fn add_interceptor(&mut self, interceptor: impl ConsumerInterceptor) {
+        self.interceptors
+            .push_and_configure(interceptor, &self.interceptor_configs);
     }
 
     /// The earliest available offset for each partition.
@@ -614,6 +637,9 @@ impl Consumer {
                         );
                     }
                     if !records.is_empty() {
+                        // Interceptors may rewrite or filter the batch before it
+                        // reaches the caller (Kafka `onConsume`).
+                        let records = self.interceptors.on_consume(records);
                         self.metrics.record_records(records.count());
                         return Ok(records);
                     }
@@ -646,6 +672,7 @@ impl Consumer {
     pub async fn close(mut self) {
         self.heartbeat_task.abort();
         let _committed = self.auto_commit_now().await;
+        self.interceptors.close();
         // Static members (`group.instance.id`) stay in the group across a close so
         // a quick restart avoids a rebalance, matching Java.
         let dynamic_member = self.config.group_instance_id.is_empty();
@@ -972,6 +999,7 @@ impl Consumer {
             coordinator::commit_offsets(&self.wire, coordinator, &group_id, &offsets).await;
         if result.is_ok() {
             self.metrics.record_commit();
+            self.interceptors.on_commit(&offsets);
         }
         result
     }

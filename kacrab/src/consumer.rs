@@ -16,6 +16,7 @@ mod coordinator;
 mod deserializer;
 mod error;
 mod fetch;
+mod interceptor;
 mod metrics;
 mod offsets;
 mod record;
@@ -28,6 +29,7 @@ pub use self::{
         ByteArrayDeserializer, BytesDeserializer, ConsumerDeserializer, StringDeserializer,
     },
     error::{ConsumerError, Result},
+    interceptor::{ConsumerInterceptor, InterceptorConfigs},
     metrics::ConsumerMetricsSnapshot,
     record::{ConsumerRecord, ConsumerRecords, OffsetAndTimestamp, RecordHeader, TimestampType},
 };

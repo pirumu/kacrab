@@ -24,8 +24,8 @@ use std::{
 use bytes::Bytes;
 use kacrab::{
     admin::{AdminClient, CreateTopicsOptions, NewTopic},
-    common::TopicPartition,
-    consumer::Consumer,
+    common::{OffsetAndMetadata, TopicPartition},
+    consumer::{Consumer, ConsumerInterceptor, ConsumerRecords, InterceptorConfigs},
     producer::{Producer, ProducerRecord},
 };
 
@@ -594,4 +594,92 @@ async fn real_kafka_roundrobin_assignor() {
     assert_eq!(total, 8);
     consumer.close().await;
     println!("real Kafka roundrobin smoke: ALL OK");
+}
+
+/// A registered [`ConsumerInterceptor`] sees every polled record (`on_consume`)
+/// and every committed offset (`on_commit`) end to end against a real broker.
+/// (The trait is implemented for the local struct directly — the orphan rule
+/// forbids implementing a foreign trait for `Arc<T>` in this test crate — so
+/// shared `Arc` counters expose what the interceptor observed after it is moved
+/// into the consumer.)
+struct CountingInterceptor {
+    consumed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    committed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    configured_group: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl ConsumerInterceptor for CountingInterceptor {
+    fn configure(&self, configs: &InterceptorConfigs) {
+        self.configured_group
+            .lock()
+            .unwrap()
+            .clone_from(&configs.group_id);
+    }
+
+    fn on_consume(&self, records: ConsumerRecords) -> ConsumerRecords {
+        let _prev = self
+            .consumed
+            .fetch_add(records.count(), std::sync::atomic::Ordering::SeqCst);
+        records
+    }
+
+    fn on_commit(&self, offsets: &std::collections::HashMap<TopicPartition, OffsetAndMetadata>) {
+        let _prev = self
+            .committed
+            .fetch_add(offsets.len(), std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires local Kafka from docker-compose.kafka.yml"]
+async fn real_kafka_interceptor_observes_records_and_commits() {
+    let bootstrap = bootstrap();
+    let topic = topic();
+    let count = 6;
+    create_topic(&bootstrap, &topic, 1).await;
+    produce(&bootstrap, &topic, 0, count).await;
+
+    let group_id = format!("group-intercept-{topic}");
+    let mut consumer = Consumer::from_map([
+        ("bootstrap.servers", bootstrap.as_str()),
+        ("group.id", group_id.as_str()),
+        ("auto.offset.reset", "earliest"),
+        ("enable.auto.commit", "false"),
+    ])
+    .await
+    .expect("consumer should connect");
+
+    let record_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let commit_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let configured_group = std::sync::Arc::new(std::sync::Mutex::new(None));
+    consumer.add_interceptor(CountingInterceptor {
+        consumed: std::sync::Arc::clone(&record_hits),
+        committed: std::sync::Arc::clone(&commit_hits),
+        configured_group: std::sync::Arc::clone(&configured_group),
+    });
+    assert_eq!(
+        *configured_group.lock().unwrap(),
+        Some(group_id.clone()),
+        "configure delivers the group.id"
+    );
+
+    consumer.assign([TopicPartition::new(topic.clone(), 0)]);
+    let mut total = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while total < count && std::time::Instant::now() < deadline {
+        total += consumer
+            .poll(Duration::from_secs(2))
+            .await
+            .expect("poll")
+            .count();
+    }
+    consumer.commit_sync().await.expect("commit");
+
+    let seen = record_hits.load(std::sync::atomic::Ordering::SeqCst);
+    let commits = commit_hits.load(std::sync::atomic::Ordering::SeqCst);
+    println!("  interceptor consumed={seen} committed_partitions={commits}");
+    assert_eq!(seen, count, "on_consume saw every record");
+    assert_eq!(commits, 1, "on_commit saw the one committed partition");
+    consumer.close().await;
+    println!("real Kafka interceptor smoke: ALL OK");
 }
