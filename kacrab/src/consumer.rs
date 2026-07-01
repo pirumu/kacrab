@@ -13,6 +13,7 @@ mod assignor;
 mod client;
 mod config;
 mod coordinator;
+mod deserializer;
 mod error;
 mod fetch;
 mod offsets;
@@ -22,6 +23,9 @@ mod subscription;
 pub use self::{
     client::{Consumer, OffsetCommitCallback},
     config::{AutoOffsetReset, ConsumerRuntimeConfig, IsolationLevel},
+    deserializer::{
+        ByteArrayDeserializer, BytesDeserializer, ConsumerDeserializer, StringDeserializer,
+    },
     error::{ConsumerError, Result},
     record::{ConsumerRecord, ConsumerRecords, OffsetAndTimestamp, RecordHeader, TimestampType},
 };

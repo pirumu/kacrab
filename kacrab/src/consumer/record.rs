@@ -61,6 +61,22 @@ impl ConsumerRecord {
     pub fn topic_partition(&self) -> TopicPartition {
         TopicPartition::new(self.topic.clone(), self.partition)
     }
+
+    /// Deserialize this record's key and value with the given deserializers.
+    ///
+    /// # Errors
+    /// Returns [`ConsumerError::Deserialization`](super::ConsumerError::Deserialization)
+    /// when either the key or value bytes cannot be decoded.
+    pub fn deserialized<K, V>(
+        &self,
+        key: &impl super::ConsumerDeserializer<K>,
+        value: &impl super::ConsumerDeserializer<V>,
+    ) -> super::Result<(Option<K>, Option<V>)> {
+        Ok((
+            key.deserialize(&self.topic, self.key.as_ref())?,
+            value.deserialize(&self.topic, self.value.as_ref())?,
+        ))
+    }
 }
 
 /// The batch of records returned by one [`Consumer::poll`](super::Consumer::poll)

@@ -50,6 +50,9 @@ pub enum ConsumerError {
     /// A blocking call was interrupted by [`Consumer::wakeup`](super::Consumer::wakeup).
     #[error("consumer operation was interrupted by wakeup")]
     Wakeup,
+    /// A typed deserializer could not decode a record's key or value bytes.
+    #[error("record deserialization failed: {0}")]
+    Deserialization(&'static str),
     /// A consumer API precondition was violated (e.g. mixing subscribe + assign).
     #[error("invalid consumer state: {0}")]
     InvalidState(&'static str),
