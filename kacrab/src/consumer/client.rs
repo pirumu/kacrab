@@ -35,6 +35,7 @@ use super::{
     coordinator,
     error::{ConsumerError, Result},
     fetch,
+    metrics::{ConsumerMetrics, ConsumerMetricsSnapshot},
     offsets::{self, EARLIEST_TIMESTAMP, LATEST_TIMESTAMP},
     record::{ConsumerRecords, OffsetAndTimestamp},
     subscription::{FetchPosition, SubscriptionState},
@@ -73,6 +74,8 @@ pub struct Consumer {
     heartbeat_task: JoinHandle<()>,
     /// When the last background auto-commit ran.
     last_auto_commit: Option<Instant>,
+    /// Native request/record counters (Java's `Consumer.metrics()`).
+    metrics: ConsumerMetrics,
 }
 
 /// Callback invoked with the result of an asynchronous offset commit.
@@ -136,11 +139,13 @@ impl Consumer {
             WireClient::connect_with_brokers(connection, config.client_id.clone(), endpoints);
         let needs_rejoin = Arc::new(AtomicBool::new(false));
         let heartbeat_context: Arc<Mutex<Option<HeartbeatContext>>> = Arc::new(Mutex::new(None));
+        let metrics = ConsumerMetrics::default();
         let heartbeat_task = tokio::spawn(heartbeat_loop(
             wire.clone(),
             Arc::clone(&heartbeat_context),
             Arc::clone(&needs_rejoin),
             runtime.heartbeat_interval,
+            metrics.clone(),
         ));
         Ok(Self {
             wire,
@@ -155,6 +160,7 @@ impl Consumer {
             heartbeat_context,
             heartbeat_task,
             last_auto_commit: None,
+            metrics,
         })
     }
 
@@ -368,7 +374,12 @@ impl Consumer {
         }
         let group_id = self.require_group_id()?;
         let coordinator = self.ensure_coordinator(&group_id).await?;
-        coordinator::commit_offsets(&self.wire, coordinator, &group_id, &offsets).await
+        let result =
+            coordinator::commit_offsets(&self.wire, coordinator, &group_id, &offsets).await;
+        if result.is_ok() {
+            self.metrics.record_commit();
+        }
+        result
     }
 
     /// Commit the current position of every assigned partition without blocking;
@@ -400,8 +411,12 @@ impl Consumer {
         let group_id = self.require_group_id()?;
         let coordinator = self.ensure_coordinator(&group_id).await?;
         let wire = self.wire.clone();
+        let metrics = self.metrics.clone();
         let _handle = tokio::spawn(async move {
             let result = coordinator::commit_offsets(&wire, coordinator, &group_id, &offsets).await;
+            if result.is_ok() {
+                metrics.record_commit();
+            }
             callback(result);
         });
         Ok(())
@@ -467,6 +482,14 @@ impl Consumer {
             ));
         }
         Ok(response.client_instance_id)
+    }
+
+    /// A snapshot of this consumer's metrics — poll/record/fetch/commit/heartbeat
+    /// and rebalance totals, plus the wire buffer-pool counters. kacrab's native
+    /// analogue of Java's `Consumer.metrics()`.
+    #[must_use]
+    pub fn metrics(&self) -> ConsumerMetricsSnapshot {
+        self.metrics.snapshot(self.wire.buffer_pool_stats())
     }
 
     /// The earliest available offset for each partition.
@@ -548,6 +571,7 @@ impl Consumer {
     /// partition needs a reset and `auto.offset.reset=none`.
     pub async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords> {
         self.check_wakeup()?;
+        self.metrics.record_poll();
         let start = Instant::now();
 
         loop {
@@ -567,6 +591,7 @@ impl Consumer {
                 let fetchable = self.subscription.fetchable_partitions();
                 fetchable_empty = fetchable.is_empty();
                 if !fetchable.is_empty() {
+                    self.metrics.record_fetch();
                     let fetched = fetch::fetch(
                         &self.wire,
                         &self.config,
@@ -589,6 +614,7 @@ impl Consumer {
                         );
                     }
                     if !records.is_empty() {
+                        self.metrics.record_records(records.count());
                         return Ok(records);
                     }
                 }
@@ -790,6 +816,7 @@ impl Consumer {
                 },
             )
             .await?;
+        self.metrics.record_rebalance();
         self.needs_rejoin.store(false, Ordering::SeqCst);
         // Cooperative rebalance: having dropped the revoked partitions from our
         // reported ownership, rejoin so the coordinator can hand them to their new
@@ -941,7 +968,12 @@ impl Consumer {
         }
         let group_id = self.config.group_id.clone();
         let coordinator = self.ensure_coordinator(&group_id).await?;
-        coordinator::commit_offsets(&self.wire, coordinator, &group_id, &offsets).await
+        let result =
+            coordinator::commit_offsets(&self.wire, coordinator, &group_id, &offsets).await;
+        if result.is_ok() {
+            self.metrics.record_commit();
+        }
+        result
     }
 
     fn ensure_assigned(&self, partition: &TopicPartition) -> Result<()> {
@@ -1046,6 +1078,7 @@ async fn heartbeat_loop(
     context: Arc<Mutex<Option<HeartbeatContext>>>,
     needs_rejoin: Arc<AtomicBool>,
     interval: Duration,
+    metrics: ConsumerMetrics,
 ) {
     loop {
         tokio::time::sleep(interval).await;
@@ -1063,7 +1096,7 @@ async fn heartbeat_loop(
             group_instance_id: group.group_instance_id.as_deref(),
         };
         match coordinator::heartbeat(&context, group.generation_id, &group.member_id).await {
-            Ok(ErrorCode::None) => {},
+            Ok(ErrorCode::None) => metrics.record_heartbeat(),
             Ok(_) => needs_rejoin.store(true, Ordering::SeqCst),
             Err(_transient) => {},
         }
