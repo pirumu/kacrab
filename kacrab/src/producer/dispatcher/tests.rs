@@ -455,6 +455,7 @@ fn metadata_with_partitions(topic: &str, partitions: usize) -> ClusterMetadata {
         topics: vec![TopicMetadata {
             name: topic.to_owned(),
             topic_id: KafkaUuid::ZERO,
+            is_internal: false,
             partitions: partition_metadata,
         }],
     }

@@ -1,7 +1,7 @@
 # kacrab
 
-The main `kacrab` crate: a Rust-native Kafka client with Java-compatible auth and
-producer surfaces. The protocol/wire/producer logic is pure Rust (not a
+The main `kacrab` crate: a Rust-native Kafka client with Java-compatible auth,
+producer, and admin surfaces. The protocol/wire/producer logic is pure Rust (not a
 `librdkafka` wrapper); the dependency tree is not fully C-free, though — TLS
 crypto (`rustls` + `aws-lc-rs`) is C/assembly and always present, and the
 optional `zstd` / `lz4-hc` / `gssapi` features add C.
@@ -11,18 +11,24 @@ the current base. The active runtime surface is:
 
 - `config` - Java-style `ClientConfig`, typed producer/consumer/admin configs,
   official Kafka config metadata, and strict validation.
+- `common` - shared `org.apache.kafka.common` domain types (`TopicPartition`,
+  `OffsetAndMetadata`, `ConsumerGroupMetadata`, `Node`), always compiled and
+  re-exported by `producer`/`admin`.
 - `wire` - Tokio broker sessions, ApiVersions negotiation, TLS, SASL,
   metadata, bounded in-flight requests, and request/response dispatch.
 - `producer` - Java-style producer builder, batching, linger, bounded memory,
   compression, idempotence, transactions, routing, and multi-broker dispatch
   behind the `producer` feature.
+- `admin` - Java-style `AdminClient` covering the full Apache Kafka 4.3.0
+  `Admin` operation surface (62 operations), behind the `admin` feature.
 
-The remaining product order is consumer, then admin, then streams.
+The remaining product order is consumer, then streams.
 
 ## Java Compatibility
 
-Auth and producer are Java-compatible targets for the implemented surface
-(outcome-faithful to the Java client, not a literal class-for-class port):
+Auth, producer, and admin are Java-compatible targets for the implemented
+surface (outcome-faithful to the Java client, not a literal class-for-class
+port):
 
 - Use familiar Java client keys such as `bootstrap.servers`,
   `security.protocol`, `ssl.truststore.location`, `sasl.mechanism`,
@@ -49,10 +55,13 @@ Rust cannot load Java classes, so custom auth should use the native Rust
       idempotence, transactions, and multi-broker dispatch.
 - [x] Protocol foundation: primitives, record batches, generated Kafka schemas,
       compression, and Java oracle compatibility checks.
+- [x] Admin: the full Apache Kafka 4.3.0 `Admin` operation surface (62 ops —
+      topics/partitions/configs, ACLs, groups & offsets, transactions,
+      delegation tokens, quotas, SCRAM, reassignments, `KRaft` quorum, share &
+      streams groups) through the same auth/transport stack, verified against a
+      real broker.
 - [ ] Consumer: manual assignment, fetch, offsets, group coordination,
       rebalance, and backpressure.
-- [ ] Admin: topic, partition, ACL, config, and cluster operations through the
-      same auth/transport stack.
 - [ ] Streams: topology runtime, state stores, repartitioning, changelog topics,
       and exactly-once processing on producer transactions.
 
@@ -65,6 +74,7 @@ kacrab = { git = "https://github.com/pirumu/kacrab", features = ["producer"] }
 Optional runtime features:
 
 - `producer` - enables the producer API.
+- `admin` - enables the `AdminClient` API.
 - `gzip`, `snappy`, `lz4` - pure-Rust record-batch compression codecs (no C
   toolchain).
 - `zstd` - record-batch compression via the C `libzstd` (`zstd-sys`); needs a C

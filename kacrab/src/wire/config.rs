@@ -106,6 +106,10 @@ pub struct ConnectionConfig {
     pub reconnect_backoff_max: Duration,
     /// Number of reusable read/write buffers retained per wire client.
     pub buffer_pool_capacity: usize,
+    /// Ask brokers to auto-create unknown topics named in metadata requests
+    /// (`allow.auto.create.topics`). The broker only honors this when its own
+    /// `auto.create.topics.enable` is set; mirrors the Java/KafkaJS flag.
+    pub allow_auto_topic_creation: bool,
 }
 
 impl Default for ConnectionConfig {
@@ -132,6 +136,7 @@ impl Default for ConnectionConfig {
             reconnect_backoff_initial: DEFAULT_RECONNECT_BACKOFF_INITIAL,
             reconnect_backoff_max: DEFAULT_RECONNECT_BACKOFF_MAX,
             buffer_pool_capacity: DEFAULT_BUFFER_POOL_CAPACITY,
+            allow_auto_topic_creation: false,
         }
     }
 }
@@ -289,6 +294,14 @@ impl ConnectionConfig {
     #[must_use]
     pub const fn buffer_pool_capacity(mut self, buffers: usize) -> Self {
         self.buffer_pool_capacity = buffers;
+        self
+    }
+
+    /// Enable broker-side auto topic creation for metadata requests
+    /// (`allow.auto.create.topics`).
+    #[must_use]
+    pub const fn allow_auto_topic_creation(mut self, allow: bool) -> Self {
+        self.allow_auto_topic_creation = allow;
         self
     }
 }

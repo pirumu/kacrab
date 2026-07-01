@@ -55,6 +55,20 @@ batched alongside them** — the bug described in
 [Failure modes](./failure-modes.md). A 6-partition burst across a broker loss
 delivers `6/6`.
 
+## Admin — the full operation surface
+
+`docker-compose.kafka.yml` (core ops), `docker-compose.kafka-admin.yml` (a broker
+with `StandardAuthorizer` and the share/streams features, for ACLs and the Kafka
+4.x group families), and `docker-compose.auth.yml` (SASL, for delegation tokens)
+back `kacrab/tests/real_kafka_admin*.rs`. Every one of the 62 admin operations is
+exercised across all four routing paths (controller, coordinator, per-leader,
+broadcast). Operations that need cluster state the test cannot create are
+asserted at the wire layer — a well-formed broker error code proves correct
+encode/decode. This pass caught real wire bugs the unit tests could not: an empty
+`ApiVersions` client name, the `OffsetCommit`/`OffsetFetch` v10 topic-name-vs-id
+switch, and the missing transient-coordinator-error retry (see
+[The admin client](./admin.md)).
+
 > **Note**
 >
 > These are `#[ignore]` integration tests — they need the compose environments and

@@ -1,14 +1,21 @@
 # Kacrab
 
-A Rust-native Kafka client (producer-first), built from the Kafka protocol up —
+A Rust-native Kafka client (producer + admin), built from the Kafka protocol up —
 a native implementation, not a `librdkafka` wrapper. The producer is
 wire-compatible with the Java client — including the idempotent sequence/epoch
-recovery state machine — and is memory- and CPU-efficient (native, no JVM).
-Consumer/admin are not implemented yet.
+recovery state machine — and is memory- and CPU-efficient (native, no JVM). The
+admin client covers the full Apache Kafka 4.3.0 `Admin` operation surface (62
+operations) and is verified against a real broker. The consumer is not
+implemented yet.
 
-* **Java-compatible auth and producer**: the authentication and producer
-  surfaces use Kafka property names, defaults, protocol flow, and wire
+* **Java-compatible auth, producer, and admin**: the authentication, producer,
+  and admin surfaces use Kafka property names, defaults, protocol flow, and wire
   semantics as the compatibility target.
+* **Full admin client** (`admin` feature): topics, partitions, configs
+  (incremental), ACLs, consumer groups & offsets, transactions, delegation
+  tokens, quotas, SCRAM credentials, partition reassignments, `KRaft` quorum,
+  and the Kafka 4.x share/streams group families — 62 operations at Apache Kafka
+  4.3.0 parity, verified end-to-end against a real broker.
 * **Native Rust, not a `librdkafka` wrapper**: the Kafka protocol, wire, and
   producer logic are pure Rust, with workspace `unsafe_code` forbidden. The
   dependency tree is not entirely C-free, though: the TLS crypto provider
@@ -48,17 +55,21 @@ Consumer/admin are not implemented yet.
 ## Status
 
 > Warning: `kacrab` is pre-release software. It has useful protocol, wire,
-> auth, and producer coverage, but the public API and runtime behavior are not
-> stable release guarantees yet.
+> auth, producer, and admin coverage, but the public API and runtime behavior
+> are not stable release guarantees yet.
 
-Protocol, wire, auth, and producer now have a usable baseline. The producer is
-the most mature surface: on a single-node broker it holds throughput parity with
+Protocol, wire, auth, producer, and admin now have a usable baseline. The
+producer is the most mature surface: on a single-node broker it holds throughput
+parity with
 the Java client at `acks=all` + idempotence (~4.7M × 10B records/sec ≈ 45 MiB/s;
 the ~12% records/sec edge is broker-bound noise, not a language win) while using
 ~4x less memory and ~1.5x less CPU — Java keeps a lower tail latency (see
 [Benchmarks](#benchmarks)). Multi-broker dispatch, leadership-change recovery,
 the SASL/TLS surface, and every compression codec are verified end-to-end
-against real brokers. The remaining focus before consumer work is sustained
+against real brokers. The admin client implements the full Apache Kafka 4.3.0 `Admin` operation surface
+(62 operations) and is verified against a real broker across every routing path
+(controller, coordinator with transient-error retry, per-leader, and broadcast);
+see [Admin](#admin). The remaining focus before consumer work is sustained
 stress / latency testing (see [Production acceptance](#production-acceptance)).
 
 Test coverage (`cargo llvm-cov`): **~87% maintained-source** line coverage
@@ -69,9 +80,9 @@ and the Kafka-style metrics library (sensors, stats, quotas, reporters) are
 directly tested; remaining gaps are mechanical error-clone arms and rare
 defensive branches. The raw whole-workspace figure (~66%) is lower only because
 it counts generated `kacrab-protocol` message structs for APIs not yet wired
-(consumer/admin/streams).
+(consumer/streams).
 
-Auth and producer are treated as **Java-compatible targets** for the
+Auth, producer, and admin are treated as **Java-compatible targets** for the
 implemented surface:
 
 - Kafka config keys work through `ClientConfig` and
@@ -167,10 +178,29 @@ implemented surface:
   - [ ] Group coordination: join, sync, heartbeat, rebalance, and offset commit.
   - [ ] Backpressure and multi-broker fetch scheduling shaped for the existing
         wire reactor.
-- [ ] Admin
-  - [ ] Topic, partition, ACL, config, and cluster metadata operations.
-  - [ ] Kafka admin config facade wired through the same auth/transport
-        stack.
+- [x] Admin usable baseline (`admin` feature)
+  - [x] Full Apache Kafka 4.3.0 `Admin` operation surface — 62 operations:
+        topics/partitions, describe/incremental-alter configs, ACLs, consumer
+        groups & offsets, `list_offsets`/`delete_records`/`elect_leaders`,
+        producers/transactions (`describe`/`list`/`abort`/`fence`), partition
+        reassignments, delegation tokens, client quotas, user SCRAM credentials,
+        log dirs, features, `KRaft` quorum/voters, and the Kafka 4.x share &
+        streams group families, plus `client_instance_id`/`metrics` accessors.
+  - [x] `metrics()` returns a typed `AdminMetricsSnapshot` (request totals,
+        error totals, average/max request latency, and the shared wire
+        buffer-pool counters) — kacrab's native analogue of Java's
+        `Admin.metrics()`.
+  - [x] `AdminClient::new`/`from_client_config`/`from_properties`/`from_map` and
+        `ClientConfig::create_admin`, wired through the same auth/transport stack
+        (SASL/TLS) as the producer.
+  - [x] Routing: controller routing with `NOT_CONTROLLER` refresh-retry,
+        `FindCoordinator` group/transaction coordinator routing with
+        transient-coordinator-error retry, per-leader request batching, and
+        broadcast; topic-id resolution for the v10 offset APIs.
+  - [x] Verified end-to-end against a real Apache Kafka 4.3.0 broker across all
+        routing paths, including ACLs, quotas, SCRAM, and delegation tokens over
+        SASL (`kacrab/tests/real_kafka_admin*.rs`,
+        `docker-compose.kafka{,-admin}.yml` + `docker-compose.auth.yml`).
 - [ ] Streams
   - [ ] Topology API, processor runtime, repartitioning, state stores, and
         changelog topics.
@@ -318,7 +348,12 @@ kacrab = {
 }
 ```
 
-GSSAPI/Kerberos support is behind the `gssapi` feature.
+The admin client is behind the `admin` feature; GSSAPI/Kerberos support is
+behind the `gssapi` feature.
+
+```toml
+kacrab = { git = "https://github.com/pirumu/kacrab", features = ["producer", "admin"] }
+```
 
 ## Producer
 
@@ -449,6 +484,47 @@ Custom **deserializers** are consumer-side and are not available yet — the
 consumer is not implemented (see [Current Status](#current-status)). A runnable
 version of the above lives in
 [`examples/typed_serializer.rs`](examples/typed_serializer.rs).
+
+## Admin
+
+The admin client (`admin` feature) mirrors Java's `Admin` with snake_case
+methods that return plain `Result<T>` / `Result<()>` and a per-call options
+struct. Build it from the same Kafka config keys as the producer (including
+`security.protocol`/`sasl.*`/TLS), then call any of the 62 operations:
+
+```rust
+use kacrab::admin::{AdminClient, CreateTopicsOptions, NewTopic};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let admin = AdminClient::from_map([("bootstrap.servers", "localhost:9092")]).await?;
+
+    admin
+        .create_topics(vec![NewTopic::new("orders", 6, 3)], CreateTopicsOptions::default())
+        .await?;
+
+    for topic in admin.list_topics(Default::default()).await? {
+        println!("{}", topic.name);
+    }
+
+    let cluster = admin.describe_cluster().await?;
+    println!("controller: {:?}", cluster.controller.map(|node| node.id));
+    Ok(())
+}
+```
+
+The full surface — configs (incremental), ACLs, consumer/share/streams groups &
+offsets, transactions, delegation tokens, quotas, SCRAM credentials, partition
+reassignments, `KRaft` quorum/voters, and more — is covered; every operation is
+verified against a real Apache Kafka 4.3.0 broker
+(`kacrab/tests/real_kafka_admin*.rs`). Shared `org.apache.kafka.common` domain
+types (`TopicPartition`, `OffsetAndMetadata`, `Node`, ...) live in
+`kacrab::common` and are re-exported by both `producer` and `admin`.
+
+A runnable version — describe cluster, create/list/describe topics, alter
+configs, add partitions, list offsets, and delete — lives in
+[`examples/admin.rs`](examples/admin.rs)
+(`cargo run -p kacrab-examples --example admin`).
 
 ## Auth
 
@@ -660,7 +736,7 @@ Limits, read these before trusting the headline:
 
 ## Workspace
 
-- `kacrab/` - public runtime crate: config, wire, producer.
+- `kacrab/` - public runtime crate: config, wire, common, producer, admin.
 - `kacrab-protocol/` - protocol primitives, generated Kafka schemas, record
   batch codecs, compression, and Java interop tests.
 - `kacrab-codegen/` - protocol and config code generation from upstream Kafka.

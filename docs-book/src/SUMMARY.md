@@ -7,6 +7,7 @@
 - [System overview](./overview.md)
 - [The wire layer](./wire.md)
 - [The producer pipeline](./producer/pipeline.md)
+- [The admin client](./admin.md)
 
 # Algorithms (the deep dives)
 
