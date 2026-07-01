@@ -328,18 +328,35 @@ fn collect_string_constants(sources: &BTreeMap<String, String>) -> BTreeMap<Stri
     reason = "Java source is scanned by byte offsets that are produced from ASCII delimiters."
 )]
 fn define_bodies(source: &str) -> Vec<&str> {
+    let bytes = source.as_bytes();
     let mut bodies = Vec::new();
     let mut search_from = 0;
-    while let Some(relative_start) = source[search_from..].find(".define(") {
-        let open = search_from + relative_start + ".define".len();
-        if let Some(close) = matching_paren(source, open) {
+    // Match `define(` and require it to be a chained `.define(` call. Kafka
+    // sometimes breaks the chain across lines as `).\n    define(`, so the dot
+    // may be separated from `define` by whitespace — look past it.
+    while let Some(relative_start) = source[search_from..].find("define(") {
+        let define_start = search_from + relative_start;
+        let open = define_start + "define".len();
+        if chained_define_call(bytes, define_start)
+            && let Some(close) = matching_paren(source, open)
+        {
             bodies.push(&source[open + 1..close]);
             search_from = close + 1;
         } else {
-            break;
+            search_from = open;
         }
     }
     bodies
+}
+
+/// Whether the `define` starting at `index` is a chained `.define(` method call:
+/// the first non-whitespace byte before it is a `.` (which also rules out longer
+/// identifiers such as `redefine`, whose preceding byte is a letter).
+fn chained_define_call(bytes: &[u8], index: usize) -> bool {
+    bytes
+        .get(..index)
+        .and_then(|prefix| prefix.iter().rev().find(|byte| !byte.is_ascii_whitespace()))
+        .is_some_and(|byte| *byte == b'.')
 }
 
 fn matching_paren(source: &str, open: usize) -> Option<usize> {
@@ -676,6 +693,42 @@ mod tests {
             parsed.configs[1].documentation.as_deref(),
             Some("Required acknowledgments.")
         );
+    }
+
+    #[test]
+    fn parses_define_broken_across_lines_after_closing_paren() {
+        // Kafka's AdminClientConfig chains the second `define` as `).\n define(`,
+        // separating the dot from `define` — the parser must still capture it
+        // (this is what made `bootstrap.controllers` go missing).
+        let source = r#"
+            public class AdminClientConfig {
+                public static final String BOOTSTRAP_SERVERS_CONFIG = "bootstrap.servers";
+                private static final String BOOTSTRAP_SERVERS_DOC = "Host list.";
+                public static final String BOOTSTRAP_CONTROLLERS_CONFIG = "bootstrap.controllers";
+                private static final String BOOTSTRAP_CONTROLLERS_DOC = "Controller list.";
+
+                static {
+                    CONFIG = new ConfigDef().define(BOOTSTRAP_SERVERS_CONFIG,
+                                            Type.LIST,
+                                            Importance.HIGH,
+                                            BOOTSTRAP_SERVERS_DOC).
+                                     define(BOOTSTRAP_CONTROLLERS_CONFIG,
+                                            Type.LIST,
+                                            Importance.HIGH,
+                                            BOOTSTRAP_CONTROLLERS_DOC);
+                }
+            }
+        "#;
+
+        let parsed = parse_client_config(KafkaConfigClient::Admin, "AdminClientConfig", source)
+            .expect("fixture should parse");
+
+        let keys: Vec<&str> = parsed
+            .configs
+            .iter()
+            .map(|config| config.key.as_str())
+            .collect();
+        assert_eq!(keys, vec!["bootstrap.servers", "bootstrap.controllers"]);
     }
 
     #[test]

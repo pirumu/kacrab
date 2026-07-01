@@ -928,99 +928,143 @@ kafka_config! {
     }
 }
 
+/// Build the shared `ConnectionConfigFields` for a client config from `$self`,
+/// taking only the nine per-client fields that differ. The other ~64 connection
+/// fields are copied verbatim, so a client missing one fails to compile — the
+/// invariant that used to live in three hand-written methods.
+macro_rules! connection_config_fields {
+    (
+        $self:ident, {
+            metadata_max_idle_ms:
+            $metadata_max_idle_ms:expr,reconnect_backoff_ms:
+            $reconnect_backoff_ms:expr,reconnect_backoff_max_ms:
+            $reconnect_backoff_max_ms:expr,retry_backoff_ms:
+            $retry_backoff_ms:expr,retry_backoff_max_ms:
+            $retry_backoff_max_ms:expr,max_in_flight_requests_per_connection:
+            $max_in_flight_requests_per_connection:expr,broker_queue_capacity:
+            $broker_queue_capacity:expr,buffer_pool_capacity:
+            $buffer_pool_capacity:expr,allow_auto_topic_creation:
+            $allow_auto_topic_creation:expr $(,)?
+        }
+    ) => {
+        ConnectionConfigFields {
+            send_buffer_bytes: $self.send_buffer_bytes,
+            receive_buffer_bytes: $self.receive_buffer_bytes,
+            request_timeout_ms: $self.request_timeout_ms,
+            metadata_max_age_ms: $self.metadata_max_age_ms,
+            metadata_recovery_strategy: $self.metadata_recovery_strategy.clone(),
+            metadata_recovery_rebootstrap_trigger_ms: $self
+                .metadata_recovery_rebootstrap_trigger_ms,
+            connections_max_idle_ms: $self.connections_max_idle_ms,
+            socket_connection_setup_timeout_ms: $self.socket_connection_setup_timeout_ms,
+            socket_connection_setup_timeout_max_ms: $self.socket_connection_setup_timeout_max_ms,
+            socket_tcp_nodelay: $self.socket_tcp_nodelay,
+            socket_tcp_notsent_lowat_bytes: $self.socket_tcp_notsent_lowat_bytes,
+            socket_tcp_quickack: $self.socket_tcp_quickack,
+            socket_tcp_user_timeout_ms: $self.socket_tcp_user_timeout_ms,
+            socket_tcp_congestion: $self.socket_tcp_congestion,
+            socket_reuse_address: $self.socket_reuse_address,
+            socket_read_buffer_capacity_bytes: $self.socket_read_buffer_capacity_bytes,
+            client_dns_lookup: $self.client_dns_lookup.clone(),
+            security_protocol: $self.security_protocol.clone(),
+            ssl_truststore_location: $self.ssl_truststore_location.clone(),
+            ssl_truststore_password: $self.ssl_truststore_password.clone(),
+            ssl_truststore_certificates: $self.ssl_truststore_certificates.clone(),
+            ssl_truststore_type: $self.ssl_truststore_type.clone(),
+            ssl_keystore_location: $self.ssl_keystore_location.clone(),
+            ssl_keystore_password: $self.ssl_keystore_password.clone(),
+            ssl_keystore_key: $self.ssl_keystore_key.clone(),
+            ssl_keystore_certificate_chain: $self.ssl_keystore_certificate_chain.clone(),
+            ssl_keystore_type: $self.ssl_keystore_type.clone(),
+            ssl_key_password: $self.ssl_key_password.clone(),
+            ssl_endpoint_identification_algorithm: $self
+                .ssl_endpoint_identification_algorithm
+                .clone(),
+            ssl_protocol: $self.ssl_protocol.clone(),
+            ssl_enabled_protocols: $self.ssl_enabled_protocols.clone(),
+            ssl_cipher_suites: $self.ssl_cipher_suites.clone(),
+            sasl_mechanism: $self.sasl_mechanism.clone(),
+            sasl_jaas_config: $self.sasl_jaas_config.clone(),
+            sasl_login_connect_timeout_ms: $self.sasl_login_connect_timeout_ms,
+            sasl_login_read_timeout_ms: $self.sasl_login_read_timeout_ms,
+            sasl_login_refresh_window_factor: $self.sasl_login_refresh_window_factor,
+            sasl_login_refresh_window_jitter: $self.sasl_login_refresh_window_jitter,
+            sasl_login_refresh_min_period_seconds: $self.sasl_login_refresh_min_period_seconds,
+            sasl_login_refresh_buffer_seconds: $self.sasl_login_refresh_buffer_seconds,
+            sasl_login_retry_backoff_ms: $self.sasl_login_retry_backoff_ms,
+            sasl_login_retry_backoff_max_ms: $self.sasl_login_retry_backoff_max_ms,
+            sasl_oauthbearer_token_endpoint_url: $self.sasl_oauthbearer_token_endpoint_url.clone(),
+            sasl_oauthbearer_assertion_file: $self.sasl_oauthbearer_assertion_file.clone(),
+            sasl_oauthbearer_client_credentials_client_id: $self
+                .sasl_oauthbearer_client_credentials_client_id
+                .clone(),
+            sasl_oauthbearer_client_credentials_client_secret: $self
+                .sasl_oauthbearer_client_credentials_client_secret
+                .clone(),
+            sasl_oauthbearer_scope: $self.sasl_oauthbearer_scope.clone(),
+            sasl_oauthbearer_assertion_private_key_file: $self
+                .sasl_oauthbearer_assertion_private_key_file
+                .clone(),
+            sasl_oauthbearer_assertion_private_key_passphrase: $self
+                .sasl_oauthbearer_assertion_private_key_passphrase
+                .clone(),
+            sasl_oauthbearer_assertion_template_file: $self
+                .sasl_oauthbearer_assertion_template_file
+                .clone(),
+            sasl_oauthbearer_assertion_algorithm: $self
+                .sasl_oauthbearer_assertion_algorithm
+                .clone(),
+            sasl_oauthbearer_assertion_claim_aud: $self
+                .sasl_oauthbearer_assertion_claim_aud
+                .clone(),
+            sasl_oauthbearer_assertion_claim_iss: $self
+                .sasl_oauthbearer_assertion_claim_iss
+                .clone(),
+            sasl_oauthbearer_assertion_claim_sub: $self
+                .sasl_oauthbearer_assertion_claim_sub
+                .clone(),
+            sasl_oauthbearer_assertion_claim_exp_seconds: $self
+                .sasl_oauthbearer_assertion_claim_exp_seconds,
+            sasl_oauthbearer_assertion_claim_nbf_seconds: $self
+                .sasl_oauthbearer_assertion_claim_nbf_seconds,
+            sasl_oauthbearer_assertion_claim_jti_include: $self
+                .sasl_oauthbearer_assertion_claim_jti_include,
+            sasl_login_callback_handler_class: $self.sasl_login_callback_handler_class.clone(),
+            sasl_client_callback_handler_class: $self.sasl_client_callback_handler_class.clone(),
+            sasl_kerberos_service_name: $self.sasl_kerberos_service_name.clone(),
+            sasl_kerberos_kinit_cmd: Some($self.sasl_kerberos_kinit_cmd.clone()),
+            sasl_kerberos_ticket_renew_window_factor: $self
+                .sasl_kerberos_ticket_renew_window_factor,
+            sasl_kerberos_ticket_renew_jitter: $self.sasl_kerberos_ticket_renew_jitter,
+            sasl_kerberos_min_time_before_relogin: $self.sasl_kerberos_min_time_before_relogin,
+            metadata_max_idle_ms: $metadata_max_idle_ms,
+            reconnect_backoff_ms: $reconnect_backoff_ms,
+            reconnect_backoff_max_ms: $reconnect_backoff_max_ms,
+            retry_backoff_ms: $retry_backoff_ms,
+            retry_backoff_max_ms: $retry_backoff_max_ms,
+            max_in_flight_requests_per_connection: $max_in_flight_requests_per_connection,
+            broker_queue_capacity: $broker_queue_capacity,
+            buffer_pool_capacity: $buffer_pool_capacity,
+            allow_auto_topic_creation: $allow_auto_topic_creation,
+        }
+    };
+}
+
 impl ProducerConfig {
     /// Builds a wire connection config from this typed producer config.
     #[must_use]
     pub fn to_connection_config(&self) -> crate::wire::ConnectionConfig {
-        connection_config_from_fields(&ConnectionConfigFields {
-            send_buffer_bytes: self.send_buffer_bytes,
-            receive_buffer_bytes: self.receive_buffer_bytes,
-            request_timeout_ms: self.request_timeout_ms,
-            metadata_max_age_ms: self.metadata_max_age_ms,
+        connection_config_from_fields(&connection_config_fields!(self, {
             metadata_max_idle_ms: self.metadata_max_idle_ms,
-            metadata_recovery_strategy: self.metadata_recovery_strategy.clone(),
-            metadata_recovery_rebootstrap_trigger_ms: self.metadata_recovery_rebootstrap_trigger_ms,
-            connections_max_idle_ms: self.connections_max_idle_ms,
             reconnect_backoff_ms: Some(self.reconnect_backoff_ms),
             reconnect_backoff_max_ms: Some(self.reconnect_backoff_max_ms),
             retry_backoff_ms: Some(self.retry_backoff_ms),
             retry_backoff_max_ms: Some(self.retry_backoff_max_ms),
-            socket_connection_setup_timeout_ms: self.socket_connection_setup_timeout_ms,
-            socket_connection_setup_timeout_max_ms: self.socket_connection_setup_timeout_max_ms,
-            socket_tcp_nodelay: self.socket_tcp_nodelay,
-            socket_tcp_notsent_lowat_bytes: self.socket_tcp_notsent_lowat_bytes,
-            socket_tcp_quickack: self.socket_tcp_quickack,
-            socket_tcp_user_timeout_ms: self.socket_tcp_user_timeout_ms,
-            socket_tcp_congestion: self.socket_tcp_congestion,
-            socket_reuse_address: self.socket_reuse_address,
-            socket_read_buffer_capacity_bytes: self.socket_read_buffer_capacity_bytes,
             max_in_flight_requests_per_connection: Some(self.max_in_flight_requests_per_connection),
             broker_queue_capacity: self.broker_queue_capacity,
             buffer_pool_capacity: self.buffer_pool_capacity,
             allow_auto_topic_creation: false,
-            security_protocol: self.security_protocol.clone(),
-            ssl_truststore_location: self.ssl_truststore_location.clone(),
-            ssl_truststore_password: self.ssl_truststore_password.clone(),
-            ssl_truststore_certificates: self.ssl_truststore_certificates.clone(),
-            ssl_truststore_type: self.ssl_truststore_type.clone(),
-            ssl_keystore_location: self.ssl_keystore_location.clone(),
-            ssl_keystore_password: self.ssl_keystore_password.clone(),
-            ssl_keystore_key: self.ssl_keystore_key.clone(),
-            ssl_keystore_certificate_chain: self.ssl_keystore_certificate_chain.clone(),
-            ssl_keystore_type: self.ssl_keystore_type.clone(),
-            ssl_key_password: self.ssl_key_password.clone(),
-            ssl_endpoint_identification_algorithm: self
-                .ssl_endpoint_identification_algorithm
-                .clone(),
-            ssl_protocol: self.ssl_protocol.clone(),
-            ssl_enabled_protocols: self.ssl_enabled_protocols.clone(),
-            ssl_cipher_suites: self.ssl_cipher_suites.clone(),
-            sasl_mechanism: self.sasl_mechanism.clone(),
-            sasl_jaas_config: self.sasl_jaas_config.clone(),
-            sasl_login_connect_timeout_ms: self.sasl_login_connect_timeout_ms,
-            sasl_login_read_timeout_ms: self.sasl_login_read_timeout_ms,
-            sasl_login_refresh_window_factor: self.sasl_login_refresh_window_factor,
-            sasl_login_refresh_window_jitter: self.sasl_login_refresh_window_jitter,
-            sasl_login_refresh_min_period_seconds: self.sasl_login_refresh_min_period_seconds,
-            sasl_login_refresh_buffer_seconds: self.sasl_login_refresh_buffer_seconds,
-            sasl_login_retry_backoff_ms: self.sasl_login_retry_backoff_ms,
-            sasl_login_retry_backoff_max_ms: self.sasl_login_retry_backoff_max_ms,
-            sasl_oauthbearer_token_endpoint_url: self.sasl_oauthbearer_token_endpoint_url.clone(),
-            sasl_oauthbearer_assertion_file: self.sasl_oauthbearer_assertion_file.clone(),
-            sasl_oauthbearer_client_credentials_client_id: self
-                .sasl_oauthbearer_client_credentials_client_id
-                .clone(),
-            sasl_oauthbearer_client_credentials_client_secret: self
-                .sasl_oauthbearer_client_credentials_client_secret
-                .clone(),
-            sasl_oauthbearer_scope: self.sasl_oauthbearer_scope.clone(),
-            sasl_oauthbearer_assertion_private_key_file: self
-                .sasl_oauthbearer_assertion_private_key_file
-                .clone(),
-            sasl_oauthbearer_assertion_private_key_passphrase: self
-                .sasl_oauthbearer_assertion_private_key_passphrase
-                .clone(),
-            sasl_oauthbearer_assertion_template_file: self
-                .sasl_oauthbearer_assertion_template_file
-                .clone(),
-            sasl_oauthbearer_assertion_algorithm: self.sasl_oauthbearer_assertion_algorithm.clone(),
-            sasl_oauthbearer_assertion_claim_aud: self.sasl_oauthbearer_assertion_claim_aud.clone(),
-            sasl_oauthbearer_assertion_claim_iss: self.sasl_oauthbearer_assertion_claim_iss.clone(),
-            sasl_oauthbearer_assertion_claim_sub: self.sasl_oauthbearer_assertion_claim_sub.clone(),
-            sasl_oauthbearer_assertion_claim_exp_seconds: self
-                .sasl_oauthbearer_assertion_claim_exp_seconds,
-            sasl_oauthbearer_assertion_claim_nbf_seconds: self
-                .sasl_oauthbearer_assertion_claim_nbf_seconds,
-            sasl_oauthbearer_assertion_claim_jti_include: self
-                .sasl_oauthbearer_assertion_claim_jti_include,
-            sasl_login_callback_handler_class: self.sasl_login_callback_handler_class.clone(),
-            sasl_client_callback_handler_class: self.sasl_client_callback_handler_class.clone(),
-            sasl_kerberos_service_name: self.sasl_kerberos_service_name.clone(),
-            sasl_kerberos_kinit_cmd: Some(self.sasl_kerberos_kinit_cmd.clone()),
-            sasl_kerberos_ticket_renew_window_factor: self.sasl_kerberos_ticket_renew_window_factor,
-            sasl_kerberos_ticket_renew_jitter: self.sasl_kerberos_ticket_renew_jitter,
-            sasl_kerberos_min_time_before_relogin: self.sasl_kerberos_min_time_before_relogin,
-        })
+        }))
     }
 
     /// Builds runtime producer settings from this typed producer config.
@@ -1036,95 +1080,17 @@ impl ConsumerConfig {
     /// Builds a wire connection config from this typed consumer config.
     #[must_use]
     pub fn to_connection_config(&self) -> crate::wire::ConnectionConfig {
-        connection_config_from_fields(&ConnectionConfigFields {
-            send_buffer_bytes: self.send_buffer_bytes,
-            receive_buffer_bytes: self.receive_buffer_bytes,
-            request_timeout_ms: self.request_timeout_ms,
-            metadata_max_age_ms: self.metadata_max_age_ms,
+        connection_config_from_fields(&connection_config_fields!(self, {
             metadata_max_idle_ms: DurationMs::from_millis(300_000),
-            metadata_recovery_strategy: self.metadata_recovery_strategy.clone(),
-            metadata_recovery_rebootstrap_trigger_ms: self.metadata_recovery_rebootstrap_trigger_ms,
-            connections_max_idle_ms: self.connections_max_idle_ms,
             reconnect_backoff_ms: None,
             reconnect_backoff_max_ms: None,
             retry_backoff_ms: None,
             retry_backoff_max_ms: None,
-            socket_connection_setup_timeout_ms: self.socket_connection_setup_timeout_ms,
-            socket_connection_setup_timeout_max_ms: self.socket_connection_setup_timeout_max_ms,
-            socket_tcp_nodelay: self.socket_tcp_nodelay,
-            socket_tcp_notsent_lowat_bytes: self.socket_tcp_notsent_lowat_bytes,
-            socket_tcp_quickack: self.socket_tcp_quickack,
-            socket_tcp_user_timeout_ms: self.socket_tcp_user_timeout_ms,
-            socket_tcp_congestion: self.socket_tcp_congestion,
-            socket_reuse_address: self.socket_reuse_address,
-            socket_read_buffer_capacity_bytes: self.socket_read_buffer_capacity_bytes,
             max_in_flight_requests_per_connection: None,
             broker_queue_capacity: None,
             buffer_pool_capacity: None,
             allow_auto_topic_creation: self.allow_auto_create_topics,
-            security_protocol: self.security_protocol.clone(),
-            ssl_truststore_location: self.ssl_truststore_location.clone(),
-            ssl_truststore_password: self.ssl_truststore_password.clone(),
-            ssl_truststore_certificates: self.ssl_truststore_certificates.clone(),
-            ssl_truststore_type: self.ssl_truststore_type.clone(),
-            ssl_keystore_location: self.ssl_keystore_location.clone(),
-            ssl_keystore_password: self.ssl_keystore_password.clone(),
-            ssl_keystore_key: self.ssl_keystore_key.clone(),
-            ssl_keystore_certificate_chain: self.ssl_keystore_certificate_chain.clone(),
-            ssl_keystore_type: self.ssl_keystore_type.clone(),
-            ssl_key_password: self.ssl_key_password.clone(),
-            ssl_endpoint_identification_algorithm: self
-                .ssl_endpoint_identification_algorithm
-                .clone(),
-            ssl_protocol: self.ssl_protocol.clone(),
-            ssl_enabled_protocols: self.ssl_enabled_protocols.clone(),
-            ssl_cipher_suites: self.ssl_cipher_suites.clone(),
-            sasl_mechanism: self.sasl_mechanism.clone(),
-            sasl_jaas_config: self.sasl_jaas_config.clone(),
-            sasl_login_connect_timeout_ms: self.sasl_login_connect_timeout_ms,
-            sasl_login_read_timeout_ms: self.sasl_login_read_timeout_ms,
-            sasl_login_refresh_window_factor: self.sasl_login_refresh_window_factor,
-            sasl_login_refresh_window_jitter: self.sasl_login_refresh_window_jitter,
-            sasl_login_refresh_min_period_seconds: self.sasl_login_refresh_min_period_seconds,
-            sasl_login_refresh_buffer_seconds: self.sasl_login_refresh_buffer_seconds,
-            sasl_login_retry_backoff_ms: self.sasl_login_retry_backoff_ms,
-            sasl_login_retry_backoff_max_ms: self.sasl_login_retry_backoff_max_ms,
-            sasl_oauthbearer_token_endpoint_url: self.sasl_oauthbearer_token_endpoint_url.clone(),
-            sasl_oauthbearer_assertion_file: self.sasl_oauthbearer_assertion_file.clone(),
-            sasl_oauthbearer_client_credentials_client_id: self
-                .sasl_oauthbearer_client_credentials_client_id
-                .clone(),
-            sasl_oauthbearer_client_credentials_client_secret: self
-                .sasl_oauthbearer_client_credentials_client_secret
-                .clone(),
-            sasl_oauthbearer_scope: self.sasl_oauthbearer_scope.clone(),
-            sasl_oauthbearer_assertion_private_key_file: self
-                .sasl_oauthbearer_assertion_private_key_file
-                .clone(),
-            sasl_oauthbearer_assertion_private_key_passphrase: self
-                .sasl_oauthbearer_assertion_private_key_passphrase
-                .clone(),
-            sasl_oauthbearer_assertion_template_file: self
-                .sasl_oauthbearer_assertion_template_file
-                .clone(),
-            sasl_oauthbearer_assertion_algorithm: self.sasl_oauthbearer_assertion_algorithm.clone(),
-            sasl_oauthbearer_assertion_claim_aud: self.sasl_oauthbearer_assertion_claim_aud.clone(),
-            sasl_oauthbearer_assertion_claim_iss: self.sasl_oauthbearer_assertion_claim_iss.clone(),
-            sasl_oauthbearer_assertion_claim_sub: self.sasl_oauthbearer_assertion_claim_sub.clone(),
-            sasl_oauthbearer_assertion_claim_exp_seconds: self
-                .sasl_oauthbearer_assertion_claim_exp_seconds,
-            sasl_oauthbearer_assertion_claim_nbf_seconds: self
-                .sasl_oauthbearer_assertion_claim_nbf_seconds,
-            sasl_oauthbearer_assertion_claim_jti_include: self
-                .sasl_oauthbearer_assertion_claim_jti_include,
-            sasl_login_callback_handler_class: self.sasl_login_callback_handler_class.clone(),
-            sasl_client_callback_handler_class: self.sasl_client_callback_handler_class.clone(),
-            sasl_kerberos_service_name: self.sasl_kerberos_service_name.clone(),
-            sasl_kerberos_kinit_cmd: Some(self.sasl_kerberos_kinit_cmd.clone()),
-            sasl_kerberos_ticket_renew_window_factor: self.sasl_kerberos_ticket_renew_window_factor,
-            sasl_kerberos_ticket_renew_jitter: self.sasl_kerberos_ticket_renew_jitter,
-            sasl_kerberos_min_time_before_relogin: self.sasl_kerberos_min_time_before_relogin,
-        })
+        }))
     }
 }
 
@@ -1132,95 +1098,17 @@ impl AdminConfig {
     /// Builds a wire connection config from this typed admin config.
     #[must_use]
     pub fn to_connection_config(&self) -> crate::wire::ConnectionConfig {
-        connection_config_from_fields(&ConnectionConfigFields {
-            send_buffer_bytes: self.send_buffer_bytes,
-            receive_buffer_bytes: self.receive_buffer_bytes,
-            request_timeout_ms: self.request_timeout_ms,
-            metadata_max_age_ms: self.metadata_max_age_ms,
+        connection_config_from_fields(&connection_config_fields!(self, {
             metadata_max_idle_ms: DurationMs::from_millis(300_000),
-            metadata_recovery_strategy: self.metadata_recovery_strategy.clone(),
-            metadata_recovery_rebootstrap_trigger_ms: self.metadata_recovery_rebootstrap_trigger_ms,
-            connections_max_idle_ms: self.connections_max_idle_ms,
             reconnect_backoff_ms: None,
             reconnect_backoff_max_ms: None,
             retry_backoff_ms: None,
             retry_backoff_max_ms: None,
-            socket_connection_setup_timeout_ms: self.socket_connection_setup_timeout_ms,
-            socket_connection_setup_timeout_max_ms: self.socket_connection_setup_timeout_max_ms,
-            socket_tcp_nodelay: self.socket_tcp_nodelay,
-            socket_tcp_notsent_lowat_bytes: self.socket_tcp_notsent_lowat_bytes,
-            socket_tcp_quickack: self.socket_tcp_quickack,
-            socket_tcp_user_timeout_ms: self.socket_tcp_user_timeout_ms,
-            socket_tcp_congestion: self.socket_tcp_congestion,
-            socket_reuse_address: self.socket_reuse_address,
-            socket_read_buffer_capacity_bytes: self.socket_read_buffer_capacity_bytes,
             max_in_flight_requests_per_connection: None,
             broker_queue_capacity: None,
             buffer_pool_capacity: None,
             allow_auto_topic_creation: false,
-            security_protocol: self.security_protocol.clone(),
-            ssl_truststore_location: self.ssl_truststore_location.clone(),
-            ssl_truststore_password: self.ssl_truststore_password.clone(),
-            ssl_truststore_certificates: self.ssl_truststore_certificates.clone(),
-            ssl_truststore_type: self.ssl_truststore_type.clone(),
-            ssl_keystore_location: self.ssl_keystore_location.clone(),
-            ssl_keystore_password: self.ssl_keystore_password.clone(),
-            ssl_keystore_key: self.ssl_keystore_key.clone(),
-            ssl_keystore_certificate_chain: self.ssl_keystore_certificate_chain.clone(),
-            ssl_keystore_type: self.ssl_keystore_type.clone(),
-            ssl_key_password: self.ssl_key_password.clone(),
-            ssl_endpoint_identification_algorithm: self
-                .ssl_endpoint_identification_algorithm
-                .clone(),
-            ssl_protocol: self.ssl_protocol.clone(),
-            ssl_enabled_protocols: self.ssl_enabled_protocols.clone(),
-            ssl_cipher_suites: self.ssl_cipher_suites.clone(),
-            sasl_mechanism: self.sasl_mechanism.clone(),
-            sasl_jaas_config: self.sasl_jaas_config.clone(),
-            sasl_login_connect_timeout_ms: self.sasl_login_connect_timeout_ms,
-            sasl_login_read_timeout_ms: self.sasl_login_read_timeout_ms,
-            sasl_login_refresh_window_factor: self.sasl_login_refresh_window_factor,
-            sasl_login_refresh_window_jitter: self.sasl_login_refresh_window_jitter,
-            sasl_login_refresh_min_period_seconds: self.sasl_login_refresh_min_period_seconds,
-            sasl_login_refresh_buffer_seconds: self.sasl_login_refresh_buffer_seconds,
-            sasl_login_retry_backoff_ms: self.sasl_login_retry_backoff_ms,
-            sasl_login_retry_backoff_max_ms: self.sasl_login_retry_backoff_max_ms,
-            sasl_oauthbearer_token_endpoint_url: self.sasl_oauthbearer_token_endpoint_url.clone(),
-            sasl_oauthbearer_assertion_file: self.sasl_oauthbearer_assertion_file.clone(),
-            sasl_oauthbearer_client_credentials_client_id: self
-                .sasl_oauthbearer_client_credentials_client_id
-                .clone(),
-            sasl_oauthbearer_client_credentials_client_secret: self
-                .sasl_oauthbearer_client_credentials_client_secret
-                .clone(),
-            sasl_oauthbearer_scope: self.sasl_oauthbearer_scope.clone(),
-            sasl_oauthbearer_assertion_private_key_file: self
-                .sasl_oauthbearer_assertion_private_key_file
-                .clone(),
-            sasl_oauthbearer_assertion_private_key_passphrase: self
-                .sasl_oauthbearer_assertion_private_key_passphrase
-                .clone(),
-            sasl_oauthbearer_assertion_template_file: self
-                .sasl_oauthbearer_assertion_template_file
-                .clone(),
-            sasl_oauthbearer_assertion_algorithm: self.sasl_oauthbearer_assertion_algorithm.clone(),
-            sasl_oauthbearer_assertion_claim_aud: self.sasl_oauthbearer_assertion_claim_aud.clone(),
-            sasl_oauthbearer_assertion_claim_iss: self.sasl_oauthbearer_assertion_claim_iss.clone(),
-            sasl_oauthbearer_assertion_claim_sub: self.sasl_oauthbearer_assertion_claim_sub.clone(),
-            sasl_oauthbearer_assertion_claim_exp_seconds: self
-                .sasl_oauthbearer_assertion_claim_exp_seconds,
-            sasl_oauthbearer_assertion_claim_nbf_seconds: self
-                .sasl_oauthbearer_assertion_claim_nbf_seconds,
-            sasl_oauthbearer_assertion_claim_jti_include: self
-                .sasl_oauthbearer_assertion_claim_jti_include,
-            sasl_login_callback_handler_class: self.sasl_login_callback_handler_class.clone(),
-            sasl_client_callback_handler_class: self.sasl_client_callback_handler_class.clone(),
-            sasl_kerberos_service_name: self.sasl_kerberos_service_name.clone(),
-            sasl_kerberos_kinit_cmd: Some(self.sasl_kerberos_kinit_cmd.clone()),
-            sasl_kerberos_ticket_renew_window_factor: self.sasl_kerberos_ticket_renew_window_factor,
-            sasl_kerberos_ticket_renew_jitter: self.sasl_kerberos_ticket_renew_jitter,
-            sasl_kerberos_min_time_before_relogin: self.sasl_kerberos_min_time_before_relogin,
-        })
+        }))
     }
 }
 
@@ -1256,6 +1144,7 @@ struct ConnectionConfigFields {
     broker_queue_capacity: Option<usize>,
     buffer_pool_capacity: Option<usize>,
     allow_auto_topic_creation: bool,
+    client_dns_lookup: String,
     security_protocol: String,
     ssl_truststore_location: Option<String>,
     ssl_truststore_password: Option<String>,
@@ -1358,6 +1247,7 @@ fn connection_config_from_fields(fields: &ConnectionConfigFields) -> crate::wire
             .buffer_pool_capacity
             .unwrap_or(default.buffer_pool_capacity),
         allow_auto_topic_creation: fields.allow_auto_topic_creation,
+        use_all_dns_ips: dns_lookup_uses_all_ips(&fields.client_dns_lookup),
     }
 }
 
@@ -1380,6 +1270,13 @@ fn metadata_recovery_strategy(value: &str) -> crate::wire::MetadataRecoveryStrat
         "none" => crate::wire::MetadataRecoveryStrategy::None,
         _ => crate::wire::MetadataRecoveryStrategy::Rebootstrap,
     }
+}
+
+/// Whether `client.dns.lookup` asks for every resolved IP to be tried. Kafka's
+/// two 4.x modes (`use_all_dns_ips`, `resolve_canonical_bootstrap_servers_only`)
+/// both try all addresses; the removed legacy `default` uses only the first.
+fn dns_lookup_uses_all_ips(value: &str) -> bool {
+    !matches!(value, "default")
 }
 
 fn tls_config_from_fields(fields: &ConnectionConfigFields) -> crate::wire::TlsConfig {
@@ -1794,6 +1691,24 @@ kafka_config! {
         #[source("https://kafka.apache.org/43/configuration/consumer-configs/#consumerconfigs_enable.auto.commit")]
         #[comment("Whether the consumer should periodically commit offsets in the background.")]
         enable_auto_commit: bool,
+
+        #[key("auto.offset.reset")]
+        #[default(String::from("latest"))]
+        #[kafka_type("string")]
+        #[kafka_default("latest")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/consumer-configs/#consumerconfigs_auto.offset.reset")]
+        #[comment("Reset policy when there is no initial or committed offset, or the committed offset is out of range.")]
+        auto_offset_reset: String,
+
+        #[key("partition.assignment.strategy")]
+        #[default(ConfigList::from_csv("range,cooperative-sticky"))]
+        #[kafka_type("list")]
+        #[kafka_default("[RangeAssignor, CooperativeStickyAssignor]")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/consumer-configs/#consumerconfigs_partition.assignment.strategy")]
+        #[comment("Ordered client-side partition assignors advertised to the group coordinator.")]
+        partition_assignment_strategy: ConfigList,
 
         #[key("exclude.internal.topics")]
         #[default(true)]

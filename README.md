@@ -1,21 +1,36 @@
 # Kacrab
 
-A Rust-native Kafka client (producer + admin), built from the Kafka protocol up —
-a native implementation, not a `librdkafka` wrapper. The producer is
+A Rust-native Kafka client (producer, admin, and consumer), built from the Kafka
+protocol up — a native implementation, not a `librdkafka` wrapper. The producer is
 wire-compatible with the Java client — including the idempotent sequence/epoch
 recovery state machine — and is memory- and CPU-efficient (native, no JVM). The
 admin client covers the full Apache Kafka 4.3.0 `Admin` operation surface (62
-operations) and is verified against a real broker. The consumer is not
-implemented yet.
+operations) and is verified against a real broker. The consumer supports manual
+assignment, topic and pattern subscription, and both group protocols — classic
+(eager and `cooperative-sticky`) and KIP-848 server-side — with fetch, offsets,
+interceptors, and metrics, verified end-to-end against a real broker.
 
-* **Java-compatible auth, producer, and admin**: the authentication, producer,
-  and admin surfaces use Kafka property names, defaults, protocol flow, and wire
-  semantics as the compatibility target.
+* **Java-compatible auth, producer, admin, and consumer**: the authentication,
+  producer, admin, and consumer surfaces use Kafka property names, defaults,
+  protocol flow, and wire semantics as the compatibility target.
 * **Full admin client** (`admin` feature): topics, partitions, configs
   (incremental), ACLs, consumer groups & offsets, transactions, delegation
   tokens, quotas, SCRAM credentials, partition reassignments, `KRaft` quorum,
   and the Kafka 4.x share/streams group families — 62 operations at Apache Kafka
   4.3.0 parity, verified end-to-end against a real broker.
+* **Consumer client** (`consumer` feature): manual partition assignment,
+  topic and pattern (regex) subscription, and both group protocols — the classic
+  `JoinGroup`/`SyncGroup` protocol with the `range`/`roundrobin`/`sticky` eager
+  assignors and the incremental `cooperative-sticky` assignor, plus the KIP-848
+  server-side protocol (`group.protocol=consumer`, single `ConsumerGroupHeartbeat`
+  RPC). `Fetch` with `auto.offset.reset`, `max.poll.records`, incremental fetch
+  sessions (KIP-227), and `seek`/`pause`/`resume`; offset
+  `commit_sync`/`commit_async`/`committed` with background auto-commit;
+  OffsetForLeaderEpoch truncation detection (KIP-320); a background heartbeat
+  task; typed deserializers; `ConsumerInterceptor`s; and `metrics()`. Verified
+  end-to-end against a real Apache Kafka 4.3.0 broker across ten scenarios
+  (single subscriber, two-consumer rebalance, cooperative-sticky, roundrobin,
+  pattern, interceptors, offset queries, and KIP-848).
 * **Native Rust, not a `librdkafka` wrapper**: the Kafka protocol, wire, and
   producer logic are pure Rust, with workspace `unsafe_code` forbidden. The
   dependency tree is not entirely C-free, though: the TLS crypto provider
@@ -69,8 +84,10 @@ the SASL/TLS surface, and every compression codec are verified end-to-end
 against real brokers. The admin client implements the full Apache Kafka 4.3.0 `Admin` operation surface
 (62 operations) and is verified against a real broker across every routing path
 (controller, coordinator with transient-error retry, per-leader, and broadcast);
-see [Admin](#admin). The remaining focus before consumer work is sustained
-stress / latency testing (see [Production acceptance](#production-acceptance)).
+see [Admin](#admin). The consumer supports manual assignment and classic
+group subscription (see [Consumer](#consumer)); the remaining broad focus is
+sustained stress / latency testing (see
+[Production acceptance](#production-acceptance)).
 
 Test coverage (`cargo llvm-cov`): **~87% maintained-source** line coverage
 (generated protocol excluded), with the **producer module at ~92%**.
@@ -80,7 +97,7 @@ and the Kafka-style metrics library (sensors, stats, quotas, reporters) are
 directly tested; remaining gaps are mechanical error-clone arms and rare
 defensive branches. The raw whole-workspace figure (~66%) is lower only because
 it counts generated `kacrab-protocol` message structs for APIs not yet wired
-(consumer/streams).
+(streams, and the KIP-848 consumer group protocol).
 
 Auth, producer, and admin are treated as **Java-compatible targets** for the
 implemented surface:
@@ -173,11 +190,28 @@ implemented surface:
   - [ ] Production acceptance: sustained multi-broker stress, memory soak, and
         latency-percentile gates on realistic multi-broker workloads (scoped
         under [Production acceptance](#production-acceptance)).
-- [ ] Consumer
-  - [ ] Manual assignment, fetch, offsets, and committed offset handling.
-  - [ ] Group coordination: join, sync, heartbeat, rebalance, and offset commit.
-  - [ ] Backpressure and multi-broker fetch scheduling shaped for the existing
-        wire reactor.
+- [x] Consumer usable baseline (`consumer` feature)
+  - [x] Manual assignment, `Fetch` (per-leader), `auto.offset.reset`
+        (`earliest`/`latest`/`none` via `ListOffsets`), `max.poll.records`, and
+        `seek`/`seek_to_beginning`/`seek_to_end`/`position`/`pause`/`resume`/
+        `wakeup`. Records are bytes-first (`ConsumerRecord.key/value:
+        Option<Bytes>`).
+  - [x] Classic group coordination: `subscribe`, `FindCoordinator`,
+        `JoinGroup`/`SyncGroup`/`Heartbeat`/`LeaveGroup`, the `range` assignor
+        with eager rebalancing, resume-from-committed-offset on assignment, and
+        poll-throttled heartbeats with rejoin on rebalance signals.
+  - [x] Offsets: `commit_sync`/`commit_sync_offsets`/`committed` (leader-epoch
+        aware) and `group_metadata`, against the group coordinator.
+  - [x] `Consumer::new`/`from_client_config`/`from_properties`/`from_map`, wired
+        through the same auth/transport stack (SASL/TLS) as the producer.
+  - [x] Verified end-to-end against a real Apache Kafka 4.3.0 broker
+        (`kacrab/tests/real_kafka_consumer.rs`): manual assign + commit, a single
+        subscriber owning both partitions, and two consumers rebalancing to one
+        partition each.
+  - [ ] Refinements: a dedicated background heartbeat task, cooperative-sticky
+        assignment, incremental fetch sessions (KIP-227), `OffsetForLeaderEpoch`
+        validation, `offsets_for_times`/`beginning`/`end_offsets`, and the
+        KIP-848 consumer group protocol.
 - [x] Admin usable baseline (`admin` feature)
   - [x] Full Apache Kafka 4.3.0 `Admin` operation surface — 62 operations:
         topics/partitions, describe/incremental-alter configs, ACLs, consumer
@@ -480,9 +514,10 @@ let _delivery = producer.send(
 )?;
 ```
 
-Custom **deserializers** are consumer-side and are not available yet — the
-consumer is not implemented (see [Current Status](#current-status)). A runnable
-version of the above lives in
+The consumer returns bytes-first records (`ConsumerRecord.key/value:
+Option<Bytes>`); a typed **deserializer** layer on top is a planned refinement
+(see [Current Status](#current-status)). A runnable version of the serializer
+example above lives in
 [`examples/typed_serializer.rs`](examples/typed_serializer.rs).
 
 ## Admin
@@ -525,6 +560,47 @@ A runnable version — describe cluster, create/list/describe topics, alter
 configs, add partitions, list offsets, and delete — lives in
 [`examples/admin.rs`](examples/admin.rs)
 (`cargo run -p kacrab-examples --example admin`).
+
+## Consumer
+
+The consumer client (`consumer` feature) mirrors Java's `Consumer` with
+snake_case methods and the same constructors as the other clients. It supports
+manual partition assignment and classic consumer-group subscription:
+
+```rust
+use std::time::Duration;
+use kacrab::{common::TopicPartition, consumer::Consumer};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Group subscription (rebalances across other members in the same group):
+    let mut consumer = Consumer::from_map([
+        ("bootstrap.servers", "localhost:9092"),
+        ("group.id", "orders-workers"),
+        ("auto.offset.reset", "earliest"),
+    ])
+    .await?;
+    consumer.subscribe(["orders"])?;
+
+    loop {
+        let records = consumer.poll(Duration::from_secs(1)).await?;
+        for record in &records {
+            println!("{}-{}@{}", record.topic, record.partition, record.offset);
+        }
+        consumer.commit_sync().await?;
+    }
+}
+```
+
+Or take direct control with `assign(vec![TopicPartition::new("orders", 0)])` and
+`seek`/`position`/`pause`. Records are bytes-first (`ConsumerRecord.key/value:
+Option<Bytes>`). The classic group path runs `FindCoordinator` +
+`JoinGroup`/`SyncGroup`/`Heartbeat` with the `range` assignor and eager
+rebalancing; `commit_sync`/`committed` carry the leader epoch. Everything is
+verified end-to-end against a real Apache Kafka 4.3.0 broker
+(`kacrab/tests/real_kafka_consumer.rs`). See the book's
+[consumer chapter](docs-book/src/consumer.md) and `docs/consumer-design.md` for
+the design and the phased plan.
 
 ## Auth
 

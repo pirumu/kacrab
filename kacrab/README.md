@@ -21,13 +21,16 @@ the current base. The active runtime surface is:
   behind the `producer` feature.
 - `admin` - Java-style `AdminClient` covering the full Apache Kafka 4.3.0
   `Admin` operation surface (62 operations), behind the `admin` feature.
+- `consumer` - Java-style `Consumer` with manual assignment and classic
+  consumer-group subscription (fetch, `auto.offset.reset`, offset commit/fetch,
+  and eager `range` rebalancing), behind the `consumer` feature.
 
-The remaining product order is consumer, then streams.
+The remaining product order is streams.
 
 ## Java Compatibility
 
-Auth, producer, and admin are Java-compatible targets for the implemented
-surface (outcome-faithful to the Java client, not a literal class-for-class
+Auth, producer, admin, and consumer are Java-compatible targets for the
+implemented surface (outcome-faithful to the Java client, not a literal class-for-class
 port):
 
 - Use familiar Java client keys such as `bootstrap.servers`,
@@ -60,8 +63,10 @@ Rust cannot load Java classes, so custom auth should use the native Rust
       delegation tokens, quotas, SCRAM, reassignments, `KRaft` quorum, share &
       streams groups) through the same auth/transport stack, verified against a
       real broker.
-- [ ] Consumer: manual assignment, fetch, offsets, group coordination,
-      rebalance, and backpressure.
+- [x] Consumer: manual assignment, `Fetch`, `auto.offset.reset`, offset
+      commit/fetch, and classic group coordination (join/sync/heartbeat with the
+      `range` assignor and eager rebalancing), verified against a real broker.
+      Background-heartbeat task, cooperative-sticky, and KIP-848 are refinements.
 - [ ] Streams: topology runtime, state stores, repartitioning, changelog topics,
       and exactly-once processing on producer transactions.
 
@@ -75,6 +80,7 @@ Optional runtime features:
 
 - `producer` - enables the producer API.
 - `admin` - enables the `AdminClient` API.
+- `consumer` - enables the `Consumer` API.
 - `gzip`, `snappy`, `lz4` - pure-Rust record-batch compression codecs (no C
   toolchain).
 - `zstd` - record-batch compression via the C `libzstd` (`zstd-sys`); needs a C

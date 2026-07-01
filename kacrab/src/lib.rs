@@ -22,6 +22,8 @@ extern crate self as kacrab;
 pub mod admin;
 pub mod common;
 pub mod config;
+#[cfg(feature = "consumer")]
+pub mod consumer;
 #[cfg(feature = "producer")]
 pub mod producer;
 pub mod wire;

@@ -110,6 +110,10 @@ pub struct ConnectionConfig {
     /// (`allow.auto.create.topics`). The broker only honors this when its own
     /// `auto.create.topics.enable` is set; mirrors the Java/KafkaJS flag.
     pub allow_auto_topic_creation: bool,
+    /// Whether to try every resolved IP for a broker hostname on connect
+    /// (`client.dns.lookup=use_all_dns_ips`, the Kafka 4.x default). When false,
+    /// only the first resolved address (IPv4-preferred) is used.
+    pub use_all_dns_ips: bool,
 }
 
 impl Default for ConnectionConfig {
@@ -137,6 +141,7 @@ impl Default for ConnectionConfig {
             reconnect_backoff_max: DEFAULT_RECONNECT_BACKOFF_MAX,
             buffer_pool_capacity: DEFAULT_BUFFER_POOL_CAPACITY,
             allow_auto_topic_creation: false,
+            use_all_dns_ips: true,
         }
     }
 }

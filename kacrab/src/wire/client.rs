@@ -89,7 +89,7 @@ impl WireClient {
     }
 
     /// Return one known broker id for metadata/control-plane requests.
-    #[cfg(feature = "producer")]
+    #[cfg(any(feature = "producer", feature = "consumer"))]
     pub(crate) fn any_broker_id(&self) -> Result<i32> {
         self.refresh_broker_id()
     }
@@ -97,8 +97,9 @@ impl WireClient {
     /// Highest mutually-supported version the given broker advertised for
     /// `api_key`, or `None` if the broker is unknown or its connection has not
     /// yet completed `ApiVersions` negotiation. Used by the producer to gate
-    /// coordinator-capability-dependent behavior (e.g. epoch bumping).
-    #[cfg(feature = "producer")]
+    /// coordinator-capability-dependent behavior (e.g. epoch bumping) and by the
+    /// consumer to pick fetch/offset request versions.
+    #[cfg(any(feature = "producer", feature = "consumer"))]
     pub(crate) fn negotiated_version(&self, broker_id: i32, api_key: ApiKey) -> Option<i16> {
         self.handle_for(broker_id).ok()?.negotiated_version(api_key)
     }
@@ -492,7 +493,10 @@ impl WireClient {
     /// convention); `Some(list)` limits it to the named topics. The broker
     /// registry is updated so brokers discovered here — including the
     /// controller — become directly reachable for follow-up requests.
-    #[cfg(feature = "admin")]
+    ///
+    /// Also used by the consumer to resolve pattern subscriptions against the
+    /// full topic list.
+    #[cfg(any(feature = "admin", feature = "consumer"))]
     pub(crate) async fn admin_metadata(
         &self,
         topics: Option<&[String]>,

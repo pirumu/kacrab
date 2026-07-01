@@ -1090,6 +1090,7 @@ dependencies = [
  "p12-keystore",
  "pkcs8",
  "rcgen",
+ "regex",
  "rustls",
  "rustls-native-certs",
  "serde_json",
