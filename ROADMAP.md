@@ -48,13 +48,13 @@ the workspace.
 
 ## Not Ready Yet
 
-- Consumer APIs are not implemented.
+- The consumer has a usable baseline (manual assignment + classic group
+  subscription, verified against a real broker), but refinements remain: a
+  dedicated background heartbeat task, cooperative-sticky assignment, incremental
+  fetch sessions, and the KIP-848 consumer group protocol.
 - Streams APIs are not implemented.
 - Release stability is not guaranteed.
 - Local benchmark baselines are not production acceptance claims.
-
-Consumer work should wait until the wire and producer layers have the measured
-batching, backpressure, routing, and multi-broker behavior they need.
 
 ## Release Bar
 

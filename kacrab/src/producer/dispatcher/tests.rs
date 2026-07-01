@@ -10,7 +10,6 @@
 
 use std::{
     collections::VecDeque,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicI64, Ordering},
@@ -37,13 +36,12 @@ use super::{
     ProduceRequestSizing, ProducerDispatcher, ProducerIdempotenceState, ProducerPartitionerState,
     RECORD_BATCH_OVERHEAD_BYTES, RecordBufferRelease, SharedAccumulator, TopicPartitionKey,
     TransactionOperation, TransactionPendingOperationStart, broker_dispatch_completed_result,
-    broker_request_placement_for_batch, build_partition_load_stats, choose_coordinator_addr,
-    complete_deliveries, end_txn_version, estimate_record_batch_bytes,
-    estimate_sticky_record_bytes, fail_pending_transaction_operation, init_producer_id_version,
-    is_fatal_transaction_error, is_leadership_error, no_ack_receipts,
-    pop_dispatchable_broker_request, produce_version, txn_offset_commit_version,
-    uniform_partition_for_random, unique_topics, unique_unassigned_record_topics,
-    validate_consumer_group_metadata,
+    broker_request_placement_for_batch, build_partition_load_stats, complete_deliveries,
+    end_txn_version, estimate_record_batch_bytes, estimate_sticky_record_bytes,
+    fail_pending_transaction_operation, init_producer_id_version, is_fatal_transaction_error,
+    is_leadership_error, no_ack_receipts, pop_dispatchable_broker_request, produce_version,
+    txn_offset_commit_version, uniform_partition_for_random, unique_topics,
+    unique_unassigned_record_topics, validate_consumer_group_metadata,
 };
 use crate::{
     producer::{
@@ -3332,20 +3330,4 @@ fn transaction_v1_request_versions_match_java_caps() {
         end_txn_version(true),
         client_api_info(ApiKey::EndTxn).max_version
     );
-}
-
-#[test]
-fn coordinator_lookup_prefers_ipv4_when_localhost_resolves_to_both() {
-    let ipv6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 9092);
-    let ipv4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9092);
-
-    assert_eq!(choose_coordinator_addr([ipv6, ipv4]), Some(ipv4));
-}
-
-#[test]
-fn coordinator_lookup_uses_first_address_when_ipv4_is_absent() {
-    let ipv6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 9092);
-
-    assert_eq!(choose_coordinator_addr([ipv6]), Some(ipv6));
-    assert_eq!(choose_coordinator_addr([]), None);
 }

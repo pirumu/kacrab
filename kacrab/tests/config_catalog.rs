@@ -10,9 +10,9 @@ fn catalog_covers_official_kafka_43_config_pages() {
     assert_eq!(KAFKA_CONFIG_SOURCE_REF, "apache/kafka@4.3.0");
     assert_eq!(catalog_for(ClientKind::Producer).len(), 122);
     assert_eq!(catalog_for(ClientKind::Consumer).len(), 122);
-    assert_eq!(catalog_for(ClientKind::Admin).len(), 97);
+    assert_eq!(catalog_for(ClientKind::Admin).len(), 98);
 
-    assert_eq!(CONFIG_CATALOG.len(), 341);
+    assert_eq!(CONFIG_CATALOG.len(), 342);
     assert!(
         CONFIG_CATALOG
             .iter()

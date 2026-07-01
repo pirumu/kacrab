@@ -31,26 +31,27 @@ use kacrab_protocol::{
         DescribeTransactionsRequestData, DescribeTransactionsResponseData,
         DescribeUserScramCredentialsRequestData, DescribeUserScramCredentialsResponseData,
         ElectLeadersRequestData, ElectLeadersResponseData, EndTxnRequestData, EndTxnResponseData,
-        ExpireDelegationTokenRequestData, ExpireDelegationTokenResponseData,
-        FindCoordinatorRequestData, FindCoordinatorResponseData,
+        ExpireDelegationTokenRequestData, ExpireDelegationTokenResponseData, FetchRequestData,
+        FetchResponseData, FindCoordinatorRequestData, FindCoordinatorResponseData,
         GetTelemetrySubscriptionsRequestData, GetTelemetrySubscriptionsResponseData,
-        IncrementalAlterConfigsRequestData, IncrementalAlterConfigsResponseData,
-        InitProducerIdRequestData, InitProducerIdResponseData, LeaveGroupRequestData,
-        LeaveGroupResponseData, ListConfigResourcesRequestData, ListConfigResourcesResponseData,
-        ListGroupsRequestData, ListGroupsResponseData, ListOffsetsRequestData,
-        ListOffsetsResponseData, ListPartitionReassignmentsRequestData,
-        ListPartitionReassignmentsResponseData, ListTransactionsRequestData,
-        ListTransactionsResponseData, MetadataRequestData, MetadataResponseData,
-        OffsetCommitRequestData, OffsetCommitResponseData, OffsetDeleteRequestData,
-        OffsetDeleteResponseData, OffsetFetchRequestData, OffsetFetchResponseData,
+        HeartbeatRequestData, HeartbeatResponseData, IncrementalAlterConfigsRequestData,
+        IncrementalAlterConfigsResponseData, InitProducerIdRequestData, InitProducerIdResponseData,
+        JoinGroupRequestData, JoinGroupResponseData, LeaveGroupRequestData, LeaveGroupResponseData,
+        ListConfigResourcesRequestData, ListConfigResourcesResponseData, ListGroupsRequestData,
+        ListGroupsResponseData, ListOffsetsRequestData, ListOffsetsResponseData,
+        ListPartitionReassignmentsRequestData, ListPartitionReassignmentsResponseData,
+        ListTransactionsRequestData, ListTransactionsResponseData, MetadataRequestData,
+        MetadataResponseData, OffsetCommitRequestData, OffsetCommitResponseData,
+        OffsetDeleteRequestData, OffsetDeleteResponseData, OffsetFetchRequestData,
+        OffsetFetchResponseData, OffsetForLeaderEpochRequestData, OffsetForLeaderEpochResponseData,
         ProduceRequestData, ProduceResponseData, PushTelemetryRequestData,
         PushTelemetryResponseData, RemoveRaftVoterRequestData, RemoveRaftVoterResponseData,
         RenewDelegationTokenRequestData, RenewDelegationTokenResponseData,
         ShareGroupDescribeRequestData, ShareGroupDescribeResponseData,
-        StreamsGroupDescribeRequestData, StreamsGroupDescribeResponseData,
-        TxnOffsetCommitRequestData, TxnOffsetCommitResponseData, UnregisterBrokerRequestData,
-        UnregisterBrokerResponseData, UpdateFeaturesRequestData, UpdateFeaturesResponseData,
-        WriteTxnMarkersRequestData, WriteTxnMarkersResponseData,
+        StreamsGroupDescribeRequestData, StreamsGroupDescribeResponseData, SyncGroupRequestData,
+        SyncGroupResponseData, TxnOffsetCommitRequestData, TxnOffsetCommitResponseData,
+        UnregisterBrokerRequestData, UnregisterBrokerResponseData, UpdateFeaturesRequestData,
+        UpdateFeaturesResponseData, WriteTxnMarkersRequestData, WriteTxnMarkersResponseData,
     },
 };
 
@@ -333,6 +334,16 @@ impl_passthrough_message! {
     DescribeShareGroupOffsetsRequestData => DescribeShareGroupOffsetsResponseData,
     AlterShareGroupOffsetsRequestData => AlterShareGroupOffsetsResponseData,
     DeleteShareGroupOffsetsRequestData => DeleteShareGroupOffsetsResponseData,
+}
+
+// Consumer client request/response pairs (fetch + classic group coordination).
+// Pure pass-through codecs, like the admin block above.
+impl_passthrough_message! {
+    FetchRequestData => FetchResponseData,
+    JoinGroupRequestData => JoinGroupResponseData,
+    SyncGroupRequestData => SyncGroupResponseData,
+    HeartbeatRequestData => HeartbeatResponseData,
+    OffsetForLeaderEpochRequestData => OffsetForLeaderEpochResponseData,
 }
 
 fn normalize_produce_request(request: &ProduceRequestData, version: i16) -> ProduceRequestData {

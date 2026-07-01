@@ -8,6 +8,7 @@
 - [The wire layer](./wire.md)
 - [The producer pipeline](./producer/pipeline.md)
 - [The admin client](./admin.md)
+- [The consumer client](./consumer.md)
 
 # Algorithms (the deep dives)
 
