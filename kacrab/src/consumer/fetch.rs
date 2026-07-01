@@ -1,17 +1,20 @@
 //! Building `Fetch` requests and decoding responses into records.
 //!
-//! Phase 1 uses sessionless full fetches (session id/epoch 0) capped at Fetch
-//! v12 so partitions are keyed by topic *name* — this sidesteps the v13+
-//! topic-id strict-codec requirement. Incremental fetch sessions (KIP-227) and
-//! topic-id fetches are a Phase 3 optimization.
+//! Fetches are capped at Fetch v12 so partitions are keyed by topic *name* —
+//! this sidesteps the v13+ topic-id strict-codec requirement. Incremental fetch
+//! sessions (KIP-227) are implemented per broker: the first fetch to a leader is
+//! a full fetch that establishes a session, and subsequent fetches send only the
+//! partitions whose position changed (plus a forgotten list for removed ones),
+//! letting the broker return only partitions with new data. Behaviour is
+//! identical to full fetches — it is purely a smaller request.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bytes::Bytes;
 use kacrab_protocol::{
     generated::{
         ApiKey, ErrorCode, FetchRequestData, FetchResponseData,
-        fetch_request::{FetchPartition, FetchTopic, ReplicaState},
+        fetch_request::{FetchPartition, FetchTopic, ForgottenTopic, ReplicaState},
     },
     record::decode_batches,
 };
@@ -28,12 +31,76 @@ use crate::{
     wire::{ClusterMetadata, WireClient},
 };
 
-/// Highest `Fetch` version Phase 1 will negotiate. v12 is the last name-keyed
-/// version; v13+ requires topic ids under the strict codec.
-const FETCH_MAX_VERSION_PHASE1: i16 = 12;
+/// Highest `Fetch` version we negotiate. v12 is the last name-keyed version;
+/// v13+ requires topic ids under the strict codec.
+const FETCH_MAX_VERSION: i16 = 12;
 
 /// The `LogAppendTime` bit (bit 3) in a record batch's attributes.
 const LOG_APPEND_TIME_BIT: i16 = 0x0008;
+
+/// `session_id` meaning "no fetch session" (a full, sessionless fetch).
+const INVALID_SESSION_ID: i32 = 0;
+/// `session_epoch` for the initial (full) fetch that opens a session.
+const INITIAL_SESSION_EPOCH: i32 = 0;
+
+/// Per-broker incremental fetch session state (KIP-227), kept across polls.
+#[derive(Debug, Default, Clone)]
+struct BrokerFetchSession {
+    /// The broker-assigned session id (`0` = no session / full fetches).
+    session_id: i32,
+    /// The epoch to send next (`0` = a full fetch that (re)establishes a session).
+    epoch: i32,
+    /// The positions the broker currently holds for this session, so we can send
+    /// only what changed and forget what is gone.
+    sent: HashMap<(String, i32), FetchPosition>,
+}
+
+impl BrokerFetchSession {
+    /// The next session epoch after a success, wrapping past `i32::MAX` to `1`
+    /// (never back to the `0` full-fetch epoch), mirroring Kafka's `FetchMetadata`.
+    const fn next_epoch(&self) -> i32 {
+        match self.epoch.checked_add(1) {
+            Some(next) => next,
+            None => 1,
+        }
+    }
+
+    /// Whether the next request is a full fetch (opens/reopens the session).
+    const fn is_full(&self) -> bool {
+        self.epoch == INITIAL_SESSION_EPOCH
+    }
+
+    /// Drop the session so the next fetch is a full one.
+    fn reset(&mut self) {
+        self.session_id = INVALID_SESSION_ID;
+        self.epoch = INITIAL_SESSION_EPOCH;
+        self.sent.clear();
+    }
+
+    /// Record a successful response: adopt the broker's session id and, when a
+    /// session exists, advance the epoch and snapshot what the broker now holds.
+    fn advance(&mut self, response_session_id: i32, entries: &[(TopicPartition, FetchPosition)]) {
+        self.session_id = response_session_id;
+        if response_session_id == INVALID_SESSION_ID {
+            self.epoch = INITIAL_SESSION_EPOCH;
+            self.sent.clear();
+        } else {
+            self.epoch = self.next_epoch();
+            self.sent = entries
+                .iter()
+                .map(|(partition, position)| {
+                    ((partition.topic.clone(), partition.partition), *position)
+                })
+                .collect();
+        }
+    }
+}
+
+/// All per-broker fetch sessions for one consumer, keyed by leader broker id.
+#[derive(Debug, Default)]
+pub(super) struct FetchSessions {
+    by_broker: HashMap<i32, BrokerFetchSession>,
+}
 
 /// Records collected for one partition plus the position to advance it to.
 #[derive(Debug)]
@@ -44,21 +111,35 @@ pub(super) struct PartitionFetch {
     pub next_leader_epoch: Option<i32>,
 }
 
+/// The read-only inputs a fetch needs: the wire client, runtime config, and the
+/// cluster metadata used to route each partition to its leader.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FetchContext<'a> {
+    pub wire: &'a WireClient,
+    pub config: &'a ConsumerRuntimeConfig,
+    pub metadata: &'a ClusterMetadata,
+}
+
 /// Fetch from every fetchable partition (grouped by leader), decode the record
 /// batches, and return per-partition records capped so the total does not exceed
 /// `max_records`. Partitions are visited in a stable order; a partition trimmed
 /// by the cap keeps the records it did not yield for the next poll (its position
-/// only advances past what is returned).
+/// only advances past what is returned). Uses incremental fetch sessions
+/// (KIP-227) per broker via `sessions`.
 pub(super) async fn fetch(
-    wire: &WireClient,
-    config: &ConsumerRuntimeConfig,
-    metadata: &ClusterMetadata,
+    context: &FetchContext<'_>,
     fetchable: &[(TopicPartition, FetchPosition)],
     max_records: usize,
+    sessions: &mut FetchSessions,
 ) -> Result<Vec<PartitionFetch>> {
     if fetchable.is_empty() || max_records == 0 {
         return Ok(Vec::new());
     }
+    let FetchContext {
+        wire,
+        config,
+        metadata,
+    } = *context;
 
     let mut by_leader: HashMap<i32, Vec<(TopicPartition, FetchPosition)>> = HashMap::new();
     for (partition, position) in fetchable {
@@ -75,7 +156,7 @@ pub(super) async fn fetch(
     // `send_to_broker` treats `version` as a ceiling and negotiates down against
     // each broker's advertised range, so passing the v12 cap keeps fetches
     // name-keyed regardless of how high the broker goes.
-    let version = FETCH_MAX_VERSION_PHASE1;
+    let version = FETCH_MAX_VERSION;
 
     let mut results = Vec::new();
     let mut budget = max_records;
@@ -84,11 +165,21 @@ pub(super) async fn fetch(
         if budget == 0 {
             break;
         }
-        let request = build_fetch_request(config, &entries);
+        let session = sessions.by_broker.entry(leader).or_default();
+        let request = build_fetch_request(config, session, &entries);
         let response: FetchResponseData = wire
             .send_to_broker(leader, ApiKey::Fetch, version, &request)
             .await?;
         let top_level = ErrorCode::from(response.error_code);
+        // A stale/unknown session — drop it and re-establish with a full fetch on
+        // the next poll (the partitions are unchanged, just the session bookkeeping).
+        if matches!(
+            top_level,
+            ErrorCode::InvalidFetchSessionEpoch | ErrorCode::FetchSessionIdNotFound
+        ) {
+            session.reset();
+            continue;
+        }
         if top_level.is_error() {
             return Err(ConsumerError::broker(
                 "fetch",
@@ -96,6 +187,7 @@ pub(super) async fn fetch(
                 "fetch request rejected",
             ));
         }
+        session.advance(response.session_id, &entries);
 
         let want: HashMap<(String, i32), FetchPosition> = entries
             .iter()
@@ -138,10 +230,22 @@ pub(super) async fn fetch(
 
 fn build_fetch_request(
     config: &ConsumerRuntimeConfig,
+    session: &BrokerFetchSession,
     entries: &[(TopicPartition, FetchPosition)],
 ) -> FetchRequestData {
+    let full = session.is_full();
     let mut topics: Vec<FetchTopic> = Vec::new();
     for (partition, position) in entries {
+        // Incremental fetch: only send partitions whose position changed since the
+        // broker last saw them; a full fetch sends everything.
+        if !full
+            && session
+                .sent
+                .get(&(partition.topic.clone(), partition.partition))
+                == Some(position)
+        {
+            continue;
+        }
         let wire_partition = FetchPartition {
             partition: partition.partition,
             current_leader_epoch: position.leader_epoch.unwrap_or(-1),
@@ -167,6 +271,11 @@ fn build_fetch_request(
             });
         }
     }
+    let forgotten = if full {
+        Vec::new()
+    } else {
+        build_forgotten(session, entries)
+    };
 
     FetchRequestData {
         cluster_id: None,
@@ -180,13 +289,45 @@ fn build_fetch_request(
         min_bytes: config.fetch_min_bytes,
         max_bytes: config.fetch_max_bytes,
         isolation_level: config.isolation_level.wire(),
-        session_id: 0,
-        session_epoch: 0,
+        session_id: session.session_id,
+        session_epoch: session.epoch,
         topics,
-        forgotten_topics_data: Vec::new(),
+        forgotten_topics_data: forgotten,
         rack_id: config.client_rack.clone().into(),
         _unknown_tagged_fields: Vec::new(),
     }
+}
+
+/// The partitions the broker still holds in the session that are no longer
+/// fetchable, grouped by topic — the incremental fetch's forgotten list.
+fn build_forgotten(
+    session: &BrokerFetchSession,
+    entries: &[(TopicPartition, FetchPosition)],
+) -> Vec<ForgottenTopic> {
+    let current: HashSet<(&str, i32)> = entries
+        .iter()
+        .map(|(partition, _)| (partition.topic.as_str(), partition.partition))
+        .collect();
+    let mut forgotten: Vec<ForgottenTopic> = Vec::new();
+    for (topic, partition) in session.sent.keys() {
+        if current.contains(&(topic.as_str(), *partition)) {
+            continue;
+        }
+        if let Some(entry) = forgotten
+            .iter_mut()
+            .find(|forgotten| forgotten.topic.as_str() == topic)
+        {
+            entry.partitions.push(*partition);
+        } else {
+            forgotten.push(ForgottenTopic {
+                topic: topic.clone().into(),
+                topic_id: kacrab_protocol::KafkaUuid::default(),
+                partitions: vec![*partition],
+                _unknown_tagged_fields: Vec::new(),
+            });
+        }
+    }
+    forgotten
 }
 
 /// Decode one partition's record bytes into records at or past `fetch_offset`,
@@ -337,5 +478,61 @@ mod tests {
         let result = decode_partition(&tp(), 50, None, 10).unwrap();
         assert!(result.records.is_empty());
         assert_eq!(result.next_offset, 50);
+    }
+
+    fn entry(topic: &str, partition: i32, offset: i64) -> (TopicPartition, FetchPosition) {
+        (
+            TopicPartition::new(topic, partition),
+            FetchPosition::new(offset, None),
+        )
+    }
+
+    #[test]
+    fn session_opens_full_then_goes_incremental() {
+        let mut session = BrokerFetchSession::default();
+        assert!(session.is_full());
+        assert_eq!(session.session_id, INVALID_SESSION_ID);
+
+        // A response with a real session id advances the epoch and records state.
+        let entries = vec![entry("t", 0, 10), entry("t", 1, 20)];
+        session.advance(42, &entries);
+        assert!(!session.is_full());
+        assert_eq!(session.session_id, 42);
+        assert_eq!(session.epoch, 1);
+        assert_eq!(session.sent.len(), 2);
+
+        // A reset returns to a full fetch.
+        session.reset();
+        assert!(session.is_full());
+        assert!(session.sent.is_empty());
+    }
+
+    #[test]
+    fn session_without_broker_id_stays_full() {
+        let mut session = BrokerFetchSession::default();
+        session.advance(INVALID_SESSION_ID, &[entry("t", 0, 5)]);
+        // The broker declined a session, so we keep sending full fetches.
+        assert!(session.is_full());
+        assert!(session.sent.is_empty());
+    }
+
+    #[test]
+    fn forgotten_lists_partitions_dropped_from_the_session() {
+        let mut session = BrokerFetchSession::default();
+        session.advance(7, &[entry("t", 0, 1), entry("t", 1, 1), entry("u", 0, 1)]);
+        // Now only t-0 remains fetchable; t-1 and u-0 must be forgotten.
+        let forgotten = build_forgotten(&session, &[entry("t", 0, 1)]);
+        let mut pairs: Vec<(String, i32)> = forgotten
+            .into_iter()
+            .flat_map(|topic| {
+                let name = topic.topic.as_str().to_owned();
+                topic
+                    .partitions
+                    .into_iter()
+                    .map(move |partition| (name.clone(), partition))
+            })
+            .collect();
+        pairs.sort();
+        assert_eq!(pairs, vec![("t".to_owned(), 1), ("u".to_owned(), 0)]);
     }
 }

@@ -96,6 +96,8 @@ pub struct Consumer {
     modern_group: Option<ModernGroupState>,
     /// When the last KIP-848 `ConsumerGroupHeartbeat` was sent.
     last_modern_heartbeat: Option<Instant>,
+    /// Per-broker incremental fetch sessions (KIP-227).
+    fetch_sessions: fetch::FetchSessions,
 }
 
 /// Callback invoked with the result of an asynchronous offset commit.
@@ -195,6 +197,7 @@ impl Consumer {
             last_pattern_refresh: None,
             modern_group: None,
             last_modern_heartbeat: None,
+            fetch_sessions: fetch::FetchSessions::default(),
         })
     }
 
@@ -716,11 +719,14 @@ impl Consumer {
                 if !fetchable.is_empty() {
                     self.metrics.record_fetch();
                     let fetched = fetch::fetch(
-                        &self.wire,
-                        &self.config,
-                        &metadata,
+                        &fetch::FetchContext {
+                            wire: &self.wire,
+                            config: &self.config,
+                            metadata: &metadata,
+                        },
                         &fetchable,
                         self.config.max_poll_records,
+                        &mut self.fetch_sessions,
                     )
                     .await?;
                     let mut records = ConsumerRecords::empty();
