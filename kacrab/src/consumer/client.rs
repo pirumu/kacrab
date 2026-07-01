@@ -657,6 +657,7 @@ impl Consumer {
             if !topics.is_empty() {
                 let metadata = self.wire.metadata_for_topics(topics).await?;
                 self.reset_positions(&metadata).await?;
+                self.validate_positions(&metadata).await?;
 
                 let fetchable = self.subscription.fetchable_partitions();
                 fetchable_empty = fetchable.is_empty();
@@ -1114,6 +1115,54 @@ impl Consumer {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
+    }
+
+    /// Validate assigned positions against their leaders' epoch history when a
+    /// leader change is visible in metadata (the current leader epoch is newer
+    /// than the epoch our position was fetched under), resetting any position the
+    /// broker reports was truncated below it (KIP-320). Positions confirmed valid
+    /// have their recorded epoch advanced so they are not re-validated.
+    async fn validate_positions(&mut self, metadata: &ClusterMetadata) -> Result<()> {
+        let mut to_validate: Vec<(TopicPartition, FetchPosition, i32)> = Vec::new();
+        for partition in self.subscription.assigned_partitions() {
+            let Some(position) = self.subscription.position(&partition) else {
+                continue;
+            };
+            let Some(fenced) = position.leader_epoch else {
+                continue;
+            };
+            let current =
+                offsets::partition_leader_epoch(metadata, &partition.topic, partition.partition);
+            if let Some(current) = current
+                && current > fenced
+            {
+                to_validate.push((partition, position, current));
+            }
+        }
+        if to_validate.is_empty() {
+            return Ok(());
+        }
+        let outcomes = offsets::validate_offsets(&self.wire, metadata, &to_validate).await?;
+        for (partition, outcome) in outcomes {
+            match outcome {
+                offsets::PositionValidation::Valid { leader_epoch } => {
+                    if let Some(position) = self.subscription.position(&partition) {
+                        self.subscription.set_position(
+                            &partition,
+                            FetchPosition::new(position.offset, Some(leader_epoch)),
+                        );
+                    }
+                },
+                offsets::PositionValidation::Truncated {
+                    offset,
+                    leader_epoch,
+                } => {
+                    self.subscription
+                        .set_position(&partition, FetchPosition::new(offset, leader_epoch));
+                },
+            }
+        }
+        Ok(())
     }
 
     async fn reset_positions(&mut self, metadata: &ClusterMetadata) -> Result<()> {
