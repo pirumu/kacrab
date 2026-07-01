@@ -121,10 +121,10 @@ pub(crate) struct BrokerHandle {
     /// the control plane can read the broker's advertised version for an API
     /// (for example, gating client-side epoch bumps on the coordinator's
     /// `InitProducerId` support). `None` until the first connection negotiates.
-    /// The producer and admin control planes read it (`negotiated_version`), so
-    /// the connection only stores it under those features; the broker task keeps
-    /// its own clone to write into regardless.
-    #[cfg(any(feature = "producer", feature = "admin"))]
+    /// Only the producer control plane reads it (`negotiated_version`), so the
+    /// connection only stores it under the `producer` feature; the broker task
+    /// keeps its own clone to write into regardless.
+    #[cfg(feature = "producer")]
     capabilities: Arc<std::sync::RwLock<Option<BrokerCapabilities>>>,
 }
 
@@ -232,18 +232,18 @@ impl BrokerHandle {
             kerberos_login,
         };
         let _task = tokio::spawn(task.run());
-        #[cfg(not(any(feature = "producer", feature = "admin")))]
+        #[cfg(not(feature = "producer"))]
         drop(capabilities);
         Self {
             tx,
-            #[cfg(any(feature = "producer", feature = "admin"))]
+            #[cfg(feature = "producer")]
             capabilities,
         }
     }
 
     /// Highest mutually-supported version the broker advertised for `api_key`,
     /// or `None` until the connection has completed `ApiVersions` negotiation.
-    #[cfg(any(feature = "producer", feature = "admin"))]
+    #[cfg(feature = "producer")]
     pub(crate) fn negotiated_version(&self, api_key: ApiKey) -> Option<i16> {
         self.capabilities
             .read()

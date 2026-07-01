@@ -559,24 +559,19 @@ impl AdminClient {
     /// `GetTelemetrySubscriptions` (Kafka's `clientInstanceId`).
     ///
     /// # Errors
-    /// Returns the broker error code (e.g. when client telemetry is disabled) or
-    /// a wire error.
+    /// Returns the broker error code (e.g. when client telemetry is disabled), or
+    /// a wire error such as `UnsupportedApiVersion` when the broker does not
+    /// advertise the client-telemetry API at all.
     pub async fn client_instance_id(&self) -> Result<KafkaUuid> {
         let request = GetTelemetrySubscriptionsRequestData {
             client_instance_id: KafkaUuid::ZERO,
             _unknown_tagged_fields: Vec::new(),
         };
         let broker_id = self.wire.admin_any_broker_id()?;
-        // Client telemetry is optional, so the broker may support a lower max
-        // version than the client (or none); use the negotiated version.
-        let version = self
-            .wire
-            .negotiated_version(broker_id, ApiKey::GetTelemetrySubscriptions)
-            .ok_or_else(|| AdminError::Broker {
-                target: String::new(),
-                error: ErrorCode::UnsupportedVersion,
-                message: Some("broker does not support client telemetry".to_owned()),
-            })?;
+        // Pass the client's max as the ceiling; the broker session negotiates the
+        // actual version down to what the broker advertised (client telemetry is
+        // optional, so this may resolve to `UnsupportedApiVersion`).
+        let version = client_api_info(ApiKey::GetTelemetrySubscriptions).max_version;
         let response: GetTelemetrySubscriptionsResponseData = self
             .wire
             .send_to_broker(

@@ -97,9 +97,8 @@ impl WireClient {
     /// Highest mutually-supported version the given broker advertised for
     /// `api_key`, or `None` if the broker is unknown or its connection has not
     /// yet completed `ApiVersions` negotiation. Used by the producer to gate
-    /// coordinator-capability-dependent behavior (e.g. epoch bumping) and by the
-    /// admin client to pick a broker-supported version for optional APIs.
-    #[cfg(any(feature = "producer", feature = "admin"))]
+    /// coordinator-capability-dependent behavior (e.g. epoch bumping).
+    #[cfg(feature = "producer")]
     pub(crate) fn negotiated_version(&self, broker_id: i32, api_key: ApiKey) -> Option<i16> {
         self.handle_for(broker_id).ok()?.negotiated_version(api_key)
     }

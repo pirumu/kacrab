@@ -556,6 +556,11 @@ fn assert_wire_ok<T: std::fmt::Debug>(label: &str, result: Result<T, AdminError>
         Err(AdminError::CoordinatorUnavailable { .. } | AdminError::MissingResult { .. }) => {
             println!("  {label}: no-state response (wire round-trip OK)");
         },
+        // The broker advertised no supported version for this (optional) API —
+        // that is the version negotiation working, not an encoding bug.
+        Err(AdminError::Wire(kacrab::wire::WireError::UnsupportedApiVersion(api))) => {
+            println!("  {label}: broker does not support {api:?} (negotiated out)");
+        },
         Err(other) => panic!("{label}: wire/encoding failure: {other:?}"),
     }
 }
