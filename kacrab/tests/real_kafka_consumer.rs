@@ -385,3 +385,100 @@ async fn real_kafka_offset_queries() {
     consumer.close().await;
     println!("real Kafka offset-queries smoke: ALL OK");
 }
+
+/// Auto-commit (background, on interval) and `commit_async` both persist offsets
+/// that a fresh consumer in the same group reads back.
+#[tokio::test]
+#[ignore = "requires local Kafka from docker-compose.kafka.yml"]
+async fn real_kafka_auto_and_async_commit() {
+    let bootstrap = bootstrap();
+    let topic = topic();
+    let count = 6;
+    create_topic(&bootstrap, &topic, 1).await;
+    produce(&bootstrap, &topic, 0, count).await;
+    let partition = TopicPartition::new(topic.clone(), 0);
+    let group = format!("group-ac-{topic}");
+
+    // --- auto-commit ---
+    let mut consumer = Consumer::from_map([
+        ("bootstrap.servers", bootstrap.as_str()),
+        ("group.id", group.as_str()),
+        ("auto.offset.reset", "earliest"),
+        ("enable.auto.commit", "true"),
+        ("auto.commit.interval.ms", "200"),
+    ])
+    .await
+    .expect("consumer");
+    consumer.assign([partition.clone()]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut total = 0;
+    while total < count && std::time::Instant::now() < deadline {
+        total += consumer
+            .poll(Duration::from_millis(500))
+            .await
+            .expect("poll")
+            .count();
+    }
+    // Poll again after the interval so the background auto-commit fires.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _records = consumer
+        .poll(Duration::from_millis(200))
+        .await
+        .expect("poll");
+    consumer.close().await; // also auto-commits on close
+
+    let mut checker = Consumer::from_map([
+        ("bootstrap.servers", bootstrap.as_str()),
+        ("group.id", group.as_str()),
+        ("enable.auto.commit", "false"),
+    ])
+    .await
+    .expect("checker");
+    let committed = checker
+        .committed(std::slice::from_ref(&partition))
+        .await
+        .expect("committed");
+    println!(
+        "  auto-commit committed={:?}",
+        committed.get(&partition).map(|o| o.offset)
+    );
+    assert_eq!(
+        committed.get(&partition).map(|o| o.offset),
+        Some(i64::try_from(count).unwrap())
+    );
+
+    // --- commit_async ---
+    checker.assign([partition.clone()]);
+    checker.seek(&partition, 3).expect("seek");
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&done);
+    checker
+        .commit_async(Box::new(move |result| {
+            result.expect("async commit ok");
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }))
+        .await
+        .expect("commit_async dispatch");
+    for _ in 0..50 {
+        if done.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        done.load(std::sync::atomic::Ordering::SeqCst),
+        "async commit callback ran"
+    );
+    let committed = checker
+        .committed(std::slice::from_ref(&partition))
+        .await
+        .expect("committed");
+    println!(
+        "  async committed={:?}",
+        committed.get(&partition).map(|o| o.offset)
+    );
+    assert_eq!(committed.get(&partition).map(|o| o.offset), Some(3));
+
+    checker.close().await;
+    println!("real Kafka auto/async commit smoke: ALL OK");
+}

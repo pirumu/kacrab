@@ -58,7 +58,12 @@ pub struct Consumer {
     needs_rejoin: bool,
     /// When the last heartbeat was sent (throttles poll-driven heartbeats).
     last_heartbeat: Option<Instant>,
+    /// When the last background auto-commit ran.
+    last_auto_commit: Option<Instant>,
 }
+
+/// Callback invoked with the result of an asynchronous offset commit.
+pub type OffsetCommitCallback = Box<dyn FnOnce(Result<()>) + Send>;
 
 impl Consumer {
     /// Build a consumer from public typed Kafka config.
@@ -83,6 +88,7 @@ impl Consumer {
             generation_id: -1,
             needs_rejoin: false,
             last_heartbeat: None,
+            last_auto_commit: None,
         })
     }
 
@@ -299,6 +305,42 @@ impl Consumer {
         coordinator::commit_offsets(&self.wire, coordinator, &group_id, &offsets).await
     }
 
+    /// Commit the current position of every assigned partition without blocking;
+    /// `callback` is invoked with the result when the commit completes.
+    ///
+    /// # Errors
+    /// Returns [`ConsumerError::InvalidState`] if `group.id` is unset, or a
+    /// coordinator-lookup error before the commit is dispatched.
+    pub async fn commit_async(&mut self, callback: OffsetCommitCallback) -> Result<()> {
+        let offsets = self.current_position_offsets();
+        self.commit_async_offsets(offsets, callback).await
+    }
+
+    /// Commit explicit offsets without blocking; `callback` is invoked with the
+    /// result when the commit completes.
+    ///
+    /// # Errors
+    /// Returns [`ConsumerError::InvalidState`] if `group.id` is unset, or a
+    /// coordinator-lookup error before the commit is dispatched.
+    pub async fn commit_async_offsets(
+        &mut self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        callback: OffsetCommitCallback,
+    ) -> Result<()> {
+        if offsets.is_empty() {
+            callback(Ok(()));
+            return Ok(());
+        }
+        let group_id = self.require_group_id()?;
+        let coordinator = self.ensure_coordinator(&group_id).await?;
+        let wire = self.wire.clone();
+        let _handle = tokio::spawn(async move {
+            let result = coordinator::commit_offsets(&wire, coordinator, &group_id, &offsets).await;
+            callback(result);
+        });
+        Ok(())
+    }
+
     /// Fetch the last committed offset for each of the given partitions.
     /// Partitions with no committed offset are omitted from the result.
     ///
@@ -412,6 +454,7 @@ impl Consumer {
                 self.ensure_active_group().await?;
                 self.maybe_heartbeat().await?;
             }
+            self.maybe_auto_commit().await;
 
             let topics = self.assigned_topics();
             let mut fetchable_empty = true;
@@ -472,7 +515,8 @@ impl Consumer {
 
     /// Close the consumer: leave the group (best effort) and release its broker
     /// connections. The wire client shuts its broker tasks down on drop.
-    pub async fn close(self) {
+    pub async fn close(mut self) {
+        let _committed = self.auto_commit_now().await;
         if let (false, Some(coordinator)) = (self.member_id.is_empty(), self.coordinator_id) {
             coordinator::leave_group(
                 &self.wire,
@@ -563,6 +607,8 @@ impl Consumer {
         if !self.needs_rejoin && !self.member_id.is_empty() {
             return Ok(());
         }
+        // Commit the current positions before the assignment is revoked.
+        let _committed = self.auto_commit_now().await;
         let group_id = self.config.group_id.clone();
         let coordinator = self.ensure_coordinator(&group_id).await?;
         let join = coordinator::join_group(
@@ -637,6 +683,37 @@ impl Consumer {
             .into_iter()
             .map(|(member, partitions)| (member, assignor::encode_assignment(&partitions)))
             .collect())
+    }
+
+    /// Best-effort background auto-commit, throttled to `auto.commit.interval.ms`.
+    /// Failures are swallowed (retried on the next interval), matching Java's
+    /// async auto-commit.
+    async fn maybe_auto_commit(&mut self) {
+        if !self.config.enable_auto_commit || self.config.group_id.is_empty() {
+            return;
+        }
+        let due = self
+            .last_auto_commit
+            .is_none_or(|last| last.elapsed() >= self.config.auto_commit_interval);
+        if due {
+            self.last_auto_commit = Some(Instant::now());
+            let _outcome = self.auto_commit_now().await;
+        }
+    }
+
+    /// Commit the current positions now if auto-commit is enabled (best effort);
+    /// used before a rebalance and on close.
+    async fn auto_commit_now(&mut self) -> Result<()> {
+        if !self.config.enable_auto_commit || self.config.group_id.is_empty() {
+            return Ok(());
+        }
+        let offsets = self.current_position_offsets();
+        if offsets.is_empty() {
+            return Ok(());
+        }
+        let group_id = self.config.group_id.clone();
+        let coordinator = self.ensure_coordinator(&group_id).await?;
+        coordinator::commit_offsets(&self.wire, coordinator, &group_id, &offsets).await
     }
 
     /// Send a throttled heartbeat, flagging a rejoin on the coordinator's signal.

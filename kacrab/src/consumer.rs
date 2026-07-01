@@ -20,7 +20,7 @@ mod record;
 mod subscription;
 
 pub use self::{
-    client::Consumer,
+    client::{Consumer, OffsetCommitCallback},
     config::{AutoOffsetReset, ConsumerRuntimeConfig, IsolationLevel},
     error::{ConsumerError, Result},
     record::{ConsumerRecord, ConsumerRecords, OffsetAndTimestamp, RecordHeader, TimestampType},
