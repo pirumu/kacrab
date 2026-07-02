@@ -98,6 +98,15 @@ pub struct Consumer {
     last_modern_heartbeat: Option<Instant>,
     /// Per-broker incremental fetch sessions (KIP-227).
     fetch_sessions: fetch::FetchSessions,
+    /// Fetched-but-undrained records kept across polls (Java's
+    /// `completedFetches`): `poll` drains this `max.poll.records` at a time and
+    /// a partition is only re-fetched once its buffered data runs dry.
+    fetch_buffer: fetch::FetchBuffer,
+    /// The background `Fetch` in flight, if any (Java's network-thread
+    /// pipelining): spawned as soon as fetchable partitions run dry — usually
+    /// while other partitions still serve from the buffer — and folded back in
+    /// by a later poll. Carries the fetch sessions while airborne.
+    in_flight_fetch: Option<JoinHandle<FetchTaskOutcome>>,
     /// Ordered queue of asynchronous commits, drained one at a time by
     /// `async_commit_task` so two `commit_async` calls never land out of order —
     /// otherwise a stale commit could move the committed offset backwards (Java's
@@ -105,6 +114,14 @@ pub struct Consumer {
     async_commits: tokio::sync::mpsc::UnboundedSender<AsyncCommit>,
     /// The background task draining `async_commits`, aborted on close.
     async_commit_task: JoinHandle<()>,
+}
+
+/// What a background fetch task hands back: the fetch outcome plus the
+/// per-broker session state it borrowed for the flight.
+#[derive(Debug)]
+struct FetchTaskOutcome {
+    result: Result<fetch::FetchProgress>,
+    sessions: fetch::FetchSessions,
 }
 
 /// A queued asynchronous commit, applied in send order by the commit worker.
@@ -239,6 +256,8 @@ impl Consumer {
             modern_group: None,
             last_modern_heartbeat: None,
             fetch_sessions: fetch::FetchSessions::default(),
+            fetch_buffer: fetch::FetchBuffer::default(),
+            in_flight_fetch: None,
             async_commits,
             async_commit_task,
         })
@@ -765,57 +784,67 @@ impl Consumer {
                 self.reset_positions(&metadata).await?;
                 self.validate_positions(&metadata).await?;
 
-                let fetchable = self.subscription.fetchable_partitions();
+                // Fold in a background fetch that has already landed
+                // (non-blocking), so its partitions count as buffered below.
+                self.reap_fetch(None).await?;
+
+                // Serve buffered records first (Java's `collectFetch`): while
+                // data waits client-side no Fetch RPC blocks the poll, so one
+                // fetch round's surplus is drained across polls instead of
+                // being re-served by the broker every poll.
+                let drained = self
+                    .fetch_buffer
+                    .drain(&self.subscription, self.config.max_poll_records)?;
+
+                // Pipeline the next fetch (Java's network thread): dry
+                // partitions get their Fetch in flight while the caller
+                // processes this batch. Skip partitions whose leader still
+                // hosts buffered partitions (Java's buffered-node gate) — a
+                // fetch omitting them would drop them from the broker's
+                // session cache, and one listing only caught-up partitions
+                // would long-poll `fetch.max.wait.ms` while the buffer drains
+                // dry behind it.
+                let buffered_leaders: HashSet<i32> = self
+                    .fetch_buffer
+                    .partitions()
+                    .filter_map(|partition| {
+                        offsets::partition_leader(&metadata, &partition.topic, partition.partition)
+                    })
+                    .collect();
+                let fetchable: Vec<_> = self
+                    .subscription
+                    .fetchable_partitions()
+                    .into_iter()
+                    .filter(|(partition, _position)| {
+                        !self.fetch_buffer.has(partition)
+                            && offsets::partition_leader(
+                                &metadata,
+                                &partition.topic,
+                                partition.partition,
+                            )
+                            .is_none_or(|leader| !buffered_leaders.contains(&leader))
+                    })
+                    .collect();
                 fetchable_empty = fetchable.is_empty();
-                if !fetchable.is_empty() {
-                    self.metrics.record_fetch();
-                    // Clamp the broker's long-poll wait to what's left of the
-                    // caller's poll timeout, so a short `poll` isn't blocked for
-                    // the full `fetch.max.wait.ms`.
-                    let remaining = clamp_ms(timeout.saturating_sub(start.elapsed()));
-                    let max_wait_ms = remaining.min(self.config.fetch_max_wait_ms);
-                    let progress = fetch::fetch(
-                        &fetch::FetchContext {
-                            wire: &self.wire,
-                            config: &self.config,
-                            metadata: &metadata,
-                            max_wait_ms,
-                        },
-                        &fetchable,
-                        self.config.max_poll_records,
-                        &mut self.fetch_sessions,
-                    )
-                    .await?;
-                    // Out-of-range partitions clear their position so the next poll
-                    // re-resolves it via `auto.offset.reset` (KIP behaviour parity).
-                    for partition in &progress.resets {
-                        self.subscription.request_reset(partition);
-                    }
-                    // Stale-leader partitions invalidate cached metadata so the next
-                    // poll re-resolves their leaders.
-                    for partition in &progress.stale {
-                        self.wire
-                            .invalidate_topic_partition(&partition.topic, partition.partition);
-                    }
-                    let mut records = ConsumerRecords::empty();
-                    for partition_fetch in progress.partitions {
-                        self.subscription.advance_position(
-                            &partition_fetch.partition,
-                            partition_fetch.next_offset,
-                            partition_fetch.next_leader_epoch,
-                        );
-                        records.push_partition(
-                            partition_fetch.partition.topic,
-                            partition_fetch.partition.partition,
-                            partition_fetch.records,
-                        );
-                    }
-                    if !records.is_empty() {
-                        // Interceptors may rewrite or filter the batch before it
-                        // reaches the caller (Kafka `onConsume`).
-                        let records = self.interceptors.on_consume(records);
-                        self.metrics.record_records(records.count());
-                        return Ok(records);
+                if !fetchable.is_empty() && self.in_flight_fetch.is_none() {
+                    self.spawn_fetch(&metadata, fetchable);
+                }
+
+                if !drained.is_empty() {
+                    return Ok(self.deliver(drained));
+                }
+
+                // Nothing buffered: wait out the in-flight fetch, bounded by
+                // the poll budget (the broker itself holds the fetch only up
+                // to `fetch.max.wait.ms`), and drain whatever landed.
+                if self.in_flight_fetch.is_some() {
+                    let remaining = timeout.saturating_sub(start.elapsed());
+                    self.reap_fetch(Some(remaining)).await?;
+                    let drained = self
+                        .fetch_buffer
+                        .drain(&self.subscription, self.config.max_poll_records)?;
+                    if !drained.is_empty() {
+                        return Ok(self.deliver(drained));
                     }
                 }
             } else if !self.is_subscribed() {
@@ -828,11 +857,112 @@ impl Consumer {
                 return Ok(ConsumerRecords::empty());
             }
             // Nothing fetchable this round (leaders unresolved, or subscribed but
-            // not yet assigned) — back off briefly so we don't spin.
-            if fetchable_empty {
+            // not yet assigned) and no fetch in flight — back off briefly so we
+            // don't spin.
+            if fetchable_empty && self.in_flight_fetch.is_none() {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
+    }
+
+    /// Spawn a background `Fetch` for `fetchable` (Java's network thread): the
+    /// request long-polls the broker for up to `fetch.max.wait.ms` while `poll`
+    /// keeps serving buffered records. The fetch sessions travel with the task
+    /// and come back in [`reap_fetch`](Self::reap_fetch).
+    fn spawn_fetch(
+        &mut self,
+        metadata: &ClusterMetadata,
+        fetchable: Vec<(TopicPartition, FetchPosition)>,
+    ) {
+        self.metrics.record_fetch();
+        let wire = self.wire.clone();
+        let config = self.config.clone();
+        let metadata = metadata.clone();
+        let mut sessions = std::mem::take(&mut self.fetch_sessions);
+        let max_wait_ms = self.config.fetch_max_wait_ms;
+        self.in_flight_fetch = Some(tokio::spawn(async move {
+            let result = fetch::fetch(
+                &fetch::FetchContext {
+                    wire: &wire,
+                    config: &config,
+                    metadata: &metadata,
+                    max_wait_ms,
+                },
+                &fetchable,
+                &mut sessions,
+            )
+            .await;
+            FetchTaskOutcome { result, sessions }
+        }));
+    }
+
+    /// Fold a completed background fetch into the buffer. With `wait` this
+    /// blocks up to that long for the in-flight fetch; without it only an
+    /// already-finished task is reaped. Restores the fetch sessions either way.
+    async fn reap_fetch(&mut self, wait: Option<Duration>) -> Result<()> {
+        let Some(mut handle) = self.in_flight_fetch.take() else {
+            return Ok(());
+        };
+        let joined = if let Some(wait) = wait {
+            match tokio::time::timeout(wait, &mut handle).await {
+                Ok(joined) => joined,
+                Err(_elapsed) => {
+                    // Still airborne — put it back; a later poll reaps it.
+                    self.in_flight_fetch = Some(handle);
+                    return Ok(());
+                },
+            }
+        } else {
+            if !handle.is_finished() {
+                self.in_flight_fetch = Some(handle);
+                return Ok(());
+            }
+            (&mut handle).await
+        };
+        // A panicked/aborted task lost the sessions it carried; the default
+        // left by `spawn_fetch`'s take() re-opens them with full fetches.
+        let outcome = joined
+            .map_err(|_join_error| ConsumerError::InvalidState("background fetch task failed"))?;
+        self.fetch_sessions = outcome.sessions;
+        let progress = outcome.result?;
+        // Out-of-range partitions clear their position so the next poll
+        // re-resolves it via `auto.offset.reset` (KIP behaviour parity).
+        for partition in &progress.resets {
+            self.subscription.request_reset(partition);
+        }
+        // Stale-leader partitions invalidate cached metadata so the next poll
+        // re-resolves their leaders.
+        for partition in &progress.stale {
+            self.wire
+                .invalidate_topic_partition(&partition.topic, partition.partition);
+        }
+        for raw in progress.partitions {
+            self.fetch_buffer.push(raw);
+        }
+        Ok(())
+    }
+
+    /// Advance positions past the drained records and hand them to the
+    /// interceptor chain — the tail of a record-yielding `poll`.
+    fn deliver(&mut self, drained: Vec<fetch::PartitionFetch>) -> ConsumerRecords {
+        let mut records = ConsumerRecords::empty();
+        for partition_fetch in drained {
+            self.subscription.advance_position(
+                &partition_fetch.partition,
+                partition_fetch.next_offset,
+                partition_fetch.next_leader_epoch,
+            );
+            records.push_partition(
+                partition_fetch.partition.topic,
+                partition_fetch.partition.partition,
+                partition_fetch.records,
+            );
+        }
+        // Interceptors may rewrite or filter the batch before it reaches the
+        // caller (Kafka `onConsume`).
+        let records = self.interceptors.on_consume(records);
+        self.metrics.record_records(records.count());
+        records
     }
 
     /// Interrupt a blocking [`Consumer::poll`] on this consumer. The next (or
@@ -848,6 +978,9 @@ impl Consumer {
     pub async fn close(mut self) {
         self.heartbeat_task.abort();
         self.async_commit_task.abort();
+        if let Some(fetch_task) = self.in_flight_fetch.take() {
+            fetch_task.abort();
+        }
         self.interceptors.close();
         let close_timeout = self.config.request_timeout;
         let _timed_out = tokio::time::timeout(close_timeout, self.commit_and_leave()).await;
@@ -1914,7 +2047,7 @@ mod tests {
             "t".to_owned(),
             0,
             vec![ConsumerRecord {
-                topic: "t".to_owned(),
+                topic: Arc::from("t"),
                 partition: 0,
                 offset: 0,
                 timestamp: 0,

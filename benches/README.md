@@ -32,6 +32,8 @@ Sustained production acceptance is the longer-term goal.
 - `producer_dispatcher` - accumulator plus multi-broker produce dispatch.
 - `producer_mock_bench` - executable mock broker smoke benchmark.
 - `producer_kafka_bench` - executable real Kafka smoke benchmark.
+- `consumer_kafka_bench` - executable real Kafka consumer benchmark mirroring
+  Java's `kafka-consumer-perf-test.sh`.
 
 ## Running
 
@@ -43,6 +45,8 @@ cargo bench -p kacrab-benches --bench producer_dispatcher
 cargo run -p kacrab-benches --release --bin producer_mock_bench
 cargo run -p kacrab-benches --release --bin producer_kafka_bench
 KACRAB_ONLY_10KIB=1 cargo run -p kacrab-benches --release --bin producer_kafka_bench
+KACRAB_BENCH_PREFILL=1 cargo run -p kacrab-benches --release --bin consumer_kafka_bench
+make bench-kafka-consumer bench-kafka-consumer-java-default
 ```
 
 `producer_mock_bench` runs two single-shot mock-broker scenarios: 5M messages ×
@@ -299,6 +303,109 @@ Wire pipeline:
   network effects.
 - The default `producer_kafka_bench` path uses Java-style per-record
   `send_with_callback`; batching is internal to the producer.
+
+## Real-Kafka Consumer Baselines
+
+`consumer_kafka_bench` mirrors Java's `ConsumerPerformance`
+(`kafka-consumer-perf-test.sh`) run for run: a fresh group id per run,
+`auto.offset.reset=earliest`, the tool's own props
+(`max.partition.fetch.bytes=1MiB`, `receive.buffer.bytes=2MiB`,
+`check.crcs=false`), 100 ms poll slices until the expected record count, a 10 s
+record-fetch timeout, and the same final CSV columns. Both sides read
+prefilled topics (`KACRAB_BENCH_PREFILL=1` on first use writes the scenario
+records through the kacrab producer), so every measured run consumes identical,
+page-cache-warm broker data. `make bench-kafka-consumer` and
+`make bench-kafka-consumer-java-default` run the pair; the Java wrapper prints
+an effective-config snapshot per run like the producer matrix does.
+
+Knobs (all read once at startup): `KACRAB_BOOTSTRAP`, `KACRAB_BENCH_TOPIC`
+(overrides both scenario topics; defaults are `kacrab-bench` for 10 B and
+`kacrab-bench-10k` for 10 KiB), `KACRAB_BENCH_RUNS`, `KACRAB_ONLY_10B`,
+`KACRAB_ONLY_10KIB`, `KACRAB_BENCH_MESSAGES`, `KACRAB_BENCH_PREFILL`,
+`KACRAB_BENCH_GROUP_PROTOCOL` (`classic`|`consumer` for KIP-848),
+`KACRAB_BENCH_ASSIGN=1` + `KACRAB_BENCH_PARTITIONS=N` (manual-assign mode, no
+group), `KACRAB_BENCH_MAX_POLL_RECORDS`, `KACRAB_BENCH_FETCH_SIZE`,
+`KACRAB_BENCH_FETCH_MAX_BYTES`, `KACRAB_BENCH_SOCKET_BUFFER`,
+`KACRAB_BENCH_CHECK_CRCS`, `KACRAB_BENCH_FROM_LATEST`,
+`KACRAB_BENCH_TIMEOUT_MS`.
+
+Measured 2026-07-02 against the same native Apache Kafka 4.3.0 single-node
+KRaft broker and host as the producer baselines (M3 Pro, `127.0.0.1:9092`,
+native — never through a Docker-VM port forward). Defaults on both sides:
+subscribe as a group, `max.poll.records=500`, no compression.
+
+### Throughput + latency (5,000,000 x 10 B, 16 partitions, `kacrab-c16p`)
+
+| Metric | kacrab | Java `kafka-consumer-perf-test` |
+| --- | ---: | ---: |
+| Throughput | ~17.6M records/sec (~168 MB/sec) | ~9.3M records/sec (~89 MB/sec) |
+| Rebalance (join) time | ~8 ms | ~131 ms |
+| poll() p50 / p99 | ~0.022 ms / ~0.04 ms | ~0.025 ms / ~0.20 ms |
+| poll() p99.9 / max | ~2.5 ms / ~8 ms | ~1.9 ms / ~111 ms |
+| CPU (user+sys, one run) | ~0.28 s | ~2.5 s |
+| Peak RSS (one run) | ~18 MiB | ~286 MiB |
+
+### Throughput + latency (100,000 x 10 KiB, 3 partitions, `kacrab-bench-10k`)
+
+| Metric | kacrab | Java `kafka-consumer-perf-test` |
+| --- | ---: | ---: |
+| Throughput | ~540K records/sec (~5,277 MB/sec) | ~136K records/sec (~1,329 MB/sec) |
+| Rebalance (join) time | ~3 ms | ~128 ms |
+| poll() p50 / p99 | ~0.54 ms / ~0.7 ms | ~1.7 ms / ~4.0 ms |
+| poll() max | ~4.2 ms | ~108 ms |
+| CPU (user+sys, one run) | ~0.16 s | ~2.8 s |
+| Peak RSS (one run) | ~12 MiB | ~230 MiB |
+
+At identical defaults (`max.poll.records=500`, the tool props above) kacrab
+consumes small records **~1.9x faster** and large records **~4x faster** than
+Java, at ~9-17x less CPU and **~16-20x less memory**, with group joins ~15x
+faster and a poll() tail (max) 14-25x lower. Java's only remaining edge is a
+slightly tighter p99.9 on the 10 B workload (~1.9 ms vs ~2.5 ms). Both
+latency lines come from identical loops (the Rust bench and a compiled Java
+probe time every `poll()` call; the max lands on the join poll for Java).
+Poll-latency percentiles print per run (`rust poll latency:` /
+`java poll latency:` lines).
+
+Three pieces produce these numbers (all Java-parity mechanisms, 2026-07-02):
+
+- **Cross-poll fetch buffering** (Java's `completedFetches`): raw fetch
+  responses buffer client-side and `poll` drains them `max.poll.records` at a
+  time; a partition is only re-fetched once dry (~13 Fetch RPCs per 5M-record
+  run, down from 10,000). Before this, every poll re-fetched — and the broker
+  re-served — the response surplus, capping the 10 B row at ~132K records/sec.
+- **Background prefetch** (Java's network thread): the next Fetch is spawned as
+  a task while the caller drains buffered records, and an empty-buffer poll
+  awaits it only up to the poll budget. Fetches skip nodes that still host
+  buffered partitions (Java's buffered-node gate) — without that gate a fetch
+  listing only caught-up partitions long-polls `fetch.max.wait.ms` and stalls
+  the pipeline (measured: throughput collapsed 13x, poll p99.9 hit the 100 ms
+  poll deadline).
+- **Lazy per-batch decode** (Java's `CompletedFetch` iterator): buffered blobs
+  decode one record batch at a time as drained, so memory holds raw blobs plus
+  ~one batch of records, and record materialization churns through small
+  same-size allocations. Decoding whole blobs up front measured ~536 MiB peak
+  RSS (allocator retention of large doubling-growth vectors); per-batch decode
+  is ~18 MiB — and it also cut the p99.9 poll (the old blob-decode spike) from
+  ~5 ms to ~2.5 ms while lifting throughput ~10%.
+
+Variants (single runs, 10 KiB scenario): KIP-848 `group.protocol=consumer` and
+manual assign track the subscribe numbers (joins ~24 ms for KIP-848, 0 for
+assign).
+
+### Consumer Comparison Caveats
+
+- kacrab caps Fetch at v12 (topic-name-keyed); Java 4.3 negotiates v17
+  (topic-id-keyed) with slightly smaller requests. Same fetched data.
+- kacrab has no rebalance-listener callback, so its rebalance time is observed
+  as the `assignment()` empty -> non-empty transition around `poll`, quantized
+  to one poll slice (<= 100 ms overestimate); Java records the exact in-callback
+  instant. kacrab's ~4-12 ms joins vs Java's ~130 ms hold well beyond that
+  noise floor.
+- Java's CSV labels the byte columns `MB`, but the tool computes mebibytes
+  (`bytes / 1024 / 1024`); kacrab reproduces the same computation, so the
+  columns compare 1:1 (and are ~5% smaller than decimal-MB figures).
+- Five-run local smoke measurements on shared client/broker hardware; the same
+  Limits Of This Pass caveats as the producer baselines apply.
 
 ## Author
 

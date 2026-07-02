@@ -1,6 +1,6 @@
 //! Records returned to the caller by [`Consumer::poll`](super::Consumer::poll).
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use bytes::Bytes;
 pub use kacrab_protocol::record::RecordHeader;
@@ -35,8 +35,10 @@ pub enum TimestampType {
 /// deserializer, mirroring the producer's bytes-first `ProducerRecord`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerRecord {
-    /// Topic the record came from.
-    pub topic: String,
+    /// Topic the record came from. A shared handle (like the producer's
+    /// `RecordMetadata`), so a poll's worth of records does not heap-allocate
+    /// the topic name once per record.
+    pub topic: Arc<str>,
     /// Partition the record came from.
     pub partition: i32,
     /// Absolute offset of the record within its partition.
@@ -59,7 +61,7 @@ impl ConsumerRecord {
     /// The record's topic and partition as a [`TopicPartition`] key.
     #[must_use]
     pub fn topic_partition(&self) -> TopicPartition {
-        TopicPartition::new(self.topic.clone(), self.partition)
+        TopicPartition::new(self.topic.as_ref(), self.partition)
     }
 
     /// Deserialize this record's key and value with the given deserializers.
@@ -106,10 +108,16 @@ impl ConsumerRecords {
             return;
         }
         self.count = self.count.saturating_add(records.len());
-        self.by_partition
-            .entry((topic, partition))
-            .or_default()
-            .extend(records);
+        match self.by_partition.entry((topic, partition)) {
+            // The common case — one slice per partition per poll — moves the
+            // vector in whole instead of copying every record.
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let _records = entry.insert(records);
+            },
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().extend(records);
+            },
+        }
     }
 
     /// Total number of records across all partitions.
@@ -177,7 +185,7 @@ mod tests {
 
     fn record(topic: &str, partition: i32, offset: i64) -> ConsumerRecord {
         ConsumerRecord {
-            topic: topic.to_owned(),
+            topic: Arc::from(topic),
             partition,
             offset,
             timestamp: offset,
