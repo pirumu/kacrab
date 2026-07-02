@@ -1,7 +1,9 @@
 # Design decisions & Java parity
 
-A handful of principles shape every file in kacrab. They explain why the code
-looks the way it does — and why some things that *could* be simpler aren't.
+Every expedition carries a compass. A handful of principles were fixed before
+the first line of code and shape every file in kacrab — they explain why the
+code looks the way it does, why some things that *could* be simpler aren't,
+and how each fork in the road in Parts I–V was decided.
 
 ## "Java-compatible" means Kafka-protocol-compatible
 

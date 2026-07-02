@@ -1,7 +1,8 @@
 # Testing, coverage & CI
 
-kacrab's correctness rests on three layers, each catching what the layer below
-cannot:
+An expedition's claims are worth what its instruments can prove. Everything
+asserted in Parts I–V rests on three layers of evidence, each catching what
+the layer below cannot:
 
 | Layer | What it proves | Where it runs |
 |---|---|---|

@@ -1,8 +1,10 @@
-# The producer pipeline
+# Following one record
 
-This chapter follows a record from `producer.send(record)` to bytes on a socket.
-The [idempotency chapter](./idempotency.md) covers the sequencing; this one
-covers the path.
+The best way to understand a producer is to walk beside a single record: from
+the moment your code calls `producer.send(record)` to the moment a broker
+acknowledgement resolves its future. This chapter is that walk. The
+[idempotency chapter](./idempotency.md) covers the sequencing that keeps the
+walk honest; this one covers the path itself.
 
 ```mermaid
 flowchart LR
@@ -89,3 +91,16 @@ The producer runs the full Kafka `ProducerInterceptor` lifecycle
 `ClusterResourceListener.onUpdate` hook) and publishes metrics under their Kafka
 names (`producer-metrics:*` / `producer-topic-metrics:*`), including the
 buffer-pool gauges.
+
+## Field notes
+
+Every stage of this walk has a tuning knob, and the
+[producer field guide](../field-guide/producer.md) ranks them. The short
+version:
+
+- `linger.ms` trades a bounded wait at the accumulator for fuller batches —
+  the highest-leverage throughput lever on the whole path.
+- `buffer.memory` + `max.block.ms` are the back-pressure contract: when the
+  accumulator is full, `send` *blocks*, it doesn't grow without bound.
+- `flush()` waits for the entire pipeline — call it at commit points, never
+  per record.

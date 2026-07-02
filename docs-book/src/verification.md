@@ -1,10 +1,13 @@
 # Verification against real brokers
 
-Unit tests prove kacrab is self-consistent. They do **not** prove it is
-*Kafka*-consistent — a codec framed the wrong way, or a SASL round skipped,
-passes a Rust-only round trip because kacrab is on both ends. So the security,
-compression, and multi-broker paths are exercised end-to-end against real Apache
-Kafka 4.3.0, with the environments captured as `docker-compose.*.yml` files.
+The map is not the territory. Unit tests prove kacrab is self-consistent —
+they do **not** prove it is *Kafka*-consistent: a codec framed the wrong way,
+or a SASL round skipped, passes a Rust-only round trip because kacrab is on
+both ends. Most of the discoveries in this book — the OAUTHBEARER error round,
+the GSSAPI security layer, the burst wedge, the IPv6 hang, the topic-id codec
+traps — were found *here*, walking the actual territory: every path exercised
+end-to-end against real Apache Kafka 4.3.0, with the environments captured as
+`docker-compose.*.yml` files.
 
 > **Quote**
 >
@@ -44,6 +47,18 @@ fail), and `kafka-console-consumer` decompresses the exact payloads back.
 on-disk batch codecs: [gzip×3, snappy×3, lz4×3, zstd×3]
 all 12 compressed records round-tripped through the broker and CLI consumer
 ```
+
+## Consumer — groups, offsets, and both protocols
+
+`kacrab/tests/real_kafka_consumer.rs` (12 tests, `--test-threads=1`) walks the
+consumer surface against a real broker: manual assignment and commit
+round-trips; one subscriber owning a whole topic; two consumers splitting it
+via a real rebalance; cooperative-sticky converging with no double-owned
+partition; the `roundrobin` assignor; pattern subscription; interceptors;
+offset queries and lag; async commits landing in call order; seek-past-end
+recovering; and a KIP-848 (`group.protocol=consumer`) member joining,
+consuming, and committing through `ConsumerGroupHeartbeat`. See
+[the consumer chapters](./consumer.md) for what each proves.
 
 ## Multi-broker — dispatch & leadership-change
 

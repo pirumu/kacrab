@@ -1,9 +1,13 @@
-# Fetching, positions & offsets
+# Reading in order: fetching, positions & offsets
 
-Once a consumer owns partitions, the job is to read them in order from the right
-place, survive the log moving underneath it, and remember how far it got. Three
-state machines cooperate: the **position** of each partition, the per-broker
-**fetch session**, and the **committed offset** at the coordinator.
+Once a consumer owns partitions, the rest of the road is reading: in order,
+from the right place, surviving the log moving underneath, remembering how far
+it got. Three state machines cooperate — the **position** of each partition,
+the per-broker **fetch session**, and the **committed offset** at the
+coordinator — and this leg is also where the consumer's *performance* was won:
+the three mechanisms that carry the [benchmark numbers](../benchmarks.md) all
+live in the fetch loop below, each added after a measurement exposed its
+absence.
 
 > **The invariant we defend**
 >
@@ -187,3 +191,19 @@ commits applying in call order with no regression; a fetch past the log end
 resetting and recovering; and a short `poll` returning without waiting out a long
 `fetch.max.wait.ms`. The fetch-session state machine and truncation classifier are
 unit-tested (a real leader change / truncation can't be staged on one broker).
+
+## Field notes
+
+- `max.poll.records` shapes your poll-loop cadence, **not** network traffic —
+  the buffer and prefetch above mean small values don't add RPCs. Size it to
+  fit `max.poll.interval.ms`.
+- Raise `fetch.min.bytes` to make the broker batch for you on
+  high-throughput topics; kacrab's poll-budget clamp keeps short polls
+  responsive anyway.
+- `OFFSET_OUT_OF_RANGE` is weather, not an outage — but what it *resets to*
+  is your `auto.offset.reset` choice. Under `latest`, an aged-out offset is
+  a silent skip; choose deliberately.
+- Prefer `commit_async` on the hot path (kacrab guarantees FIFO application)
+  with one `commit_sync` at shutdown.
+
+The [consumer field guide](../field-guide/consumer.md) develops all four.

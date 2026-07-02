@@ -1,11 +1,13 @@
-# The wire layer
+# First contact: the wire layer
 
-The `wire` module is the async transport every higher layer rides on. Its job:
-turn a stream of "send this request to broker N" commands into bytes on a socket
+The journey starts here, because everything else has to. Before a producer can
+batch or a consumer can rebalance, one problem must be solved completely: turn
+a stream of "send this request to broker N" commands into bytes on a socket
 and responses back to the caller — correctly, with bounded memory, surviving
-reconnects and broker failovers. It is built on Tokio and `rustls` — the Kafka
-client logic is pure Rust, not a `librdkafka` wrapper. (The TLS crypto provider
-under `rustls` is `aws-lc-rs`, which is C/assembly; see
+reconnects and broker failovers. That is the `wire` module, and every higher
+layer rides on it. It is built on Tokio and `rustls` — the Kafka client logic
+is pure Rust, not a `librdkafka` wrapper. (The TLS crypto provider under
+`rustls` is `aws-lc-rs`, which is C/assembly; see
 [Design decisions](./design-decisions.md) for which dependencies are C.)
 
 ## One task per broker
@@ -88,3 +90,25 @@ The fatal cases mirror Java's non-retriable `SaslAuthenticationException` /
 immediately with the broker's reason, instead of looping until
 `request.timeout.ms`. See [Security](./security.md) and
 [Failure modes](./failure-modes.md).
+
+## DNS is part of the transport
+
+One discovery on this leg came from a hang, not a crash: a broker advertised
+as `localhost` resolved to the IPv6 loopback first — where nothing listened —
+and a pinned coordinator connection waited forever. DNS resolution is now
+centralized in the wire layer: hostnames are re-resolved on every connect,
+all returned addresses are tried IPv4-first, and
+`client.dns.lookup=use_all_dns_ips` is honoured. Producer, admin, and
+consumer all inherit the fix because they all ride this layer.
+
+## Field notes
+
+- The backoff pair (`reconnect.backoff.ms` → `reconnect.backoff.max.ms`) is
+  exponential and jittered out of the box — see the
+  [foundations field guide](./field-guide/foundations.md) before overriding.
+- An auth failure at connect is **fatal by design**. If startup fails fast
+  with a SASL/TLS reason, that is the wire layer doing its job — fix the
+  credential, don't raise `request.timeout.ms`.
+- In containerized or multi-homed environments, prefer
+  `client.dns.lookup=use_all_dns_ips` and advertise brokers by names every
+  client network can actually reach.

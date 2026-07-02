@@ -1,8 +1,10 @@
-# Group membership & rebalancing
+# Sharing the load: groups & rebalancing
 
-This is the consumer's correctness core. A consumer group spreads the partitions
-of the subscribed topics across its members and keeps that division valid as
-members come and go. The whole design exists to defend one invariant.
+This is the consumer's correctness core, and the deepest cave on the road
+back. A consumer group spreads the partitions of the subscribed topics across
+its members and keeps that division valid as members come and go — through
+two different protocols, four assignors, and a handoff dance whose entire
+purpose is to defend one invariant.
 
 > **The invariant we defend**
 >
@@ -199,3 +201,17 @@ assignor; cooperative-sticky converging two consumers to a clean split; and a
 assigned both partitions, consuming, and committing. The multi-member handoff is
 exercised end to end for the classic cooperative path; the KIP-848 handoff relies
 on the coordinator's documented server-side withholding.
+
+## Field notes
+
+- The default `partition.assignment.strategy` (`range,cooperative-sticky`)
+  negotiates to **eager `range`** in steady state — to actually get the
+  incremental handoff above, set `cooperative-sticky` **alone**.
+- On Kafka 4.x clusters, `group.protocol=consumer` gets you server-side
+  reconciliation and one-RPC membership — prefer it for new groups.
+- `group.instance.id` (static membership) is the cheapest rebalance-storm
+  fix in Kafka: a bounce within `session.timeout.ms` triggers no rebalance
+  at all.
+- Heartbeats are background; **poll cadence** is the liveness you own —
+  the `max.poll.interval.ms` arithmetic is in the
+  [consumer field guide](../field-guide/consumer.md).

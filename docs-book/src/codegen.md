@@ -1,9 +1,11 @@
-# Protocol code generation
+# Learning the language: protocol codegen
 
-The Kafka wire protocol is hundreds of request/response types across dozens of
-versions, with flexible/compact encodings, nullable fields, tagged fields, and
-nested schemas. Hand-writing and hand-maintaining that is how subtle wire bugs
-are born. kacrab **generates** it from the upstream schemas and checks the result
+You cannot explore a territory whose language you don't speak — and Kafka's
+language is hundreds of request/response types across dozens of versions, with
+flexible/compact encodings, nullable fields, tagged fields, and nested
+schemas. Hand-writing and hand-maintaining that is how subtle wire bugs are
+born. So before setting out, kacrab **generates** the entire protocol from the
+upstream schemas — and, not trusting its own pronunciation, checks the result
 against the Java client as an external oracle.
 
 ## `kacrab-codegen`
@@ -64,3 +66,12 @@ The matrix is not exhaustive over every value combination, and it does not cover
 broker/client *behavior* outside message serialization (that is what the unit
 tests, the idempotent fixtures, and the real-broker integration tests are for).
 It proves cross-language *wire compatibility* for the generated schema surface.
+
+## The config surface is generated too
+
+The `config` subcommand extracts upstream `ConfigDef` declarations into the
+catalog behind `ClientConfig` — which is why every key in the
+[field guide](./field-guide/foundations.md) carries Kafka's own name, type,
+default, and validation. The hand-curated typed API is cross-checked against
+that catalog by a drift test, so a config documented in this book is a config
+that exists, with the semantics upstream gave it.
