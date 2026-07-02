@@ -92,18 +92,23 @@ for APIs not yet wired up (streams).
 
 ## Install
 
+Nothing is enabled by default (`default = []`) — turn on the surfaces you use:
+
 ```toml
 [dependencies]
-kacrab = { version = "0.1", features = ["producer"] }
+kacrab = { version = "0.1", features = ["producer", "consumer", "admin"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
-Available features: `producer`, `consumer`, `admin`; compression codecs
-`gzip`, `lz4`, `snappy`, `zstd`; Kerberos via `gssapi`.
+Available features: `producer`, `consumer`, `admin` (each example below names
+the one it needs); compression codecs `gzip`, `lz4`, `snappy`, `zstd` (or the
+`compression` meta-feature for all four); Kerberos via `gssapi`; config macro
+helpers via `macros`.
 
 ## Producer
 
-`send` is synchronous like Kafka's `Producer.send`: it returns a `SendFuture`
+Requires the `producer` feature. `send` is synchronous like Kafka's
+`Producer.send`: it returns a `SendFuture`
 right away, and you await that future for the broker acknowledgement. Batching
 happens automatically through `batch.size`, `linger.ms`, buffer memory, and
 flush/close boundaries.
@@ -144,8 +149,9 @@ not `key.serializer` class names. See
 
 ## Consumer
 
-Manual `assign` + `seek`/`position`/`pause`, topic subscription, regex
-`subscribe_pattern`, and both group protocols are supported:
+Requires the `consumer` feature. Manual `assign` + `seek`/`position`/`pause`,
+topic subscription, regex `subscribe_pattern`, and both group protocols are
+supported:
 
 ```rust
 use std::time::Duration;
@@ -187,9 +193,9 @@ deep dives.
 
 ## Admin
 
-Admin mirrors Java's `Admin` with `snake_case` methods and per-call options
-structs. It uses the same Kafka config keys, including
-`security.protocol`/TLS/SASL:
+Requires the `admin` feature. Admin mirrors Java's `Admin` with `snake_case`
+methods and per-call options structs. It uses the same Kafka config keys,
+including `security.protocol`/TLS/SASL:
 
 ```rust
 use kacrab::admin::{AdminClient, CreateTopicsOptions, NewTopic};
