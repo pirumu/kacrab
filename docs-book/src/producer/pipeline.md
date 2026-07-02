@@ -49,9 +49,18 @@ prepares them, and dispatches.
 
 1. **Drain** pulls ready batches out of the accumulator in a single sequential
    pass — the point where idempotent sequence numbers are assigned in order.
+   The idempotent path drains only each partition's *front* batch per cycle:
+   dispatch starts at most one new request per partition per selection, so
+   draining a deep backlog only to re-enqueue all but one batch per partition
+   would be O(backlog) churn under the accumulator lock on every cycle.
+   Non-idempotent dispatch drains everything ready (it coalesces all of it into
+   one request).
 2. **Prepare** stamps each batch with its `(producer id, epoch, base sequence)`
    and registers it in the partition's in-flight set. Batches that cannot be sent
-   in order yet are deferred (re-enqueued).
+   in order yet are deferred (re-enqueued). A cycle whose every ready batch is
+   deferred (all partitions already at the in-flight depth cap) parks the sender
+   until a completion frees a slot — re-polling immediately would livelock in a
+   hot drain/defer/requeue spin for the whole round trip.
 3. **Dispatch** routes each batch to its partition leader, groups batches
    destined for the same broker into one Produce request, splits on
    `max.request.size`, and enqueues through the

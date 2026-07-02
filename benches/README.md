@@ -162,12 +162,15 @@ moves, but it cannot skip Kafka serialization itself.
 
 ## Real-Kafka Baselines
 
-Measured 2026-06-28 against native Apache Kafka 4.3.0 single-node KRaft on the
+Measured 2026-07-02 against native Apache Kafka 4.3.0 single-node KRaft on the
 same machine (`127.0.0.1:9092`), through the public producer API at the
 **default Kafka-compatible config** (`acks=all`, `enable.idempotence=true`), no
 compression. Client and broker share the host (no CPU pinning or page-cache
 isolation), so treat these as local checkpoints, not production acceptance
-numbers.
+numbers. **Benchmark against a native broker, not one behind a Docker-VM port
+forward** — a Colima/OrbStack published port is an SSH tunnel that roughly
+triples request RTT and silently caps every number (10 KiB throughput measured
+~3x lower through the tunnel).
 
 Benchmark host:
 
@@ -191,18 +194,19 @@ kafka-producer-perf-test.sh --topic kacrab-16p --num-records 5000000 \
 
 | Metric | kacrab | Java `kafka-producer-perf-test` |
 | --- | ---: | ---: |
-| Throughput | ~4.70M rec/sec (44.8 MiB/sec) | 3.6-4.2M rec/sec |
-| Latency avg | ~1.7 ms | 0.27-0.35 ms |
-| Latency p99 | ~15 ms | 1-2 ms |
+| Throughput | ~4.79-4.86M rec/sec (46.3 MiB/sec) | 3.80-3.84M rec/sec |
+| Latency avg | ~1.7 ms | ~0.38 ms |
+| Latency p99 | ~13 ms | ~3 ms |
 | retries / errors | 0 / 0 | 0 / 0 |
 
-kacrab wins throughput (about +12% over Java's best runs) while staying fully
-idempotent-correct, but Java has lower typical latency. The gap is a tunable
-tradeoff plus a shared broker artifact, not a client cost:
+kacrab wins throughput (about +25% over Java) while staying fully
+idempotent-correct, but Java has lower typical latency on this 16-partition
+workload. The gap is a tunable tradeoff plus a shared broker artifact, not a
+client cost:
 
 - **Pipeline depth.** kacrab's synchronous send fills the per-partition pipeline
   toward `max.in.flight=5`. At `max.in.flight=1` kacrab's p99 drops to ~2 ms at
-  the same ~4.7M throughput, because on a single low-RTT broker the per-broker
+  the same ~4.8M throughput, because on a single low-RTT broker the per-broker
   request coalescing already saturates the connection and the extra depth only
   adds queue latency. Depth pays off across multiple brokers / higher RTT.
 - **Broker-pause resilience.** The co-located single-node JVM broker pauses
@@ -211,12 +215,25 @@ tradeoff plus a shared broker artifact, not a client cost:
   (kacrab p99.9 ~10 ms); at depth 1 the single slot blocks and p99.9 jumps to
   ~100 ms.
 
-On a single partition (`kacrab-1p`) kacrab latency is ~0.2 ms avg, close to Java.
-Lower `max.in.flight.requests.per.connection` / `linger.ms` for lower
+On a single partition (`kacrab-1p`) kacrab latency is ~0.08 ms avg — below
+Java's. Lower `max.in.flight.requests.per.connection` / `linger.ms` for lower
 single-broker latency; the gap shrinks in production (broker off the client
 machine, real network RTT).
 
-### CPU + peak memory (same 5M x 10B run, `/usr/bin/time -l`)
+### Throughput + latency (100K x 10 KiB, 3 partitions, default `batch.size`)
+
+| Metric | kacrab | Java `kafka-producer-perf-test` |
+| --- | ---: | ---: |
+| Throughput | ~55.5-58.4K rec/sec (~542-570 MB/sec) | 42.7-46.4K rec/sec (417-453 MB/sec) |
+| Latency avg / p99 | ~36 ms / ~78 ms | ~43 ms / ~92 ms |
+| retries / errors | 0 / 0 | 0 / 0 |
+
+A 10 KiB record exceeds half of the default 16 KiB `batch.size`, so every batch
+holds one record; throughput stays high because each `acks=all` produce request
+coalesces one ready batch from every partition (`records_per_request` = 3 on a
+3-partition topic) instead of serializing one record per round trip.
+
+### CPU + peak memory (same 5M x 10B workload, `/usr/bin/time -l`, 2026-06-28)
 
 | Resource | kacrab | Java | Java overhead |
 | --- | ---: | ---: | ---: |
@@ -224,10 +241,10 @@ machine, real network RTT).
 | Total CPU (user+sys) | ~2.7 s | ~4.1 s | **~1.5x more** |
 | Wall time | ~1.1-1.8 s | ~2.4 s | -- |
 
-This is where the native-vs-JVM gap shows, and it explains why the throughput
-win is "only" ~12%: throughput here is **broker-bound** (both clients spend most
-of the run waiting on `acks=all` round-trips), so the client language barely
-moves the throughput needle. The real efficiency difference is in **memory**
+This is where the native-vs-JVM gap shows. Throughput is **broker-bound** (both
+clients spend most of the run waiting on `acks=all` round-trips), so the +25%
+records/sec edge comes from keeping the broker busier (pipeline depth plus
+one-batch-per-partition request coalescing), not from cheaper per-record CPU. The real efficiency difference is in **memory**
 (no JVM heap/metaspace, ~4x less resident) and **CPU per record** (~1.5x less
 work for the same 5M records, while also pushing higher throughput). The Java
 CPU figure includes one-time JVM startup + JIT warmup that amortizes over a
