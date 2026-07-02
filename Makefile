@@ -6,6 +6,7 @@
         kafka-tools-check kafka-topic-describe kafka-topic-create \
         kafka-topic-delete kafka-topic-recreate bench-kafka-topic \
         bench-kafka bench-kafka-java-default \
+        bench-kafka-consumer bench-kafka-consumer-java-default \
         ci ci-strict tools
 
 KAFKA_BIN ?= $(HOME)/.local/share/kacrab-kafka/current/bin
@@ -13,6 +14,7 @@ KAFKA_TOPICS ?= $(KAFKA_BIN)/kafka-topics.sh
 KAFKA_SERVER_START ?= $(KAFKA_BIN)/kafka-server-start.sh
 KAFKA_SERVER_STOP ?= $(KAFKA_BIN)/kafka-server-stop.sh
 KAFKA_PRODUCER_PERF ?= $(KAFKA_BIN)/kafka-producer-perf-test.sh
+KAFKA_CONSUMER_PERF ?= $(KAFKA_BIN)/kafka-consumer-perf-test.sh
 KAFKA_ROOT ?= $(abspath $(KAFKA_BIN)/../..)
 KAFKA_SERVER_PROPERTIES ?= $(KAFKA_ROOT)/server.properties
 KAFKA_DATA_DIR ?= $(KAFKA_ROOT)/data
@@ -68,6 +70,9 @@ help:
 	@echo "  bench-kafka           - run Rust real-Kafka bench with fixed default scenarios"
 	@echo "                          uses Java-style per-record public producer send"
 	@echo "  bench-kafka-java-default - run Java default scenarios 5x with effective config snapshots"
+	@echo "  bench-kafka-consumer  - run Rust real-Kafka consumer bench (ConsumerPerformance mirror)"
+	@echo "                          KACRAB_BENCH_PREFILL=1 fills the topics on first use"
+	@echo "  bench-kafka-consumer-java-default - run Java consumer default scenarios 5x"
 
 check:
 	cargo check --workspace --all-targets --all-features
@@ -171,6 +176,16 @@ bench-kafka: kafka-topic-create
 
 bench-kafka-java-default: kafka-tools-check kafka-topic-create
 	KAFKA_BIN="$(KAFKA_BIN)" KAFKA_ROOT="$(KAFKA_ROOT)" KAFKA_PRODUCER_PERF="$(KAFKA_PRODUCER_PERF)" KACRAB_BOOTSTRAP="$(KACRAB_BOOTSTRAP)" KACRAB_BENCH_TOPIC="$(KACRAB_BENCH_TOPIC)" benches/scripts/producer_default_matrix.sh
+
+# The consumer bench manages its own per-scenario topics (kacrab-bench /
+# kacrab-bench-10k unless KACRAB_BENCH_TOPIC is exported), so it does not
+# force $(KACRAB_BENCH_TOPIC) the way the producer targets do.
+bench-kafka-consumer:
+	KACRAB_BOOTSTRAP="$(KACRAB_BOOTSTRAP)" cargo run -p kacrab-benches --bin consumer_kafka_bench --release
+
+bench-kafka-consumer-java-default:
+	@test -x "$(KAFKA_CONSUMER_PERF)" || { echo "missing kafka-consumer-perf-test.sh at $(KAFKA_CONSUMER_PERF). Set KAFKA_BIN=/path/to/kafka/bin"; exit 1; }
+	KAFKA_BIN="$(KAFKA_BIN)" KAFKA_ROOT="$(KAFKA_ROOT)" KAFKA_CONSUMER_PERF="$(KAFKA_CONSUMER_PERF)" KACRAB_BOOTSTRAP="$(KACRAB_BOOTSTRAP)" benches/scripts/consumer_default_matrix.sh
 
 audit:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "cargo-audit not installed. Run: make tools"; exit 1; }
