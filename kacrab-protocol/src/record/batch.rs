@@ -172,9 +172,17 @@ impl RecordBatch {
                 },
             )
         })?;
-        if let Some(slot) = buf.get_mut(crc_field_pos..crc_field_end) {
-            slot.copy_from_slice(&crc_bytes);
-        }
+        let Some(slot) = buf.get_mut(crc_field_pos..crc_field_end) else {
+            return Err(RecordError::at_offset(
+                self.base_offset,
+                RecordErrorKind::LengthOverflow {
+                    field: "crc field",
+                    got: crc_field_end,
+                    remaining: buf.len(),
+                },
+            ));
+        };
+        slot.copy_from_slice(&crc_bytes);
 
         Ok(())
     }
@@ -215,7 +223,7 @@ impl RecordBatch {
     }
 
     /// Decode one batch from `buf`. Validates CRC32C, decompresses if needed,
-    /// caps `record_count` at [`super::MAX_RECORDS_PER_BATCH`].
+    /// and rejects a `record_count` above [`super::MAX_RECORDS_PER_BATCH`].
     #[expect(
         clippy::too_many_lines,
         reason = "Record-batch decoding mirrors the Kafka wire layout step-by-step; splitting it \
@@ -329,7 +337,6 @@ impl RecordBatch {
                 },
             )
         })?;
-        let cap = record_count_usize.min(MAX_RECORDS_PER_BATCH);
         if record_count_usize > MAX_RECORDS_PER_BATCH {
             return Err(RecordError::at_offset(
                 base_offset,
@@ -351,7 +358,7 @@ impl RecordBatch {
             Bytes::from(decompressed)
         };
 
-        let mut records = Vec::with_capacity(cap);
+        let mut records = Vec::with_capacity(record_count_usize);
         for _ in 0..record_count {
             let rec = Record::decode(&mut records_data)
                 .map_err(|e| RecordError::at_offset(base_offset, e.kind))?;

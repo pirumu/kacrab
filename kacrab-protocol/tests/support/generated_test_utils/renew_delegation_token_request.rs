@@ -1,10 +1,17 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::renew_delegation_token_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for RenewDelegationTokenRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             hmac: Bytes::from_static(b"\xca\xfe"),
             renew_period_ms: 9_876_543_210_i64,
@@ -14,35 +21,35 @@ impl TestInstance for RenewDelegationTokenRequestData {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         Self {
             hmac: Bytes::new(),
             renew_period_ms: 0_i64,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             hmac: Bytes::new(),
             renew_period_ms: 0_i64,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             hmac: Bytes::from_static(b"\x00\xff"),
             renew_period_ms: 9_876_543_211_i64,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             hmac: Bytes::from_static(b"\x00\xff"),
             renew_period_ms: i64::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             hmac: Bytes::from_static(b"\xca\xfe"),
             renew_period_ms: 9_876_543_210_i64,
@@ -54,65 +61,69 @@ impl TestInstance for RenewDelegationTokenRequestData {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <RenewDelegationTokenRequestData as TestInstance>::test_populated();
+    let message = <RenewDelegationTokenRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <RenewDelegationTokenRequestData as TestInstance>::test_populated();
+    let message = <RenewDelegationTokenRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <RenewDelegationTokenRequestData as TestInstance>::test_null_optionals();
+    let message = <RenewDelegationTokenRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <RenewDelegationTokenRequestData as TestInstance>::test_null_optionals();
+    let message = <RenewDelegationTokenRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <RenewDelegationTokenRequestData as TestInstance>::test_empty_collections();
+    let message =
+        <RenewDelegationTokenRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <RenewDelegationTokenRequestData as TestInstance>::test_empty_collections();
+    let message =
+        <RenewDelegationTokenRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
     let message =
-        <RenewDelegationTokenRequestData as TestInstance>::test_multi_element_collections();
+        <RenewDelegationTokenRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
     let message =
-        <RenewDelegationTokenRequestData as TestInstance>::test_multi_element_collections();
+        <RenewDelegationTokenRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <RenewDelegationTokenRequestData as TestInstance>::test_numeric_boundaries();
+    let message =
+        <RenewDelegationTokenRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <RenewDelegationTokenRequestData as TestInstance>::test_numeric_boundaries();
+    let message =
+        <RenewDelegationTokenRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <RenewDelegationTokenRequestData as TestInstance>::test_tagged_fields();
+    let message = <RenewDelegationTokenRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <RenewDelegationTokenRequestData as TestInstance>::test_tagged_fields();
+    let message = <RenewDelegationTokenRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

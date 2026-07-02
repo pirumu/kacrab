@@ -14,11 +14,19 @@ const RUST_KEYWORDS: &[&str] = &[
 /// Names that would shadow read/write method parameters.
 const METHOD_PARAM_NAMES: &[&str] = &["version", "buf"];
 
+/// Keywords that are *not* valid raw identifiers: `Ident::new_raw` panics on them,
+/// so they get an underscore suffix instead of `r#` escaping. (`to_snake_case`
+/// lower-cases `Self` to `self`, so only the lower-case forms need listing.)
+const NON_RAW_KEYWORDS: &[&str] = &["self", "super", "crate"];
+
 /// Convert a field name to a [`proc_macro2::Ident`], using a raw identifier when
-/// the snake-cased form clashes with a Rust keyword.
+/// the snake-cased form clashes with a Rust keyword. Reserved words that cannot be
+/// raw identifiers (`self`, `super`, `crate`) get an underscore suffix instead.
 pub(crate) fn safe_rust_ident(name: &str) -> Ident {
     let snake = name.to_snake_case();
-    if RUST_KEYWORDS.contains(&snake.as_str()) {
+    if NON_RAW_KEYWORDS.contains(&snake.as_str()) {
+        Ident::new(&format!("{snake}_"), Span::call_site())
+    } else if RUST_KEYWORDS.contains(&snake.as_str()) {
         Ident::new_raw(&snake, Span::call_site())
     } else {
         Ident::new(&snake, Span::call_site())
@@ -34,7 +42,7 @@ pub(crate) fn shadows_param(name: &str) -> bool {
 /// keyword collisions.
 pub(crate) fn local_var_ident(name: &str) -> Ident {
     let snake = name.to_snake_case();
-    if METHOD_PARAM_NAMES.contains(&snake.as_str()) {
+    if METHOD_PARAM_NAMES.contains(&snake.as_str()) || NON_RAW_KEYWORDS.contains(&snake.as_str()) {
         Ident::new(&format!("{snake}_"), Span::call_site())
     } else if RUST_KEYWORDS.contains(&snake.as_str()) {
         Ident::new_raw(&snake, Span::call_site())

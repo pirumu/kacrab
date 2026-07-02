@@ -1,48 +1,59 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::write_txn_markers_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for WriteTxnMarkersRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
-            markers: vec![<WritableTxnMarker as TestInstance>::test_populated()],
+            markers: vec![<WritableTxnMarker as TestInstance>::test_populated(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
-            markers: vec![<WritableTxnMarker as TestInstance>::test_null_optionals()],
+            markers: vec![<WritableTxnMarker as TestInstance>::test_null_optionals(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             markers: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             markers: vec![
-                <WritableTxnMarker as TestInstance>::test_populated(),
-                <WritableTxnMarker as TestInstance>::test_multi_element_collections(),
+                <WritableTxnMarker as TestInstance>::test_populated(version),
+                <WritableTxnMarker as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
-            markers: vec![<WritableTxnMarker as TestInstance>::test_numeric_boundaries()],
+            markers: vec![<WritableTxnMarker as TestInstance>::test_numeric_boundaries(version)],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
-            markers: vec![<WritableTxnMarker as TestInstance>::test_tagged_fields()],
+            markers: vec![<WritableTxnMarker as TestInstance>::test_tagged_fields(
+                version,
+            )],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -51,76 +62,80 @@ impl TestInstance for WriteTxnMarkersRequestData {
     }
 }
 impl TestInstance for WritableTxnMarker {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             producer_id: 9_876_543_210_i64,
             producer_epoch: 42_i16,
             transaction_result: true,
-            topics: vec![<WritableTxnMarkerTopic as TestInstance>::test_populated()],
+            topics: vec![<WritableTxnMarkerTopic as TestInstance>::test_populated(
+                version,
+            )],
             coordinator_epoch: 12345_i32,
-            transaction_version: 7_i8,
+            transaction_version: if version >= 2 { 7_i8 } else { 0i8 },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             producer_id: 0_i64,
             producer_epoch: 0_i16,
             transaction_result: false,
-            topics: vec![<WritableTxnMarkerTopic as TestInstance>::test_null_optionals()],
+            topics: vec![<WritableTxnMarkerTopic as TestInstance>::test_null_optionals(version)],
             coordinator_epoch: 0_i32,
-            transaction_version: 0_i8,
+            transaction_version: if version >= 2 { 0_i8 } else { 0i8 },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
             producer_id: 0_i64,
             producer_epoch: 0_i16,
             transaction_result: false,
             topics: Vec::new(),
             coordinator_epoch: 0_i32,
-            transaction_version: 0_i8,
+            transaction_version: if version >= 2 { 0_i8 } else { 0i8 },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             producer_id: 9_876_543_211_i64,
             producer_epoch: 43_i16,
             transaction_result: false,
             topics: vec![
-                <WritableTxnMarkerTopic as TestInstance>::test_populated(),
-                <WritableTxnMarkerTopic as TestInstance>::test_multi_element_collections(),
+                <WritableTxnMarkerTopic as TestInstance>::test_populated(version),
+                <WritableTxnMarkerTopic as TestInstance>::test_multi_element_collections(version),
             ],
             coordinator_epoch: 23456_i32,
-            transaction_version: 8_i8,
+            transaction_version: if version >= 2 { 8_i8 } else { 0i8 },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             producer_id: i64::MIN,
             producer_epoch: i16::MIN,
             transaction_result: true,
-            topics: vec![<WritableTxnMarkerTopic as TestInstance>::test_numeric_boundaries()],
+            topics: vec![
+                <WritableTxnMarkerTopic as TestInstance>::test_numeric_boundaries(version),
+            ],
             coordinator_epoch: i32::MIN,
-            transaction_version: i8::MIN,
+            transaction_version: if version >= 2 { i8::MIN } else { 0i8 },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             producer_id: 9_876_543_210_i64,
             producer_epoch: 42_i16,
             transaction_result: true,
-            topics: vec![<WritableTxnMarkerTopic as TestInstance>::test_tagged_fields()],
+            topics: vec![<WritableTxnMarkerTopic as TestInstance>::test_tagged_fields(version)],
             coordinator_epoch: 12345_i32,
-            transaction_version: 7_i8,
+            transaction_version: if version >= 2 { 7_i8 } else { 0i8 },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -129,7 +144,7 @@ impl TestInstance for WritableTxnMarker {
     }
 }
 impl TestInstance for WritableTxnMarkerTopic {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             partition_indexes: vec![12345_i32],
@@ -139,7 +154,7 @@ impl TestInstance for WritableTxnMarkerTopic {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
@@ -147,28 +162,28 @@ impl TestInstance for WritableTxnMarkerTopic {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             partition_indexes: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             partition_indexes: vec![12345_i32, 23456_i32],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
             partition_indexes: vec![i32::MIN],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             partition_indexes: vec![12345_i32],
@@ -180,63 +195,65 @@ impl TestInstance for WritableTxnMarkerTopic {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <WriteTxnMarkersRequestData as TestInstance>::test_populated();
+    let message = <WriteTxnMarkersRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <WriteTxnMarkersRequestData as TestInstance>::test_populated();
+    let message = <WriteTxnMarkersRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <WriteTxnMarkersRequestData as TestInstance>::test_null_optionals();
+    let message = <WriteTxnMarkersRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <WriteTxnMarkersRequestData as TestInstance>::test_null_optionals();
+    let message = <WriteTxnMarkersRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <WriteTxnMarkersRequestData as TestInstance>::test_empty_collections();
+    let message = <WriteTxnMarkersRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <WriteTxnMarkersRequestData as TestInstance>::test_empty_collections();
+    let message = <WriteTxnMarkersRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <WriteTxnMarkersRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <WriteTxnMarkersRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <WriteTxnMarkersRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <WriteTxnMarkersRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <WriteTxnMarkersRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <WriteTxnMarkersRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <WriteTxnMarkersRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <WriteTxnMarkersRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <WriteTxnMarkersRequestData as TestInstance>::test_tagged_fields();
+    let message = <WriteTxnMarkersRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <WriteTxnMarkersRequestData as TestInstance>::test_tagged_fields();
+    let message = <WriteTxnMarkersRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

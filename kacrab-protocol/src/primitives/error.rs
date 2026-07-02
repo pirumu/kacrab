@@ -54,4 +54,11 @@ pub enum PrimitiveErrorKind {
         /// Maximum bytes the varint encoding allows.
         max_bytes: u8,
     },
+
+    /// A compact length prefix decoded to a value that overflows `i32`.
+    #[error("compact length {length} exceeds the i32 maximum")]
+    LengthOutOfRange {
+        /// The decoded length that could not fit in an `i32`.
+        length: u32,
+    },
 }

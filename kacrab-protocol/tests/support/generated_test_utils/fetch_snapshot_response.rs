@@ -1,32 +1,45 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::fetch_snapshot_response::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for FetchSnapshotResponseData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             throttle_time_ms: 12345_i32,
             error_code: 42_i16,
-            topics: vec![<TopicSnapshot as TestInstance>::test_populated()],
-            node_endpoints: vec![<NodeEndpoint as TestInstance>::test_populated()],
+            topics: vec![<TopicSnapshot as TestInstance>::test_populated(version)],
+            node_endpoints: if version >= 1 {
+                vec![<NodeEndpoint as TestInstance>::test_populated(version)]
+            } else {
+                Vec::new()
+            },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
-        drop(<NodeEndpoint as TestInstance>::test_null_optionals());
+    fn test_null_optionals(version: i16) -> Self {
+        drop(<NodeEndpoint as TestInstance>::test_null_optionals(version));
         Self {
             throttle_time_ms: 0_i32,
             error_code: 0_i16,
-            topics: vec![<TopicSnapshot as TestInstance>::test_null_optionals()],
+            topics: vec![<TopicSnapshot as TestInstance>::test_null_optionals(
+                version,
+            )],
             node_endpoints: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             throttle_time_ms: 0_i32,
             error_code: 0_i16,
@@ -35,36 +48,52 @@ impl TestInstance for FetchSnapshotResponseData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             throttle_time_ms: 23456_i32,
             error_code: 43_i16,
             topics: vec![
-                <TopicSnapshot as TestInstance>::test_populated(),
-                <TopicSnapshot as TestInstance>::test_multi_element_collections(),
+                <TopicSnapshot as TestInstance>::test_populated(version),
+                <TopicSnapshot as TestInstance>::test_multi_element_collections(version),
             ],
-            node_endpoints: vec![
-                <NodeEndpoint as TestInstance>::test_populated(),
-                <NodeEndpoint as TestInstance>::test_multi_element_collections(),
-            ],
+            node_endpoints: if version >= 1 {
+                vec![
+                    <NodeEndpoint as TestInstance>::test_populated(version),
+                    <NodeEndpoint as TestInstance>::test_multi_element_collections(version),
+                ]
+            } else {
+                Vec::new()
+            },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             throttle_time_ms: i32::MIN,
             error_code: i16::MIN,
-            topics: vec![<TopicSnapshot as TestInstance>::test_numeric_boundaries()],
-            node_endpoints: vec![<NodeEndpoint as TestInstance>::test_numeric_boundaries()],
+            topics: vec![<TopicSnapshot as TestInstance>::test_numeric_boundaries(
+                version,
+            )],
+            node_endpoints: if version >= 1 {
+                vec![<NodeEndpoint as TestInstance>::test_numeric_boundaries(
+                    version,
+                )]
+            } else {
+                Vec::new()
+            },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             throttle_time_ms: 12345_i32,
             error_code: 42_i16,
-            topics: vec![<TopicSnapshot as TestInstance>::test_tagged_fields()],
-            node_endpoints: vec![<NodeEndpoint as TestInstance>::test_tagged_fields()],
+            topics: vec![<TopicSnapshot as TestInstance>::test_tagged_fields(version)],
+            node_endpoints: if version >= 1 {
+                vec![<NodeEndpoint as TestInstance>::test_tagged_fields(version)]
+            } else {
+                Vec::new()
+            },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -73,52 +102,56 @@ impl TestInstance for FetchSnapshotResponseData {
     }
 }
 impl TestInstance for TopicSnapshot {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
-            partitions: vec![<PartitionSnapshot as TestInstance>::test_populated()],
+            partitions: vec![<PartitionSnapshot as TestInstance>::test_populated(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
-            partitions: vec![<PartitionSnapshot as TestInstance>::test_null_optionals()],
+            partitions: vec![<PartitionSnapshot as TestInstance>::test_null_optionals(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             partitions: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             partitions: vec![
-                <PartitionSnapshot as TestInstance>::test_populated(),
-                <PartitionSnapshot as TestInstance>::test_multi_element_collections(),
+                <PartitionSnapshot as TestInstance>::test_populated(version),
+                <PartitionSnapshot as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
-            partitions: vec![<PartitionSnapshot as TestInstance>::test_numeric_boundaries()],
+            partitions: vec![<PartitionSnapshot as TestInstance>::test_numeric_boundaries(version)],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
-            partitions: vec![<PartitionSnapshot as TestInstance>::test_tagged_fields()],
+            partitions: vec![<PartitionSnapshot as TestInstance>::test_tagged_fields(
+                version,
+            )],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -127,12 +160,12 @@ impl TestInstance for TopicSnapshot {
     }
 }
 impl TestInstance for PartitionSnapshot {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             index: 12345_i32,
             error_code: 42_i16,
-            snapshot_id: <SnapshotId as TestInstance>::test_populated(),
-            current_leader: <LeaderIdAndEpoch as TestInstance>::test_populated(),
+            snapshot_id: <SnapshotId as TestInstance>::test_populated(version),
+            current_leader: <LeaderIdAndEpoch as TestInstance>::test_populated(version),
             size: 9_876_543_210_i64,
             position: 9_876_543_210_i64,
             unaligned_records: Some(Bytes::new()),
@@ -142,13 +175,15 @@ impl TestInstance for PartitionSnapshot {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
-        drop(<LeaderIdAndEpoch as TestInstance>::test_null_optionals());
+        drop(<LeaderIdAndEpoch as TestInstance>::test_null_optionals(
+            version,
+        ));
         Self {
             index: 0_i32,
             error_code: 0_i16,
-            snapshot_id: <SnapshotId as TestInstance>::test_null_optionals(),
+            snapshot_id: <SnapshotId as TestInstance>::test_null_optionals(version),
             current_leader: LeaderIdAndEpoch::default(),
             size: 0_i64,
             position: 0_i64,
@@ -156,48 +191,50 @@ impl TestInstance for PartitionSnapshot {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
             index: 0_i32,
             error_code: 0_i16,
-            snapshot_id: <SnapshotId as TestInstance>::test_null_optionals(),
-            current_leader: <LeaderIdAndEpoch as TestInstance>::test_null_optionals(),
+            snapshot_id: <SnapshotId as TestInstance>::test_null_optionals(version),
+            current_leader: <LeaderIdAndEpoch as TestInstance>::test_null_optionals(version),
             size: 0_i64,
             position: 0_i64,
             unaligned_records: Some(Bytes::new()),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             index: 23456_i32,
             error_code: 43_i16,
-            snapshot_id: <SnapshotId as TestInstance>::test_multi_element_collections(),
-            current_leader: <LeaderIdAndEpoch as TestInstance>::test_multi_element_collections(),
+            snapshot_id: <SnapshotId as TestInstance>::test_multi_element_collections(version),
+            current_leader: <LeaderIdAndEpoch as TestInstance>::test_multi_element_collections(
+                version,
+            ),
             size: 9_876_543_211_i64,
             position: 9_876_543_211_i64,
             unaligned_records: Some(Bytes::new()),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             index: i32::MIN,
             error_code: i16::MIN,
-            snapshot_id: <SnapshotId as TestInstance>::test_numeric_boundaries(),
-            current_leader: <LeaderIdAndEpoch as TestInstance>::test_numeric_boundaries(),
+            snapshot_id: <SnapshotId as TestInstance>::test_numeric_boundaries(version),
+            current_leader: <LeaderIdAndEpoch as TestInstance>::test_numeric_boundaries(version),
             size: i64::MIN,
             position: i64::MIN,
             unaligned_records: Some(Bytes::new()),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             index: 12345_i32,
             error_code: 42_i16,
-            snapshot_id: <SnapshotId as TestInstance>::test_tagged_fields(),
-            current_leader: <LeaderIdAndEpoch as TestInstance>::test_tagged_fields(),
+            snapshot_id: <SnapshotId as TestInstance>::test_tagged_fields(version),
+            current_leader: <LeaderIdAndEpoch as TestInstance>::test_tagged_fields(version),
             size: 9_876_543_210_i64,
             position: 9_876_543_210_i64,
             unaligned_records: Some(Bytes::new()),
@@ -209,7 +246,7 @@ impl TestInstance for PartitionSnapshot {
     }
 }
 impl TestInstance for SnapshotId {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             end_offset: 9_876_543_210_i64,
             epoch: 12345_i32,
@@ -219,7 +256,7 @@ impl TestInstance for SnapshotId {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             end_offset: 0_i64,
@@ -227,28 +264,28 @@ impl TestInstance for SnapshotId {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             end_offset: 0_i64,
             epoch: 0_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             end_offset: 9_876_543_211_i64,
             epoch: 23456_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             end_offset: i64::MIN,
             epoch: i32::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             end_offset: 9_876_543_210_i64,
             epoch: 12345_i32,
@@ -260,7 +297,7 @@ impl TestInstance for SnapshotId {
     }
 }
 impl TestInstance for LeaderIdAndEpoch {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             leader_id: 12345_i32,
             leader_epoch: 12345_i32,
@@ -270,7 +307,7 @@ impl TestInstance for LeaderIdAndEpoch {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             leader_id: 0_i32,
@@ -278,28 +315,28 @@ impl TestInstance for LeaderIdAndEpoch {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             leader_id: 0_i32,
             leader_epoch: 0_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             leader_id: 23456_i32,
             leader_epoch: 23456_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             leader_id: i32::MIN,
             leader_epoch: i32::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             leader_id: 12345_i32,
             leader_epoch: 12345_i32,
@@ -311,7 +348,7 @@ impl TestInstance for LeaderIdAndEpoch {
     }
 }
 impl TestInstance for NodeEndpoint {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             node_id: 12345_i32,
             host: KafkaString::from("test".to_owned()),
@@ -322,7 +359,7 @@ impl TestInstance for NodeEndpoint {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             node_id: 0_i32,
@@ -331,7 +368,7 @@ impl TestInstance for NodeEndpoint {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             node_id: 0_i32,
             host: KafkaString::default(),
@@ -339,7 +376,7 @@ impl TestInstance for NodeEndpoint {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             node_id: 23456_i32,
             host: KafkaString::from("test-2".to_owned()),
@@ -347,7 +384,7 @@ impl TestInstance for NodeEndpoint {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             node_id: i32::MIN,
             host: KafkaString::from("boundary".to_owned()),
@@ -355,7 +392,7 @@ impl TestInstance for NodeEndpoint {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             node_id: 12345_i32,
             host: KafkaString::from("test".to_owned()),
@@ -368,63 +405,65 @@ impl TestInstance for NodeEndpoint {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <FetchSnapshotResponseData as TestInstance>::test_populated();
+    let message = <FetchSnapshotResponseData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <FetchSnapshotResponseData as TestInstance>::test_populated();
+    let message = <FetchSnapshotResponseData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <FetchSnapshotResponseData as TestInstance>::test_null_optionals();
+    let message = <FetchSnapshotResponseData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <FetchSnapshotResponseData as TestInstance>::test_null_optionals();
+    let message = <FetchSnapshotResponseData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <FetchSnapshotResponseData as TestInstance>::test_empty_collections();
+    let message = <FetchSnapshotResponseData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <FetchSnapshotResponseData as TestInstance>::test_empty_collections();
+    let message = <FetchSnapshotResponseData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <FetchSnapshotResponseData as TestInstance>::test_multi_element_collections();
+    let message =
+        <FetchSnapshotResponseData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <FetchSnapshotResponseData as TestInstance>::test_multi_element_collections();
+    let message =
+        <FetchSnapshotResponseData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <FetchSnapshotResponseData as TestInstance>::test_numeric_boundaries();
+    let message = <FetchSnapshotResponseData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <FetchSnapshotResponseData as TestInstance>::test_numeric_boundaries();
+    let message = <FetchSnapshotResponseData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <FetchSnapshotResponseData as TestInstance>::test_tagged_fields();
+    let message = <FetchSnapshotResponseData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <FetchSnapshotResponseData as TestInstance>::test_tagged_fields();
+    let message = <FetchSnapshotResponseData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

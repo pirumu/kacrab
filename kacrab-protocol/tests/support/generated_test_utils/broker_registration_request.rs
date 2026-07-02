@@ -1,41 +1,60 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::broker_registration_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for BrokerRegistrationRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             broker_id: 12345_i32,
             cluster_id: KafkaString::from("test".to_owned()),
             incarnation_id: KafkaUuid::ONE,
-            listeners: vec![<Listener as TestInstance>::test_populated()],
-            features: vec![<Feature as TestInstance>::test_populated()],
+            listeners: vec![<Listener as TestInstance>::test_populated(version)],
+            features: vec![<Feature as TestInstance>::test_populated(version)],
             rack: Some(KafkaString::from("test".to_owned())),
-            is_migrating_zk_broker: true,
-            log_dirs: vec![KafkaUuid::ONE],
-            previous_broker_epoch: 9_876_543_210_i64,
+            is_migrating_zk_broker: if version >= 1 { true } else { false },
+            log_dirs: if version >= 2 {
+                vec![KafkaUuid::ONE]
+            } else {
+                Vec::new()
+            },
+            previous_broker_epoch: if version >= 3 {
+                9_876_543_210_i64
+            } else {
+                -1i64
+            },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             broker_id: 0_i32,
             cluster_id: KafkaString::default(),
             incarnation_id: KafkaUuid::ZERO,
-            listeners: vec![<Listener as TestInstance>::test_null_optionals()],
-            features: vec![<Feature as TestInstance>::test_null_optionals()],
+            listeners: vec![<Listener as TestInstance>::test_null_optionals(version)],
+            features: vec![<Feature as TestInstance>::test_null_optionals(version)],
             rack: None,
             is_migrating_zk_broker: false,
-            log_dirs: vec![KafkaUuid::ZERO],
-            previous_broker_epoch: 0_i64,
+            log_dirs: if version >= 2 {
+                vec![KafkaUuid::ZERO]
+            } else {
+                Vec::new()
+            },
+            previous_broker_epoch: if version >= 3 { 0_i64 } else { -1i64 },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
             broker_id: 0_i32,
             cluster_id: KafkaString::default(),
@@ -45,55 +64,75 @@ impl TestInstance for BrokerRegistrationRequestData {
             rack: Some(KafkaString::default()),
             is_migrating_zk_broker: false,
             log_dirs: Vec::new(),
-            previous_broker_epoch: 0_i64,
+            previous_broker_epoch: if version >= 3 { 0_i64 } else { -1i64 },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             broker_id: 23456_i32,
             cluster_id: KafkaString::from("test-2".to_owned()),
             incarnation_id: KafkaUuid::from_parts(2, 3),
             listeners: vec![
-                <Listener as TestInstance>::test_populated(),
-                <Listener as TestInstance>::test_multi_element_collections(),
+                <Listener as TestInstance>::test_populated(version),
+                <Listener as TestInstance>::test_multi_element_collections(version),
             ],
             features: vec![
-                <Feature as TestInstance>::test_populated(),
-                <Feature as TestInstance>::test_multi_element_collections(),
+                <Feature as TestInstance>::test_populated(version),
+                <Feature as TestInstance>::test_multi_element_collections(version),
             ],
             rack: Some(KafkaString::from("test-2".to_owned())),
             is_migrating_zk_broker: false,
-            log_dirs: vec![KafkaUuid::ONE, KafkaUuid::from_parts(2, 3)],
-            previous_broker_epoch: 9_876_543_211_i64,
+            log_dirs: if version >= 2 {
+                vec![KafkaUuid::ONE, KafkaUuid::from_parts(2, 3)]
+            } else {
+                Vec::new()
+            },
+            previous_broker_epoch: if version >= 3 {
+                9_876_543_211_i64
+            } else {
+                -1i64
+            },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             broker_id: i32::MIN,
             cluster_id: KafkaString::from("boundary".to_owned()),
             incarnation_id: KafkaUuid::ONE,
-            listeners: vec![<Listener as TestInstance>::test_numeric_boundaries()],
-            features: vec![<Feature as TestInstance>::test_numeric_boundaries()],
+            listeners: vec![<Listener as TestInstance>::test_numeric_boundaries(version)],
+            features: vec![<Feature as TestInstance>::test_numeric_boundaries(version)],
             rack: Some(KafkaString::from("boundary".to_owned())),
-            is_migrating_zk_broker: true,
-            log_dirs: vec![KafkaUuid::ONE],
-            previous_broker_epoch: i64::MIN,
+            is_migrating_zk_broker: if version >= 1 { true } else { false },
+            log_dirs: if version >= 2 {
+                vec![KafkaUuid::ONE]
+            } else {
+                Vec::new()
+            },
+            previous_broker_epoch: if version >= 3 { i64::MIN } else { -1i64 },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             broker_id: 12345_i32,
             cluster_id: KafkaString::from("test".to_owned()),
             incarnation_id: KafkaUuid::ONE,
-            listeners: vec![<Listener as TestInstance>::test_tagged_fields()],
-            features: vec![<Feature as TestInstance>::test_tagged_fields()],
+            listeners: vec![<Listener as TestInstance>::test_tagged_fields(version)],
+            features: vec![<Feature as TestInstance>::test_tagged_fields(version)],
             rack: Some(KafkaString::from("test".to_owned())),
-            is_migrating_zk_broker: true,
-            log_dirs: vec![KafkaUuid::ONE],
-            previous_broker_epoch: 9_876_543_210_i64,
+            is_migrating_zk_broker: if version >= 1 { true } else { false },
+            log_dirs: if version >= 2 {
+                vec![KafkaUuid::ONE]
+            } else {
+                Vec::new()
+            },
+            previous_broker_epoch: if version >= 3 {
+                9_876_543_210_i64
+            } else {
+                -1i64
+            },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -102,7 +141,7 @@ impl TestInstance for BrokerRegistrationRequestData {
     }
 }
 impl TestInstance for Listener {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             host: KafkaString::from("test".to_owned()),
@@ -114,7 +153,7 @@ impl TestInstance for Listener {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
@@ -124,7 +163,7 @@ impl TestInstance for Listener {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             host: KafkaString::default(),
@@ -133,7 +172,7 @@ impl TestInstance for Listener {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             host: KafkaString::from("test-2".to_owned()),
@@ -142,7 +181,7 @@ impl TestInstance for Listener {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
             host: KafkaString::from("boundary".to_owned()),
@@ -151,7 +190,7 @@ impl TestInstance for Listener {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             host: KafkaString::from("test".to_owned()),
@@ -165,7 +204,7 @@ impl TestInstance for Listener {
     }
 }
 impl TestInstance for Feature {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             min_supported_version: 42_i16,
@@ -176,7 +215,7 @@ impl TestInstance for Feature {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
@@ -185,7 +224,7 @@ impl TestInstance for Feature {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             min_supported_version: 0_i16,
@@ -193,7 +232,7 @@ impl TestInstance for Feature {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             min_supported_version: 43_i16,
@@ -201,7 +240,7 @@ impl TestInstance for Feature {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
             min_supported_version: i16::MIN,
@@ -209,7 +248,7 @@ impl TestInstance for Feature {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             min_supported_version: 42_i16,
@@ -222,63 +261,65 @@ impl TestInstance for Feature {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <BrokerRegistrationRequestData as TestInstance>::test_populated();
+    let message = <BrokerRegistrationRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <BrokerRegistrationRequestData as TestInstance>::test_populated();
+    let message = <BrokerRegistrationRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <BrokerRegistrationRequestData as TestInstance>::test_null_optionals();
+    let message = <BrokerRegistrationRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <BrokerRegistrationRequestData as TestInstance>::test_null_optionals();
+    let message = <BrokerRegistrationRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <BrokerRegistrationRequestData as TestInstance>::test_empty_collections();
+    let message = <BrokerRegistrationRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <BrokerRegistrationRequestData as TestInstance>::test_empty_collections();
+    let message = <BrokerRegistrationRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <BrokerRegistrationRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <BrokerRegistrationRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <BrokerRegistrationRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <BrokerRegistrationRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <BrokerRegistrationRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <BrokerRegistrationRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <BrokerRegistrationRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <BrokerRegistrationRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <BrokerRegistrationRequestData as TestInstance>::test_tagged_fields();
+    let message = <BrokerRegistrationRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <BrokerRegistrationRequestData as TestInstance>::test_tagged_fields();
+    let message = <BrokerRegistrationRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

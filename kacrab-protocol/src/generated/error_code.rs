@@ -497,622 +497,392 @@ impl From<ErrorCode> for i16 {
 impl std::fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ErrorCode::UnknownServerError => {
-                write!(
-                    f,
-                    "The server experienced an unexpected error when processing the request."
-                )
-            },
-            ErrorCode::None => write!(f, "NONE"),
-            ErrorCode::OffsetOutOfRange => {
-                write!(
-                    f,
-                    "The requested offset is not within the range of offsets maintained by the \
-                     server."
-                )
-            },
-            ErrorCode::CorruptMessage => {
-                write!(
-                    f,
-                    "This message has failed its CRC checksum, exceeds the valid size, has a null \
-                     key for a compacted topic, or is otherwise corrupt."
-                )
-            },
+            ErrorCode::UnknownServerError => f.write_str(
+                "The server experienced an unexpected error when processing the request.",
+            ),
+            ErrorCode::None => f.write_str("NONE"),
+            ErrorCode::OffsetOutOfRange => f.write_str(
+                "The requested offset is not within the range of offsets maintained by the server.",
+            ),
+            ErrorCode::CorruptMessage => f.write_str(
+                "This message has failed its CRC checksum, exceeds the valid size, has a null key \
+                 for a compacted topic, or is otherwise corrupt.",
+            ),
             ErrorCode::UnknownTopicOrPartition => {
-                write!(f, "This server does not host this topic-partition.")
+                f.write_str("This server does not host this topic-partition.")
             },
-            ErrorCode::InvalidFetchSize => {
-                write!(f, "The requested fetch size is invalid.")
-            },
-            ErrorCode::LeaderNotAvailable => {
-                write!(
-                    f,
-                    "There is no leader for this topic-partition as we are in the middle of a \
-                     leadership election."
-                )
-            },
-            ErrorCode::NotLeaderOrFollower => {
-                write!(
-                    f,
-                    "For requests intended only for the leader, this error indicates that the \
-                     broker is not the current leader. For requests intended for any replica, \
-                     this error indicates that the broker is not a replica of the topic partition."
-                )
-            },
-            ErrorCode::RequestTimedOut => write!(f, "The request timed out."),
-            ErrorCode::BrokerNotAvailable => write!(f, "The broker is not available."),
-            ErrorCode::ReplicaNotAvailable => {
-                write!(
-                    f,
-                    "The replica is not available for the requested topic-partition. \
-                     Produce/Fetch requests and other requests intended only for the leader or \
-                     follower return NOT_LEADER_OR_FOLLOWER if the broker is not a replica of the \
-                     topic-partition."
-                )
-            },
-            ErrorCode::MessageTooLarge => {
-                write!(
-                    f,
-                    "The request included a message larger than the max message size the server \
-                     will accept."
-                )
-            },
+            ErrorCode::InvalidFetchSize => f.write_str("The requested fetch size is invalid."),
+            ErrorCode::LeaderNotAvailable => f.write_str(
+                "There is no leader for this topic-partition as we are in the middle of a \
+                 leadership election.",
+            ),
+            ErrorCode::NotLeaderOrFollower => f.write_str(
+                "For requests intended only for the leader, this error indicates that the broker \
+                 is not the current leader. For requests intended for any replica, this error \
+                 indicates that the broker is not a replica of the topic partition.",
+            ),
+            ErrorCode::RequestTimedOut => f.write_str("The request timed out."),
+            ErrorCode::BrokerNotAvailable => f.write_str("The broker is not available."),
+            ErrorCode::ReplicaNotAvailable => f.write_str(
+                "The replica is not available for the requested topic-partition. Produce/Fetch \
+                 requests and other requests intended only for the leader or follower return \
+                 NOT_LEADER_OR_FOLLOWER if the broker is not a replica of the topic-partition.",
+            ),
+            ErrorCode::MessageTooLarge => f.write_str(
+                "The request included a message larger than the max message size the server will \
+                 accept.",
+            ),
             ErrorCode::StaleControllerEpoch => {
-                write!(f, "The controller moved to another broker.")
+                f.write_str("The controller moved to another broker.")
             },
             ErrorCode::OffsetMetadataTooLarge => {
-                write!(f, "The metadata field of the offset request was too large.")
+                f.write_str("The metadata field of the offset request was too large.")
             },
             ErrorCode::NetworkException => {
-                write!(f, "The server disconnected before a response was received.")
+                f.write_str("The server disconnected before a response was received.")
             },
             ErrorCode::CoordinatorLoadInProgress => {
-                write!(
-                    f,
-                    "The coordinator is loading and hence can't process requests."
-                )
+                f.write_str("The coordinator is loading and hence can't process requests.")
             },
-            ErrorCode::CoordinatorNotAvailable => {
-                write!(f, "The coordinator is not available.")
-            },
-            ErrorCode::NotCoordinator => {
-                write!(f, "This is not the correct coordinator.")
-            },
+            ErrorCode::CoordinatorNotAvailable => f.write_str("The coordinator is not available."),
+            ErrorCode::NotCoordinator => f.write_str("This is not the correct coordinator."),
             ErrorCode::InvalidTopicException => {
-                write!(
-                    f,
-                    "The request attempted to perform an operation on an invalid topic."
-                )
+                f.write_str("The request attempted to perform an operation on an invalid topic.")
             },
-            ErrorCode::RecordListTooLarge => {
-                write!(
-                    f,
-                    "The request included message batch larger than the configured segment size \
-                     on the server."
-                )
-            },
-            ErrorCode::NotEnoughReplicas => {
-                write!(
-                    f,
-                    "Messages are rejected since there are fewer in-sync replicas than required."
-                )
-            },
-            ErrorCode::NotEnoughReplicasAfterAppend => {
-                write!(
-                    f,
-                    "Messages are written to the log, but to fewer in-sync replicas than required."
-                )
-            },
+            ErrorCode::RecordListTooLarge => f.write_str(
+                "The request included message batch larger than the configured segment size on \
+                 the server.",
+            ),
+            ErrorCode::NotEnoughReplicas => f.write_str(
+                "Messages are rejected since there are fewer in-sync replicas than required.",
+            ),
+            ErrorCode::NotEnoughReplicasAfterAppend => f.write_str(
+                "Messages are written to the log, but to fewer in-sync replicas than required.",
+            ),
             ErrorCode::InvalidRequiredAcks => {
-                write!(
-                    f,
-                    "Produce request specified an invalid value for required acks."
-                )
+                f.write_str("Produce request specified an invalid value for required acks.")
             },
             ErrorCode::IllegalGeneration => {
-                write!(f, "Specified group generation id is not valid.")
+                f.write_str("Specified group generation id is not valid.")
             },
-            ErrorCode::InconsistentGroupProtocol => {
-                write!(
-                    f,
-                    "The group member's supported protocols are incompatible with those of \
-                     existing members or first group member tried to join with empty protocol \
-                     type or empty protocol list."
-                )
-            },
-            ErrorCode::InvalidGroupId => write!(f, "The group id is invalid."),
+            ErrorCode::InconsistentGroupProtocol => f.write_str(
+                "The group member's supported protocols are incompatible with those of existing \
+                 members or first group member tried to join with empty protocol type or empty \
+                 protocol list.",
+            ),
+            ErrorCode::InvalidGroupId => f.write_str("The group id is invalid."),
             ErrorCode::UnknownMemberId => {
-                write!(f, "The coordinator is not aware of this member.")
+                f.write_str("The coordinator is not aware of this member.")
             },
-            ErrorCode::InvalidSessionTimeout => {
-                write!(
-                    f,
-                    "The session timeout is not within the range allowed by the broker (as \
-                     configured by group.min.session.timeout.ms and group.max.session.timeout.ms)."
-                )
-            },
+            ErrorCode::InvalidSessionTimeout => f.write_str(
+                "The session timeout is not within the range allowed by the broker (as configured \
+                 by group.min.session.timeout.ms and group.max.session.timeout.ms).",
+            ),
             ErrorCode::RebalanceInProgress => {
-                write!(f, "The group is rebalancing, so a rejoin is needed.")
+                f.write_str("The group is rebalancing, so a rejoin is needed.")
             },
             ErrorCode::InvalidCommitOffsetSize => {
-                write!(f, "The committing offset data size is not valid.")
+                f.write_str("The committing offset data size is not valid.")
             },
-            ErrorCode::TopicAuthorizationFailed => {
-                write!(f, "Topic authorization failed.")
-            },
-            ErrorCode::GroupAuthorizationFailed => {
-                write!(f, "Group authorization failed.")
-            },
-            ErrorCode::ClusterAuthorizationFailed => {
-                write!(f, "Cluster authorization failed.")
-            },
+            ErrorCode::TopicAuthorizationFailed => f.write_str("Topic authorization failed."),
+            ErrorCode::GroupAuthorizationFailed => f.write_str("Group authorization failed."),
+            ErrorCode::ClusterAuthorizationFailed => f.write_str("Cluster authorization failed."),
             ErrorCode::InvalidTimestamp => {
-                write!(
-                    f,
-                    "The timestamp of the message is out of acceptable range."
-                )
+                f.write_str("The timestamp of the message is out of acceptable range.")
             },
             ErrorCode::UnsupportedSaslMechanism => {
-                write!(
-                    f,
-                    "The broker does not support the requested SASL mechanism."
-                )
+                f.write_str("The broker does not support the requested SASL mechanism.")
             },
             ErrorCode::IllegalSaslState => {
-                write!(f, "Request is not valid given the current SASL state.")
+                f.write_str("Request is not valid given the current SASL state.")
             },
-            ErrorCode::UnsupportedVersion => {
-                write!(f, "The version of API is not supported.")
-            },
-            ErrorCode::TopicAlreadyExists => {
-                write!(f, "Topic with this name already exists.")
-            },
-            ErrorCode::InvalidPartitions => write!(f, "Number of partitions is below 1."),
-            ErrorCode::InvalidReplicationFactor => {
-                write!(
-                    f,
-                    "Replication factor is below 1 or larger than the number of available brokers."
-                )
-            },
-            ErrorCode::InvalidReplicaAssignment => {
-                write!(f, "Replica assignment is invalid.")
-            },
-            ErrorCode::InvalidConfig => write!(f, "Configuration is invalid."),
+            ErrorCode::UnsupportedVersion => f.write_str("The version of API is not supported."),
+            ErrorCode::TopicAlreadyExists => f.write_str("Topic with this name already exists."),
+            ErrorCode::InvalidPartitions => f.write_str("Number of partitions is below 1."),
+            ErrorCode::InvalidReplicationFactor => f.write_str(
+                "Replication factor is below 1 or larger than the number of available brokers.",
+            ),
+            ErrorCode::InvalidReplicaAssignment => f.write_str("Replica assignment is invalid."),
+            ErrorCode::InvalidConfig => f.write_str("Configuration is invalid."),
             ErrorCode::NotController => {
-                write!(f, "This is not the correct controller for this cluster.")
+                f.write_str("This is not the correct controller for this cluster.")
             },
-            ErrorCode::InvalidRequest => {
-                write!(
-                    f,
-                    "This most likely occurs because of a request being malformed by the client \
-                     library or the message was sent to an incompatible broker. See the broker \
-                     logs for more details."
-                )
-            },
-            ErrorCode::UnsupportedForMessageFormat => {
-                write!(
-                    f,
-                    "The message format version on the broker does not support the request."
-                )
-            },
+            ErrorCode::InvalidRequest => f.write_str(
+                "This most likely occurs because of a request being malformed by the client \
+                 library or the message was sent to an incompatible broker. See the broker logs \
+                 for more details.",
+            ),
+            ErrorCode::UnsupportedForMessageFormat => f.write_str(
+                "The message format version on the broker does not support the request.",
+            ),
             ErrorCode::PolicyViolation => {
-                write!(
-                    f,
-                    "Request parameters do not satisfy the configured policy."
-                )
+                f.write_str("Request parameters do not satisfy the configured policy.")
             },
             ErrorCode::OutOfOrderSequenceNumber => {
-                write!(f, "The broker received an out of order sequence number.")
+                f.write_str("The broker received an out of order sequence number.")
             },
             ErrorCode::DuplicateSequenceNumber => {
-                write!(f, "The broker received a duplicate sequence number.")
+                f.write_str("The broker received a duplicate sequence number.")
             },
             ErrorCode::InvalidProducerEpoch => {
-                write!(f, "Producer attempted to produce with an old epoch.")
+                f.write_str("Producer attempted to produce with an old epoch.")
             },
             ErrorCode::InvalidTxnState => {
-                write!(
-                    f,
-                    "The producer attempted a transactional operation in an invalid state."
-                )
+                f.write_str("The producer attempted a transactional operation in an invalid state.")
             },
-            ErrorCode::InvalidProducerIdMapping => {
-                write!(
-                    f,
-                    "The producer attempted to use a producer id which is not currently assigned \
-                     to its transactional id."
-                )
-            },
-            ErrorCode::InvalidTransactionTimeout => {
-                write!(
-                    f,
-                    "The transaction timeout is larger than the maximum value allowed by the \
-                     broker (as configured by transaction.max.timeout.ms)."
-                )
-            },
-            ErrorCode::ConcurrentTransactions => {
-                write!(
-                    f,
-                    "The producer attempted to update a transaction while another concurrent \
-                     operation on the same transaction was ongoing."
-                )
-            },
-            ErrorCode::TransactionCoordinatorFenced => {
-                write!(
-                    f,
-                    "Indicates that the transaction coordinator sending a WriteTxnMarker is no \
-                     longer the current coordinator for a given producer."
-                )
-            },
+            ErrorCode::InvalidProducerIdMapping => f.write_str(
+                "The producer attempted to use a producer id which is not currently assigned to \
+                 its transactional id.",
+            ),
+            ErrorCode::InvalidTransactionTimeout => f.write_str(
+                "The transaction timeout is larger than the maximum value allowed by the broker \
+                 (as configured by transaction.max.timeout.ms).",
+            ),
+            ErrorCode::ConcurrentTransactions => f.write_str(
+                "The producer attempted to update a transaction while another concurrent \
+                 operation on the same transaction was ongoing.",
+            ),
+            ErrorCode::TransactionCoordinatorFenced => f.write_str(
+                "Indicates that the transaction coordinator sending a WriteTxnMarker is no longer \
+                 the current coordinator for a given producer.",
+            ),
             ErrorCode::TransactionalIdAuthorizationFailed => {
-                write!(f, "Transactional Id authorization failed.")
+                f.write_str("Transactional Id authorization failed.")
             },
-            ErrorCode::SecurityDisabled => write!(f, "Security features are disabled."),
-            ErrorCode::OperationNotAttempted => {
-                write!(
-                    f,
-                    "The broker did not attempt to execute this operation. This may happen for \
-                     batched RPCs where some operations in the batch failed, causing the broker \
-                     to respond without trying the rest."
-                )
-            },
+            ErrorCode::SecurityDisabled => f.write_str("Security features are disabled."),
+            ErrorCode::OperationNotAttempted => f.write_str(
+                "The broker did not attempt to execute this operation. This may happen for \
+                 batched RPCs where some operations in the batch failed, causing the broker to \
+                 respond without trying the rest.",
+            ),
             ErrorCode::KafkaStorageError => {
-                write!(f, "Disk error when trying to access log file on the disk.")
+                f.write_str("Disk error when trying to access log file on the disk.")
             },
             ErrorCode::LogDirNotFound => {
-                write!(
-                    f,
-                    "The user-specified log directory is not found in the broker config."
-                )
+                f.write_str("The user-specified log directory is not found in the broker config.")
             },
-            ErrorCode::SaslAuthenticationFailed => {
-                write!(f, "SASL Authentication failed.")
-            },
-            ErrorCode::UnknownProducerId => {
-                write!(
-                    f,
-                    "This exception is raised by the broker if it could not locate the producer \
-                     metadata associated with the producerId in question. This could happen if, \
-                     for instance, the producer's records were deleted because their retention \
-                     time had elapsed. Once the last records of the producerId are removed, the \
-                     producer's metadata is removed from the broker, and future appends by the \
-                     producer will return this exception."
-                )
-            },
+            ErrorCode::SaslAuthenticationFailed => f.write_str("SASL Authentication failed."),
+            ErrorCode::UnknownProducerId => f.write_str(
+                "This exception is raised by the broker if it could not locate the producer \
+                 metadata associated with the producerId in question. This could happen if, for \
+                 instance, the producer's records were deleted because their retention time had \
+                 elapsed. Once the last records of the producerId are removed, the producer's \
+                 metadata is removed from the broker, and future appends by the producer will \
+                 return this exception.",
+            ),
             ErrorCode::ReassignmentInProgress => {
-                write!(f, "A partition reassignment is in progress.")
+                f.write_str("A partition reassignment is in progress.")
             },
             ErrorCode::DelegationTokenAuthDisabled => {
-                write!(f, "Delegation Token feature is not enabled.")
+                f.write_str("Delegation Token feature is not enabled.")
             },
             ErrorCode::DelegationTokenNotFound => {
-                write!(f, "Delegation Token is not found on server.")
+                f.write_str("Delegation Token is not found on server.")
             },
             ErrorCode::DelegationTokenOwnerMismatch => {
-                write!(f, "Specified Principal is not valid Owner/Renewer.")
+                f.write_str("Specified Principal is not valid Owner/Renewer.")
             },
-            ErrorCode::DelegationTokenRequestNotAllowed => {
-                write!(
-                    f,
-                    "Delegation Token requests are not allowed on PLAINTEXT/1-way SSL channels \
-                     and on delegation token authenticated channels."
-                )
-            },
+            ErrorCode::DelegationTokenRequestNotAllowed => f.write_str(
+                "Delegation Token requests are not allowed on PLAINTEXT/1-way SSL channels and on \
+                 delegation token authenticated channels.",
+            ),
             ErrorCode::DelegationTokenAuthorizationFailed => {
-                write!(f, "Delegation Token authorization failed.")
+                f.write_str("Delegation Token authorization failed.")
             },
-            ErrorCode::DelegationTokenExpired => {
-                write!(f, "Delegation Token is expired.")
-            },
+            ErrorCode::DelegationTokenExpired => f.write_str("Delegation Token is expired."),
             ErrorCode::InvalidPrincipalType => {
-                write!(f, "Supplied principalType is not supported.")
+                f.write_str("Supplied principalType is not supported.")
             },
-            ErrorCode::NonEmptyGroup => write!(f, "The group is not empty."),
-            ErrorCode::GroupIdNotFound => write!(f, "The group id does not exist."),
-            ErrorCode::FetchSessionIdNotFound => {
-                write!(f, "The fetch session ID was not found.")
-            },
+            ErrorCode::NonEmptyGroup => f.write_str("The group is not empty."),
+            ErrorCode::GroupIdNotFound => f.write_str("The group id does not exist."),
+            ErrorCode::FetchSessionIdNotFound => f.write_str("The fetch session ID was not found."),
             ErrorCode::InvalidFetchSessionEpoch => {
-                write!(f, "The fetch session epoch is invalid.")
+                f.write_str("The fetch session epoch is invalid.")
             },
-            ErrorCode::ListenerNotFound => {
-                write!(
-                    f,
-                    "There is no listener on the leader broker that matches the listener on which \
-                     metadata request was processed."
-                )
-            },
-            ErrorCode::TopicDeletionDisabled => write!(f, "Topic deletion is disabled."),
-            ErrorCode::FencedLeaderEpoch => {
-                write!(
-                    f,
-                    "The leader epoch in the request is older than the epoch on the broker."
-                )
-            },
-            ErrorCode::UnknownLeaderEpoch => {
-                write!(
-                    f,
-                    "The leader epoch in the request is newer than the epoch on the broker."
-                )
-            },
-            ErrorCode::UnsupportedCompressionType => {
-                write!(
-                    f,
-                    "The requesting client does not support the compression type of given \
-                     partition."
-                )
-            },
-            ErrorCode::StaleBrokerEpoch => write!(f, "Broker epoch has changed."),
-            ErrorCode::OffsetNotAvailable => {
-                write!(
-                    f,
-                    "The leader high watermark has not caught up from a recent leader election so \
-                     the offsets cannot be guaranteed to be monotonically increasing."
-                )
-            },
-            ErrorCode::MemberIdRequired => {
-                write!(
-                    f,
-                    "The group member needs to have a valid member id before actually entering a \
-                     consumer group."
-                )
-            },
+            ErrorCode::ListenerNotFound => f.write_str(
+                "There is no listener on the leader broker that matches the listener on which \
+                 metadata request was processed.",
+            ),
+            ErrorCode::TopicDeletionDisabled => f.write_str("Topic deletion is disabled."),
+            ErrorCode::FencedLeaderEpoch => f.write_str(
+                "The leader epoch in the request is older than the epoch on the broker.",
+            ),
+            ErrorCode::UnknownLeaderEpoch => f.write_str(
+                "The leader epoch in the request is newer than the epoch on the broker.",
+            ),
+            ErrorCode::UnsupportedCompressionType => f.write_str(
+                "The requesting client does not support the compression type of given partition.",
+            ),
+            ErrorCode::StaleBrokerEpoch => f.write_str("Broker epoch has changed."),
+            ErrorCode::OffsetNotAvailable => f.write_str(
+                "The leader high watermark has not caught up from a recent leader election so the \
+                 offsets cannot be guaranteed to be monotonically increasing.",
+            ),
+            ErrorCode::MemberIdRequired => f.write_str(
+                "The group member needs to have a valid member id before actually entering a \
+                 consumer group.",
+            ),
             ErrorCode::PreferredLeaderNotAvailable => {
-                write!(f, "The preferred leader was not available.")
+                f.write_str("The preferred leader was not available.")
             },
             ErrorCode::GroupMaxSizeReached => {
-                write!(f, "The group has reached its maximum size.")
+                f.write_str("The group has reached its maximum size.")
             },
-            ErrorCode::FencedInstanceId => {
-                write!(
-                    f,
-                    "The broker rejected this static consumer since another consumer with the \
-                     same group.instance.id has registered with a different member.id."
-                )
-            },
+            ErrorCode::FencedInstanceId => f.write_str(
+                "The broker rejected this static consumer since another consumer with the same \
+                 group.instance.id has registered with a different member.id.",
+            ),
             ErrorCode::EligibleLeadersNotAvailable => {
-                write!(f, "Eligible topic partition leaders are not available.")
+                f.write_str("Eligible topic partition leaders are not available.")
             },
             ErrorCode::ElectionNotNeeded => {
-                write!(f, "Leader election not needed for topic partition.")
+                f.write_str("Leader election not needed for topic partition.")
             },
             ErrorCode::NoReassignmentInProgress => {
-                write!(f, "No partition reassignment is in progress.")
+                f.write_str("No partition reassignment is in progress.")
             },
-            ErrorCode::GroupSubscribedToTopic => {
-                write!(
-                    f,
-                    "Deleting offsets of a topic is forbidden while the consumer group is \
-                     actively subscribed to it."
-                )
-            },
-            ErrorCode::InvalidRecord => {
-                write!(
-                    f,
-                    "This record has failed the validation on broker and hence will be rejected."
-                )
-            },
+            ErrorCode::GroupSubscribedToTopic => f.write_str(
+                "Deleting offsets of a topic is forbidden while the consumer group is actively \
+                 subscribed to it.",
+            ),
+            ErrorCode::InvalidRecord => f.write_str(
+                "This record has failed the validation on broker and hence will be rejected.",
+            ),
             ErrorCode::UnstableOffsetCommit => {
-                write!(f, "There are unstable offsets that need to be cleared.")
+                f.write_str("There are unstable offsets that need to be cleared.")
             },
             ErrorCode::ThrottlingQuotaExceeded => {
-                write!(f, "The throttling quota has been exceeded.")
+                f.write_str("The throttling quota has been exceeded.")
             },
-            ErrorCode::ProducerFenced => {
-                write!(
-                    f,
-                    "There is a newer producer with the same transactionalId which fences the \
-                     current one."
-                )
-            },
+            ErrorCode::ProducerFenced => f.write_str(
+                "There is a newer producer with the same transactionalId which fences the current \
+                 one.",
+            ),
             ErrorCode::ResourceNotFound => {
-                write!(
-                    f,
-                    "A request illegally referred to a resource that does not exist."
-                )
+                f.write_str("A request illegally referred to a resource that does not exist.")
             },
             ErrorCode::DuplicateResource => {
-                write!(
-                    f,
-                    "A request illegally referred to the same resource twice."
-                )
+                f.write_str("A request illegally referred to the same resource twice.")
             },
             ErrorCode::UnacceptableCredential => {
-                write!(
-                    f,
-                    "Requested credential would not meet criteria for acceptability."
-                )
+                f.write_str("Requested credential would not meet criteria for acceptability.")
             },
-            ErrorCode::InconsistentVoterSet => {
-                write!(
-                    f,
-                    "Indicates that the either the sender or recipient of a voter-only request is \
-                     not one of the expected voters."
-                )
-            },
-            ErrorCode::InvalidUpdateVersion => {
-                write!(f, "The given update version was invalid.")
-            },
-            ErrorCode::FeatureUpdateFailed => {
-                write!(
-                    f,
-                    "Unable to update finalized features due to an unexpected server error."
-                )
-            },
-            ErrorCode::PrincipalDeserializationFailure => {
-                write!(
-                    f,
-                    "Request principal deserialization failed during forwarding. This indicates \
-                     an internal error on the broker cluster security setup."
-                )
-            },
-            ErrorCode::SnapshotNotFound => write!(f, "Requested snapshot was not found."),
-            ErrorCode::PositionOutOfRange => {
-                write!(
-                    f,
-                    "Requested position is not greater than or equal to zero, and less than the \
-                     size of the snapshot."
-                )
-            },
-            ErrorCode::UnknownTopicId => {
-                write!(f, "This server does not host this topic ID.")
-            },
+            ErrorCode::InconsistentVoterSet => f.write_str(
+                "Indicates that the either the sender or recipient of a voter-only request is not \
+                 one of the expected voters.",
+            ),
+            ErrorCode::InvalidUpdateVersion => f.write_str("The given update version was invalid."),
+            ErrorCode::FeatureUpdateFailed => f.write_str(
+                "Unable to update finalized features due to an unexpected server error.",
+            ),
+            ErrorCode::PrincipalDeserializationFailure => f.write_str(
+                "Request principal deserialization failed during forwarding. This indicates an \
+                 internal error on the broker cluster security setup.",
+            ),
+            ErrorCode::SnapshotNotFound => f.write_str("Requested snapshot was not found."),
+            ErrorCode::PositionOutOfRange => f.write_str(
+                "Requested position is not greater than or equal to zero, and less than the size \
+                 of the snapshot.",
+            ),
+            ErrorCode::UnknownTopicId => f.write_str("This server does not host this topic ID."),
             ErrorCode::DuplicateBrokerRegistration => {
-                write!(f, "This broker ID is already in use.")
+                f.write_str("This broker ID is already in use.")
             },
             ErrorCode::BrokerIdNotRegistered => {
-                write!(f, "The given broker ID was not registered.")
+                f.write_str("The given broker ID was not registered.")
             },
             ErrorCode::InconsistentTopicId => {
-                write!(
-                    f,
-                    "The log's topic ID did not match the topic ID in the request."
-                )
+                f.write_str("The log's topic ID did not match the topic ID in the request.")
             },
             ErrorCode::InconsistentClusterId => {
-                write!(
-                    f,
-                    "The clusterId in the request does not match that found on the server."
-                )
+                f.write_str("The clusterId in the request does not match that found on the server.")
             },
             ErrorCode::TransactionalIdNotFound => {
-                write!(f, "The transactionalId could not be found.")
+                f.write_str("The transactionalId could not be found.")
             },
             ErrorCode::FetchSessionTopicIdError => {
-                write!(
-                    f,
-                    "The fetch session encountered inconsistent topic ID usage."
-                )
+                f.write_str("The fetch session encountered inconsistent topic ID usage.")
             },
             ErrorCode::IneligibleReplica => {
-                write!(f, "The new ISR contains at least one ineligible replica.")
+                f.write_str("The new ISR contains at least one ineligible replica.")
             },
-            ErrorCode::NewLeaderElected => {
-                write!(
-                    f,
-                    "The AlterPartition request successfully updated the partition state but the \
-                     leader has changed."
-                )
-            },
+            ErrorCode::NewLeaderElected => f.write_str(
+                "The AlterPartition request successfully updated the partition state but the \
+                 leader has changed.",
+            ),
             ErrorCode::OffsetMovedToTieredStorage => {
-                write!(f, "The requested offset is moved to tiered storage.")
+                f.write_str("The requested offset is moved to tiered storage.")
             },
-            ErrorCode::FencedMemberEpoch => {
-                write!(
-                    f,
-                    "The member epoch is fenced by the group coordinator. The member must abandon \
-                     all its partitions and rejoin."
-                )
-            },
-            ErrorCode::UnreleasedInstanceId => {
-                write!(
-                    f,
-                    "The instance ID is still used by another member in the consumer group. That \
-                     member must leave first."
-                )
-            },
-            ErrorCode::UnsupportedAssignor => {
-                write!(
-                    f,
-                    "The assignor or its version range is not supported by the consumer group."
-                )
-            },
-            ErrorCode::StaleMemberEpoch => {
-                write!(
-                    f,
-                    "The member epoch is stale. The member must retry after receiving its updated \
-                     member epoch via the ConsumerGroupHeartbeat API."
-                )
-            },
+            ErrorCode::FencedMemberEpoch => f.write_str(
+                "The member epoch is fenced by the group coordinator. The member must abandon all \
+                 its partitions and rejoin.",
+            ),
+            ErrorCode::UnreleasedInstanceId => f.write_str(
+                "The instance ID is still used by another member in the consumer group. That \
+                 member must leave first.",
+            ),
+            ErrorCode::UnsupportedAssignor => f.write_str(
+                "The assignor or its version range is not supported by the consumer group.",
+            ),
+            ErrorCode::StaleMemberEpoch => f.write_str(
+                "The member epoch is stale. The member must retry after receiving its updated \
+                 member epoch via the ConsumerGroupHeartbeat API.",
+            ),
             ErrorCode::MismatchedEndpointType => {
-                write!(f, "The request was sent to an endpoint of the wrong type.")
+                f.write_str("The request was sent to an endpoint of the wrong type.")
             },
             ErrorCode::UnsupportedEndpointType => {
-                write!(f, "This endpoint type is not supported yet.")
+                f.write_str("This endpoint type is not supported yet.")
             },
-            ErrorCode::UnknownControllerId => {
-                write!(f, "This controller ID is not known.")
-            },
-            ErrorCode::UnknownSubscriptionId => {
-                write!(
-                    f,
-                    "Client sent a push telemetry request with an invalid or outdated \
-                     subscription ID."
-                )
-            },
-            ErrorCode::TelemetryTooLarge => {
-                write!(
-                    f,
-                    "Client sent a push telemetry request larger than the maximum size the broker \
-                     will accept."
-                )
-            },
+            ErrorCode::UnknownControllerId => f.write_str("This controller ID is not known."),
+            ErrorCode::UnknownSubscriptionId => f.write_str(
+                "Client sent a push telemetry request with an invalid or outdated subscription ID.",
+            ),
+            ErrorCode::TelemetryTooLarge => f.write_str(
+                "Client sent a push telemetry request larger than the maximum size the broker \
+                 will accept.",
+            ),
             ErrorCode::InvalidRegistration => {
-                write!(
-                    f,
-                    "The controller has considered the broker registration to be invalid."
-                )
+                f.write_str("The controller has considered the broker registration to be invalid.")
             },
-            ErrorCode::TransactionAbortable => {
-                write!(
-                    f,
-                    "The server encountered an error with the transaction. The client can abort \
-                     the transaction to continue using this transactional ID."
-                )
-            },
-            ErrorCode::InvalidRecordState => {
-                write!(
-                    f,
-                    "The record state is invalid. The acknowledgement of delivery could not be \
-                     completed."
-                )
-            },
-            ErrorCode::ShareSessionNotFound => {
-                write!(f, "The share session was not found.")
-            },
+            ErrorCode::TransactionAbortable => f.write_str(
+                "The server encountered an error with the transaction. The client can abort the \
+                 transaction to continue using this transactional ID.",
+            ),
+            ErrorCode::InvalidRecordState => f.write_str(
+                "The record state is invalid. The acknowledgement of delivery could not be \
+                 completed.",
+            ),
+            ErrorCode::ShareSessionNotFound => f.write_str("The share session was not found."),
             ErrorCode::InvalidShareSessionEpoch => {
-                write!(f, "The share session epoch is invalid.")
+                f.write_str("The share session epoch is invalid.")
             },
-            ErrorCode::FencedStateEpoch => {
-                write!(
-                    f,
-                    "The share coordinator rejected the request because the share-group state \
-                     epoch did not match."
-                )
-            },
+            ErrorCode::FencedStateEpoch => f.write_str(
+                "The share coordinator rejected the request because the share-group state epoch \
+                 did not match.",
+            ),
             ErrorCode::InvalidVoterKey => {
-                write!(
-                    f,
-                    "The voter key doesn't match the receiving replica's key."
-                )
+                f.write_str("The voter key doesn't match the receiving replica's key.")
             },
             ErrorCode::DuplicateVoter => {
-                write!(f, "The voter is already part of the set of voters.")
+                f.write_str("The voter is already part of the set of voters.")
             },
-            ErrorCode::VoterNotFound => {
-                write!(f, "The voter is not part of the set of voters.")
-            },
+            ErrorCode::VoterNotFound => f.write_str("The voter is not part of the set of voters."),
             ErrorCode::InvalidRegularExpression => {
-                write!(f, "The regular expression is not valid.")
+                f.write_str("The regular expression is not valid.")
             },
-            ErrorCode::RebootstrapRequired => {
-                write!(
-                    f,
-                    "Client metadata is stale. The client should rebootstrap to obtain new \
-                     metadata."
-                )
-            },
-            ErrorCode::StreamsInvalidTopology => {
-                write!(f, "The supplied topology is invalid.")
-            },
+            ErrorCode::RebootstrapRequired => f.write_str(
+                "Client metadata is stale. The client should rebootstrap to obtain new metadata.",
+            ),
+            ErrorCode::StreamsInvalidTopology => f.write_str("The supplied topology is invalid."),
             ErrorCode::StreamsInvalidTopologyEpoch => {
-                write!(f, "The supplied topology epoch is invalid.")
+                f.write_str("The supplied topology epoch is invalid.")
             },
             ErrorCode::StreamsTopologyFenced => {
-                write!(f, "The supplied topology epoch is outdated.")
+                f.write_str("The supplied topology epoch is outdated.")
             },
             ErrorCode::ShareSessionLimitReached => {
-                write!(f, "The limit of share sessions has been reached.")
+                f.write_str("The limit of share sessions has been reached.")
             },
             ErrorCode::Unknown(code) => write!(f, "Unknown error code: {}", code),
         }

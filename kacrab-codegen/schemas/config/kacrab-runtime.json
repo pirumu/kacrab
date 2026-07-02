@@ -81,7 +81,6 @@
         "kind": "null"
       },
       "clients": ["producer", "consumer", "admin"],
-      "feature": "socket2",
       "documentation": "Initial reusable in-process read buffer capacity for broker frame reads."
     },
     {

@@ -43,12 +43,12 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 pub(crate) type MatrixResult<T = String> = Result<T, Box<dyn Error>>;
 
 pub(crate) trait TestInstance {
-    fn test_populated() -> Self;
-    fn test_null_optionals() -> Self;
-    fn test_empty_collections() -> Self;
-    fn test_multi_element_collections() -> Self;
-    fn test_numeric_boundaries() -> Self;
-    fn test_tagged_fields() -> Self;
+    fn test_populated(version: i16) -> Self;
+    fn test_null_optionals(version: i16) -> Self;
+    fn test_empty_collections(version: i16) -> Self;
+    fn test_multi_element_collections(version: i16) -> Self;
+    fn test_numeric_boundaries(version: i16) -> Self;
+    fn test_tagged_fields(version: i16) -> Self;
 }
 
 #[derive(Clone, Copy, Debug)]

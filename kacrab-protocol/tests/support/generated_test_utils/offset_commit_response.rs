@@ -1,54 +1,67 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::offset_commit_response::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for OffsetCommitResponseData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
-            throttle_time_ms: 12345_i32,
-            topics: vec![<OffsetCommitResponseTopic as TestInstance>::test_populated()],
+            throttle_time_ms: if version >= 3 { 12345_i32 } else { 0_i32 },
+            topics: vec![<OffsetCommitResponseTopic as TestInstance>::test_populated(
+                version,
+            )],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             throttle_time_ms: 0_i32,
-            topics: vec![<OffsetCommitResponseTopic as TestInstance>::test_null_optionals()],
+            topics: vec![<OffsetCommitResponseTopic as TestInstance>::test_null_optionals(version)],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             throttle_time_ms: 0_i32,
             topics: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
-            throttle_time_ms: 23456_i32,
+            throttle_time_ms: if version >= 3 { 23456_i32 } else { 0_i32 },
             topics: vec![
-                <OffsetCommitResponseTopic as TestInstance>::test_populated(),
-                <OffsetCommitResponseTopic as TestInstance>::test_multi_element_collections(),
+                <OffsetCommitResponseTopic as TestInstance>::test_populated(version),
+                <OffsetCommitResponseTopic as TestInstance>::test_multi_element_collections(
+                    version,
+                ),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
-            throttle_time_ms: i32::MIN,
-            topics: vec![<OffsetCommitResponseTopic as TestInstance>::test_numeric_boundaries()],
+            throttle_time_ms: if version >= 3 { i32::MIN } else { 0_i32 },
+            topics: vec![
+                <OffsetCommitResponseTopic as TestInstance>::test_numeric_boundaries(version),
+            ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
-            throttle_time_ms: 12345_i32,
-            topics: vec![<OffsetCommitResponseTopic as TestInstance>::test_tagged_fields()],
+            throttle_time_ms: if version >= 3 { 12345_i32 } else { 0_i32 },
+            topics: vec![<OffsetCommitResponseTopic as TestInstance>::test_tagged_fields(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -57,29 +70,39 @@ impl TestInstance for OffsetCommitResponseData {
     }
 }
 impl TestInstance for OffsetCommitResponseTopic {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
-            name: KafkaString::from("test".to_owned()),
-            topic_id: KafkaUuid::ONE,
-            partitions: vec![<OffsetCommitResponsePartition as TestInstance>::test_populated()],
+            name: if version <= 9 {
+                KafkaString::from("test".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            topic_id: if version >= 10 {
+                KafkaUuid::ONE
+            } else {
+                KafkaUuid::ZERO
+            },
+            partitions: vec![
+                <OffsetCommitResponsePartition as TestInstance>::test_populated(version),
+            ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
             topic_id: KafkaUuid::ZERO,
             partitions: vec![
-                <OffsetCommitResponsePartition as TestInstance>::test_null_optionals(),
+                <OffsetCommitResponsePartition as TestInstance>::test_null_optionals(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             topic_id: KafkaUuid::ZERO,
@@ -87,32 +110,60 @@ impl TestInstance for OffsetCommitResponseTopic {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
-            name: KafkaString::from("test-2".to_owned()),
-            topic_id: KafkaUuid::from_parts(2, 3),
+            name: if version <= 9 {
+                KafkaString::from("test-2".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            topic_id: if version >= 10 {
+                KafkaUuid::from_parts(2, 3)
+            } else {
+                KafkaUuid::ZERO
+            },
             partitions: vec![
-                <OffsetCommitResponsePartition as TestInstance>::test_populated(),
-                <OffsetCommitResponsePartition as TestInstance>::test_multi_element_collections(),
+                <OffsetCommitResponsePartition as TestInstance>::test_populated(version),
+                <OffsetCommitResponsePartition as TestInstance>::test_multi_element_collections(
+                    version,
+                ),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
-            name: KafkaString::from("boundary".to_owned()),
-            topic_id: KafkaUuid::ONE,
+            name: if version <= 9 {
+                KafkaString::from("boundary".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            topic_id: if version >= 10 {
+                KafkaUuid::ONE
+            } else {
+                KafkaUuid::ZERO
+            },
             partitions: vec![
-                <OffsetCommitResponsePartition as TestInstance>::test_numeric_boundaries(),
+                <OffsetCommitResponsePartition as TestInstance>::test_numeric_boundaries(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
-            name: KafkaString::from("test".to_owned()),
-            topic_id: KafkaUuid::ONE,
-            partitions: vec![<OffsetCommitResponsePartition as TestInstance>::test_tagged_fields()],
+            name: if version <= 9 {
+                KafkaString::from("test".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            topic_id: if version >= 10 {
+                KafkaUuid::ONE
+            } else {
+                KafkaUuid::ZERO
+            },
+            partitions: vec![
+                <OffsetCommitResponsePartition as TestInstance>::test_tagged_fields(version),
+            ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -121,7 +172,7 @@ impl TestInstance for OffsetCommitResponseTopic {
     }
 }
 impl TestInstance for OffsetCommitResponsePartition {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             error_code: 42_i16,
@@ -131,7 +182,7 @@ impl TestInstance for OffsetCommitResponsePartition {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             partition_index: 0_i32,
@@ -139,28 +190,28 @@ impl TestInstance for OffsetCommitResponsePartition {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             partition_index: 0_i32,
             error_code: 0_i16,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             partition_index: 23456_i32,
             error_code: 43_i16,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             partition_index: i32::MIN,
             error_code: i16::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             error_code: 42_i16,
@@ -172,63 +223,65 @@ impl TestInstance for OffsetCommitResponsePartition {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <OffsetCommitResponseData as TestInstance>::test_populated();
+    let message = <OffsetCommitResponseData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <OffsetCommitResponseData as TestInstance>::test_populated();
+    let message = <OffsetCommitResponseData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <OffsetCommitResponseData as TestInstance>::test_null_optionals();
+    let message = <OffsetCommitResponseData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <OffsetCommitResponseData as TestInstance>::test_null_optionals();
+    let message = <OffsetCommitResponseData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <OffsetCommitResponseData as TestInstance>::test_empty_collections();
+    let message = <OffsetCommitResponseData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <OffsetCommitResponseData as TestInstance>::test_empty_collections();
+    let message = <OffsetCommitResponseData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <OffsetCommitResponseData as TestInstance>::test_multi_element_collections();
+    let message =
+        <OffsetCommitResponseData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <OffsetCommitResponseData as TestInstance>::test_multi_element_collections();
+    let message =
+        <OffsetCommitResponseData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <OffsetCommitResponseData as TestInstance>::test_numeric_boundaries();
+    let message = <OffsetCommitResponseData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <OffsetCommitResponseData as TestInstance>::test_numeric_boundaries();
+    let message = <OffsetCommitResponseData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <OffsetCommitResponseData as TestInstance>::test_tagged_fields();
+    let message = <OffsetCommitResponseData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <OffsetCommitResponseData as TestInstance>::test_tagged_fields();
+    let message = <OffsetCommitResponseData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

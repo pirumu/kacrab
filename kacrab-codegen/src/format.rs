@@ -1,4 +1,4 @@
-//! Stage 4: pretty-print a [`proc_macro2::TokenStream`] with [`prettyplease`].
+//! Stage 3: pretty-print a [`proc_macro2::TokenStream`] with [`prettyplease`].
 //!
 //! One struct, one source — there's basically only one way this stage can
 //! fail. If we ever grow more, split into `format/error.rs` then.
@@ -67,7 +67,8 @@ fn insert_blank_line_after_uses(source: &str) -> String {
         out.push_str(line);
         out.push('\n');
 
-        // Avoid trailing newline duplication when the input already ends with a blank line.
+        // `lines()` strips the trailing newline, so we add one per line above; undo it
+        // on the last line when the input had none, preserving the original ending.
         if lines.peek().is_none() && !source.ends_with('\n') {
             let _ = out.pop();
         }

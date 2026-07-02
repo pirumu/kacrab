@@ -1,39 +1,56 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::add_partitions_to_txn_response::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for AddPartitionsToTxnResponseData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             throttle_time_ms: 12345_i32,
-            error_code: 42_i16,
-            results_by_transaction: vec![
-                <AddPartitionsToTxnResult as TestInstance>::test_populated(),
-            ],
-            results_by_topic_v3_and_below: vec![
-                <AddPartitionsToTxnTopicResult as TestInstance>::test_populated(),
-            ],
+            error_code: if version >= 4 { 42_i16 } else { 0_i16 },
+            results_by_transaction: if version >= 4 {
+                vec![<AddPartitionsToTxnResult as TestInstance>::test_populated(
+                    version,
+                )]
+            } else {
+                Vec::new()
+            },
+            results_by_topic_v3_and_below: if version <= 3 {
+                vec![<AddPartitionsToTxnTopicResult as TestInstance>::test_populated(version)]
+            } else {
+                Vec::new()
+            },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             throttle_time_ms: 0_i32,
             error_code: 0_i16,
-            results_by_transaction: vec![
-                <AddPartitionsToTxnResult as TestInstance>::test_null_optionals(),
-            ],
-            results_by_topic_v3_and_below: vec![
-                <AddPartitionsToTxnTopicResult as TestInstance>::test_null_optionals(),
-            ],
+            results_by_transaction: if version >= 4 {
+                vec![<AddPartitionsToTxnResult as TestInstance>::test_null_optionals(version)]
+            } else {
+                Vec::new()
+            },
+            results_by_topic_v3_and_below: if version <= 3 {
+                vec![<AddPartitionsToTxnTopicResult as TestInstance>::test_null_optionals(version)]
+            } else {
+                Vec::new()
+            },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             throttle_time_ms: 0_i32,
             error_code: 0_i16,
@@ -42,44 +59,68 @@ impl TestInstance for AddPartitionsToTxnResponseData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             throttle_time_ms: 23456_i32,
-            error_code: 43_i16,
-            results_by_transaction: vec![
-                <AddPartitionsToTxnResult as TestInstance>::test_populated(),
-                <AddPartitionsToTxnResult as TestInstance>::test_multi_element_collections(),
-            ],
-            results_by_topic_v3_and_below: vec![
-                <AddPartitionsToTxnTopicResult as TestInstance>::test_populated(),
-                <AddPartitionsToTxnTopicResult as TestInstance>::test_multi_element_collections(),
-            ],
+            error_code: if version >= 4 { 43_i16 } else { 0_i16 },
+            results_by_transaction: if version >= 4 {
+                vec![
+                    <AddPartitionsToTxnResult as TestInstance>::test_populated(version),
+                    <AddPartitionsToTxnResult as TestInstance>::test_multi_element_collections(
+                        version,
+                    ),
+                ]
+            } else {
+                Vec::new()
+            },
+            results_by_topic_v3_and_below: if version <= 3 {
+                vec![
+                    <AddPartitionsToTxnTopicResult as TestInstance>::test_populated(version),
+                    <AddPartitionsToTxnTopicResult as TestInstance>::test_multi_element_collections(
+                        version,
+                    ),
+                ]
+            } else {
+                Vec::new()
+            },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             throttle_time_ms: i32::MIN,
-            error_code: i16::MIN,
-            results_by_transaction: vec![
-                <AddPartitionsToTxnResult as TestInstance>::test_numeric_boundaries(),
-            ],
-            results_by_topic_v3_and_below: vec![
-                <AddPartitionsToTxnTopicResult as TestInstance>::test_numeric_boundaries(),
-            ],
+            error_code: if version >= 4 { i16::MIN } else { 0_i16 },
+            results_by_transaction: if version >= 4 {
+                vec![<AddPartitionsToTxnResult as TestInstance>::test_numeric_boundaries(version)]
+            } else {
+                Vec::new()
+            },
+            results_by_topic_v3_and_below: if version <= 3 {
+                vec![
+                    <AddPartitionsToTxnTopicResult as TestInstance>::test_numeric_boundaries(
+                        version,
+                    ),
+                ]
+            } else {
+                Vec::new()
+            },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             throttle_time_ms: 12345_i32,
-            error_code: 42_i16,
-            results_by_transaction: vec![
-                <AddPartitionsToTxnResult as TestInstance>::test_tagged_fields(),
-            ],
-            results_by_topic_v3_and_below: vec![
-                <AddPartitionsToTxnTopicResult as TestInstance>::test_tagged_fields(),
-            ],
+            error_code: if version >= 4 { 42_i16 } else { 0_i16 },
+            results_by_transaction: if version >= 4 {
+                vec![<AddPartitionsToTxnResult as TestInstance>::test_tagged_fields(version)]
+            } else {
+                Vec::new()
+            },
+            results_by_topic_v3_and_below: if version <= 3 {
+                vec![<AddPartitionsToTxnTopicResult as TestInstance>::test_tagged_fields(version)]
+            } else {
+                Vec::new()
+            },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -88,57 +129,61 @@ impl TestInstance for AddPartitionsToTxnResponseData {
     }
 }
 impl TestInstance for AddPartitionsToTxnResult {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             transactional_id: KafkaString::from("test".to_owned()),
-            topic_results: vec![<AddPartitionsToTxnTopicResult as TestInstance>::test_populated()],
+            topic_results: vec![
+                <AddPartitionsToTxnTopicResult as TestInstance>::test_populated(version),
+            ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             transactional_id: KafkaString::default(),
             topic_results: vec![
-                <AddPartitionsToTxnTopicResult as TestInstance>::test_null_optionals(),
+                <AddPartitionsToTxnTopicResult as TestInstance>::test_null_optionals(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             transactional_id: KafkaString::default(),
             topic_results: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             transactional_id: KafkaString::from("test-2".to_owned()),
             topic_results: vec![
-                <AddPartitionsToTxnTopicResult as TestInstance>::test_populated(),
-                <AddPartitionsToTxnTopicResult as TestInstance>::test_multi_element_collections(),
+                <AddPartitionsToTxnTopicResult as TestInstance>::test_populated(version),
+                <AddPartitionsToTxnTopicResult as TestInstance>::test_multi_element_collections(
+                    version,
+                ),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             transactional_id: KafkaString::from("boundary".to_owned()),
             topic_results: vec![
-                <AddPartitionsToTxnTopicResult as TestInstance>::test_numeric_boundaries(),
+                <AddPartitionsToTxnTopicResult as TestInstance>::test_numeric_boundaries(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             transactional_id: KafkaString::from("test".to_owned()),
             topic_results: vec![
-                <AddPartitionsToTxnTopicResult as TestInstance>::test_tagged_fields(),
+                <AddPartitionsToTxnTopicResult as TestInstance>::test_tagged_fields(version),
             ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -148,11 +193,11 @@ impl TestInstance for AddPartitionsToTxnResult {
     }
 }
 impl TestInstance for AddPartitionsToTxnTopicResult {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             results_by_partition: vec![
-                <AddPartitionsToTxnPartitionResult as TestInstance>::test_populated(),
+                <AddPartitionsToTxnPartitionResult as TestInstance>::test_populated(version),
             ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -160,48 +205,51 @@ impl TestInstance for AddPartitionsToTxnTopicResult {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
             results_by_partition: vec![
-                <AddPartitionsToTxnPartitionResult as TestInstance>::test_null_optionals(),
+                <AddPartitionsToTxnPartitionResult as TestInstance>::test_null_optionals(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             results_by_partition: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             results_by_partition: vec![
-                <AddPartitionsToTxnPartitionResult as TestInstance>::test_populated(),
+                <AddPartitionsToTxnPartitionResult as TestInstance>::test_populated(version),
                 <AddPartitionsToTxnPartitionResult as TestInstance>::test_multi_element_collections(
+                    version,
                 ),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
             results_by_partition: vec![
-                <AddPartitionsToTxnPartitionResult as TestInstance>::test_numeric_boundaries(),
+                <AddPartitionsToTxnPartitionResult as TestInstance>::test_numeric_boundaries(
+                    version,
+                ),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             results_by_partition: vec![
-                <AddPartitionsToTxnPartitionResult as TestInstance>::test_tagged_fields(),
+                <AddPartitionsToTxnPartitionResult as TestInstance>::test_tagged_fields(version),
             ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -211,7 +259,7 @@ impl TestInstance for AddPartitionsToTxnTopicResult {
     }
 }
 impl TestInstance for AddPartitionsToTxnPartitionResult {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             partition_error_code: 42_i16,
@@ -221,7 +269,7 @@ impl TestInstance for AddPartitionsToTxnPartitionResult {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             partition_index: 0_i32,
@@ -229,28 +277,28 @@ impl TestInstance for AddPartitionsToTxnPartitionResult {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             partition_index: 0_i32,
             partition_error_code: 0_i16,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             partition_index: 23456_i32,
             partition_error_code: 43_i16,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             partition_index: i32::MIN,
             partition_error_code: i16::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             partition_error_code: 42_i16,
@@ -262,65 +310,67 @@ impl TestInstance for AddPartitionsToTxnPartitionResult {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_populated();
+    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_populated();
+    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_null_optionals();
+    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_null_optionals();
+    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_empty_collections();
+    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_empty_collections();
+    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
     let message =
-        <AddPartitionsToTxnResponseData as TestInstance>::test_multi_element_collections();
+        <AddPartitionsToTxnResponseData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
     let message =
-        <AddPartitionsToTxnResponseData as TestInstance>::test_multi_element_collections();
+        <AddPartitionsToTxnResponseData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_numeric_boundaries();
+    let message =
+        <AddPartitionsToTxnResponseData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_numeric_boundaries();
+    let message =
+        <AddPartitionsToTxnResponseData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_tagged_fields();
+    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_tagged_fields();
+    let message = <AddPartitionsToTxnResponseData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

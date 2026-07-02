@@ -6,7 +6,8 @@ use super::{Compression, CompressionError, CompressionErrorKind, Result};
 
 const DEFAULT_GZIP_LEVEL: u32 = 6;
 
-/// Compress `payload` at the given level (`None` -> codec default `6`, range `0..=9`).
+/// Compress `payload` at the given level (`None` -> codec default `6`). Only the lower bound is
+/// clamped (negative levels become `0`); higher values pass through to `flate2` unchanged.
 pub fn compress_with_level(payload: &[u8], level: Option<i32>) -> Result<Vec<u8>> {
     let lvl = level.map_or(DEFAULT_GZIP_LEVEL, |l| l.max(0).cast_unsigned());
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(lvl));

@@ -330,7 +330,10 @@ fn generate_unsupported_field_check(
     };
     let default_val = resolve_default(field)?;
     let api_key_lit = Literal::i16_unsuffixed(api_key);
-    let field_name = var_ident.to_string();
+    let var_string = var_ident.to_string();
+    // Strip the raw-identifier prefix so a field named `type` reads as `type`,
+    // not `r#type`, in the runtime error message.
+    let field_name = var_string.strip_prefix("r#").unwrap_or(&var_string);
     Ok(quote! {
         else if self.#var_ident != #default_val {
             return Err(UnsupportedFieldVersion::new(#api_key_lit, #field_name, version).into());

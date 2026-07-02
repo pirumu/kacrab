@@ -1,90 +1,131 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::txn_offset_commit_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for TxnOffsetCommitRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             transactional_id: KafkaString::from("test".to_owned()),
             group_id: KafkaString::from("test".to_owned()),
             producer_id: 9_876_543_210_i64,
             producer_epoch: 42_i16,
-            generation_id: 12345_i32,
-            member_id: KafkaString::from("test".to_owned()),
-            group_instance_id: Some(KafkaString::from("test".to_owned())),
-            topics: vec![<TxnOffsetCommitRequestTopic as TestInstance>::test_populated()],
+            generation_id: if version >= 3 { 12345_i32 } else { -1i32 },
+            member_id: if version >= 3 {
+                KafkaString::from("test".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            group_instance_id: (version >= 3)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
+            topics: vec![<TxnOffsetCommitRequestTopic as TestInstance>::test_populated(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             transactional_id: KafkaString::default(),
             group_id: KafkaString::default(),
             producer_id: 0_i64,
             producer_epoch: 0_i16,
-            generation_id: 0_i32,
+            generation_id: if version >= 3 { 0_i32 } else { -1i32 },
             member_id: KafkaString::default(),
             group_instance_id: None,
-            topics: vec![<TxnOffsetCommitRequestTopic as TestInstance>::test_null_optionals()],
+            topics: vec![
+                <TxnOffsetCommitRequestTopic as TestInstance>::test_null_optionals(version),
+            ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
             transactional_id: KafkaString::default(),
             group_id: KafkaString::default(),
             producer_id: 0_i64,
             producer_epoch: 0_i16,
-            generation_id: 0_i32,
+            generation_id: if version >= 3 { 0_i32 } else { -1i32 },
             member_id: KafkaString::default(),
-            group_instance_id: Some(KafkaString::default()),
+            group_instance_id: (version >= 3)
+                .then(|| Some(KafkaString::default()))
+                .flatten(),
             topics: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             transactional_id: KafkaString::from("test-2".to_owned()),
             group_id: KafkaString::from("test-2".to_owned()),
             producer_id: 9_876_543_211_i64,
             producer_epoch: 43_i16,
-            generation_id: 23456_i32,
-            member_id: KafkaString::from("test-2".to_owned()),
-            group_instance_id: Some(KafkaString::from("test-2".to_owned())),
+            generation_id: if version >= 3 { 23456_i32 } else { -1i32 },
+            member_id: if version >= 3 {
+                KafkaString::from("test-2".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            group_instance_id: (version >= 3)
+                .then(|| Some(KafkaString::from("test-2".to_owned())))
+                .flatten(),
             topics: vec![
-                <TxnOffsetCommitRequestTopic as TestInstance>::test_populated(),
-                <TxnOffsetCommitRequestTopic as TestInstance>::test_multi_element_collections(),
+                <TxnOffsetCommitRequestTopic as TestInstance>::test_populated(version),
+                <TxnOffsetCommitRequestTopic as TestInstance>::test_multi_element_collections(
+                    version,
+                ),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             transactional_id: KafkaString::from("boundary".to_owned()),
             group_id: KafkaString::from("boundary".to_owned()),
             producer_id: i64::MIN,
             producer_epoch: i16::MIN,
-            generation_id: i32::MIN,
-            member_id: KafkaString::from("boundary".to_owned()),
-            group_instance_id: Some(KafkaString::from("boundary".to_owned())),
-            topics: vec![<TxnOffsetCommitRequestTopic as TestInstance>::test_numeric_boundaries()],
+            generation_id: if version >= 3 { i32::MIN } else { -1i32 },
+            member_id: if version >= 3 {
+                KafkaString::from("boundary".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            group_instance_id: (version >= 3)
+                .then(|| Some(KafkaString::from("boundary".to_owned())))
+                .flatten(),
+            topics: vec![
+                <TxnOffsetCommitRequestTopic as TestInstance>::test_numeric_boundaries(version),
+            ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             transactional_id: KafkaString::from("test".to_owned()),
             group_id: KafkaString::from("test".to_owned()),
             producer_id: 9_876_543_210_i64,
             producer_epoch: 42_i16,
-            generation_id: 12345_i32,
-            member_id: KafkaString::from("test".to_owned()),
-            group_instance_id: Some(KafkaString::from("test".to_owned())),
-            topics: vec![<TxnOffsetCommitRequestTopic as TestInstance>::test_tagged_fields()],
+            generation_id: if version >= 3 { 12345_i32 } else { -1i32 },
+            member_id: if version >= 3 {
+                KafkaString::from("test".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            group_instance_id: (version >= 3)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
+            topics: vec![
+                <TxnOffsetCommitRequestTopic as TestInstance>::test_tagged_fields(version),
+            ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -93,57 +134,61 @@ impl TestInstance for TxnOffsetCommitRequestData {
     }
 }
 impl TestInstance for TxnOffsetCommitRequestTopic {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
-            partitions: vec![<TxnOffsetCommitRequestPartition as TestInstance>::test_populated()],
+            partitions: vec![
+                <TxnOffsetCommitRequestPartition as TestInstance>::test_populated(version),
+            ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
             partitions: vec![
-                <TxnOffsetCommitRequestPartition as TestInstance>::test_null_optionals(),
+                <TxnOffsetCommitRequestPartition as TestInstance>::test_null_optionals(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             partitions: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             partitions: vec![
-                <TxnOffsetCommitRequestPartition as TestInstance>::test_populated(),
-                <TxnOffsetCommitRequestPartition as TestInstance>::test_multi_element_collections(),
+                <TxnOffsetCommitRequestPartition as TestInstance>::test_populated(version),
+                <TxnOffsetCommitRequestPartition as TestInstance>::test_multi_element_collections(
+                    version,
+                ),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
             partitions: vec![
-                <TxnOffsetCommitRequestPartition as TestInstance>::test_numeric_boundaries(),
+                <TxnOffsetCommitRequestPartition as TestInstance>::test_numeric_boundaries(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             partitions: vec![
-                <TxnOffsetCommitRequestPartition as TestInstance>::test_tagged_fields(),
+                <TxnOffsetCommitRequestPartition as TestInstance>::test_tagged_fields(version),
             ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -153,11 +198,11 @@ impl TestInstance for TxnOffsetCommitRequestTopic {
     }
 }
 impl TestInstance for TxnOffsetCommitRequestPartition {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             committed_offset: 9_876_543_210_i64,
-            committed_leader_epoch: 12345_i32,
+            committed_leader_epoch: if version >= 2 { 12345_i32 } else { -1i32 },
             committed_metadata: Some(KafkaString::from("test".to_owned())),
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -165,48 +210,48 @@ impl TestInstance for TxnOffsetCommitRequestPartition {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             partition_index: 0_i32,
             committed_offset: 0_i64,
-            committed_leader_epoch: 0_i32,
+            committed_leader_epoch: if version >= 2 { 0_i32 } else { -1i32 },
             committed_metadata: None,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
             partition_index: 0_i32,
             committed_offset: 0_i64,
-            committed_leader_epoch: 0_i32,
+            committed_leader_epoch: if version >= 2 { 0_i32 } else { -1i32 },
             committed_metadata: Some(KafkaString::default()),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             partition_index: 23456_i32,
             committed_offset: 9_876_543_211_i64,
-            committed_leader_epoch: 23456_i32,
+            committed_leader_epoch: if version >= 2 { 23456_i32 } else { -1i32 },
             committed_metadata: Some(KafkaString::from("test-2".to_owned())),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             partition_index: i32::MIN,
             committed_offset: i64::MIN,
-            committed_leader_epoch: i32::MIN,
+            committed_leader_epoch: if version >= 2 { i32::MIN } else { -1i32 },
             committed_metadata: Some(KafkaString::from("boundary".to_owned())),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             committed_offset: 9_876_543_210_i64,
-            committed_leader_epoch: 12345_i32,
+            committed_leader_epoch: if version >= 2 { 12345_i32 } else { -1i32 },
             committed_metadata: Some(KafkaString::from("test".to_owned())),
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -216,63 +261,65 @@ impl TestInstance for TxnOffsetCommitRequestPartition {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <TxnOffsetCommitRequestData as TestInstance>::test_populated();
+    let message = <TxnOffsetCommitRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <TxnOffsetCommitRequestData as TestInstance>::test_populated();
+    let message = <TxnOffsetCommitRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <TxnOffsetCommitRequestData as TestInstance>::test_null_optionals();
+    let message = <TxnOffsetCommitRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <TxnOffsetCommitRequestData as TestInstance>::test_null_optionals();
+    let message = <TxnOffsetCommitRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <TxnOffsetCommitRequestData as TestInstance>::test_empty_collections();
+    let message = <TxnOffsetCommitRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <TxnOffsetCommitRequestData as TestInstance>::test_empty_collections();
+    let message = <TxnOffsetCommitRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <TxnOffsetCommitRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <TxnOffsetCommitRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <TxnOffsetCommitRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <TxnOffsetCommitRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <TxnOffsetCommitRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <TxnOffsetCommitRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <TxnOffsetCommitRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <TxnOffsetCommitRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <TxnOffsetCommitRequestData as TestInstance>::test_tagged_fields();
+    let message = <TxnOffsetCommitRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <TxnOffsetCommitRequestData as TestInstance>::test_tagged_fields();
+    let message = <TxnOffsetCommitRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

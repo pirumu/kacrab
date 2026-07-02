@@ -1,54 +1,67 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::describe_configs_response::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for DescribeConfigsResponseData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             throttle_time_ms: 12345_i32,
-            results: vec![<DescribeConfigsResult as TestInstance>::test_populated()],
+            results: vec![<DescribeConfigsResult as TestInstance>::test_populated(
+                version,
+            )],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             throttle_time_ms: 0_i32,
-            results: vec![<DescribeConfigsResult as TestInstance>::test_null_optionals()],
+            results: vec![<DescribeConfigsResult as TestInstance>::test_null_optionals(version)],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             throttle_time_ms: 0_i32,
             results: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             throttle_time_ms: 23456_i32,
             results: vec![
-                <DescribeConfigsResult as TestInstance>::test_populated(),
-                <DescribeConfigsResult as TestInstance>::test_multi_element_collections(),
+                <DescribeConfigsResult as TestInstance>::test_populated(version),
+                <DescribeConfigsResult as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             throttle_time_ms: i32::MIN,
-            results: vec![<DescribeConfigsResult as TestInstance>::test_numeric_boundaries()],
+            results: vec![
+                <DescribeConfigsResult as TestInstance>::test_numeric_boundaries(version),
+            ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             throttle_time_ms: 12345_i32,
-            results: vec![<DescribeConfigsResult as TestInstance>::test_tagged_fields()],
+            results: vec![<DescribeConfigsResult as TestInstance>::test_tagged_fields(
+                version,
+            )],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -57,31 +70,33 @@ impl TestInstance for DescribeConfigsResponseData {
     }
 }
 impl TestInstance for DescribeConfigsResult {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             error_code: 42_i16,
             error_message: Some(KafkaString::from("test".to_owned())),
             resource_type: 7_i8,
             resource_name: KafkaString::from("test".to_owned()),
-            configs: vec![<DescribeConfigsResourceResult as TestInstance>::test_populated()],
+            configs: vec![<DescribeConfigsResourceResult as TestInstance>::test_populated(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             error_code: 0_i16,
             error_message: None,
             resource_type: 0_i8,
             resource_name: KafkaString::default(),
-            configs: vec![<DescribeConfigsResourceResult as TestInstance>::test_null_optionals()],
+            configs: vec![
+                <DescribeConfigsResourceResult as TestInstance>::test_null_optionals(version),
+            ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             error_code: 0_i16,
             error_message: Some(KafkaString::default()),
@@ -91,38 +106,42 @@ impl TestInstance for DescribeConfigsResult {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             error_code: 43_i16,
             error_message: Some(KafkaString::from("test-2".to_owned())),
             resource_type: 8_i8,
             resource_name: KafkaString::from("test-2".to_owned()),
             configs: vec![
-                <DescribeConfigsResourceResult as TestInstance>::test_populated(),
-                <DescribeConfigsResourceResult as TestInstance>::test_multi_element_collections(),
+                <DescribeConfigsResourceResult as TestInstance>::test_populated(version),
+                <DescribeConfigsResourceResult as TestInstance>::test_multi_element_collections(
+                    version,
+                ),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             error_code: i16::MIN,
             error_message: Some(KafkaString::from("boundary".to_owned())),
             resource_type: i8::MIN,
             resource_name: KafkaString::from("boundary".to_owned()),
             configs: vec![
-                <DescribeConfigsResourceResult as TestInstance>::test_numeric_boundaries(),
+                <DescribeConfigsResourceResult as TestInstance>::test_numeric_boundaries(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             error_code: 42_i16,
             error_message: Some(KafkaString::from("test".to_owned())),
             resource_type: 7_i8,
             resource_name: KafkaString::from("test".to_owned()),
-            configs: vec![<DescribeConfigsResourceResult as TestInstance>::test_tagged_fields()],
+            configs: vec![
+                <DescribeConfigsResourceResult as TestInstance>::test_tagged_fields(version),
+            ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -131,23 +150,27 @@ impl TestInstance for DescribeConfigsResult {
     }
 }
 impl TestInstance for DescribeConfigsResourceResult {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             value: Some(KafkaString::from("test".to_owned())),
             read_only: true,
             config_source: 7_i8,
             is_sensitive: true,
-            synonyms: vec![<DescribeConfigsSynonym as TestInstance>::test_populated()],
-            config_type: 7_i8,
-            documentation: Some(KafkaString::from("test".to_owned())),
+            synonyms: vec![<DescribeConfigsSynonym as TestInstance>::test_populated(
+                version,
+            )],
+            config_type: if version >= 3 { 7_i8 } else { 0i8 },
+            documentation: (version >= 3)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
@@ -155,13 +178,13 @@ impl TestInstance for DescribeConfigsResourceResult {
             read_only: false,
             config_source: 0_i8,
             is_sensitive: false,
-            synonyms: vec![<DescribeConfigsSynonym as TestInstance>::test_null_optionals()],
-            config_type: 0_i8,
+            synonyms: vec![<DescribeConfigsSynonym as TestInstance>::test_null_optionals(version)],
+            config_type: if version >= 3 { 0_i8 } else { 0i8 },
             documentation: None,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             value: Some(KafkaString::default()),
@@ -169,12 +192,14 @@ impl TestInstance for DescribeConfigsResourceResult {
             config_source: 0_i8,
             is_sensitive: false,
             synonyms: Vec::new(),
-            config_type: 0_i8,
-            documentation: Some(KafkaString::default()),
+            config_type: if version >= 3 { 0_i8 } else { 0i8 },
+            documentation: (version >= 3)
+                .then(|| Some(KafkaString::default()))
+                .flatten(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             value: Some(KafkaString::from("test-2".to_owned())),
@@ -182,37 +207,45 @@ impl TestInstance for DescribeConfigsResourceResult {
             config_source: 8_i8,
             is_sensitive: false,
             synonyms: vec![
-                <DescribeConfigsSynonym as TestInstance>::test_populated(),
-                <DescribeConfigsSynonym as TestInstance>::test_multi_element_collections(),
+                <DescribeConfigsSynonym as TestInstance>::test_populated(version),
+                <DescribeConfigsSynonym as TestInstance>::test_multi_element_collections(version),
             ],
-            config_type: 8_i8,
-            documentation: Some(KafkaString::from("test-2".to_owned())),
+            config_type: if version >= 3 { 8_i8 } else { 0i8 },
+            documentation: (version >= 3)
+                .then(|| Some(KafkaString::from("test-2".to_owned())))
+                .flatten(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
             value: Some(KafkaString::from("boundary".to_owned())),
             read_only: true,
             config_source: i8::MIN,
             is_sensitive: true,
-            synonyms: vec![<DescribeConfigsSynonym as TestInstance>::test_numeric_boundaries()],
-            config_type: i8::MIN,
-            documentation: Some(KafkaString::from("boundary".to_owned())),
+            synonyms: vec![
+                <DescribeConfigsSynonym as TestInstance>::test_numeric_boundaries(version),
+            ],
+            config_type: if version >= 3 { i8::MIN } else { 0i8 },
+            documentation: (version >= 3)
+                .then(|| Some(KafkaString::from("boundary".to_owned())))
+                .flatten(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             value: Some(KafkaString::from("test".to_owned())),
             read_only: true,
             config_source: 7_i8,
             is_sensitive: true,
-            synonyms: vec![<DescribeConfigsSynonym as TestInstance>::test_tagged_fields()],
-            config_type: 7_i8,
-            documentation: Some(KafkaString::from("test".to_owned())),
+            synonyms: vec![<DescribeConfigsSynonym as TestInstance>::test_tagged_fields(version)],
+            config_type: if version >= 3 { 7_i8 } else { 0i8 },
+            documentation: (version >= 3)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -221,7 +254,7 @@ impl TestInstance for DescribeConfigsResourceResult {
     }
 }
 impl TestInstance for DescribeConfigsSynonym {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             value: Some(KafkaString::from("test".to_owned())),
@@ -232,7 +265,7 @@ impl TestInstance for DescribeConfigsSynonym {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
@@ -241,7 +274,7 @@ impl TestInstance for DescribeConfigsSynonym {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             value: Some(KafkaString::default()),
@@ -249,7 +282,7 @@ impl TestInstance for DescribeConfigsSynonym {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             value: Some(KafkaString::from("test-2".to_owned())),
@@ -257,7 +290,7 @@ impl TestInstance for DescribeConfigsSynonym {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
             value: Some(KafkaString::from("boundary".to_owned())),
@@ -265,7 +298,7 @@ impl TestInstance for DescribeConfigsSynonym {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             value: Some(KafkaString::from("test".to_owned())),
@@ -278,63 +311,65 @@ impl TestInstance for DescribeConfigsSynonym {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <DescribeConfigsResponseData as TestInstance>::test_populated();
+    let message = <DescribeConfigsResponseData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DescribeConfigsResponseData as TestInstance>::test_populated();
+    let message = <DescribeConfigsResponseData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <DescribeConfigsResponseData as TestInstance>::test_null_optionals();
+    let message = <DescribeConfigsResponseData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DescribeConfigsResponseData as TestInstance>::test_null_optionals();
+    let message = <DescribeConfigsResponseData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <DescribeConfigsResponseData as TestInstance>::test_empty_collections();
+    let message = <DescribeConfigsResponseData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DescribeConfigsResponseData as TestInstance>::test_empty_collections();
+    let message = <DescribeConfigsResponseData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <DescribeConfigsResponseData as TestInstance>::test_multi_element_collections();
+    let message =
+        <DescribeConfigsResponseData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DescribeConfigsResponseData as TestInstance>::test_multi_element_collections();
+    let message =
+        <DescribeConfigsResponseData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <DescribeConfigsResponseData as TestInstance>::test_numeric_boundaries();
+    let message = <DescribeConfigsResponseData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DescribeConfigsResponseData as TestInstance>::test_numeric_boundaries();
+    let message = <DescribeConfigsResponseData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <DescribeConfigsResponseData as TestInstance>::test_tagged_fields();
+    let message = <DescribeConfigsResponseData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DescribeConfigsResponseData as TestInstance>::test_tagged_fields();
+    let message = <DescribeConfigsResponseData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

@@ -1,54 +1,67 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::describe_groups_response::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for DescribeGroupsResponseData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
-            throttle_time_ms: 12345_i32,
-            groups: vec![<DescribedGroup as TestInstance>::test_populated()],
+            throttle_time_ms: if version >= 1 { 12345_i32 } else { 0_i32 },
+            groups: vec![<DescribedGroup as TestInstance>::test_populated(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             throttle_time_ms: 0_i32,
-            groups: vec![<DescribedGroup as TestInstance>::test_null_optionals()],
+            groups: vec![<DescribedGroup as TestInstance>::test_null_optionals(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             throttle_time_ms: 0_i32,
             groups: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
-            throttle_time_ms: 23456_i32,
+            throttle_time_ms: if version >= 1 { 23456_i32 } else { 0_i32 },
             groups: vec![
-                <DescribedGroup as TestInstance>::test_populated(),
-                <DescribedGroup as TestInstance>::test_multi_element_collections(),
+                <DescribedGroup as TestInstance>::test_populated(version),
+                <DescribedGroup as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
-            throttle_time_ms: i32::MIN,
-            groups: vec![<DescribedGroup as TestInstance>::test_numeric_boundaries()],
+            throttle_time_ms: if version >= 1 { i32::MIN } else { 0_i32 },
+            groups: vec![<DescribedGroup as TestInstance>::test_numeric_boundaries(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
-            throttle_time_ms: 12345_i32,
-            groups: vec![<DescribedGroup as TestInstance>::test_tagged_fields()],
+            throttle_time_ms: if version >= 1 { 12345_i32 } else { 0_i32 },
+            groups: vec![<DescribedGroup as TestInstance>::test_tagged_fields(
+                version,
+            )],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -57,23 +70,27 @@ impl TestInstance for DescribeGroupsResponseData {
     }
 }
 impl TestInstance for DescribedGroup {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             error_code: 42_i16,
-            error_message: Some(KafkaString::from("test".to_owned())),
+            error_message: (version >= 6)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
             group_id: KafkaString::from("test".to_owned()),
             group_state: KafkaString::from("test".to_owned()),
             protocol_type: KafkaString::from("test".to_owned()),
             protocol_data: KafkaString::from("test".to_owned()),
-            members: vec![<DescribedGroupMember as TestInstance>::test_populated()],
-            authorized_operations: 12345_i32,
+            members: vec![<DescribedGroupMember as TestInstance>::test_populated(
+                version,
+            )],
+            authorized_operations: if version >= 3 { 12345_i32 } else { i32::MIN },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             error_code: 0_i16,
@@ -82,63 +99,75 @@ impl TestInstance for DescribedGroup {
             group_state: KafkaString::default(),
             protocol_type: KafkaString::default(),
             protocol_data: KafkaString::default(),
-            members: vec![<DescribedGroupMember as TestInstance>::test_null_optionals()],
-            authorized_operations: 0_i32,
+            members: vec![<DescribedGroupMember as TestInstance>::test_null_optionals(
+                version,
+            )],
+            authorized_operations: if version >= 3 { 0_i32 } else { i32::MIN },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
             error_code: 0_i16,
-            error_message: Some(KafkaString::default()),
+            error_message: (version >= 6)
+                .then(|| Some(KafkaString::default()))
+                .flatten(),
             group_id: KafkaString::default(),
             group_state: KafkaString::default(),
             protocol_type: KafkaString::default(),
             protocol_data: KafkaString::default(),
             members: Vec::new(),
-            authorized_operations: 0_i32,
+            authorized_operations: if version >= 3 { 0_i32 } else { i32::MIN },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             error_code: 43_i16,
-            error_message: Some(KafkaString::from("test-2".to_owned())),
+            error_message: (version >= 6)
+                .then(|| Some(KafkaString::from("test-2".to_owned())))
+                .flatten(),
             group_id: KafkaString::from("test-2".to_owned()),
             group_state: KafkaString::from("test-2".to_owned()),
             protocol_type: KafkaString::from("test-2".to_owned()),
             protocol_data: KafkaString::from("test-2".to_owned()),
             members: vec![
-                <DescribedGroupMember as TestInstance>::test_populated(),
-                <DescribedGroupMember as TestInstance>::test_multi_element_collections(),
+                <DescribedGroupMember as TestInstance>::test_populated(version),
+                <DescribedGroupMember as TestInstance>::test_multi_element_collections(version),
             ],
-            authorized_operations: 23456_i32,
+            authorized_operations: if version >= 3 { 23456_i32 } else { i32::MIN },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             error_code: i16::MIN,
-            error_message: Some(KafkaString::from("boundary".to_owned())),
+            error_message: (version >= 6)
+                .then(|| Some(KafkaString::from("boundary".to_owned())))
+                .flatten(),
             group_id: KafkaString::from("boundary".to_owned()),
             group_state: KafkaString::from("boundary".to_owned()),
             protocol_type: KafkaString::from("boundary".to_owned()),
             protocol_data: KafkaString::from("boundary".to_owned()),
-            members: vec![<DescribedGroupMember as TestInstance>::test_numeric_boundaries()],
+            members: vec![<DescribedGroupMember as TestInstance>::test_numeric_boundaries(version)],
             authorized_operations: i32::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             error_code: 42_i16,
-            error_message: Some(KafkaString::from("test".to_owned())),
+            error_message: (version >= 6)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
             group_id: KafkaString::from("test".to_owned()),
             group_state: KafkaString::from("test".to_owned()),
             protocol_type: KafkaString::from("test".to_owned()),
             protocol_data: KafkaString::from("test".to_owned()),
-            members: vec![<DescribedGroupMember as TestInstance>::test_tagged_fields()],
-            authorized_operations: 12345_i32,
+            members: vec![<DescribedGroupMember as TestInstance>::test_tagged_fields(
+                version,
+            )],
+            authorized_operations: if version >= 3 { 12345_i32 } else { i32::MIN },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -147,10 +176,12 @@ impl TestInstance for DescribedGroup {
     }
 }
 impl TestInstance for DescribedGroupMember {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             member_id: KafkaString::from("test".to_owned()),
-            group_instance_id: Some(KafkaString::from("test".to_owned())),
+            group_instance_id: (version >= 4)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
             client_id: KafkaString::from("test".to_owned()),
             client_host: KafkaString::from("test".to_owned()),
             member_metadata: Bytes::from_static(b"\xca\xfe"),
@@ -161,7 +192,7 @@ impl TestInstance for DescribedGroupMember {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             member_id: KafkaString::default(),
@@ -173,10 +204,12 @@ impl TestInstance for DescribedGroupMember {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
             member_id: KafkaString::default(),
-            group_instance_id: Some(KafkaString::default()),
+            group_instance_id: (version >= 4)
+                .then(|| Some(KafkaString::default()))
+                .flatten(),
             client_id: KafkaString::default(),
             client_host: KafkaString::default(),
             member_metadata: Bytes::new(),
@@ -184,10 +217,12 @@ impl TestInstance for DescribedGroupMember {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             member_id: KafkaString::from("test-2".to_owned()),
-            group_instance_id: Some(KafkaString::from("test-2".to_owned())),
+            group_instance_id: (version >= 4)
+                .then(|| Some(KafkaString::from("test-2".to_owned())))
+                .flatten(),
             client_id: KafkaString::from("test-2".to_owned()),
             client_host: KafkaString::from("test-2".to_owned()),
             member_metadata: Bytes::from_static(b"\x00\xff"),
@@ -195,10 +230,12 @@ impl TestInstance for DescribedGroupMember {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             member_id: KafkaString::from("boundary".to_owned()),
-            group_instance_id: Some(KafkaString::from("boundary".to_owned())),
+            group_instance_id: (version >= 4)
+                .then(|| Some(KafkaString::from("boundary".to_owned())))
+                .flatten(),
             client_id: KafkaString::from("boundary".to_owned()),
             client_host: KafkaString::from("boundary".to_owned()),
             member_metadata: Bytes::from_static(b"\x00\xff"),
@@ -206,10 +243,12 @@ impl TestInstance for DescribedGroupMember {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             member_id: KafkaString::from("test".to_owned()),
-            group_instance_id: Some(KafkaString::from("test".to_owned())),
+            group_instance_id: (version >= 4)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
             client_id: KafkaString::from("test".to_owned()),
             client_host: KafkaString::from("test".to_owned()),
             member_metadata: Bytes::from_static(b"\xca\xfe"),
@@ -222,63 +261,65 @@ impl TestInstance for DescribedGroupMember {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <DescribeGroupsResponseData as TestInstance>::test_populated();
+    let message = <DescribeGroupsResponseData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DescribeGroupsResponseData as TestInstance>::test_populated();
+    let message = <DescribeGroupsResponseData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <DescribeGroupsResponseData as TestInstance>::test_null_optionals();
+    let message = <DescribeGroupsResponseData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DescribeGroupsResponseData as TestInstance>::test_null_optionals();
+    let message = <DescribeGroupsResponseData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <DescribeGroupsResponseData as TestInstance>::test_empty_collections();
+    let message = <DescribeGroupsResponseData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DescribeGroupsResponseData as TestInstance>::test_empty_collections();
+    let message = <DescribeGroupsResponseData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <DescribeGroupsResponseData as TestInstance>::test_multi_element_collections();
+    let message =
+        <DescribeGroupsResponseData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DescribeGroupsResponseData as TestInstance>::test_multi_element_collections();
+    let message =
+        <DescribeGroupsResponseData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <DescribeGroupsResponseData as TestInstance>::test_numeric_boundaries();
+    let message = <DescribeGroupsResponseData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DescribeGroupsResponseData as TestInstance>::test_numeric_boundaries();
+    let message = <DescribeGroupsResponseData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <DescribeGroupsResponseData as TestInstance>::test_tagged_fields();
+    let message = <DescribeGroupsResponseData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DescribeGroupsResponseData as TestInstance>::test_tagged_fields();
+    let message = <DescribeGroupsResponseData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

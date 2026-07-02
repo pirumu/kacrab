@@ -59,12 +59,13 @@ pub enum StringErrorKind {
         length: i32,
     },
 
-    /// String length exceeds the configured maximum.
+    /// String length exceeds the maximum encodable length.
     #[error("string length {length} exceeds maximum {max}")]
     TooLong {
-        /// Length read from the wire.
+        /// Offending length: the value being encoded, or `usize::MAX` as a
+        /// sentinel when a wire length prefix did not fit in `usize`.
         length: usize,
-        /// Configured maximum.
+        /// Protocol-constant maximum (e.g. `i32::MAX`), not a tunable.
         max: usize,
     },
 }

@@ -244,8 +244,12 @@ pub(crate) fn generate_non_default_check(field: &FieldSpec, var_ident: &Ident) -
                 FieldType::Uint16 => "_u16",
                 _ => "",
             };
-            let default_expr: TokenStream =
-                format!("{default_val}{suffix}").parse().unwrap_or_default();
+            // A malformed default would otherwise lex to empty tokens and emit a
+            // broken `self.x != ` comparison; fall back to the type's zero, which
+            // always lexes and infers the field's integer type.
+            let default_expr: TokenStream = format!("{default_val}{suffix}")
+                .parse()
+                .unwrap_or_else(|_| quote! { 0 });
             quote! { self.#var_ident != #default_expr }
         },
         FieldType::Float64 => quote! { self.#var_ident != 0.0 },

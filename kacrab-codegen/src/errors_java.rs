@@ -1,4 +1,4 @@
-//! Stage 3 (optional): parse upstream Kafka's `clients/.../Errors.java` and
+//! Stage 4 (optional): parse upstream Kafka's `clients/.../Errors.java` and
 //! emit a Rust mirror of every `(code, name, retriable)` triple.
 
 mod codegen;

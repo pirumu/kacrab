@@ -33,7 +33,7 @@ pub fn lower(entries: &[ErrorEntry]) -> TokenStream {
             .clone()
             .unwrap_or_else(|| entry.variant_name.clone());
         let display_lit = Literal::string(&display_str);
-        display_arms.push(quote! { ErrorCode::#ident => write!(f, #display_lit), });
+        display_arms.push(quote! { ErrorCode::#ident => f.write_str(#display_lit), });
     }
 
     quote! {

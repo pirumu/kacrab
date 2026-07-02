@@ -1,76 +1,141 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::offset_fetch_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for OffsetFetchRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
-            group_id: KafkaString::from("test".to_owned()),
-            topics: Some(vec![
-                <OffsetFetchRequestTopic as TestInstance>::test_populated(),
-            ]),
-            groups: vec![<OffsetFetchRequestGroup as TestInstance>::test_populated()],
-            require_stable: true,
+            group_id: if version <= 7 {
+                KafkaString::from("test".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            topics: (version <= 7)
+                .then(|| {
+                    Some(vec![
+                        <OffsetFetchRequestTopic as TestInstance>::test_populated(version),
+                    ])
+                })
+                .flatten(),
+            groups: if version >= 8 {
+                vec![<OffsetFetchRequestGroup as TestInstance>::test_populated(
+                    version,
+                )]
+            } else {
+                Vec::new()
+            },
+            require_stable: if version >= 7 { true } else { false },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
-        drop(<OffsetFetchRequestTopic as TestInstance>::test_null_optionals());
+    fn test_null_optionals(version: i16) -> Self {
+        drop(<OffsetFetchRequestTopic as TestInstance>::test_null_optionals(version));
         Self {
             group_id: KafkaString::default(),
             topics: None,
-            groups: vec![<OffsetFetchRequestGroup as TestInstance>::test_null_optionals()],
+            groups: if version >= 8 {
+                vec![<OffsetFetchRequestGroup as TestInstance>::test_null_optionals(version)]
+            } else {
+                Vec::new()
+            },
             require_stable: false,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
             group_id: KafkaString::default(),
-            topics: Some(Vec::new()),
+            topics: (version <= 7).then(|| Some(Vec::new())).flatten(),
             groups: Vec::new(),
             require_stable: false,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
-            group_id: KafkaString::from("test-2".to_owned()),
-            topics: Some(vec![
-                <OffsetFetchRequestTopic as TestInstance>::test_populated(),
-                <OffsetFetchRequestTopic as TestInstance>::test_multi_element_collections(),
-            ]),
-            groups: vec![
-                <OffsetFetchRequestGroup as TestInstance>::test_populated(),
-                <OffsetFetchRequestGroup as TestInstance>::test_multi_element_collections(),
-            ],
+            group_id: if version <= 7 {
+                KafkaString::from("test-2".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            topics: (version <= 7)
+                .then(|| {
+                    Some(vec![
+                        <OffsetFetchRequestTopic as TestInstance>::test_populated(version),
+                        <OffsetFetchRequestTopic as TestInstance>::test_multi_element_collections(
+                            version,
+                        ),
+                    ])
+                })
+                .flatten(),
+            groups: if version >= 8 {
+                vec![
+                    <OffsetFetchRequestGroup as TestInstance>::test_populated(version),
+                    <OffsetFetchRequestGroup as TestInstance>::test_multi_element_collections(
+                        version,
+                    ),
+                ]
+            } else {
+                Vec::new()
+            },
             require_stable: false,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
-            group_id: KafkaString::from("boundary".to_owned()),
-            topics: Some(vec![
-                <OffsetFetchRequestTopic as TestInstance>::test_numeric_boundaries(),
-            ]),
-            groups: vec![<OffsetFetchRequestGroup as TestInstance>::test_numeric_boundaries()],
-            require_stable: true,
+            group_id: if version <= 7 {
+                KafkaString::from("boundary".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            topics: (version <= 7)
+                .then(|| {
+                    Some(vec![
+                        <OffsetFetchRequestTopic as TestInstance>::test_numeric_boundaries(version),
+                    ])
+                })
+                .flatten(),
+            groups: if version >= 8 {
+                vec![<OffsetFetchRequestGroup as TestInstance>::test_numeric_boundaries(version)]
+            } else {
+                Vec::new()
+            },
+            require_stable: if version >= 7 { true } else { false },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
-            group_id: KafkaString::from("test".to_owned()),
-            topics: Some(vec![
-                <OffsetFetchRequestTopic as TestInstance>::test_tagged_fields(),
-            ]),
-            groups: vec![<OffsetFetchRequestGroup as TestInstance>::test_tagged_fields()],
-            require_stable: true,
+            group_id: if version <= 7 {
+                KafkaString::from("test".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            topics: (version <= 7)
+                .then(|| {
+                    Some(vec![
+                        <OffsetFetchRequestTopic as TestInstance>::test_tagged_fields(version),
+                    ])
+                })
+                .flatten(),
+            groups: if version >= 8 {
+                vec![<OffsetFetchRequestGroup as TestInstance>::test_tagged_fields(version)]
+            } else {
+                Vec::new()
+            },
+            require_stable: if version >= 7 { true } else { false },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -79,7 +144,7 @@ impl TestInstance for OffsetFetchRequestData {
     }
 }
 impl TestInstance for OffsetFetchRequestTopic {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             partition_indexes: vec![12345_i32],
@@ -89,7 +154,7 @@ impl TestInstance for OffsetFetchRequestTopic {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
@@ -97,28 +162,28 @@ impl TestInstance for OffsetFetchRequestTopic {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             partition_indexes: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             partition_indexes: vec![12345_i32, 23456_i32],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
             partition_indexes: vec![i32::MIN],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             partition_indexes: vec![12345_i32],
@@ -130,13 +195,15 @@ impl TestInstance for OffsetFetchRequestTopic {
     }
 }
 impl TestInstance for OffsetFetchRequestGroup {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("test".to_owned()),
-            member_id: Some(KafkaString::from("test".to_owned())),
-            member_epoch: 12345_i32,
+            member_id: (version >= 9)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
+            member_epoch: if version >= 9 { 12345_i32 } else { -1i32 },
             topics: Some(vec![
-                <OffsetFetchRequestTopics as TestInstance>::test_populated(),
+                <OffsetFetchRequestTopics as TestInstance>::test_populated(version),
             ]),
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -144,56 +211,64 @@ impl TestInstance for OffsetFetchRequestGroup {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
-        drop(<OffsetFetchRequestTopics as TestInstance>::test_null_optionals());
+        drop(<OffsetFetchRequestTopics as TestInstance>::test_null_optionals(version));
         Self {
             group_id: KafkaString::default(),
             member_id: None,
-            member_epoch: 0_i32,
+            member_epoch: if version >= 9 { 0_i32 } else { -1i32 },
             topics: None,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
             group_id: KafkaString::default(),
-            member_id: Some(KafkaString::default()),
-            member_epoch: 0_i32,
+            member_id: (version >= 9)
+                .then(|| Some(KafkaString::default()))
+                .flatten(),
+            member_epoch: if version >= 9 { 0_i32 } else { -1i32 },
             topics: Some(Vec::new()),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("test-2".to_owned()),
-            member_id: Some(KafkaString::from("test-2".to_owned())),
-            member_epoch: 23456_i32,
+            member_id: (version >= 9)
+                .then(|| Some(KafkaString::from("test-2".to_owned())))
+                .flatten(),
+            member_epoch: if version >= 9 { 23456_i32 } else { -1i32 },
             topics: Some(vec![
-                <OffsetFetchRequestTopics as TestInstance>::test_populated(),
-                <OffsetFetchRequestTopics as TestInstance>::test_multi_element_collections(),
+                <OffsetFetchRequestTopics as TestInstance>::test_populated(version),
+                <OffsetFetchRequestTopics as TestInstance>::test_multi_element_collections(version),
             ]),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("boundary".to_owned()),
-            member_id: Some(KafkaString::from("boundary".to_owned())),
-            member_epoch: i32::MIN,
+            member_id: (version >= 9)
+                .then(|| Some(KafkaString::from("boundary".to_owned())))
+                .flatten(),
+            member_epoch: if version >= 9 { i32::MIN } else { -1i32 },
             topics: Some(vec![
-                <OffsetFetchRequestTopics as TestInstance>::test_numeric_boundaries(),
+                <OffsetFetchRequestTopics as TestInstance>::test_numeric_boundaries(version),
             ]),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("test".to_owned()),
-            member_id: Some(KafkaString::from("test".to_owned())),
-            member_epoch: 12345_i32,
+            member_id: (version >= 9)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
+            member_epoch: if version >= 9 { 12345_i32 } else { -1i32 },
             topics: Some(vec![
-                <OffsetFetchRequestTopics as TestInstance>::test_tagged_fields(),
+                <OffsetFetchRequestTopics as TestInstance>::test_tagged_fields(version),
             ]),
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -203,10 +278,18 @@ impl TestInstance for OffsetFetchRequestGroup {
     }
 }
 impl TestInstance for OffsetFetchRequestTopics {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
-            name: KafkaString::from("test".to_owned()),
-            topic_id: KafkaUuid::ONE,
+            name: if version <= 9 {
+                KafkaString::from("test".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            topic_id: if version >= 10 {
+                KafkaUuid::ONE
+            } else {
+                KafkaUuid::ZERO
+            },
             partition_indexes: vec![12345_i32],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -214,7 +297,7 @@ impl TestInstance for OffsetFetchRequestTopics {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
@@ -223,7 +306,7 @@ impl TestInstance for OffsetFetchRequestTopics {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             topic_id: KafkaUuid::ZERO,
@@ -231,26 +314,50 @@ impl TestInstance for OffsetFetchRequestTopics {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
-            name: KafkaString::from("test-2".to_owned()),
-            topic_id: KafkaUuid::from_parts(2, 3),
+            name: if version <= 9 {
+                KafkaString::from("test-2".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            topic_id: if version >= 10 {
+                KafkaUuid::from_parts(2, 3)
+            } else {
+                KafkaUuid::ZERO
+            },
             partition_indexes: vec![12345_i32, 23456_i32],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
-            name: KafkaString::from("boundary".to_owned()),
-            topic_id: KafkaUuid::ONE,
+            name: if version <= 9 {
+                KafkaString::from("boundary".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            topic_id: if version >= 10 {
+                KafkaUuid::ONE
+            } else {
+                KafkaUuid::ZERO
+            },
             partition_indexes: vec![i32::MIN],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
-            name: KafkaString::from("test".to_owned()),
-            topic_id: KafkaUuid::ONE,
+            name: if version <= 9 {
+                KafkaString::from("test".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            topic_id: if version >= 10 {
+                KafkaUuid::ONE
+            } else {
+                KafkaUuid::ZERO
+            },
             partition_indexes: vec![12345_i32],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -260,63 +367,63 @@ impl TestInstance for OffsetFetchRequestTopics {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <OffsetFetchRequestData as TestInstance>::test_populated();
+    let message = <OffsetFetchRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <OffsetFetchRequestData as TestInstance>::test_populated();
+    let message = <OffsetFetchRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <OffsetFetchRequestData as TestInstance>::test_null_optionals();
+    let message = <OffsetFetchRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <OffsetFetchRequestData as TestInstance>::test_null_optionals();
+    let message = <OffsetFetchRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <OffsetFetchRequestData as TestInstance>::test_empty_collections();
+    let message = <OffsetFetchRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <OffsetFetchRequestData as TestInstance>::test_empty_collections();
+    let message = <OffsetFetchRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <OffsetFetchRequestData as TestInstance>::test_multi_element_collections();
+    let message = <OffsetFetchRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <OffsetFetchRequestData as TestInstance>::test_multi_element_collections();
+    let message = <OffsetFetchRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <OffsetFetchRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <OffsetFetchRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <OffsetFetchRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <OffsetFetchRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <OffsetFetchRequestData as TestInstance>::test_tagged_fields();
+    let message = <OffsetFetchRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <OffsetFetchRequestData as TestInstance>::test_tagged_fields();
+    let message = <OffsetFetchRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

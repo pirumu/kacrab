@@ -1,6 +1,6 @@
 //! Kafka protocol code generator — library portion.
 //!
-//! The pipeline is split into four stages, each owning its own error type:
+//! The pipeline is split into five stages, each owning its own error type:
 //!
 //! 1. [`parser`]      — load + parse JSON message specs into an IR.
 //! 2. [`codegen`]     — lower the IR into a Rust `TokenStream`.

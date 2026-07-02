@@ -1,8 +1,10 @@
 //! Error types for [`crate::version`].
 //!
-//! Single failure mode (the negotiated range was empty / version unsupported)
-//! so this is a struct, not an enum. Context fields (`api_key`, `version`) are
-//! always populated.
+//! Two distinct failure modes, each a plain struct rather than an enum variant:
+//! [`UnsupportedVersion`] (the negotiated range was empty / a decoder rejected an
+//! unknown version) and [`UnsupportedFieldVersion`] (a field was set while
+//! encoding a version that does not carry it). Context fields are always
+//! populated.
 
 /// API version negotiation produced no mutually-supported version, or a
 /// generated decoder rejected an unknown version.

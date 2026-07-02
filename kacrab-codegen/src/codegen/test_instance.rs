@@ -1,11 +1,15 @@
 //! Generation of `impl TestInstance for {Type}` blocks for round-trip testing.
 
-use proc_macro2::{Ident, Span, TokenStream};
+use proc_macro2::{Ident, Span, TokenStream, TokenTree};
 use quote::quote;
 
 use super::{
-    default_impl::resolve_default, error::CodegenErrorKind, ident::safe_rust_ident,
-    struct_def::StructDef, ty::is_field_nullable,
+    default_impl::resolve_default,
+    error::CodegenErrorKind,
+    ident::safe_rust_ident,
+    struct_def::StructDef,
+    ty::is_field_nullable,
+    version_check::{version_check_always_true, version_contains_check_with_context},
 };
 use crate::ir::{
     field::{FieldSpec, FieldType},
@@ -34,15 +38,43 @@ pub(crate) fn generate_test_instance_impl(
     let default_exercise = default_exercise(def);
     let nullable_exercises = nullable_exercises(def);
 
+    // The fixture builders take the target wire `version` so a field that is not
+    // valid at that version is set to its default (absent) value instead of a
+    // populated one. Without this, encoding a version-restricted field — e.g. a
+    // KIP-890 `4+` field of a `0-5` message at v0 — raises
+    // `UnsupportedFieldVersion` because the fixture carries a non-default value
+    // for a field the wire form of that version cannot represent.
+    //
+    // Each fixture method is named `version`/`_version` independently: a method
+    // whose body neither gates a field on the wire version nor threads it into a
+    // nested builder does not use the parameter, and naming it `version` there
+    // would trip `unused_variables`.
+    let (populated_fields, populated_uses_version) = populated_fields;
+    let (null_optionals_fields, null_fields_use_version) = null_optionals_fields;
+    let (empty_collections_fields, empty_uses_version) = empty_collections_fields;
+    let (multi_element_collections_fields, multi_uses_version) = multi_element_collections_fields;
+    let (numeric_boundaries_fields, numeric_uses_version) = numeric_boundaries_fields;
+    let (tagged_fields, tagged_uses_version) = tagged_fields;
+
+    let populated_param = version_param(populated_uses_version);
+    // `test_null_optionals` also drops nested null-optional builders, which thread
+    // `version`, so account for those exercises too.
+    let null_optionals_param =
+        version_param(null_fields_use_version || !nullable_exercises.is_empty());
+    let empty_collections_param = version_param(empty_uses_version);
+    let multi_element_collections_param = version_param(multi_uses_version);
+    let numeric_boundaries_param = version_param(numeric_uses_version);
+    let tagged_fields_param = version_param(tagged_uses_version);
+
     Ok(quote! {
         impl TestInstance for #name {
-            fn test_populated() -> Self {
+            fn test_populated(#populated_param) -> Self {
                 Self {
                     #(#populated_fields)*
                     #populated_tagged_field_value
                 }
             }
-            fn test_null_optionals() -> Self {
+            fn test_null_optionals(#null_optionals_param) -> Self {
                 #default_exercise
                 #(#nullable_exercises)*
                 Self {
@@ -50,31 +82,51 @@ pub(crate) fn generate_test_instance_impl(
                     _unknown_tagged_fields: Vec::new(),
                 }
             }
-            fn test_empty_collections() -> Self {
+            fn test_empty_collections(#empty_collections_param) -> Self {
                 Self {
                     #(#empty_collections_fields)*
                     #empty_tagged_field_value
                 }
             }
-            fn test_multi_element_collections() -> Self {
+            fn test_multi_element_collections(#multi_element_collections_param) -> Self {
                 Self {
                     #(#multi_element_collections_fields)*
                     #empty_tagged_field_value
                 }
             }
-            fn test_numeric_boundaries() -> Self {
+            fn test_numeric_boundaries(#numeric_boundaries_param) -> Self {
                 Self {
                     #(#numeric_boundaries_fields)*
                     #empty_tagged_field_value
                 }
             }
-            fn test_tagged_fields() -> Self {
+            fn test_tagged_fields(#tagged_fields_param) -> Self {
                 Self {
                     #(#tagged_fields)*
                     #tagged_fields_tagged_field_value
                 }
             }
         }
+    })
+}
+
+/// `version: i16` when the fixture body uses it, `_version: i16` otherwise.
+fn version_param(uses_version: bool) -> TokenStream {
+    if uses_version {
+        quote! { version: i16 }
+    } else {
+        quote! { _version: i16 }
+    }
+}
+
+/// Whether any token in `tokens` is the bare `version` identifier (the fixture
+/// parameter threaded into a version guard or a nested builder call). Field-name
+/// idents like `min_version` are distinct idents and never match.
+fn tokens_use_version(tokens: &TokenStream) -> bool {
+    tokens.clone().into_iter().any(|tree| match tree {
+        TokenTree::Ident(ident) => ident == "version",
+        TokenTree::Group(group) => tokens_use_version(&group.stream()),
+        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
     })
 }
 
@@ -88,18 +140,53 @@ enum FixtureKind {
     TaggedFields,
 }
 
+/// Build the struct-literal field lines for one fixture, and report whether any
+/// of them reference the `version` parameter (via a version guard or a nested
+/// builder call) so the caller can name the parameter `version` or `_version`.
 fn fields_for_fixture(
     def: &StructDef<'_>,
     kind: FixtureKind,
-) -> Result<Vec<TokenStream>, CodegenErrorKind> {
-    def.fields
-        .iter()
-        .map(|field| {
-            let rust_name = safe_rust_ident(&field.name);
-            let rust_name_val = fixture_value(field, &def.effective_versions, kind)?;
-            Ok(quote! { #rust_name: #rust_name_val, })
-        })
-        .collect()
+) -> Result<(Vec<TokenStream>, bool), CodegenErrorKind> {
+    let mut lines = Vec::with_capacity(def.fields.len());
+    let mut uses_version = false;
+    for field in def.fields {
+        let rust_name = safe_rust_ident(&field.name);
+        let value = fixture_value(field, &def.effective_versions, kind)?;
+        // Whether the value expression itself threads `version` (a nested builder
+        // call). Computed on the value alone so a field literally named `version`
+        // does not count as a use of the parameter.
+        let value_uses_version = tokens_use_version(&value);
+        // A field valid across the whole message version range is always
+        // populated; a version-restricted one is populated only at versions
+        // where it exists, and set to its default (absent) value elsewhere so
+        // the encoder does not reject it as `UnsupportedFieldVersion`.
+        let rust_name_val = if version_check_always_true(&field.versions, &def.effective_versions) {
+            uses_version |= value_uses_version;
+            value
+        } else {
+            let in_version =
+                version_contains_check_with_context(&field.versions, &def.effective_versions);
+            let absent = resolve_default(field)?;
+            // When the fixture value equals the absent/default value, the version
+            // guard would produce identical branches (and reference `version` for
+            // no reason); emit the value directly instead.
+            if value.to_string() == absent.to_string() {
+                uses_version |= value_uses_version;
+                value
+            } else if absent.to_string() == "None" {
+                // A version-gated optional: `if v { Some(x) } else { None }` is
+                // `v.then(|| Some(x)).flatten()`, avoiding the `if_then_some_else_none`
+                // restriction lint the plain `if`/`else` would trip.
+                uses_version = true;
+                quote! { (#in_version).then(|| #value).flatten() }
+            } else {
+                uses_version = true; // the `if #in_version` guard uses `version`
+                quote! { if #in_version { #value } else { #absent } }
+            }
+        };
+        lines.push(quote! { #rust_name: #rust_name_val, });
+    }
+    Ok((lines, uses_version))
 }
 
 fn fixture_value(
@@ -149,12 +236,12 @@ fn nullable_exercises(def: &StructDef<'_>) -> Vec<TokenStream> {
             match &field.field_type {
                 FieldType::Struct(name) => {
                     let id = Ident::new(name, Span::call_site());
-                    Some(quote! { drop(<#id as TestInstance>::test_null_optionals()); })
+                    Some(quote! { drop(<#id as TestInstance>::test_null_optionals(version)); })
                 },
                 FieldType::Array(inner) => {
                     if let FieldType::Struct(name) = inner.as_ref() {
                         let id = Ident::new(name, Span::call_site());
-                        Some(quote! { drop(<#id as TestInstance>::test_null_optionals()); })
+                        Some(quote! { drop(<#id as TestInstance>::test_null_optionals(version)); })
                     } else {
                         None
                     }
@@ -205,7 +292,7 @@ fn null_optionals_value_for_type(ft: &FieldType) -> TokenStream {
         FieldType::Records => quote! { Some(Bytes::new()) },
         FieldType::Struct(name) => {
             let id = Ident::new(name, Span::call_site());
-            quote! { <#id as TestInstance>::test_null_optionals() }
+            quote! { <#id as TestInstance>::test_null_optionals(version) }
         },
         FieldType::Array(inner) => {
             let inner_val = null_optionals_array_element(inner);
@@ -218,7 +305,7 @@ fn null_optionals_array_element(ft: &FieldType) -> TokenStream {
     match ft {
         FieldType::Struct(name) => {
             let id = Ident::new(name, Span::call_site());
-            quote! { <#id as TestInstance>::test_null_optionals() }
+            quote! { <#id as TestInstance>::test_null_optionals(version) }
         },
         FieldType::Bool => quote! { false },
         FieldType::Int8 => quote! { 0_i8 },
@@ -247,7 +334,7 @@ fn populated_value(field: &FieldSpec) -> TokenStream {
             FieldType::Records => quote! { Some(Bytes::from_static(b"\x00")) },
             FieldType::Struct(name) => {
                 let id = Ident::new(name, Span::call_site());
-                quote! { Some(Box::new(<#id as TestInstance>::test_populated())) }
+                quote! { Some(Box::new(<#id as TestInstance>::test_populated(version))) }
             },
             _ => quote! { Some(#base) },
         }
@@ -284,7 +371,7 @@ fn numeric_boundaries_value(field: &FieldSpec) -> TokenStream {
             FieldType::Records => base,
             FieldType::Struct(name) => {
                 let id = Ident::new(name, Span::call_site());
-                quote! { Some(Box::new(<#id as TestInstance>::test_numeric_boundaries())) }
+                quote! { Some(Box::new(<#id as TestInstance>::test_numeric_boundaries(version))) }
             },
             _ => quote! { Some(#base) },
         }
@@ -301,7 +388,7 @@ fn tagged_fields_value(field: &FieldSpec) -> TokenStream {
             FieldType::Records => base,
             FieldType::Struct(name) => {
                 let id = Ident::new(name, Span::call_site());
-                quote! { Some(Box::new(<#id as TestInstance>::test_tagged_fields())) }
+                quote! { Some(Box::new(<#id as TestInstance>::test_tagged_fields(version))) }
             },
             _ => quote! { Some(#base) },
         }
@@ -325,7 +412,7 @@ fn populated_value_for_type(ft: &FieldType) -> TokenStream {
         FieldType::Records => quote! { Some(Bytes::new()) },
         FieldType::Struct(name) => {
             let id = Ident::new(name, Span::call_site());
-            quote! { <#id as TestInstance>::test_populated() }
+            quote! { <#id as TestInstance>::test_populated(version) }
         },
         FieldType::Array(inner) => {
             let inner_val = populated_value_for_type(inner);
@@ -360,7 +447,7 @@ fn multi_element_array_element(ft: &FieldType) -> TokenStream {
     match ft {
         FieldType::Struct(name) => {
             let id = Ident::new(name, Span::call_site());
-            quote! { <#id as TestInstance>::test_multi_element_collections() }
+            quote! { <#id as TestInstance>::test_multi_element_collections(version) }
         },
         FieldType::Array(inner) => {
             let first = populated_value_for_type(inner);
@@ -388,7 +475,7 @@ fn multi_element_scalar_value_for_type(ft: &FieldType) -> TokenStream {
         FieldType::Records => quote! { Some(Bytes::new()) },
         FieldType::Struct(name) => {
             let id = Ident::new(name, Span::call_site());
-            quote! { <#id as TestInstance>::test_multi_element_collections() }
+            quote! { <#id as TestInstance>::test_multi_element_collections(version) }
         },
         FieldType::Array(inner) => {
             let first = populated_value_for_type(inner);
@@ -413,7 +500,7 @@ fn numeric_boundaries_value_for_type(ft: &FieldType) -> TokenStream {
         FieldType::Records => quote! { Some(Bytes::new()) },
         FieldType::Struct(name) => {
             let id = Ident::new(name, Span::call_site());
-            quote! { <#id as TestInstance>::test_numeric_boundaries() }
+            quote! { <#id as TestInstance>::test_numeric_boundaries(version) }
         },
         FieldType::Array(inner) => {
             let inner_val = numeric_boundaries_value_for_type(inner);
@@ -426,7 +513,7 @@ fn tagged_fields_value_for_type(ft: &FieldType) -> TokenStream {
     match ft {
         FieldType::Struct(name) => {
             let id = Ident::new(name, Span::call_site());
-            quote! { <#id as TestInstance>::test_tagged_fields() }
+            quote! { <#id as TestInstance>::test_tagged_fields(version) }
         },
         FieldType::Array(inner) => {
             let inner_val = tagged_fields_array_element(inner);
@@ -440,7 +527,7 @@ fn tagged_fields_array_element(ft: &FieldType) -> TokenStream {
     match ft {
         FieldType::Struct(name) => {
             let id = Ident::new(name, Span::call_site());
-            quote! { <#id as TestInstance>::test_tagged_fields() }
+            quote! { <#id as TestInstance>::test_tagged_fields(version) }
         },
         FieldType::Array(inner) => {
             let inner_val = tagged_fields_array_element(inner);

@@ -1,29 +1,36 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::alter_partition_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for AlterPartitionRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             broker_id: 12345_i32,
             broker_epoch: 9_876_543_210_i64,
-            topics: vec![<TopicData as TestInstance>::test_populated()],
+            topics: vec![<TopicData as TestInstance>::test_populated(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             broker_id: 0_i32,
             broker_epoch: 0_i64,
-            topics: vec![<TopicData as TestInstance>::test_null_optionals()],
+            topics: vec![<TopicData as TestInstance>::test_null_optionals(version)],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             broker_id: 0_i32,
             broker_epoch: 0_i64,
@@ -31,30 +38,32 @@ impl TestInstance for AlterPartitionRequestData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             broker_id: 23456_i32,
             broker_epoch: 9_876_543_211_i64,
             topics: vec![
-                <TopicData as TestInstance>::test_populated(),
-                <TopicData as TestInstance>::test_multi_element_collections(),
+                <TopicData as TestInstance>::test_populated(version),
+                <TopicData as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             broker_id: i32::MIN,
             broker_epoch: i64::MIN,
-            topics: vec![<TopicData as TestInstance>::test_numeric_boundaries()],
+            topics: vec![<TopicData as TestInstance>::test_numeric_boundaries(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             broker_id: 12345_i32,
             broker_epoch: 9_876_543_210_i64,
-            topics: vec![<TopicData as TestInstance>::test_tagged_fields()],
+            topics: vec![<TopicData as TestInstance>::test_tagged_fields(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -63,52 +72,56 @@ impl TestInstance for AlterPartitionRequestData {
     }
 }
 impl TestInstance for TopicData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::ONE,
-            partitions: vec![<PartitionData as TestInstance>::test_populated()],
+            partitions: vec![<PartitionData as TestInstance>::test_populated(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             topic_id: KafkaUuid::ZERO,
-            partitions: vec![<PartitionData as TestInstance>::test_null_optionals()],
+            partitions: vec![<PartitionData as TestInstance>::test_null_optionals(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::ZERO,
             partitions: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::from_parts(2, 3),
             partitions: vec![
-                <PartitionData as TestInstance>::test_populated(),
-                <PartitionData as TestInstance>::test_multi_element_collections(),
+                <PartitionData as TestInstance>::test_populated(version),
+                <PartitionData as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::ONE,
-            partitions: vec![<PartitionData as TestInstance>::test_numeric_boundaries()],
+            partitions: vec![<PartitionData as TestInstance>::test_numeric_boundaries(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::ONE,
-            partitions: vec![<PartitionData as TestInstance>::test_tagged_fields()],
+            partitions: vec![<PartitionData as TestInstance>::test_tagged_fields(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -117,12 +130,20 @@ impl TestInstance for TopicData {
     }
 }
 impl TestInstance for PartitionData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             leader_epoch: 12345_i32,
-            new_isr: vec![12345_i32],
-            new_isr_with_epochs: vec![<BrokerState as TestInstance>::test_populated()],
+            new_isr: if version <= 2 {
+                vec![12345_i32]
+            } else {
+                Vec::new()
+            },
+            new_isr_with_epochs: if version >= 3 {
+                vec![<BrokerState as TestInstance>::test_populated(version)]
+            } else {
+                Vec::new()
+            },
             leader_recovery_state: 7_i8,
             partition_epoch: 12345_i32,
             _unknown_tagged_fields: vec![RawTaggedField {
@@ -131,19 +152,27 @@ impl TestInstance for PartitionData {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             partition_index: 0_i32,
             leader_epoch: 0_i32,
-            new_isr: vec![0_i32],
-            new_isr_with_epochs: vec![<BrokerState as TestInstance>::test_null_optionals()],
+            new_isr: if version <= 2 {
+                vec![0_i32]
+            } else {
+                Vec::new()
+            },
+            new_isr_with_epochs: if version >= 3 {
+                vec![<BrokerState as TestInstance>::test_null_optionals(version)]
+            } else {
+                Vec::new()
+            },
             leader_recovery_state: 0_i8,
             partition_epoch: 0_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             partition_index: 0_i32,
             leader_epoch: 0_i32,
@@ -154,37 +183,63 @@ impl TestInstance for PartitionData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             partition_index: 23456_i32,
             leader_epoch: 23456_i32,
-            new_isr: vec![12345_i32, 23456_i32],
-            new_isr_with_epochs: vec![
-                <BrokerState as TestInstance>::test_populated(),
-                <BrokerState as TestInstance>::test_multi_element_collections(),
-            ],
+            new_isr: if version <= 2 {
+                vec![12345_i32, 23456_i32]
+            } else {
+                Vec::new()
+            },
+            new_isr_with_epochs: if version >= 3 {
+                vec![
+                    <BrokerState as TestInstance>::test_populated(version),
+                    <BrokerState as TestInstance>::test_multi_element_collections(version),
+                ]
+            } else {
+                Vec::new()
+            },
             leader_recovery_state: 8_i8,
             partition_epoch: 23456_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             partition_index: i32::MIN,
             leader_epoch: i32::MIN,
-            new_isr: vec![i32::MIN],
-            new_isr_with_epochs: vec![<BrokerState as TestInstance>::test_numeric_boundaries()],
+            new_isr: if version <= 2 {
+                vec![i32::MIN]
+            } else {
+                Vec::new()
+            },
+            new_isr_with_epochs: if version >= 3 {
+                vec![<BrokerState as TestInstance>::test_numeric_boundaries(
+                    version,
+                )]
+            } else {
+                Vec::new()
+            },
             leader_recovery_state: i8::MIN,
             partition_epoch: i32::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             leader_epoch: 12345_i32,
-            new_isr: vec![12345_i32],
-            new_isr_with_epochs: vec![<BrokerState as TestInstance>::test_tagged_fields()],
+            new_isr: if version <= 2 {
+                vec![12345_i32]
+            } else {
+                Vec::new()
+            },
+            new_isr_with_epochs: if version >= 3 {
+                vec![<BrokerState as TestInstance>::test_tagged_fields(version)]
+            } else {
+                Vec::new()
+            },
             leader_recovery_state: 7_i8,
             partition_epoch: 12345_i32,
             _unknown_tagged_fields: vec![RawTaggedField {
@@ -195,7 +250,7 @@ impl TestInstance for PartitionData {
     }
 }
 impl TestInstance for BrokerState {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             broker_id: 12345_i32,
             broker_epoch: 9_876_543_210_i64,
@@ -205,7 +260,7 @@ impl TestInstance for BrokerState {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             broker_id: 0_i32,
@@ -213,28 +268,28 @@ impl TestInstance for BrokerState {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             broker_id: 0_i32,
             broker_epoch: 0_i64,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             broker_id: 23456_i32,
             broker_epoch: 9_876_543_211_i64,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             broker_id: i32::MIN,
             broker_epoch: i64::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             broker_id: 12345_i32,
             broker_epoch: 9_876_543_210_i64,
@@ -246,63 +301,65 @@ impl TestInstance for BrokerState {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <AlterPartitionRequestData as TestInstance>::test_populated();
+    let message = <AlterPartitionRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AlterPartitionRequestData as TestInstance>::test_populated();
+    let message = <AlterPartitionRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <AlterPartitionRequestData as TestInstance>::test_null_optionals();
+    let message = <AlterPartitionRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AlterPartitionRequestData as TestInstance>::test_null_optionals();
+    let message = <AlterPartitionRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <AlterPartitionRequestData as TestInstance>::test_empty_collections();
+    let message = <AlterPartitionRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AlterPartitionRequestData as TestInstance>::test_empty_collections();
+    let message = <AlterPartitionRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <AlterPartitionRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <AlterPartitionRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AlterPartitionRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <AlterPartitionRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <AlterPartitionRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <AlterPartitionRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AlterPartitionRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <AlterPartitionRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <AlterPartitionRequestData as TestInstance>::test_tagged_fields();
+    let message = <AlterPartitionRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AlterPartitionRequestData as TestInstance>::test_tagged_fields();
+    let message = <AlterPartitionRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

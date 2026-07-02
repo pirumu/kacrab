@@ -1,31 +1,40 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::list_offsets_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for ListOffsetsRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             replica_id: 12345_i32,
-            isolation_level: 7_i8,
-            topics: vec![<ListOffsetsTopic as TestInstance>::test_populated()],
-            timeout_ms: 12345_i32,
+            isolation_level: if version >= 2 { 7_i8 } else { 0_i8 },
+            topics: vec![<ListOffsetsTopic as TestInstance>::test_populated(version)],
+            timeout_ms: if version >= 10 { 12345_i32 } else { 0_i32 },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             replica_id: 0_i32,
             isolation_level: 0_i8,
-            topics: vec![<ListOffsetsTopic as TestInstance>::test_null_optionals()],
+            topics: vec![<ListOffsetsTopic as TestInstance>::test_null_optionals(
+                version,
+            )],
             timeout_ms: 0_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             replica_id: 0_i32,
             isolation_level: 0_i8,
@@ -34,33 +43,37 @@ impl TestInstance for ListOffsetsRequestData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             replica_id: 23456_i32,
-            isolation_level: 8_i8,
+            isolation_level: if version >= 2 { 8_i8 } else { 0_i8 },
             topics: vec![
-                <ListOffsetsTopic as TestInstance>::test_populated(),
-                <ListOffsetsTopic as TestInstance>::test_multi_element_collections(),
+                <ListOffsetsTopic as TestInstance>::test_populated(version),
+                <ListOffsetsTopic as TestInstance>::test_multi_element_collections(version),
             ],
-            timeout_ms: 23456_i32,
+            timeout_ms: if version >= 10 { 23456_i32 } else { 0_i32 },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             replica_id: i32::MIN,
-            isolation_level: i8::MIN,
-            topics: vec![<ListOffsetsTopic as TestInstance>::test_numeric_boundaries()],
-            timeout_ms: i32::MIN,
+            isolation_level: if version >= 2 { i8::MIN } else { 0_i8 },
+            topics: vec![<ListOffsetsTopic as TestInstance>::test_numeric_boundaries(
+                version,
+            )],
+            timeout_ms: if version >= 10 { i32::MIN } else { 0_i32 },
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             replica_id: 12345_i32,
-            isolation_level: 7_i8,
-            topics: vec![<ListOffsetsTopic as TestInstance>::test_tagged_fields()],
-            timeout_ms: 12345_i32,
+            isolation_level: if version >= 2 { 7_i8 } else { 0_i8 },
+            topics: vec![<ListOffsetsTopic as TestInstance>::test_tagged_fields(
+                version,
+            )],
+            timeout_ms: if version >= 10 { 12345_i32 } else { 0_i32 },
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -69,52 +82,60 @@ impl TestInstance for ListOffsetsRequestData {
     }
 }
 impl TestInstance for ListOffsetsTopic {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
-            partitions: vec![<ListOffsetsPartition as TestInstance>::test_populated()],
+            partitions: vec![<ListOffsetsPartition as TestInstance>::test_populated(
+                version,
+            )],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
-            partitions: vec![<ListOffsetsPartition as TestInstance>::test_null_optionals()],
+            partitions: vec![<ListOffsetsPartition as TestInstance>::test_null_optionals(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             partitions: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             partitions: vec![
-                <ListOffsetsPartition as TestInstance>::test_populated(),
-                <ListOffsetsPartition as TestInstance>::test_multi_element_collections(),
+                <ListOffsetsPartition as TestInstance>::test_populated(version),
+                <ListOffsetsPartition as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
-            partitions: vec![<ListOffsetsPartition as TestInstance>::test_numeric_boundaries()],
+            partitions: vec![
+                <ListOffsetsPartition as TestInstance>::test_numeric_boundaries(version),
+            ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
-            partitions: vec![<ListOffsetsPartition as TestInstance>::test_tagged_fields()],
+            partitions: vec![<ListOffsetsPartition as TestInstance>::test_tagged_fields(
+                version,
+            )],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -123,10 +144,10 @@ impl TestInstance for ListOffsetsTopic {
     }
 }
 impl TestInstance for ListOffsetsPartition {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
-            current_leader_epoch: 12345_i32,
+            current_leader_epoch: if version >= 4 { 12345_i32 } else { -1i32 },
             timestamp: 9_876_543_210_i64,
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -134,43 +155,43 @@ impl TestInstance for ListOffsetsPartition {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             partition_index: 0_i32,
-            current_leader_epoch: 0_i32,
+            current_leader_epoch: if version >= 4 { 0_i32 } else { -1i32 },
             timestamp: 0_i64,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
             partition_index: 0_i32,
-            current_leader_epoch: 0_i32,
+            current_leader_epoch: if version >= 4 { 0_i32 } else { -1i32 },
             timestamp: 0_i64,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             partition_index: 23456_i32,
-            current_leader_epoch: 23456_i32,
+            current_leader_epoch: if version >= 4 { 23456_i32 } else { -1i32 },
             timestamp: 9_876_543_211_i64,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             partition_index: i32::MIN,
-            current_leader_epoch: i32::MIN,
+            current_leader_epoch: if version >= 4 { i32::MIN } else { -1i32 },
             timestamp: i64::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
-            current_leader_epoch: 12345_i32,
+            current_leader_epoch: if version >= 4 { 12345_i32 } else { -1i32 },
             timestamp: 9_876_543_210_i64,
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -180,63 +201,63 @@ impl TestInstance for ListOffsetsPartition {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <ListOffsetsRequestData as TestInstance>::test_populated();
+    let message = <ListOffsetsRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ListOffsetsRequestData as TestInstance>::test_populated();
+    let message = <ListOffsetsRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <ListOffsetsRequestData as TestInstance>::test_null_optionals();
+    let message = <ListOffsetsRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ListOffsetsRequestData as TestInstance>::test_null_optionals();
+    let message = <ListOffsetsRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <ListOffsetsRequestData as TestInstance>::test_empty_collections();
+    let message = <ListOffsetsRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ListOffsetsRequestData as TestInstance>::test_empty_collections();
+    let message = <ListOffsetsRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <ListOffsetsRequestData as TestInstance>::test_multi_element_collections();
+    let message = <ListOffsetsRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ListOffsetsRequestData as TestInstance>::test_multi_element_collections();
+    let message = <ListOffsetsRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <ListOffsetsRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <ListOffsetsRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ListOffsetsRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <ListOffsetsRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <ListOffsetsRequestData as TestInstance>::test_tagged_fields();
+    let message = <ListOffsetsRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ListOffsetsRequestData as TestInstance>::test_tagged_fields();
+    let message = <ListOffsetsRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

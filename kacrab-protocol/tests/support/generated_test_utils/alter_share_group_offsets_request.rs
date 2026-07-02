@@ -1,60 +1,71 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::alter_share_group_offsets_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for AlterShareGroupOffsetsRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("test".to_owned()),
-            topics: vec![<AlterShareGroupOffsetsRequestTopic as TestInstance>::test_populated()],
+            topics: vec![
+                <AlterShareGroupOffsetsRequestTopic as TestInstance>::test_populated(version),
+            ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             group_id: KafkaString::default(),
             topics: vec![
-                <AlterShareGroupOffsetsRequestTopic as TestInstance>::test_null_optionals(),
+                <AlterShareGroupOffsetsRequestTopic as TestInstance>::test_null_optionals(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             group_id: KafkaString::default(),
             topics: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("test-2".to_owned()),
             topics: vec![
                 < AlterShareGroupOffsetsRequestTopic as TestInstance >
-                ::test_populated(), < AlterShareGroupOffsetsRequestTopic as TestInstance
-                > ::test_multi_element_collections()
+                ::test_populated(version), < AlterShareGroupOffsetsRequestTopic as
+                TestInstance > ::test_multi_element_collections(version)
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("boundary".to_owned()),
             topics: vec![
-                <AlterShareGroupOffsetsRequestTopic as TestInstance>::test_numeric_boundaries(),
+                <AlterShareGroupOffsetsRequestTopic as TestInstance>::test_numeric_boundaries(
+                    version,
+                ),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("test".to_owned()),
             topics: vec![
-                <AlterShareGroupOffsetsRequestTopic as TestInstance>::test_tagged_fields(),
+                <AlterShareGroupOffsetsRequestTopic as TestInstance>::test_tagged_fields(version),
             ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -64,11 +75,11 @@ impl TestInstance for AlterShareGroupOffsetsRequestData {
     }
 }
 impl TestInstance for AlterShareGroupOffsetsRequestTopic {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             topic_name: KafkaString::from("test".to_owned()),
             partitions: vec![
-                <AlterShareGroupOffsetsRequestPartition as TestInstance>::test_populated(),
+                <AlterShareGroupOffsetsRequestPartition as TestInstance>::test_populated(version),
             ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -76,48 +87,54 @@ impl TestInstance for AlterShareGroupOffsetsRequestTopic {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             topic_name: KafkaString::default(),
             partitions: vec![
-                <AlterShareGroupOffsetsRequestPartition as TestInstance>::test_null_optionals(),
+                <AlterShareGroupOffsetsRequestPartition as TestInstance>::test_null_optionals(
+                    version,
+                ),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             topic_name: KafkaString::default(),
             partitions: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             topic_name: KafkaString::from("test-2".to_owned()),
             partitions: vec![
                 < AlterShareGroupOffsetsRequestPartition as TestInstance >
-                ::test_populated(), < AlterShareGroupOffsetsRequestPartition as
-                TestInstance > ::test_multi_element_collections()
+                ::test_populated(version), < AlterShareGroupOffsetsRequestPartition as
+                TestInstance > ::test_multi_element_collections(version)
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             topic_name: KafkaString::from("boundary".to_owned()),
             partitions: vec![
-                <AlterShareGroupOffsetsRequestPartition as TestInstance>::test_numeric_boundaries(),
+                <AlterShareGroupOffsetsRequestPartition as TestInstance>::test_numeric_boundaries(
+                    version,
+                ),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             topic_name: KafkaString::from("test".to_owned()),
             partitions: vec![
-                <AlterShareGroupOffsetsRequestPartition as TestInstance>::test_tagged_fields(),
+                <AlterShareGroupOffsetsRequestPartition as TestInstance>::test_tagged_fields(
+                    version,
+                ),
             ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -127,7 +144,7 @@ impl TestInstance for AlterShareGroupOffsetsRequestTopic {
     }
 }
 impl TestInstance for AlterShareGroupOffsetsRequestPartition {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             start_offset: 9_876_543_210_i64,
@@ -137,7 +154,7 @@ impl TestInstance for AlterShareGroupOffsetsRequestPartition {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             partition_index: 0_i32,
@@ -145,28 +162,28 @@ impl TestInstance for AlterShareGroupOffsetsRequestPartition {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             partition_index: 0_i32,
             start_offset: 0_i64,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             partition_index: 23456_i32,
             start_offset: 9_876_543_211_i64,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             partition_index: i32::MIN,
             start_offset: i64::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             start_offset: 9_876_543_210_i64,
@@ -178,65 +195,73 @@ impl TestInstance for AlterShareGroupOffsetsRequestPartition {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_populated();
+    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_populated();
+    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_null_optionals();
+    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_null_optionals();
+    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_empty_collections();
+    let message =
+        <AlterShareGroupOffsetsRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_empty_collections();
+    let message =
+        <AlterShareGroupOffsetsRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
     let message =
-        <AlterShareGroupOffsetsRequestData as TestInstance>::test_multi_element_collections();
+        <AlterShareGroupOffsetsRequestData as TestInstance>::test_multi_element_collections(
+            version,
+        );
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
     let message =
-        <AlterShareGroupOffsetsRequestData as TestInstance>::test_multi_element_collections();
+        <AlterShareGroupOffsetsRequestData as TestInstance>::test_multi_element_collections(
+            version,
+        );
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_numeric_boundaries();
+    let message =
+        <AlterShareGroupOffsetsRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_numeric_boundaries();
+    let message =
+        <AlterShareGroupOffsetsRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_tagged_fields();
+    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_tagged_fields();
+    let message = <AlterShareGroupOffsetsRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {
