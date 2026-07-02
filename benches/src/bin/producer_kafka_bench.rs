@@ -494,11 +494,17 @@ const fn benchmark_api_for(value: Option<&str>) -> DeliveryMode {
 fn benchmark_record(topic: Arc<str>, index: usize) -> ProducerRecord {
     // KACRAB_BENCH_SPREAD=N forces explicit round-robin over N partitions to
     // isolate whether throughput is concurrency-bound (1-in-flight × N partitions).
-    if let Some(partitions) = env::var("KACRAB_BENCH_SPREAD")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|partitions| *partitions > 0)
-    {
+    // Read the env var ONCE: this function runs per record, and macOS `getenv`
+    // takes a global libc lock (`__findenv_locked`) that serializes the send
+    // loop — calling it 5M times cost ~28% of small-record throughput.
+    static SPREAD: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let spread = SPREAD.get_or_init(|| {
+        env::var("KACRAB_BENCH_SPREAD")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|partitions| *partitions > 0)
+    });
+    if let Some(partitions) = spread {
         let partition = i32::try_from(index % partitions).unwrap_or(0);
         return ProducerRecord::new(topic.as_ref(), partition);
     }
