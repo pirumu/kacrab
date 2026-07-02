@@ -12,6 +12,19 @@ issues.
 
 ### Added
 
+- Real-Kafka consumer benchmark (`consumer_kafka_bench`) mirroring Java's
+  `kafka-consumer-perf-test.sh` (same tool props, poll loop, timeout semantics,
+  and final CSV columns), with a `KACRAB_BENCH_PREFILL=1` topic prefill, a Java
+  baseline wrapper (`benches/scripts/consumer_default_matrix.sh`), and
+  `make bench-kafka-consumer` / `bench-kafka-consumer-java-default` targets.
+  First head-to-head (2026-07-02): kacrab consumes 10 KiB records ~3.3x faster
+  than Java (~5.0 GB/s vs ~1.5 GB/s) at ~19x less CPU and ~20x less memory, but
+  small-record subscribe throughput collapses to ~132K records/sec vs Java's
+  ~9.2M because the consumer lacks cross-poll fetch buffering (each poll
+  re-fetches and discards the response surplus past `max.poll.records`); with
+  `max.poll.records=50000` the same wire path reaches ~8.5M records/sec. The
+  buffering fix is tracked in `benches/README.md`.
+
 - Consumer client (`consumer` feature): `kacrab::consumer::Consumer` with manual
   partition assignment and classic consumer-group subscription. Fetch with
   `auto.offset.reset`, `max.poll.records`, and `seek`/`seek_to_beginning`/

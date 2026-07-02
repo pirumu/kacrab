@@ -60,6 +60,36 @@ Java keeps a lower typical latency; kacrab trades it for pipeline depth.
   single slot blocks (p99.9 ~100 ms). The gap shrinks in production — broker off
   the client machine, real network RTT.
 
+## The consumer head-to-head
+
+The consumer benchmark mirrors Java's `kafka-consumer-perf-test.sh` exactly
+(fresh group per run, the tool's own props, 100 ms poll slices, the same CSV
+columns) against prefilled topics on the same native broker (2026-07-02):
+
+| Metric (100K × 10 KiB, 3 partitions) | kacrab | Java `kafka-consumer-perf-test` |
+|---|---:|---:|
+| Throughput | ~516K rec/s (~5,042 MB/s) | ~158K rec/s (~1,542 MB/s) |
+| Rebalance (join) time | ~4 ms | ~132 ms |
+| CPU / peak RSS (one run, ~1 GB) | ~0.15 s / ~12 MiB | ~2.85 s / ~230 MiB |
+
+On large records kacrab consumes **~3.3× faster** at ~19× less CPU and ~20×
+less memory. Small records tell the opposite story, deliberately documented:
+
+| Metric (5M × 10B, 16 partitions) | kacrab (defaults) | kacrab (`max.poll.records=50000`) | Java (defaults) |
+|---|---:|---:|---:|
+| Throughput | ~132K rec/s | ~8.49M rec/s | ~9.23M rec/s |
+
+The collapse at defaults is a known bottleneck, not a wire-path deficit: the
+consumer has no cross-poll fetch buffering yet, so every `poll` issues a fetch,
+keeps at most `max.poll.records` records, and discards the rest of the response
+the broker just served — up to ~16 MiB re-served per 500 records consumed. The
+`max.poll.records=50000` column shows the same wire path within ~8% of Java once
+the cap stops discarding data, and the 10 KiB scenario dodges the bug entirely
+(~300 records fill a response, under the cap). Java buffers whole fetch
+responses client-side and drains them across polls; the matching fix
+(per-partition fetch buffer, refetch only when dry, cleared on
+seek/reset/revoke) is the consumer's next perf milestone.
+
 ## Micro-benchmarks
 
 Criterion benchmarks against local mock brokers cover the hot paths in
