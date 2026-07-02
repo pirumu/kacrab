@@ -17,11 +17,12 @@ provider (`rustls` + `aws-lc-rs`) is C/assembly, and the optional `zstd`,
 
 ```toml
 [dependencies]
-kacrab = { version = "0.1", features = ["producer"] }
+kacrab = { version = "0.1", features = ["producer", "consumer", "admin"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
-The crate compiles almost nothing by default (`default = []`); opt into the
+The crate compiles almost nothing by default (`default = []`) — a bare
+`kacrab = "0.1"` gives you no producer, consumer, or admin API. Opt into the
 surfaces you use:
 
 - `producer` — the producer API.
@@ -74,10 +75,10 @@ in the [benchmarks chapter](https://pirumu.github.io/kacrab/benchmarks.html).
 
 ## Producer
 
-`send` is synchronous like Kafka's `Producer.send`: it returns a `SendFuture`
-right away, and you await that future for the broker acknowledgement. Batching
-happens automatically through `batch.size`, `linger.ms`, buffer memory, and
-flush/close boundaries.
+Requires the `producer` feature. `send` is synchronous like Kafka's
+`Producer.send`: it returns a `SendFuture` right away, and you await that
+future for the broker acknowledgement. Batching happens automatically through
+`batch.size`, `linger.ms`, buffer memory, and flush/close boundaries.
 
 ```rust
 use kacrab::producer::{Producer, ProducerRecord};
@@ -111,6 +112,8 @@ a compile-time Rust trait (`ProducerSerializer<T>` via
 `build_with_serializers`), not `key.serializer` class names.
 
 ## Consumer
+
+Requires the `consumer` feature.
 
 ```rust
 use std::time::Duration;
@@ -149,8 +152,8 @@ automatically, with leader-epoch awareness.
 
 ## Admin
 
-Admin mirrors Java's `Admin` with `snake_case` methods and per-call options
-structs:
+Requires the `admin` feature. Admin mirrors Java's `Admin` with `snake_case`
+methods and per-call options structs:
 
 ```rust
 use kacrab::admin::{AdminClient, CreateTopicsOptions, NewTopic};
