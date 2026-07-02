@@ -3,20 +3,39 @@
 Thanks for taking the time to contribute.
 
 `kacrab` is a pre-release, 100% pure Rust Kafka client. Protocol generation,
-wire sessions, auth, and producer paths are usable, but the project is still
-hardening batching, routing, multi-broker behavior, and release guarantees.
-Please keep changes focused and production-minded: correctness first, then
-measurable throughput.
+wire sessions, auth, producer, consumer, and admin are usable and verified
+against real brokers; the project is now hardening sustained-load behavior and
+release guarantees. Please keep changes focused and production-minded:
+correctness first, then measurable throughput.
 
 ## Before You Start
 
 - Read [README.md](README.md) and [ROADMAP.md](ROADMAP.md) for current status
   and priorities.
+- Read the [Design & Internals book](https://pirumu.github.io/kacrab/)
+  ([`docs-book/`](docs-book/)) — it is the architecture onboarding: every
+  subsystem's algorithms, invariants, and verification strategy are written
+  down there so understanding the code does not require asking the maintainer.
+- The pinned Apache Kafka Java source under `upstream/` is the ground truth
+  for compatibility questions; cite it in Java-parity discussions.
 - Check existing issues or open a short proposal before large design changes.
 - Keep generated protocol files under `kacrab-protocol/src/generated/`
   untouched unless the generator changes.
-- Do not start consumer work until the wire and producer layers have the
-  batching, backpressure, routing, and benchmark shape needed for it.
+
+## Where Help Is Wanted
+
+Good self-contained entry points, roughly in order of impact:
+
+- **Production acceptance** (`ROADMAP.md` → Production Acceptance Plan):
+  sustained multi-broker stress, cross-DC/high-RTT emulation, memory soak, and
+  latency-percentile harnesses. Infrastructure- and measurement-heavy, well
+  scoped, and largely independent of the client internals.
+- **Real-broker test coverage**: new scenarios in `kacrab/tests/real_kafka_*.rs`
+  against the `docker-compose.*.yml` fixtures (failover, auth edge cases,
+  compression matrices).
+- **Benchmarks**: additional workloads in `benches/` (record-size sweeps,
+  open-loop latency, multi-broker) with honest methodology notes.
+- **Docs**: corrections and deep-dive chapters in `docs-book/`.
 
 ## Development Setup
 
@@ -42,8 +61,8 @@ hand-written byte expectations.
 - Keep public re-exports in the facade file.
 - Keep implementation files narrow: `error.rs`, `client.rs`, `session.rs`,
   `routing.rs`, `batch.rs`, `response.rs`, and similar focused names.
-- Preserve `no_std` by default in `kacrab`; runtime support should be behind
-  explicit features.
+- Keep client surfaces behind their explicit cargo features (`producer`,
+  `consumer`, `admin`); every feature must also build standalone.
 - Keep the project pure Rust. Do not add C client bindings, `librdkafka`
   wrappers, or native Kafka client dependencies.
 - Do not add unsafe code. The workspace forbids `unsafe_code`.
