@@ -20,6 +20,8 @@ batches, compression, framing, and version negotiation for `kacrab`.
 - `gzip`, `snappy`, `lz4`, and `zstd` enable record-batch compression codecs.
 - `lz4-hc` enables the C-FFI high-compression LZ4 backend.
 - `compression` enables `gzip`, `snappy`, `lz4`, and `zstd`.
+- `message-enums` enables generated request/response wrapper enums over the
+  per-message structs.
 
 The default feature set is empty so the protocol crate can stay small for
 callers that only need primitive/generated message support.

@@ -1,103 +1,83 @@
 # kacrab
 
-The main `kacrab` crate: a Rust-native Kafka client with Java-compatible auth,
-producer, and admin surfaces. The protocol/wire/producer logic is pure Rust (not a
-`librdkafka` wrapper); the dependency tree is not fully C-free, though — TLS
-crypto (`rustls` + `aws-lc-rs`) is C/assembly and always present, and the
-optional `zstd` / `lz4-hc` / `gssapi` features add C.
+A Rust-native Apache Kafka client — producer, consumer, and admin — built from
+the Kafka protocol up. Not a `librdkafka` wrapper.
 
-`kacrab` is pre-release. Core runtime pieces and protocol compatibility form
-the current base. The active runtime surface is:
+[Repository](https://github.com/pirumu/kacrab) ·
+[Design & Internals book](https://pirumu.github.io/kacrab/) ·
+[API reference](https://docs.rs/kacrab)
 
-- `config` - Java-style `ClientConfig`, typed producer/consumer/admin configs,
-  official Kafka config metadata, and strict validation.
-- `common` - shared `org.apache.kafka.common` domain types (`TopicPartition`,
-  `OffsetAndMetadata`, `ConsumerGroupMetadata`, `Node`), always compiled and
-  re-exported by `producer`/`admin`.
-- `wire` - Tokio broker sessions, ApiVersions negotiation, TLS, SASL,
-  metadata, bounded in-flight requests, and request/response dispatch.
-- `producer` - Java-style producer builder, batching, linger, bounded memory,
-  compression, idempotence, transactions, routing, and multi-broker dispatch
-  behind the `producer` feature.
-- `admin` - Java-style `AdminClient` covering the full Apache Kafka 4.3.0
-  `Admin` operation surface (62 operations), behind the `admin` feature.
-- `consumer` - Java-style `Consumer` with manual assignment and classic
-  consumer-group subscription (fetch, `auto.offset.reset`, offset commit/fetch,
-  and eager `range` rebalancing), behind the `consumer` feature.
+The protocol, wire, and client logic are pure Rust with `unsafe_code` forbidden
+workspace-wide. The dependency tree is not fully C-free, though: the default TLS
+provider (`rustls` + `aws-lc-rs`) is C/assembly, and the optional `zstd`,
+`lz4-hc`, and `gssapi` features add C. For a C-free build, use a pure-Rust
+`rustls` provider and the `gzip`/`snappy`/`lz4` codecs.
 
-The remaining product order is streams.
-
-## Java Compatibility
-
-Auth, producer, admin, and consumer are Java-compatible targets for the
-implemented surface (outcome-faithful to the Java client, not a literal class-for-class
-port):
-
-- Use familiar Java client keys such as `bootstrap.servers`,
-  `security.protocol`, `ssl.truststore.location`, `sasl.mechanism`,
-  `sasl.jaas.config`, `acks`, `enable.idempotence`, `transactional.id`,
-  `batch.size`, `linger.ms`, and `max.in.flight.requests.per.connection`.
-  For built-in Rust SASL mechanisms, `sasl.jaas.config` is treated as a
-  credential option source; Java login module classes are not loaded.
-- `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, and `SASL_SSL` map to the wire
-  connection config.
-- TLS supports PEM, JKS, and PKCS12 trust/identity material.
-- SASL supports `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, `OAUTHBEARER`, and
-  feature-gated `GSSAPI`.
-- Producer idempotence and transactions use generated Kafka protocol request
-  paths including `InitProducerId`, `FindCoordinator`, `AddPartitionsToTxn`,
-  and `EndTxn`.
-
-JVM login module and callback handler classes are the intentional boundary:
-Rust cannot load Java classes, so custom auth should use the native Rust
-`sasl_client_authenticator(...)` hook.
-
-## Current Status
-
-- [x] Core runtime foundation: config, wire, auth, producer, batching,
-      idempotence, transactions, and multi-broker dispatch.
-- [x] Protocol foundation: primitives, record batches, generated Kafka schemas,
-      compression, and Java oracle compatibility checks.
-- [x] Admin: the full Apache Kafka 4.3.0 `Admin` operation surface (62 ops —
-      topics/partitions/configs, ACLs, groups & offsets, transactions,
-      delegation tokens, quotas, SCRAM, reassignments, `KRaft` quorum, share &
-      streams groups) through the same auth/transport stack, verified against a
-      real broker.
-- [x] Consumer: manual assignment, `Fetch`, `auto.offset.reset`, offset
-      commit/fetch, and classic group coordination (join/sync/heartbeat with the
-      `range` assignor and eager rebalancing), verified against a real broker.
-      Background-heartbeat task, cooperative-sticky, and KIP-848 are refinements.
-- [ ] Streams: topology runtime, state stores, repartitioning, changelog topics,
-      and exactly-once processing on producer transactions.
-
-## Features
+## Install
 
 ```toml
-kacrab = { git = "https://github.com/pirumu/kacrab", features = ["producer"] }
+[dependencies]
+kacrab = { version = "0.1", features = ["producer"] }
+tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
-Optional runtime features:
+The crate compiles almost nothing by default (`default = []`); opt into the
+surfaces you use:
 
-- `producer` - enables the producer API.
-- `admin` - enables the `AdminClient` API.
-- `consumer` - enables the `Consumer` API.
-- `gzip`, `snappy`, `lz4` - pure-Rust record-batch compression codecs (no C
+- `producer` — the producer API.
+- `consumer` — the consumer API; pulls in the `compression` codecs (fetched
+  batches must decompress) and `regex` for pattern subscription.
+- `admin` — the `AdminClient` API.
+- `gzip`, `snappy`, `lz4` — pure-Rust record-batch compression codecs (no C
   toolchain).
-- `zstd` - record-batch compression via the C `libzstd` (`zstd-sys`); needs a C
-  compiler at build time. The `compression` meta-feature enables all four
-  (`gzip` + `snappy` + `lz4` + `zstd`), so it requires a C compiler too — for a
-  pure-Rust build, enable only the first three.
-- `lz4-hc` - C-FFI LZ4 backend adding high-compression levels
-  (`compression.lz4.level` 3..=12); needs a C compiler at build time. Plain
-  `lz4` is fast-mode only.
-- `gssapi` - enables Kerberos/GSSAPI through platform Kerberos credentials.
-- `macros` - re-exports the config macro helper.
+- `zstd` — compression via the C `libzstd` (`zstd-sys`); needs a C compiler at
+  build time. The `compression` meta-feature enables all four
+  (`gzip` + `snappy` + `lz4` + `zstd`), so it needs one too — for a pure-Rust
+  build, enable only the first three.
+- `lz4-hc` — C-FFI LZ4 backend adding high-compression levels
+  (`compression.lz4.level` 3..=12); plain `lz4` is fast-mode only.
+- `gssapi` — Kerberos/GSSAPI through platform Kerberos libraries.
+- `macros` — re-exports the config macro helper.
 
-`default = ["std"]`; the crate still carries
-`#![cfg_attr(not(feature = "std"), no_std)]`, while the active wire and producer
-runtime currently use `std` and Tokio.
+## Surface
 
-## Producer Example
+- `config` — Java-style `ClientConfig`, typed producer/consumer/admin configs,
+  official Kafka config metadata, and strict validation.
+- `common` — shared `org.apache.kafka.common` domain types (`TopicPartition`,
+  `OffsetAndMetadata`, `ConsumerGroupMetadata`, `Node`), always compiled and
+  re-exported by `producer`/`consumer`/`admin`.
+- `wire` — Tokio broker sessions, `ApiVersions` negotiation, TLS, SASL,
+  metadata, bounded in-flight requests, and request/response dispatch.
+- `producer` — Java-style producer builder, batching, linger, bounded memory,
+  compression, murmur2 + sticky/adaptive partitioning, multi-broker dispatch
+  with leadership-change failover, transactions, and a Kafka-faithful
+  idempotent path (per-partition multi-in-flight, ordered retry, deferred epoch
+  bump, sequence wraparound). Interceptors and Kafka-named metrics included.
+- `consumer` — full Apache Kafka 4.3.0 feature parity: manual assignment, topic
+  and pattern (regex) subscription, classic groups
+  (`range`/`roundrobin`/`sticky` eager + incremental `cooperative-sticky`,
+  KIP-429) and the KIP-848 server-side protocol; topic-id-keyed fetch (KIP-516,
+  up to v18), incremental fetch sessions (KIP-227), truncation detection
+  (KIP-320), `commit_sync`/`commit_async`/auto-commit, background heartbeat,
+  static membership, typed deserializers, interceptors, and `metrics()`.
+- `admin` — the full Apache Kafka 4.3.0 `Admin` operation surface (62
+  operations): topics, configs (incremental), ACLs, groups & offsets,
+  transactions, delegation tokens, quotas, SCRAM, reassignments, KRaft quorum,
+  and the 4.x share/streams group families.
+
+Every client surface — producer, consumer, admin, every SASL mechanism and TLS
+mode, every compression codec, 3-broker failover — is verified end-to-end
+against real Apache Kafka 4.3.0 brokers. On the same broker and defaults,
+producer throughput measures +25-28% over the Java client at ~4x less memory,
+and consumer throughput 1.9-4x at ~16-20x less memory; methodology and caveats
+in the [benchmarks chapter](https://pirumu.github.io/kacrab/benchmarks.html).
+
+## Producer
+
+`send` is synchronous like Kafka's `Producer.send`: it returns a `SendFuture`
+right away, and you await that future for the broker acknowledgement. Batching
+happens automatically through `batch.size`, `linger.ms`, buffer memory, and
+flush/close boundaries.
 
 ```rust
 use kacrab::producer::{Producer, ProducerRecord};
@@ -106,50 +86,125 @@ use kacrab::producer::{Producer, ProducerRecord};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut producer = Producer::builder()
         .set("bootstrap.servers", "127.0.0.1:9092")
-        .set("client.id", "kacrab-example")
         .set("acks", "all")
         .set("enable.idempotence", "true")
-        .set("batch.size", "16384")
         .set("linger.ms", "5")
         .build()
         .await?;
 
-    // `send` is synchronous (Kafka `Producer.send` shape): it enqueues the
-    // record and returns a future you await for the broker acknowledgement.
-    let delivery = producer
-        .send(ProducerRecord::new("orders", 0).key("k").value("v"))?;
+    let delivery = producer.send(
+        ProducerRecord::new("orders", 0).key("order-42").value("created"),
+    )?;
 
     producer.flush().await?;
     let receipt = delivery.await?;
-    println!(
-        "topic={} partition={} offset={}",
-        receipt.topic, receipt.partition, receipt.offset
-    );
+    println!("{}-{}@{}", receipt.topic, receipt.partition, receipt.offset);
 
     producer.close().await?;
     Ok(())
 }
 ```
 
-See [`../examples/producer.rs`](../examples/producer.rs) for single-send,
-tracked batch, untracked batch, idempotence, transaction, and auth examples.
+Transactions use the same producer (`transactional.id` +
+`init_transactions`/`begin_transaction`/`commit_transaction`). Serializers are
+a compile-time Rust trait (`ProducerSerializer<T>` via
+`build_with_serializers`), not `key.serializer` class names.
 
-## Verification
+## Consumer
 
-Use workspace Makefile targets from the repo root:
+```rust
+use std::time::Duration;
+use kacrab::consumer::{Consumer, StringDeserializer};
 
-```bash
-make fmt-check
-make clippy
-make test
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut consumer = Consumer::from_map([
+        ("bootstrap.servers", "localhost:9092"),
+        ("group.id", "orders-workers"),
+        ("auto.offset.reset", "earliest"),
+        // Incremental rebalancing; use ("group.protocol", "consumer") for KIP-848.
+        ("partition.assignment.strategy", "cooperative-sticky"),
+    ])
+    .await?;
+    consumer.subscribe(["orders"])?;
+
+    let (keys, values) = (StringDeserializer, StringDeserializer);
+    loop {
+        let records = consumer.poll(Duration::from_secs(1)).await?;
+        for record in &records {
+            let (key, value) = record.deserialized(&keys, &values)?;
+            println!(
+                "{}-{}@{}: {key:?} = {value:?}",
+                record.topic, record.partition, record.offset
+            );
+        }
+        consumer.commit_sync().await?;
+    }
+}
 ```
 
-Protocol compatibility with Kafka Java is checked by the ignored Java oracle
-matrix:
+Records are bytes-first (`ConsumerRecord.key/value: Option<Bytes>`), with a
+typed `ConsumerDeserializer` layer on top. Offsets commit sync, async, or
+automatically, with leader-epoch awareness.
 
-```bash
-make test-protocol-java-matrix
+## Admin
+
+Admin mirrors Java's `Admin` with `snake_case` methods and per-call options
+structs:
+
+```rust
+use kacrab::admin::{AdminClient, CreateTopicsOptions, NewTopic};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let admin = AdminClient::from_map([("bootstrap.servers", "localhost:9092")]).await?;
+
+    admin
+        .create_topics(vec![NewTopic::new("orders", 6, 3)], CreateTopicsOptions::default())
+        .await?;
+
+    for topic in admin.list_topics(Default::default()).await? {
+        println!("{}", topic.name);
+    }
+    Ok(())
+}
 ```
+
+## Java Compatibility
+
+Auth, producer, consumer, and admin are outcome-faithful to the Java client for
+the implemented surface — not a literal class-for-class port:
+
+- Familiar Java client keys work as-is: `bootstrap.servers`,
+  `security.protocol`, `ssl.truststore.location`, `sasl.mechanism`,
+  `sasl.jaas.config`, `acks`, `enable.idempotence`, `transactional.id`,
+  `batch.size`, `linger.ms`, `max.in.flight.requests.per.connection`, ...
+- `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, and `SASL_SSL`; TLS trust/identity
+  material in PEM, JKS, and PKCS12; SASL `PLAIN`, `SCRAM-SHA-256/512`,
+  `OAUTHBEARER` (JAAS options, files, HTTP(S) token endpoints, or locally
+  signed JWT assertions), and feature-gated `GSSAPI`. Handshake and auth
+  failures fail fast with the broker's reason, matching Java.
+- JVM login module and callback handler classes are the intentional boundary:
+  Rust cannot load Java classes. `sasl.jaas.config` strings are parsed for
+  their credential options only; custom SASL flows plug in through the native
+  `sasl_client_authenticator(...)` hook.
+- Protocol request/response structs are generated from the Apache Kafka message
+  schemas and checked byte-for-byte against the Kafka Java client as an
+  external oracle.
+
+## Status
+
+`kacrab` is pre-release: the public API and runtime behavior are not stable
+release guarantees yet. Protocol, wire, auth, producer, consumer, and admin all
+have a verified usable baseline; the remaining work before production-ready is
+measurement under load (sustained multi-broker stress, cross-DC/high-RTT
+coverage, memory soak, latency-percentile gates), not correctness. See the
+[roadmap](https://github.com/pirumu/kacrab/blob/master/ROADMAP.md).
+
+**Kafka Streams is out of scope.** kacrab is a Kafka *client* library — the
+equivalent of `KafkaProducer`/`KafkaConsumer`/`Admin`, not a stream-processing
+framework. It deliberately provides the primitives a streams runtime would
+build on (transactions, consumer groups, offsets) and stops there.
 
 ## Author
 
