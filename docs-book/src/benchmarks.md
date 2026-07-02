@@ -68,27 +68,29 @@ columns) against prefilled topics on the same native broker (2026-07-02):
 
 | Metric (5M × 10B, 16 partitions) | kacrab | Java `kafka-consumer-perf-test` |
 |---|---:|---:|
-| Throughput | ~11.8M rec/s (~113 MB/s) | ~9.25M rec/s (~88 MB/s) |
-| Rebalance (join) time | ~12–14 ms | ~133 ms |
-| CPU (one run) | ~0.40 s | ~2.51 s |
+| Throughput | ~17.6M rec/s (~168 MB/s) | ~9.3M rec/s (~89 MB/s) |
+| Rebalance (join) time | ~8 ms | ~131 ms |
+| poll() p50 / p99 / max | ~0.022 / 0.04 / 8 ms | ~0.025 / 0.20 / 111 ms |
+| CPU / peak RSS (one run) | ~0.28 s / ~18 MiB | ~2.5 s / ~286 MiB |
 
 | Metric (100K × 10 KiB, 3 partitions) | kacrab | Java |
 |---|---:|---:|
-| Throughput | ~480–516K rec/s (~4,700–5,000 MB/s) | ~158K rec/s (~1,542 MB/s) |
-| Rebalance (join) time | ~4 ms | ~132 ms |
-| CPU / peak RSS (one run, ~1 GB) | ~0.15 s / ~12 MiB | ~2.85 s / ~230 MiB |
+| Throughput | ~540K rec/s (~5,277 MB/s) | ~136K rec/s (~1,329 MB/s) |
+| poll() p50 / p99 / max | ~0.54 / 0.7 / 4.2 ms | ~1.7 / 4.0 / 108 ms |
+| CPU / peak RSS (one run, ~1 GB) | ~0.16 s / ~12 MiB | ~2.8 s / ~230 MiB |
 
-kacrab consumes small records **~28% faster** and large records **~3×
-faster** than Java at identical defaults. The load-bearing piece is cross-poll
-fetch buffering (Java's `CompletedFetches`, implemented 2026-07-02): raw fetch
-responses are buffered client-side, `poll` drains them `max.poll.records` at a
-time, and a partition is only re-fetched once its buffer runs dry — ~12 Fetch
-RPCs for a 5M-record run instead of 10,000. Before it, each poll discarded the
-response surplus and small-record throughput sat at ~132K rec/s; the benchmark
-caught it on its first run. One honest asymmetry survives: on the 5M-tiny-record
-burst kacrab's peak RSS (~536 MiB) exceeds Java's (~312 MiB) from allocation
-churn of 5M owned records in ~0.4 s — it plateaus across runs (not a leak), and
-the 10 KiB workload flips it (12 vs 230 MiB).
+kacrab consumes small records **~1.9× faster** and large records **~4×
+faster** than Java at identical defaults, at ~16–20× less memory and ~9–17×
+less CPU, with a poll() tail 14–25× lower (Java keeps a slightly tighter
+p99.9 on 10 B records: ~1.9 ms vs ~2.5 ms). Three Java-parity mechanisms carry
+it, each added after the benchmark exposed its absence: **cross-poll fetch
+buffering** (`completedFetches` — before it, every poll re-fetched the response
+surplus and 10 B throughput sat at ~132K rec/s), **background prefetch with the
+buffered-node gate** (the network thread; without the gate, a fetch listing
+only caught-up partitions long-polled `fetch.max.wait.ms` and collapsed
+throughput 13×), and **lazy per-batch decode** (`CompletedFetch`'s iterator —
+decoding whole blobs up front cost ~536 MiB of allocator churn; per-batch it is
+~18 MiB and the p99.9 decode spike halved).
 
 ## Micro-benchmarks
 

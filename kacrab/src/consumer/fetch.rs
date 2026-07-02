@@ -23,7 +23,7 @@ use kacrab_protocol::{
         ApiKey, ErrorCode, FetchRequestData, FetchResponseData,
         fetch_request::{FetchPartition, FetchTopic, ForgottenTopic, ReplicaState},
     },
-    record::decode_batches,
+    record::decode_next_batch,
 };
 
 use super::{
@@ -313,12 +313,13 @@ fn collect_fetches(
 
 /// Fetched-but-undrained partition data kept across polls — Java's
 /// `completedFetches` queue plus `nextInLineFetch`. Raw response blobs queue up
-/// FIFO; the front entry is decoded whole when its turn comes and then drained
-/// `max.poll.records` at a time, so memory holds the raw blobs plus at most one
-/// decoded partition. Entries are invalidated lazily at drain time: a position
-/// that no longer matches the entry (seek, reset, truncation) or a partition no
-/// longer assigned (revoked, unsubscribed) drops its buffered data; paused
-/// partitions keep theirs until resumed, mirroring Java.
+/// FIFO; the front entry decodes lazily, one record batch at a time, as `poll`
+/// drains it `max.poll.records` per slice — memory holds the raw blobs plus at
+/// most about one batch of decoded records. Entries are invalidated lazily at
+/// drain time: a position that no longer matches the entry (seek, reset,
+/// truncation) or a partition no longer assigned (revoked, unsubscribed) drops
+/// its buffered data; paused partitions keep theirs until resumed, mirroring
+/// Java.
 #[derive(Debug, Default)]
 pub(super) struct FetchBuffer {
     buffered: VecDeque<BufferedFetch>,
@@ -350,18 +351,94 @@ impl BufferedFetch {
     }
 }
 
-/// A decoded partition blob mid-drain.
+/// A partition blob mid-drain: batches decode lazily, one at a time, so memory
+/// holds the raw blob plus roughly one batch of decoded records (Java's
+/// `CompletedFetch` record iterator).
 #[derive(Debug)]
 struct DecodedFetch {
     partition: TopicPartition,
-    /// Records not yet handed to the app, in offset order.
+    /// Shared topic handle cloned into every record.
+    topic: std::sync::Arc<str>,
+    /// Raw record batches not yet decoded.
+    blob: Bytes,
+    /// Records from decoded batches, not yet handed to the app.
     records: VecDeque<ConsumerRecord>,
     /// The position the app sits at if this buffer is still valid.
     position_offset: i64,
-    /// The position to advance to once every record is drained (from the whole
-    /// blob's decode, so it clears any trailing gap).
+    /// The position to advance to once every decoded record is drained.
     next_offset: i64,
     next_leader_epoch: Option<i32>,
+}
+
+impl DecodedFetch {
+    fn new(raw: RawPartitionFetch) -> Self {
+        Self {
+            topic: std::sync::Arc::from(raw.partition.topic.as_str()),
+            partition: raw.partition,
+            blob: raw.records,
+            records: VecDeque::new(),
+            position_offset: raw.fetch_position.offset,
+            next_offset: raw.fetch_position.offset,
+            next_leader_epoch: None,
+        }
+    }
+
+    /// Whether every batch is decoded and every record handed out.
+    fn is_exhausted(&self) -> bool {
+        self.records.is_empty() && self.blob.is_empty()
+    }
+
+    /// Decode batches until at least `budget` records are ready or the blob
+    /// runs out. Records below the current position (a fetch landing mid-batch)
+    /// are skipped.
+    fn refill(&mut self, budget: usize) -> Result<()> {
+        while self.records.len() < budget && !self.blob.is_empty() {
+            let batch = decode_next_batch(&mut self.blob).map_err(|_error| {
+                ConsumerError::InvalidState("failed to decode fetched record batch")
+            })?;
+            let Some(batch) = batch else {
+                // A truncated trailing batch — normal at the end of a fetch
+                // response; the records continue in the next fetch.
+                self.blob = Bytes::new();
+                break;
+            };
+            let leader_epoch =
+                (batch.partition_leader_epoch >= 0).then_some(batch.partition_leader_epoch);
+            self.next_leader_epoch = leader_epoch;
+            let log_append_time = batch.attributes & LOG_APPEND_TIME_BIT != 0;
+            let timestamp_type = if log_append_time {
+                TimestampType::LogAppendTime
+            } else {
+                TimestampType::CreateTime
+            };
+            for record in batch.records {
+                let offset = batch
+                    .base_offset
+                    .saturating_add(i64::from(record.offset_delta));
+                if offset < self.position_offset {
+                    continue;
+                }
+                let timestamp = if log_append_time {
+                    batch.max_timestamp
+                } else {
+                    batch.first_timestamp.saturating_add(record.timestamp_delta)
+                };
+                self.records.push_back(ConsumerRecord {
+                    topic: std::sync::Arc::clone(&self.topic),
+                    partition: self.partition.partition,
+                    offset,
+                    timestamp,
+                    timestamp_type,
+                    key: record.key,
+                    value: record.value,
+                    headers: record.headers,
+                    leader_epoch,
+                });
+                self.next_offset = offset.saturating_add(1);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl FetchBuffer {
@@ -370,6 +447,11 @@ impl FetchBuffer {
         self.buffered
             .iter()
             .any(|entry| entry.partition() == partition)
+    }
+
+    /// The partitions with buffered data, for the buffered-node fetch gate.
+    pub(super) fn partitions(&self) -> impl Iterator<Item = &TopicPartition> {
+        self.buffered.iter().map(BufferedFetch::partition)
     }
 
     /// Queue one partition's raw fetch response data.
@@ -411,29 +493,18 @@ impl FetchBuffer {
             }
             let mut decoded = match entry {
                 BufferedFetch::Decoded(decoded) => decoded,
-                BufferedFetch::Raw(raw) => {
-                    let fetched = decode_partition(
-                        &raw.partition,
-                        raw.fetch_position.offset,
-                        Some(raw.records),
-                    )?;
-                    if fetched.records.is_empty() {
-                        // Nothing at or past the position in this blob.
-                        continue;
-                    }
-                    DecodedFetch {
-                        partition: raw.partition,
-                        records: fetched.records.into(),
-                        position_offset: raw.fetch_position.offset,
-                        next_offset: fetched.next_offset,
-                        next_leader_epoch: fetched.next_leader_epoch,
-                    }
-                },
+                BufferedFetch::Raw(raw) => DecodedFetch::new(raw),
             };
+            decoded.refill(budget)?;
+            if decoded.records.is_empty() {
+                // Nothing at or past the position in this blob.
+                continue;
+            }
             let take = budget.min(decoded.records.len());
             let records: Vec<ConsumerRecord> = decoded.records.drain(..take).collect();
             budget = budget.saturating_sub(take);
-            let (next_offset, next_leader_epoch) = if decoded.records.is_empty() {
+            let finished = decoded.is_exhausted();
+            let (next_offset, next_leader_epoch) = if finished {
                 (decoded.next_offset, decoded.next_leader_epoch)
             } else {
                 records
@@ -448,7 +519,7 @@ impl FetchBuffer {
                 next_offset,
                 next_leader_epoch,
             });
-            if !decoded.records.is_empty() {
+            if !finished {
                 // The caller advances the position to `next_offset`; record it
                 // so the remainder stays valid for the next poll.
                 decoded.position_offset = next_offset;
@@ -562,71 +633,6 @@ fn build_forgotten(
     forgotten
 }
 
-/// Decode one partition's record bytes into records at or past `fetch_offset`.
-fn decode_partition(
-    partition: &TopicPartition,
-    fetch_offset: i64,
-    records: Option<Bytes>,
-) -> Result<PartitionFetch> {
-    let mut out = Vec::new();
-    let mut next_offset = fetch_offset;
-
-    let Some(mut bytes) = records.filter(|b| !b.is_empty()) else {
-        return Ok(PartitionFetch {
-            partition: partition.clone(),
-            records: out,
-            next_offset,
-            next_leader_epoch: None,
-        });
-    };
-
-    let batches = decode_batches(&mut bytes)
-        .map_err(|_| ConsumerError::InvalidState("failed to decode fetched record batch"))?;
-
-    let mut leader_epoch = None;
-    for batch in batches {
-        leader_epoch = (batch.partition_leader_epoch >= 0).then_some(batch.partition_leader_epoch);
-        let log_append_time = batch.attributes & LOG_APPEND_TIME_BIT != 0;
-        let timestamp_type = if log_append_time {
-            TimestampType::LogAppendTime
-        } else {
-            TimestampType::CreateTime
-        };
-        for record in batch.records {
-            let offset = batch
-                .base_offset
-                .saturating_add(i64::from(record.offset_delta));
-            if offset < fetch_offset {
-                continue;
-            }
-            let timestamp = if log_append_time {
-                batch.max_timestamp
-            } else {
-                batch.first_timestamp.saturating_add(record.timestamp_delta)
-            };
-            out.push(ConsumerRecord {
-                topic: partition.topic.clone(),
-                partition: partition.partition,
-                offset,
-                timestamp,
-                timestamp_type,
-                key: record.key,
-                value: record.value,
-                headers: record.headers,
-                leader_epoch,
-            });
-            next_offset = offset.saturating_add(1);
-        }
-    }
-
-    Ok(PartitionFetch {
-        partition: partition.clone(),
-        records: out,
-        next_offset,
-        next_leader_epoch: leader_epoch,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use bytes::BytesMut;
@@ -673,30 +679,80 @@ mod tests {
 
     #[test]
     fn decodes_records_with_absolute_offsets() {
-        let bytes = encode_batch(100, 3);
-        let result = decode_partition(&tp(), 100, Some(bytes)).unwrap();
-        assert_eq!(result.records.len(), 3);
-        assert_eq!(result.records[0].offset, 100);
-        assert_eq!(result.records[2].offset, 102);
-        assert_eq!(result.records[0].value.as_deref(), Some(b"v0".as_ref()));
-        assert_eq!(result.records[0].leader_epoch, Some(4));
-        assert_eq!(result.next_offset, 103);
+        let mut decoded = DecodedFetch::new(RawPartitionFetch {
+            partition: tp(),
+            fetch_position: FetchPosition::new(100, None),
+            records: encode_batch(100, 3),
+        });
+        decoded.refill(10).unwrap();
+        assert_eq!(decoded.records.len(), 3);
+        assert_eq!(decoded.records[0].offset, 100);
+        assert_eq!(decoded.records[2].offset, 102);
+        assert_eq!(decoded.records[0].value.as_deref(), Some(b"v0".as_ref()));
+        assert_eq!(decoded.records[0].leader_epoch, Some(4));
+        assert_eq!(decoded.next_offset, 103);
+        assert!(decoded.blob.is_empty());
     }
 
     #[test]
     fn skips_records_before_the_fetch_offset() {
-        let bytes = encode_batch(100, 3);
-        let result = decode_partition(&tp(), 101, Some(bytes)).unwrap();
-        assert_eq!(result.records.len(), 2);
-        assert_eq!(result.records[0].offset, 101);
-        assert_eq!(result.next_offset, 103);
+        // A fetch landing mid-batch (offset 101 inside a batch based at 100)
+        // must skip the records below the position.
+        let mut decoded = DecodedFetch::new(RawPartitionFetch {
+            partition: tp(),
+            fetch_position: FetchPosition::new(101, None),
+            records: encode_batch(100, 3),
+        });
+        decoded.refill(10).unwrap();
+        assert_eq!(decoded.records.len(), 2);
+        assert_eq!(decoded.records[0].offset, 101);
+        assert_eq!(decoded.next_offset, 103);
     }
 
     #[test]
-    fn empty_records_yield_no_progress() {
-        let result = decode_partition(&tp(), 50, None).unwrap();
-        assert!(result.records.is_empty());
-        assert_eq!(result.next_offset, 50);
+    fn refill_decodes_lazily_per_batch() {
+        // Two 3-record batches: a refill for 2 records decodes only the first
+        // batch; the second stays raw until needed.
+        let mut blob = BytesMut::new();
+        blob.extend_from_slice(&encode_batch(100, 3));
+        blob.extend_from_slice(&encode_batch(103, 3));
+        let mut decoded = DecodedFetch::new(RawPartitionFetch {
+            partition: tp(),
+            fetch_position: FetchPosition::new(100, None),
+            records: blob.freeze(),
+        });
+
+        decoded.refill(2).unwrap();
+        assert_eq!(decoded.records.len(), 3);
+        assert!(!decoded.blob.is_empty());
+
+        decoded.refill(6).unwrap();
+        assert_eq!(decoded.records.len(), 6);
+        assert!(decoded.blob.is_empty());
+        assert_eq!(decoded.next_offset, 106);
+    }
+
+    #[test]
+    fn truncated_trailing_batch_is_dropped_cleanly() {
+        // Fetch responses may cut the final batch short; the truncated tail is
+        // discarded and the position resumes at the last whole record.
+        let whole = encode_batch(100, 3);
+        let mut blob = BytesMut::new();
+        blob.extend_from_slice(&whole);
+        blob.extend_from_slice(&whole.slice(..whole.len() / 2));
+        let mut buffer = FetchBuffer::default();
+        buffer.push(RawPartitionFetch {
+            partition: tp(),
+            fetch_position: FetchPosition::new(100, None),
+            records: blob.freeze(),
+        });
+        let subscription = subscription_at("t", 0, 100);
+
+        let drained = buffer.drain(&subscription, 10).expect("drain");
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].records.len(), 3);
+        assert_eq!(drained[0].next_offset, 103);
+        assert!(!buffer.has(&tp()));
     }
 
     fn entry(topic: &str, partition: i32, offset: i64) -> (TopicPartition, FetchPosition) {

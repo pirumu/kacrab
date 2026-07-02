@@ -102,6 +102,9 @@ fn main() {
                 );
                 let (summary, metrics) = run_scenario(&options, scenario, run_index).await;
                 println!("{}", summary.java_perf_line());
+                if let Some(latency) = summary.poll_latency {
+                    println!("{}", latency.line("rust"));
+                }
                 println!("{}", format_counter_line(&metrics));
                 summaries.push(summary);
                 counters.push(metrics);
@@ -410,12 +413,15 @@ async fn consume(
     let mut records_read = 0usize;
     let mut bytes_read = 0usize;
     let mut last_consumed = start;
+    let mut poll_samples: Vec<Duration> = Vec::with_capacity(4096);
     while records_read < num_records && last_consumed.elapsed() <= record_fetch_timeout {
+        let poll_started = Instant::now();
         let records = consumer
             .poll(POLL_TIMEOUT)
             .await
             .expect("benchmark poll should succeed");
         let now = Instant::now();
+        poll_samples.push(now.saturating_duration_since(poll_started));
         if group_mode {
             join.observe(!consumer.assignment().is_empty(), now);
         }
@@ -444,7 +450,63 @@ async fn consume(
         bytes: bytes_read,
         elapsed,
         join_time: join.total,
+        poll_latency: poll_latency_summary(&mut poll_samples),
     }
+}
+
+/// Per-`poll` call latency percentiles (nearest-rank), reported alongside the
+/// Java probe's identical line. The max typically lands on the join poll.
+#[derive(Debug, Clone, Copy)]
+struct PollLatencySummary {
+    polls: usize,
+    avg_ms: f64,
+    p50_ms: f64,
+    p95_ms: f64,
+    p99_ms: f64,
+    p999_ms: f64,
+    max_ms: f64,
+}
+
+impl PollLatencySummary {
+    fn line(&self, side: &str) -> String {
+        format!(
+            "{side} poll latency: polls={}, avg={:.3} ms, p50={:.3} ms, p95={:.3} ms, p99={:.3} \
+             ms, p999={:.3} ms, max={:.3} ms",
+            self.polls,
+            self.avg_ms,
+            self.p50_ms,
+            self.p95_ms,
+            self.p99_ms,
+            self.p999_ms,
+            self.max_ms
+        )
+    }
+}
+
+fn poll_latency_summary(samples: &mut [Duration]) -> Option<PollLatencySummary> {
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_unstable();
+    let len = samples.len();
+    let total: Duration = samples.iter().sum();
+    let percentile = |per_mille: usize| -> f64 {
+        let rank = per_mille.saturating_mul(len).div_ceil(1000);
+        duration_ms(samples[rank.saturating_sub(1).min(len.saturating_sub(1))])
+    };
+    Some(PollLatencySummary {
+        polls: len,
+        avg_ms: duration_ms(total) / f64_from_usize(len),
+        p50_ms: percentile(500),
+        p95_ms: percentile(950),
+        p99_ms: percentile(990),
+        p999_ms: percentile(999),
+        max_ms: duration_ms(samples[len.saturating_sub(1)]),
+    })
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 /// Mirrors the Java tool's `ConsumerPerfRebListener` without a listener API:
@@ -486,6 +548,7 @@ struct ConsumerPerfSummary {
     bytes: usize,
     elapsed: Duration,
     join_time: Duration,
+    poll_latency: Option<PollLatencySummary>,
 }
 
 impl ConsumerPerfSummary {
@@ -822,6 +885,7 @@ mod tests {
             bytes: 2 * 1024 * 1024,
             elapsed: Duration::from_secs(2),
             join_time: Duration::from_millis(500),
+            poll_latency: None,
         };
 
         let line = summary.java_perf_line();
@@ -844,6 +908,7 @@ mod tests {
             bytes: 0,
             elapsed: Duration::from_millis(10),
             join_time: Duration::from_millis(50),
+            poll_latency: None,
         };
 
         assert_eq!(summary.fetch_time(), Duration::from_millis(1));
@@ -864,6 +929,7 @@ mod tests {
             bytes: 1024 * 1024,
             elapsed: Duration::from_secs(1),
             join_time: Duration::from_millis(200),
+            poll_latency: None,
         };
         let slower = ConsumerPerfSummary {
             elapsed: Duration::from_secs(2),

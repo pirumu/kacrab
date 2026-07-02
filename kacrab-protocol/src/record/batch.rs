@@ -412,32 +412,45 @@ impl RecordBatch {
     }
 }
 
+/// Decode the next complete batch from `buf`, when one is present.
+///
+/// Returns `Ok(None)` when the buffer is empty or ends in a truncated trailing
+/// batch (fetch responses may cut the last batch short) — an error only if a
+/// batch is *malformed*, not just incomplete. Lets a consumer decode a fetched
+/// blob one batch at a time instead of materializing every record up front.
+pub fn decode_next_batch(buf: &mut Bytes) -> Result<Option<RecordBatch>> {
+    if buf.remaining() < LOG_OVERHEAD {
+        return Ok(None);
+    }
+    let Some(len_slice) = buf.get(8..12) else {
+        return Ok(None);
+    };
+    let len_bytes: [u8; 4] = match len_slice.try_into() {
+        Ok(arr) => arr,
+        Err(_) => return Ok(None),
+    };
+    let batch_length = i32::from_be_bytes(len_bytes);
+    if batch_length < 0 {
+        return Ok(None);
+    }
+    let Ok(batch_len) = usize::try_from(batch_length) else {
+        return Ok(None);
+    };
+    let needed = LOG_OVERHEAD.saturating_add(batch_len);
+    if buf.remaining() < needed {
+        return Ok(None);
+    }
+    RecordBatch::decode(buf).map(Some)
+}
+
 /// Decode every batch in a contiguous buffer.
 ///
 /// Stops cleanly on a truncated trailing batch (returns the batches decoded so
 /// far). Returns an error only if a batch is *malformed* — not just incomplete.
 pub fn decode_batches(buf: &mut Bytes) -> Result<Vec<RecordBatch>> {
     let mut batches = Vec::new();
-    while buf.remaining() >= LOG_OVERHEAD {
-        let Some(len_slice) = buf.get(8..12) else {
-            break;
-        };
-        let len_bytes: [u8; 4] = match len_slice.try_into() {
-            Ok(arr) => arr,
-            Err(_) => break,
-        };
-        let batch_length = i32::from_be_bytes(len_bytes);
-        if batch_length < 0 {
-            break;
-        }
-        let Ok(batch_len) = usize::try_from(batch_length) else {
-            break;
-        };
-        let needed = LOG_OVERHEAD.saturating_add(batch_len);
-        if buf.remaining() < needed {
-            break;
-        }
-        batches.push(RecordBatch::decode(buf)?);
+    while let Some(batch) = decode_next_batch(buf)? {
+        batches.push(batch);
     }
     Ok(batches)
 }

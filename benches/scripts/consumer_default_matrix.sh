@@ -92,7 +92,82 @@ public final class ConsumerConfigSnapshot {
 }
 JAVA
 
-javac -cp "$KAFKA_LIB_DIR/*" "$SNAPSHOT_TMP/ConsumerConfigSnapshot.java"
+# Per-poll() latency percentiles with the same loop the Rust bench uses —
+# ConsumerPerformance itself cannot report poll latency.
+cat >"$SNAPSHOT_TMP/ConsumerPollLatency.java" <<'JAVA'
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Properties;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+
+public final class ConsumerPollLatency {
+    public static void main(String[] args) {
+        String bootstrap = args[0];
+        String topic = args[1];
+        long numRecords = Long.parseLong(args[2]);
+        String group = args[3];
+        Properties props = new Properties();
+        props.setProperty("bootstrap.servers", bootstrap);
+        props.setProperty("group.id", group);
+        props.setProperty("client.id", "perf-consumer-client");
+        props.setProperty("receive.buffer.bytes", String.valueOf(2 * 1024 * 1024));
+        props.setProperty("max.partition.fetch.bytes", String.valueOf(1024 * 1024));
+        props.setProperty("auto.offset.reset", "earliest");
+        props.setProperty("check.crcs", "false");
+        props.setProperty(
+            "key.deserializer",
+            "org.apache.kafka.common.serialization.ByteArrayDeserializer"
+        );
+        props.setProperty(
+            "value.deserializer",
+            "org.apache.kafka.common.serialization.ByteArrayDeserializer"
+        );
+        long read = 0;
+        ArrayList<Long> samples = new ArrayList<>();
+        long lastConsumed = System.currentTimeMillis();
+        try (KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(props)) {
+            consumer.subscribe(List.of(topic));
+            while (read < numRecords && System.currentTimeMillis() - lastConsumed <= 10_000) {
+                long start = System.nanoTime();
+                ConsumerRecords<byte[], byte[]> records = consumer.poll(Duration.ofMillis(100));
+                samples.add(System.nanoTime() - start);
+                if (!records.isEmpty()) {
+                    lastConsumed = System.currentTimeMillis();
+                }
+                read += records.count();
+            }
+        }
+        Collections.sort(samples);
+        int n = samples.size();
+        double avg = samples.stream().mapToLong(Long::longValue).average().orElse(0) / 1e6;
+        System.out.printf(
+            "java poll latency: polls=%d, avg=%.3f ms, p50=%.3f ms, p95=%.3f ms, p99=%.3f ms, "
+                + "p999=%.3f ms, max=%.3f ms%n",
+            n, avg, pct(samples, 500), pct(samples, 950), pct(samples, 990), pct(samples, 999),
+            samples.get(n - 1) / 1e6
+        );
+    }
+
+    private static double pct(List<Long> samples, int perMille) {
+        int n = samples.size();
+        int rank = (perMille * n + 999) / 1000;
+        int idx = Math.min(Math.max(rank - 1, 0), n - 1);
+        return samples.get(idx) / 1e6;
+    }
+}
+JAVA
+
+javac -cp "$KAFKA_LIB_DIR/*" "$SNAPSHOT_TMP/ConsumerConfigSnapshot.java" "$SNAPSHOT_TMP/ConsumerPollLatency.java"
+
+run_poll_latency_probe() {
+  local topic="$1"
+  local records="$2"
+  local group="perf-consumer-java-latency-$$-${RANDOM}"
+  java -cp "$SNAPSHOT_TMP:$KAFKA_LIB_DIR/*" ConsumerPollLatency "$BOOTSTRAP" "$topic" "$records" "$group"
+}
 
 print_config_snapshot() {
   local group_id="$1"
@@ -174,6 +249,7 @@ run_java_scenario() {
         pretty, sum_rps / runs, sum_mbps / runs, sum_fetch_rps / runs,
         sum_fetch_mbps / runs, sum_rebalance_ms / runs, runs
     }'
+  run_poll_latency_probe "$topic" "$records"
 }
 
 # KACRAB_BENCH_MESSAGES bounds the record count, mirroring the Rust harness.
