@@ -33,8 +33,9 @@ impl Node {
         self
     }
 
-    /// Whether this node is the sentinel "no node" (negative id), matching
-    /// Java's `Node.isEmpty`/`noNode`.
+    /// Whether this node is the sentinel "no node", detected by a negative id
+    /// (Kafka's `Node.noNode()` sentinel). This intentionally checks only the id,
+    /// unlike Java's `Node.isEmpty`, which also treats a null/blank host as empty.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.id < 0

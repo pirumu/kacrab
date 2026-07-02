@@ -116,7 +116,7 @@ use super::{
     },
 };
 use crate::{
-    common::{OffsetAndMetadata, TopicPartition},
+    common::{CoordinatorType, OffsetAndMetadata, TopicPartition},
     config::{AdminConfig, ClientConfig, ConfigKey, ConfigValue, Properties},
     wire::{
         BrokerEndpoint, ClusterMetadata, RequestMessage, ResponseMessage, WireClient, WireError,
@@ -159,11 +159,8 @@ impl AdminClient {
             .unwrap_or(i32::MAX)
             .max(0);
         let controller_attempts = controller_attempts_from_retries(config.retries);
-        let wire = WireClient::connect_with_brokers(
-            config.to_connection_config(),
-            config.client_id,
-            endpoints,
-        );
+        let connection = config.to_connection_config()?;
+        let wire = WireClient::connect_with_brokers(connection, config.client_id, endpoints);
         Ok(Self {
             wire,
             request_timeout_ms,
@@ -650,7 +647,8 @@ impl AdminClient {
     }
 
     /// Send a request to the coordinator for `key` (a group id with
-    /// `key_type` 0, or a transactional id with `key_type` 1), retrying against a
+    /// `CoordinatorType::Group`, or a transactional id with
+    /// `CoordinatorType::Transaction`), retrying against a
     /// freshly resolved coordinator while it reports a transient coordinator
     /// error (`NOT_COORDINATOR` / `COORDINATOR_NOT_AVAILABLE` /
     /// `COORDINATOR_LOAD_IN_PROGRESS`) — whether from `FindCoordinator` or in the
@@ -664,7 +662,7 @@ impl AdminClient {
     async fn route_to_coordinator<Req, Resp>(
         &self,
         key: &str,
-        key_type: i8,
+        coordinator_type: CoordinatorType,
         api_key: ApiKey,
         request: &Req,
         has_coordinator_error: impl Fn(&Resp) -> bool,
@@ -677,7 +675,7 @@ impl AdminClient {
         let mut attempt: u32 = 0;
         loop {
             attempt = attempt.saturating_add(1);
-            let coordinator = match self.coordinator_node(key, key_type).await {
+            let coordinator = match self.coordinator_node(key, coordinator_type).await {
                 Ok(coordinator) => coordinator,
                 Err(AdminError::Broker { error, .. })
                     if is_coordinator_error(i16::from(error))
@@ -807,7 +805,7 @@ impl AdminClient {
         let (response, coordinator) = match self
             .route_to_coordinator(
                 group_id,
-                0,
+                CoordinatorType::Group,
                 ApiKey::ConsumerGroupDescribe,
                 &request,
                 |response: &ConsumerGroupDescribeResponseData| {
@@ -883,7 +881,7 @@ impl AdminClient {
         let (response, coordinator) = self
             .route_to_coordinator(
                 group_id,
-                0,
+                CoordinatorType::Group,
                 ApiKey::DescribeGroups,
                 &request,
                 |response: &DescribeGroupsResponseData| {
@@ -944,7 +942,7 @@ impl AdminClient {
             let (response, _coordinator) = self
                 .route_to_coordinator(
                     group_id,
-                    0,
+                    CoordinatorType::Group,
                     ApiKey::DeleteGroups,
                     &request,
                     |response: &DeleteGroupsResponseData| {
@@ -995,7 +993,7 @@ impl AdminClient {
         let (response, _coordinator) = self
             .route_to_coordinator(
                 group_id,
-                0,
+                CoordinatorType::Group,
                 ApiKey::OffsetFetch,
                 &request,
                 |response: &OffsetFetchResponseData| {
@@ -1069,7 +1067,7 @@ impl AdminClient {
         let (response, _coordinator) = self
             .route_to_coordinator(
                 group_id,
-                0,
+                CoordinatorType::Group,
                 ApiKey::OffsetCommit,
                 &request,
                 |response: &OffsetCommitResponseData| {
@@ -1108,7 +1106,7 @@ impl AdminClient {
         let (response, _coordinator) = self
             .route_to_coordinator(
                 group_id,
-                0,
+                CoordinatorType::Group,
                 ApiKey::OffsetDelete,
                 &request,
                 |response: &OffsetDeleteResponseData| {
@@ -1369,12 +1367,13 @@ impl AdminClient {
             },
             None => (None, None),
         };
+        let renewers = options.renewers;
         let request = CreateDelegationTokenRequestData {
             owner_principal_type,
             owner_principal_name,
-            renewers: options
-                .renewers
-                .into_iter()
+            renewers: renewers
+                .iter()
+                .cloned()
                 .map(|(principal_type, principal_name)| CreatableRenewers {
                     principal_type: principal_type.into(),
                     principal_name: principal_name.into(),
@@ -1398,7 +1397,7 @@ impl AdminClient {
             expiry_timestamp_ms: response.expiry_timestamp_ms,
             max_timestamp_ms: response.max_timestamp_ms,
             hmac: response.hmac.to_vec(),
-            renewers: Vec::new(),
+            renewers,
         })
     }
 
@@ -1568,7 +1567,7 @@ impl AdminClient {
             let (response, _coordinator) = self
                 .route_to_coordinator(
                     transactional_id,
-                    1,
+                    CoordinatorType::Transaction,
                     ApiKey::InitProducerId,
                     &request,
                     |response: &InitProducerIdResponseData| {
@@ -1766,7 +1765,7 @@ impl AdminClient {
         let (response, _coordinator) = self
             .route_to_coordinator(
                 group_id,
-                0,
+                CoordinatorType::Group,
                 ApiKey::LeaveGroup,
                 &request,
                 |response: &LeaveGroupResponseData| is_coordinator_error(response.error_code),
@@ -2040,7 +2039,7 @@ impl AdminClient {
             let (response, coordinator) = self
                 .route_to_coordinator(
                     group_id,
-                    0,
+                    CoordinatorType::Group,
                     ApiKey::ShareGroupDescribe,
                     &request,
                     |response: &ShareGroupDescribeResponseData| {
@@ -2117,7 +2116,7 @@ impl AdminClient {
             let (response, coordinator) = self
                 .route_to_coordinator(
                     group_id,
-                    0,
+                    CoordinatorType::Group,
                     ApiKey::StreamsGroupDescribe,
                     &request,
                     |response: &StreamsGroupDescribeResponseData| {
@@ -2204,7 +2203,7 @@ impl AdminClient {
         let (response, _coordinator) = self
             .route_to_coordinator(
                 group_id,
-                0,
+                CoordinatorType::Group,
                 ApiKey::DescribeShareGroupOffsets,
                 &request,
                 |response: &DescribeShareGroupOffsetsResponseData| {
@@ -2285,7 +2284,7 @@ impl AdminClient {
         let (response, _coordinator) = self
             .route_to_coordinator(
                 group_id,
-                0,
+                CoordinatorType::Group,
                 ApiKey::AlterShareGroupOffsets,
                 &request,
                 |response: &AlterShareGroupOffsetsResponseData| {
@@ -2335,7 +2334,7 @@ impl AdminClient {
         let (response, _coordinator) = self
             .route_to_coordinator(
                 group_id,
-                0,
+                CoordinatorType::Group,
                 ApiKey::DeleteShareGroupOffsets,
                 &request,
                 |response: &DeleteShareGroupOffsetsResponseData| {
@@ -3093,7 +3092,7 @@ impl AdminClient {
             let (response, coordinator) = self
                 .route_to_coordinator(
                     transactional_id,
-                    1,
+                    CoordinatorType::Transaction,
                     ApiKey::DescribeTransactions,
                     &request,
                     |response: &DescribeTransactionsResponseData| {
@@ -3193,12 +3192,12 @@ impl AdminClient {
             .collect())
     }
 
-    /// Resolve a coordinator broker for `key` of the given `FindCoordinator`
-    /// `key_type`, registering its endpoint. Mirrors the producer's
+    /// Resolve a coordinator broker for `key` of the given
+    /// `CoordinatorType`, registering its endpoint. Mirrors the producer's
     /// `FindCoordinator` flow (resolve advertised host:port, then upsert).
-    async fn coordinator_node(&self, key: &str, key_type: i8) -> Result<Node> {
+    async fn coordinator_node(&self, key: &str, coordinator_type: CoordinatorType) -> Result<Node> {
         let request = FindCoordinatorRequestData {
-            key_type,
+            key_type: coordinator_type.key_type(),
             coordinator_keys: vec![key.to_owned().into()],
             ..FindCoordinatorRequestData::default()
         };
@@ -3671,7 +3670,7 @@ fn decode_authorized_operations(bits: i32) -> Vec<AclOperation> {
     }
     let bits = bits.cast_unsigned();
     (2_i8..15)
-        .filter(|code| bits & (1_u32 << u32::from(code.unsigned_abs())) != 0)
+        .filter(|code| bits & (1_u32 << u32::from(code.cast_unsigned())) != 0)
         .map(AclOperation::from_wire)
         .filter(|operation| !matches!(operation, AclOperation::Unknown))
         .collect()

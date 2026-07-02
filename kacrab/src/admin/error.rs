@@ -65,14 +65,6 @@ pub enum AdminError {
         /// Configuration validation error.
         error: ConfigError,
     },
-    /// Public admin config could not be mapped to runtime settings.
-    #[error("invalid admin config {key}={value}")]
-    InvalidConfig {
-        /// Kafka configuration key.
-        key: &'static str,
-        /// Invalid configured value.
-        value: String,
-    },
 }
 
 impl From<ConfigError> for AdminError {

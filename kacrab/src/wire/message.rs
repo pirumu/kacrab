@@ -1,5 +1,7 @@
 //! Generated request/response adapter traits for broker sessions.
 
+use std::borrow::Cow;
+
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{
     KafkaString, KafkaUuid, Result,
@@ -71,193 +73,6 @@ pub trait ResponseMessage: Sized {
     fn read_response(buf: &mut Bytes, version: i16) -> Result<Self>;
 }
 
-impl RequestMessage for ApiVersionsRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        self.write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        self.encoded_len(version)
-    }
-}
-
-impl ResponseMessage for ApiVersionsResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
-impl RequestMessage for MetadataRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        self.write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        self.encoded_len(version)
-    }
-}
-
-impl ResponseMessage for MetadataResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
-impl RequestMessage for ProduceRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        normalize_produce_request(self, version).write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        normalize_produce_request(self, version).encoded_len(version)
-    }
-}
-
-impl ResponseMessage for ProduceResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
-impl RequestMessage for InitProducerIdRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        self.write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        self.encoded_len(version)
-    }
-}
-
-impl ResponseMessage for InitProducerIdResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
-impl RequestMessage for FindCoordinatorRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        self.write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        self.encoded_len(version)
-    }
-}
-
-impl ResponseMessage for FindCoordinatorResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
-impl RequestMessage for AddPartitionsToTxnRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        self.write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        self.encoded_len(version)
-    }
-}
-
-impl ResponseMessage for AddPartitionsToTxnResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
-impl RequestMessage for AddOffsetsToTxnRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        self.write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        self.encoded_len(version)
-    }
-}
-
-impl ResponseMessage for AddOffsetsToTxnResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
-impl RequestMessage for TxnOffsetCommitRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        self.write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        self.encoded_len(version)
-    }
-}
-
-impl ResponseMessage for TxnOffsetCommitResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
-impl RequestMessage for EndTxnRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        self.write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        self.encoded_len(version)
-    }
-}
-
-impl ResponseMessage for EndTxnResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
-impl RequestMessage for GetTelemetrySubscriptionsRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        self.write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        self.encoded_len(version)
-    }
-}
-
-impl ResponseMessage for GetTelemetrySubscriptionsResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
-impl RequestMessage for PushTelemetryRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        self.write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        self.encoded_len(version)
-    }
-}
-
-impl ResponseMessage for PushTelemetryResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
 /// Implement [`RequestMessage`]/[`ResponseMessage`] for a generated request and
 /// response pair whose encoding is a straight pass-through to the generated
 /// `write`/`encoded_len`/`read` methods (no version-specific normalization).
@@ -282,6 +97,42 @@ macro_rules! impl_passthrough_message {
             }
         )+
     };
+}
+
+// Core client request/response pairs (api-versions, metadata, producer id,
+// coordinator discovery, transactions, and telemetry). Pure pass-through codecs.
+impl_passthrough_message! {
+    ApiVersionsRequestData => ApiVersionsResponseData,
+    MetadataRequestData => MetadataResponseData,
+    InitProducerIdRequestData => InitProducerIdResponseData,
+    FindCoordinatorRequestData => FindCoordinatorResponseData,
+    AddPartitionsToTxnRequestData => AddPartitionsToTxnResponseData,
+    AddOffsetsToTxnRequestData => AddOffsetsToTxnResponseData,
+    TxnOffsetCommitRequestData => TxnOffsetCommitResponseData,
+    EndTxnRequestData => EndTxnResponseData,
+    GetTelemetrySubscriptionsRequestData => GetTelemetrySubscriptionsResponseData,
+    PushTelemetryRequestData => PushTelemetryResponseData,
+}
+
+// Produce is the only request that is not a straight pass-through: depending on
+// the negotiated version the wire form carries either the topic name (v < 13) or
+// the topic id (v >= 13), so the unused field is cleared before the generated
+// encoder runs (see `normalize_produce_request`). The response is pass-through.
+impl RequestMessage for ProduceRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_produce_request(self, version).write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_produce_request(self, version).encoded_len(version)
+    }
+}
+
+impl ResponseMessage for ProduceResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
 }
 
 // Admin client request/response pairs. These are pure pass-through codecs, so
@@ -337,8 +188,10 @@ impl_passthrough_message! {
     DeleteShareGroupOffsetsRequestData => DeleteShareGroupOffsetsResponseData,
 }
 
-// Consumer client request/response pairs (fetch + classic group coordination).
-// Pure pass-through codecs, like the admin block above.
+// Consumer client request/response pairs: fetch, the classic consumer-group
+// coordination RPCs (join/sync/heartbeat), offset-for-leader-epoch, and the new
+// KIP-848 consumer group protocol (ConsumerGroupHeartbeat). All are pure
+// pass-through codecs, like the admin block above.
 impl_passthrough_message! {
     FetchRequestData => FetchResponseData,
     JoinGroupRequestData => JoinGroupResponseData,
@@ -348,7 +201,28 @@ impl_passthrough_message! {
     ConsumerGroupHeartbeatRequestData => ConsumerGroupHeartbeatResponseData,
 }
 
-fn normalize_produce_request(request: &ProduceRequestData, version: i16) -> ProduceRequestData {
+/// Clear the topic key that the negotiated `version` does not put on the wire so
+/// the generated encoder does not reject a request that still carries both the
+/// topic name and topic id.
+///
+/// The request is borrowed unchanged when it is already in the wire form for
+/// `version`; a clone is only taken when a field actually has to be cleared. The
+/// cleared field carries no bytes for its version, so the borrowed and cleared
+/// forms encode to the identical length and body.
+fn normalize_produce_request(
+    request: &ProduceRequestData,
+    version: i16,
+) -> Cow<'_, ProduceRequestData> {
+    let needs_clear = request.topic_data.iter().any(|topic| {
+        if version >= 13 {
+            topic.name != KafkaString::default()
+        } else {
+            topic.topic_id != KafkaUuid::ZERO
+        }
+    });
+    if !needs_clear {
+        return Cow::Borrowed(request);
+    }
     let mut normalized = request.clone();
     for topic in &mut normalized.topic_data {
         if version >= 13 {
@@ -357,5 +231,5 @@ fn normalize_produce_request(request: &ProduceRequestData, version: i16) -> Prod
             topic.topic_id = KafkaUuid::ZERO;
         }
     }
-    normalized
+    Cow::Owned(normalized)
 }

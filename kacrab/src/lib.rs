@@ -9,6 +9,8 @@
 //! - `config`: Java-style config facade, typed configs, metadata, and validation.
 //! - `wire`: TCP/TLS/SASL sessions, `ApiVersions`, metadata, and request dispatch.
 //! - `producer`: batching, routing, idempotence, transactions, and delivery handles.
+//! - `consumer`: the Apache Kafka 4.3.0 `Consumer` surface (subscribe/assign, group rebalancing,
+//!   fetching, offset commits, and interceptors).
 //! - `admin`: the full Apache Kafka 4.3.0 `Admin` operation surface (topics, configs, groups,
 //!   offsets, transactions, ACLs, quotas, tokens, and more).
 //!

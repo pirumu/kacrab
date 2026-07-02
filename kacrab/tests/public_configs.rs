@@ -410,7 +410,7 @@ fn client_config_maps_runtime_socket_overlay_to_wire_connection_config() {
         .build()
         .expect("producer config");
 
-    let config = producer.to_connection_config();
+    let config = producer.to_connection_config().expect("connection config");
 
     assert_eq!(config.socket.send_buffer_bytes, Some(262_144));
     assert_eq!(config.socket.receive_buffer_bytes, Some(524_288));
@@ -522,7 +522,7 @@ fn client_config_maps_java_security_properties_to_wire_connection_config() {
         .producer_config()
         .expect("security properties should be accepted");
 
-    let config = producer.to_connection_config();
+    let config = producer.to_connection_config().expect("connection config");
 
     assert_eq!(producer.security_protocol, "SASL_SSL");
     assert_eq!(producer.sasl_mechanism, "SCRAM-SHA-512");
@@ -701,8 +701,12 @@ fn consumer_and_admin_configs_map_java_security_properties_to_wire_connection_co
         .admin_config()
         .expect("admin security properties should be accepted");
 
-    let consumer_connection = consumer.to_connection_config();
-    let admin_connection = admin.to_connection_config();
+    let consumer_connection = consumer
+        .to_connection_config()
+        .expect("consumer connection config");
+    let admin_connection = admin
+        .to_connection_config()
+        .expect("admin connection config");
 
     assert_eq!(
         consumer_connection.security.protocol,

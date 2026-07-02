@@ -288,9 +288,6 @@ pub(super) struct JoinResult {
     pub members: Vec<MemberSubscription>,
 }
 
-/// Run one `JoinGroup` round for the classic (eager) `range` protocol,
-/// transparently retrying once with the coordinator-assigned member id when the
-/// broker demands one (`MEMBER_ID_REQUIRED`).
 /// The per-round `JoinGroup` inputs beyond the routing context.
 pub(super) struct JoinRequest<'a> {
     pub member_id: &'a str,
@@ -302,6 +299,10 @@ pub(super) struct JoinRequest<'a> {
     pub owned: &'a [TopicPartition],
 }
 
+/// Drive the classic `JoinGroup` handshake to completion, retrying as needed: it
+/// adopts the coordinator-assigned member id on `MEMBER_ID_REQUIRED`, and resets
+/// to a fresh member id on `UNKNOWN_MEMBER_ID`/`ILLEGAL_GENERATION`, looping until
+/// the broker accepts the join or returns another error.
 pub(super) async fn join_group(
     context: &GroupContext<'_>,
     join: &JoinRequest<'_>,

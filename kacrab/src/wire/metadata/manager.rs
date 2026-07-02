@@ -127,10 +127,6 @@ impl MetadataManager {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let topics = topics
-            .into_iter()
-            .map(|topic| topic.as_ref().to_owned())
-            .collect::<Vec<_>>();
         let snapshot = self.snapshot.as_ref()?;
         if now.duration_since(snapshot.updated_at) > self.config.metadata_max_age {
             return None;
@@ -138,17 +134,11 @@ impl MetadataManager {
         if self.update_requested {
             return None;
         }
-        let requested = topics.iter().collect::<HashSet<_>>();
-        if !requested
-            .iter()
-            .all(|topic| snapshot.metadata.topic(topic).is_some())
-        {
-            return None;
-        }
-        if !requested
-            .iter()
-            .all(|topic| self.topic_is_fresh(topic, now))
-        {
+        let all_present_and_fresh = topics.into_iter().all(|topic| {
+            let topic = topic.as_ref();
+            snapshot.metadata.topic(topic).is_some() && self.topic_is_fresh(topic, now)
+        });
+        if !all_present_and_fresh {
             return None;
         }
         Some(Arc::clone(&snapshot.metadata))

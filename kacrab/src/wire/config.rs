@@ -39,8 +39,9 @@ pub const DEFAULT_BROKER_QUEUE_CAPACITY: usize = 1024;
 /// Initial reconnect delay. Kafka's default is 50ms; kacrab uses 100ms to avoid
 /// tight reconnect loops while the async task model is still coarse-grained.
 pub const DEFAULT_RECONNECT_BACKOFF_INITIAL: Duration = Duration::from_millis(100);
-/// Maximum reconnect delay for the current deterministic backoff path; kept
-/// below request timeout so pending commands are cleaned up promptly.
+/// Maximum reconnect delay before the reconnect backoff applies its ±20%
+/// jitter; kept below request timeout so pending commands are cleaned up
+/// promptly.
 pub const DEFAULT_RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// Zero disables buffer pooling by default, leaving allocation behavior explicit
 /// until users opt into the runtime memory tradeoff.

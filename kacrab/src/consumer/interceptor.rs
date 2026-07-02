@@ -66,6 +66,9 @@ impl ConsumerInterceptors {
     /// through the chain. A panicking interceptor is skipped (records unchanged).
     pub(super) fn on_consume(&self, mut records: ConsumerRecords) -> ConsumerRecords {
         for interceptor in self.inner.iter() {
+            // Snapshot to restore on panic: `on_consume` takes the batch by value
+            // (Kafka's transform-and-return contract), so a panicking interceptor
+            // would consume it. Only paid when interceptors are actually registered.
             let previous = records.clone();
             match catch_interceptor_unwind(|| interceptor.on_consume(records)) {
                 Some(intercepted) => records = intercepted,

@@ -60,7 +60,7 @@ impl BackoffState {
 
     pub(crate) fn next_delay(&mut self) -> Result<Duration> {
         let mut bytes = [0_u8; 4];
-        getrandom::fill(&mut bytes).map_err(|error| WireError::RandomBytes(error.to_string()))?;
+        getrandom::fill(&mut bytes).map_err(WireError::RandomBytes)?;
         let sample = sample_from_random_bytes(bytes);
         Ok(self.next_delay_with_sample(sample))
     }

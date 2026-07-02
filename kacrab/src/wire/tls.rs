@@ -178,6 +178,9 @@ impl ServerCertVerifier for SkipServerNameVerifier {
 }
 
 fn enabled_protocol_versions(config: &TlsConfig) -> Result<Vec<&'static SupportedProtocolVersion>> {
+    // `ssl.protocol` only names the preferred family; `ssl.enabled.protocols`
+    // below drives the actual version list. We still resolve it here purely to
+    // reject an unsupported `ssl.protocol` value before continuing.
     let _preferred = protocol_version(config.protocol.as_str())?;
     let protocols = config
         .enabled_protocols
@@ -219,10 +222,30 @@ fn protocol_version(value: &str) -> Result<&'static SupportedProtocolVersion> {
 fn root_store(config: &TlsConfig) -> Result<RootCertStore> {
     let mut roots = RootCertStore::empty();
     let native = rustls_native_certs::load_native_certs();
+    // `load_native_certs` reports partial failures via `errors` while still
+    // returning whatever certificates it could parse. If the OS trust store
+    // contributed nothing *and* reported errors, surface them instead of
+    // silently narrowing the trust anchors to an empty set; only do so when no
+    // explicit truststore is configured below to fall back on.
+    let native_store_failed = native.certs.is_empty() && !native.errors.is_empty();
     for cert in native.certs {
         roots.add(cert).map_err(|error| {
             WireError::InvalidTlsConfig(format!("native root certificate rejected: {error}"))
         })?;
+    }
+    if native_store_failed
+        && config.truststore_certificates.is_none()
+        && config.truststore_location.is_none()
+    {
+        let details = native
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(WireError::InvalidTlsConfig(format!(
+            "no OS trust anchors could be loaded: {details}"
+        )));
     }
     if let Some(pem) = &config.truststore_certificates {
         add_pem_certs(&mut roots, pem.as_bytes(), "ssl.truststore.certificates")?;

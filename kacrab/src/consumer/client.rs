@@ -197,7 +197,9 @@ impl Consumer {
             client_id: (!config.client_id.is_empty()).then(|| config.client_id.clone()),
             group_id: (!runtime.group_id.is_empty()).then(|| runtime.group_id.clone()),
         };
-        let connection = config.to_connection_config();
+        let connection = config
+            .to_connection_config()
+            .map_err(|error| ConsumerError::Config { error })?;
         let wire =
             WireClient::connect_with_brokers(connection, config.client_id.clone(), endpoints);
         let needs_rejoin = Arc::new(AtomicBool::new(false));
@@ -288,7 +290,7 @@ impl Consumer {
     }
 
     /// Manually assign a set of partitions to this consumer, replacing any prior
-    /// assignment. This is the Phase 1 path (no group coordination).
+    /// assignment. Manual assignment bypasses group coordination.
     pub fn assign(&mut self, partitions: impl IntoIterator<Item = TopicPartition>) {
         let partitions: Vec<TopicPartition> = partitions.into_iter().collect();
         self.subscription.assign(&partitions);

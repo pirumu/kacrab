@@ -1,8 +1,10 @@
-//! Consumer group metadata used by transactional offset commits.
+//! Consumer group metadata, returned by `Consumer::group_metadata` and used by
+//! transactional offset commits.
 
 use std::fmt;
 
-/// Consumer group metadata used by transactional offset commits.
+/// Consumer group metadata, returned by `Consumer::group_metadata` and used by
+/// transactional offset commits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(
     clippy::struct_field_names,

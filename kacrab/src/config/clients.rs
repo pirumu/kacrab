@@ -366,7 +366,7 @@ kafka_config! {
         #[status(native_review)]
         #[source("https://kafka.apache.org/43/configuration/producer-configs/#producerconfigs_ssl.truststore.type")]
         #[feature("tls-rustls")]
-        #[comment("Truststore format; rustls backend supports PEM material.")]
+        #[comment("Truststore format; rustls backend supports PEM, JKS, and PKCS12 material.")]
         ssl_truststore_type: Option<String>,
 
         #[key("ssl.keystore.location")]
@@ -416,7 +416,7 @@ kafka_config! {
         #[status(native_review)]
         #[source("https://kafka.apache.org/43/configuration/producer-configs/#producerconfigs_ssl.keystore.type")]
         #[feature("tls-rustls")]
-        #[comment("Keystore format; rustls backend supports PEM material.")]
+        #[comment("Keystore format; rustls backend supports PEM, JKS, and PKCS12 material.")]
         ssl_keystore_type: Option<String>,
 
         #[key("ssl.key.password")]
@@ -902,7 +902,6 @@ kafka_config! {
         #[status(native)]
         #[origin(kacrab_runtime)]
         #[source("kacrab-runtime://config/socket.read.buffer.capacity.bytes")]
-        #[feature("socket2")]
         #[comment("Initial reusable in-process read buffer capacity for broker frame reads.")]
         socket_read_buffer_capacity_bytes: Option<usize>,
 
@@ -1052,19 +1051,29 @@ macro_rules! connection_config_fields {
 
 impl ProducerConfig {
     /// Builds a wire connection config from this typed producer config.
-    #[must_use]
-    pub fn to_connection_config(&self) -> crate::wire::ConnectionConfig {
-        connection_config_from_fields(&connection_config_fields!(self, {
-            metadata_max_idle_ms: self.metadata_max_idle_ms,
-            reconnect_backoff_ms: Some(self.reconnect_backoff_ms),
-            reconnect_backoff_max_ms: Some(self.reconnect_backoff_max_ms),
-            retry_backoff_ms: Some(self.retry_backoff_ms),
-            retry_backoff_max_ms: Some(self.retry_backoff_max_ms),
-            max_in_flight_requests_per_connection: Some(self.max_in_flight_requests_per_connection),
-            broker_queue_capacity: self.broker_queue_capacity,
-            buffer_pool_capacity: self.buffer_pool_capacity,
-            allow_auto_topic_creation: false,
-        }))
+    ///
+    /// # Errors
+    ///
+    /// Returns a `ConfigError::InvalidValue` when `security.protocol` or (when
+    /// SASL is in use) `sasl.mechanism` cannot be parsed, rather than silently
+    /// downgrading to a default protocol.
+    pub fn to_connection_config(
+        &self,
+    ) -> Result<crate::wire::ConnectionConfig, crate::config::ConfigError> {
+        connection_config_from_fields(
+            &connection_config_fields!(self, {
+                metadata_max_idle_ms: self.metadata_max_idle_ms,
+                reconnect_backoff_ms: Some(self.reconnect_backoff_ms),
+                reconnect_backoff_max_ms: Some(self.reconnect_backoff_max_ms),
+                retry_backoff_ms: Some(self.retry_backoff_ms),
+                retry_backoff_max_ms: Some(self.retry_backoff_max_ms),
+                max_in_flight_requests_per_connection: Some(self.max_in_flight_requests_per_connection),
+                broker_queue_capacity: self.broker_queue_capacity,
+                buffer_pool_capacity: self.buffer_pool_capacity,
+                allow_auto_topic_creation: false,
+            }),
+            crate::config::ClientKind::Producer,
+        )
     }
 
     /// Builds runtime producer settings from this typed producer config.
@@ -1078,37 +1087,57 @@ impl ProducerConfig {
 
 impl ConsumerConfig {
     /// Builds a wire connection config from this typed consumer config.
-    #[must_use]
-    pub fn to_connection_config(&self) -> crate::wire::ConnectionConfig {
-        connection_config_from_fields(&connection_config_fields!(self, {
-            metadata_max_idle_ms: DurationMs::from_millis(300_000),
-            reconnect_backoff_ms: None,
-            reconnect_backoff_max_ms: None,
-            retry_backoff_ms: None,
-            retry_backoff_max_ms: None,
-            max_in_flight_requests_per_connection: None,
-            broker_queue_capacity: None,
-            buffer_pool_capacity: None,
-            allow_auto_topic_creation: self.allow_auto_create_topics,
-        }))
+    ///
+    /// # Errors
+    ///
+    /// Returns a `ConfigError::InvalidValue` when `security.protocol` or (when
+    /// SASL is in use) `sasl.mechanism` cannot be parsed, rather than silently
+    /// downgrading to a default protocol.
+    pub fn to_connection_config(
+        &self,
+    ) -> Result<crate::wire::ConnectionConfig, crate::config::ConfigError> {
+        connection_config_from_fields(
+            &connection_config_fields!(self, {
+                metadata_max_idle_ms: DurationMs::from_millis(300_000),
+                reconnect_backoff_ms: None,
+                reconnect_backoff_max_ms: None,
+                retry_backoff_ms: None,
+                retry_backoff_max_ms: None,
+                max_in_flight_requests_per_connection: None,
+                broker_queue_capacity: None,
+                buffer_pool_capacity: None,
+                allow_auto_topic_creation: self.allow_auto_create_topics,
+            }),
+            crate::config::ClientKind::Consumer,
+        )
     }
 }
 
 impl AdminConfig {
     /// Builds a wire connection config from this typed admin config.
-    #[must_use]
-    pub fn to_connection_config(&self) -> crate::wire::ConnectionConfig {
-        connection_config_from_fields(&connection_config_fields!(self, {
-            metadata_max_idle_ms: DurationMs::from_millis(300_000),
-            reconnect_backoff_ms: None,
-            reconnect_backoff_max_ms: None,
-            retry_backoff_ms: None,
-            retry_backoff_max_ms: None,
-            max_in_flight_requests_per_connection: None,
-            broker_queue_capacity: None,
-            buffer_pool_capacity: None,
-            allow_auto_topic_creation: false,
-        }))
+    ///
+    /// # Errors
+    ///
+    /// Returns a `ConfigError::InvalidValue` when `security.protocol` or (when
+    /// SASL is in use) `sasl.mechanism` cannot be parsed, rather than silently
+    /// downgrading to a default protocol.
+    pub fn to_connection_config(
+        &self,
+    ) -> Result<crate::wire::ConnectionConfig, crate::config::ConfigError> {
+        connection_config_from_fields(
+            &connection_config_fields!(self, {
+                metadata_max_idle_ms: DurationMs::from_millis(300_000),
+                reconnect_backoff_ms: None,
+                reconnect_backoff_max_ms: None,
+                retry_backoff_ms: None,
+                retry_backoff_max_ms: None,
+                max_in_flight_requests_per_connection: None,
+                broker_queue_capacity: None,
+                buffer_pool_capacity: None,
+                allow_auto_topic_creation: false,
+            }),
+            crate::config::ClientKind::Admin,
+        )
     }
 }
 
@@ -1194,16 +1223,35 @@ struct ConnectionConfigFields {
     sasl_kerberos_min_time_before_relogin: DurationMs,
 }
 
-fn connection_config_from_fields(fields: &ConnectionConfigFields) -> crate::wire::ConnectionConfig {
+fn connection_config_from_fields(
+    fields: &ConnectionConfigFields,
+    client: crate::config::ClientKind,
+) -> Result<crate::wire::ConnectionConfig, crate::config::ConfigError> {
     let default = crate::wire::ConnectionConfig::default();
+    // Reject an unparseable `security.protocol` instead of silently downgrading
+    // to the default (PLAINTEXT), which would be a silent security downgrade.
     let security_protocol = crate::wire::SecurityProtocol::parse(&fields.security_protocol)
-        .unwrap_or(default.security.protocol);
+        .map_err(|_| crate::config::ConfigError::InvalidValue {
+            client,
+            key: "security.protocol",
+            target: "SecurityProtocol",
+            value: fields.security_protocol.clone(),
+        })?;
     let sasl_mechanism = if security_protocol.uses_sasl() {
-        crate::wire::SaslMechanism::parse(&fields.sasl_mechanism).ok()
+        Some(
+            crate::wire::SaslMechanism::parse(&fields.sasl_mechanism).map_err(|_| {
+                crate::config::ConfigError::InvalidValue {
+                    client,
+                    key: "sasl.mechanism",
+                    target: "SaslMechanism",
+                    value: fields.sasl_mechanism.clone(),
+                }
+            })?,
+        )
     } else {
         None
     };
-    crate::wire::ConnectionConfig {
+    Ok(crate::wire::ConnectionConfig {
         socket: socket_config_from_fields(fields),
         security: crate::wire::SecurityConfig {
             protocol: security_protocol,
@@ -1248,7 +1296,7 @@ fn connection_config_from_fields(fields: &ConnectionConfigFields) -> crate::wire
             .unwrap_or(default.buffer_pool_capacity),
         allow_auto_topic_creation: fields.allow_auto_topic_creation,
         use_all_dns_ips: dns_lookup_uses_all_ips(&fields.client_dns_lookup),
-    }
+    })
 }
 
 fn socket_config_from_fields(fields: &ConnectionConfigFields) -> crate::wire::SocketConfig {
@@ -1356,7 +1404,7 @@ fn sasl_config_from_fields(
 }
 
 fn seconds_from_i32(value: i32) -> std::time::Duration {
-    positive_i32_to_u64(value)
+    non_negative_i32_to_u64(value)
         .map(std::time::Duration::from_secs)
         .unwrap_or_default()
 }
@@ -1376,7 +1424,7 @@ fn positive_i32_to_usize(value: i32) -> Option<usize> {
         .filter(|value| *value > 0)
 }
 
-fn positive_i32_to_u64(value: i32) -> Option<u64> {
+fn non_negative_i32_to_u64(value: i32) -> Option<u64> {
     u32::try_from(value).ok().map(u64::from)
 }
 
@@ -1411,7 +1459,8 @@ mod tests {
             .socket_read_buffer_capacity_bytes(Some(65_536))
             .build()
             .expect("consumer config")
-            .to_connection_config();
+            .to_connection_config()
+            .expect("connection config");
 
         assert_eq!(config.socket.send_buffer_bytes, Some(131_072));
         assert_eq!(config.socket.receive_buffer_bytes, Some(262_144));
@@ -1471,7 +1520,8 @@ mod tests {
             .socket_read_buffer_capacity_bytes(Some(32_768))
             .build()
             .expect("admin config")
-            .to_connection_config();
+            .to_connection_config()
+            .expect("connection config");
 
         assert_eq!(config.socket.send_buffer_bytes, Some(65_536));
         assert_eq!(config.socket.receive_buffer_bytes, Some(98_304));
@@ -1509,7 +1559,8 @@ mod tests {
             .reconnect_backoff_max_ms(DurationMs::from_millis(71))
             .build()
             .expect("producer config")
-            .to_connection_config();
+            .to_connection_config()
+            .expect("connection config");
 
         assert_eq!(
             config.connections_max_idle,
@@ -1535,7 +1586,8 @@ mod tests {
             .metadata_recovery_rebootstrap_trigger_ms(DurationMs::from_millis(41))
             .build()
             .expect("producer config")
-            .to_connection_config();
+            .to_connection_config()
+            .expect("connection config");
 
         assert_eq!(
             config.metadata_max_age,
@@ -2427,7 +2479,6 @@ kafka_config! {
         #[status(native)]
         #[origin(kacrab_runtime)]
         #[source("kacrab-runtime://config/socket.read.buffer.capacity.bytes")]
-        #[feature("socket2")]
         #[comment("Initial reusable in-process read buffer capacity for broker frame reads.")]
         socket_read_buffer_capacity_bytes: Option<usize>,
     }
@@ -3126,7 +3177,6 @@ kafka_config! {
         #[status(native)]
         #[origin(kacrab_runtime)]
         #[source("kacrab-runtime://config/socket.read.buffer.capacity.bytes")]
-        #[feature("socket2")]
         #[comment("Initial reusable in-process read buffer capacity for broker frame reads.")]
         socket_read_buffer_capacity_bytes: Option<usize>,
     }
