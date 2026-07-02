@@ -1,10 +1,14 @@
-# Compression
+# Traveling light: compression
 
-Compression happens at the record-batch level: a batch of records is serialized,
-the record block is compressed, and the compressed bytes go inside a record-batch
-v2 envelope with a CRC over them. Every Kafka client and broker must frame this
-identically, which is why kacrab's codecs are
-[proven on a real broker](./verification.md), not just round-tripped in process.
+A caravan moves faster carrying less, and so does a Kafka pipeline — compressed
+batches multiply effective network *and broker disk* throughput. Compression
+happens at the record-batch level: a batch of records is serialized, the record
+block is compressed, and the compressed bytes go inside a record-batch v2
+envelope with a CRC over them. Every Kafka client and broker must frame this
+identically — get it *almost* right and your own process reads the bytes back
+fine while the broker rejects them — which is why kacrab's codecs are
+[proven on a real broker](./verification.md), not just round-tripped in
+process.
 
 ## Codecs
 
@@ -67,3 +71,16 @@ That gap is exactly why the [verification](./verification.md) test does three
 things end to end: produce each codec, confirm with `kafka-dump-log` that the
 on-disk batch is stored with the **right codec** (a silently-uncompressed send
 fails here), and consume the payloads back through `kafka-console-consumer`.
+
+## Field notes
+
+- Default recommendation: `compression.type=zstd` for ratio, `lz4` when CPU
+  is the scarce resource. Both are covered in the
+  [producer field guide](./field-guide/producer.md).
+- `compression.lz4.level` silently does nothing without the `lz4-hc`
+  feature — the pure-Rust backend is fast-mode only.
+- Consumers need no codec config: the batch header names its codec, and the
+  `consumer` feature already enables all four backends.
+- Building without a C toolchain (cross-compilation, minimal images): take
+  `gzip` + `snappy` + `lz4` only, and skip `zstd`/`lz4-hc`/the
+  `compression` meta-feature.

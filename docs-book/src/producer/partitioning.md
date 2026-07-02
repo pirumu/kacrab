@@ -1,9 +1,11 @@
-# Partitioning
+# Choosing a partition
 
-Every record needs a partition. kacrab chooses it exactly as the Java client
-does — which matters more than it sounds: a different choice means a different
-key→partition mapping, which breaks ordering guarantees and consumer
-expectations for anyone running both clients against the same topic.
+The first fork in every record's road: which partition? It looks like a detail
+and is actually a contract. kacrab chooses exactly as the Java client does,
+because a different choice means a different key→partition mapping — which
+silently breaks ordering guarantees and consumer expectations for anyone
+running both clients against the same topic. This was one of the first places
+the journey demanded *byte-exactness*, not just compatibility.
 
 ## Keyed records: murmur2, byte-exact
 
@@ -72,3 +74,16 @@ pub trait ProducerPartitioner: Send + Sync + 'static {
 > identical to Java, not just "compatible". kacrab treats murmur2, CRC32C, and the
 > varint/zigzag encodings as that kind of contract — tested against the Java
 > output, not just against themselves.
+
+## Field notes
+
+- A key is an **ordering contract** — choose it for the order you need, and
+  watch cardinality: a hot key is a hot partition no client can fix.
+- Null-keyed traffic is well served by the default sticky/adaptive path;
+  forcing round-robin scatters batches and costs throughput.
+- The adaptive re-sampling story above is why "it worked in the old version"
+  is not a tuning argument — measure your own partition spread
+  (`producer-topic-metrics`) before overriding
+  `partitioner.adaptive.partitioning.enable`.
+
+More in the [producer field guide](../field-guide/producer.md).

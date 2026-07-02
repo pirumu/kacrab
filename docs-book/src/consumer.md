@@ -1,9 +1,14 @@
 # The consumer client
 
-The `consumer` feature adds `kacrab::consumer::Consumer`, a native implementation
-of Apache Kafka's `Consumer`, built on the same wire/session layer (and therefore
-the same TLS/SASL auth) as the producer and admin clients. Like the rest of
-kacrab, "Java-compatible" means Kafka-protocol- and behaviour-compatible, not a
+The road back: everything the producer wrote, read again — in order, from the
+right place, shared fairly across a group, surviving the log moving underneath.
+Consuming turned out to be the *stateful* half of the journey; where the
+producer defends one invariant (sequences ascend), the consumer juggles three
+state machines at once. The `consumer` feature adds
+`kacrab::consumer::Consumer`, a native implementation of Apache Kafka's
+`Consumer`, built on the same wire/session layer (and therefore the same
+TLS/SASL auth) as the producer and admin clients. Like the rest of kacrab,
+"Java-compatible" means Kafka-protocol- and behaviour-compatible, not a
 literal port.
 
 It supports **manual partition assignment**, **topic and pattern subscription**,
@@ -163,4 +168,19 @@ A latent connection bug surfaced during verification: a coordinator advertised a
 `localhost` resolving to a dead IPv6 loopback made a pinned connection hang. The
 fix centralized DNS in the wire layer — brokers are re-resolved on connect,
 IPv4-first, honouring `client.dns.lookup=use_all_dns_ips` — so the producer,
-admin, and consumer all benefit.
+admin, and consumer all benefit (see [First contact](./wire.md)).
+
+## Field notes
+
+The consumer's configuration is where semantics live — the
+[consumer field guide](./field-guide/consumer.md) is the full treatment. The
+three decisions to make before deployment:
+
+- **Commit discipline**: auto-commit (periodic, at-least-once with idempotent
+  handlers) vs manual `commit_sync` after processing.
+- **`auto.offset.reset`**: `latest`, `earliest`, or `none` — chosen, not
+  inherited, because it also decides what happens when retention outruns a
+  stopped consumer.
+- **Rebalance posture**: `cooperative-sticky` alone (or
+  `group.protocol=consumer` on 4.x clusters) plus `group.instance.id` per
+  instance for calm rolling deploys.

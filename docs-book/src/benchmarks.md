@@ -1,8 +1,11 @@
 # Benchmarks & methodology
 
-Numbers are only as good as the method behind them. This chapter gives the
-headline figures and — more importantly — how they were measured and what they do
-*not* claim. Full reproduction lives in
+The journey's final weighing: what did going native actually buy? Numbers are
+only as good as the method behind them — two of this book's performance
+war stories (the SSH-tunnel trap, the `getenv` lock) are about the *harness*
+lying, not the client — so this chapter gives the headline figures and, more
+importantly, how they were measured and what they do *not* claim. Full
+reproduction lives in
 [`benches/README.md`](https://github.com/pirumu/kacrab/blob/master/benches/README.md).
 
 ## The headline

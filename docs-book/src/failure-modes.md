@@ -1,9 +1,11 @@
-# Failure modes
+# When brokers die: failure modes
 
-A producer that works on a healthy cluster is a demo. A producer you can run is
+A client that works on a healthy cluster is a demo. A client you can run is
 one that does the *right thing* when a broker dies mid-flight, a credential is
 wrong, a leader moves under load, or a request is lost with no answer. This
-chapter is the catalogue of "what goes wrong and what kacrab does".
+chapter is the storm log of the journey — the catalogue of what went wrong (in
+testing, on purpose, and once or twice by surprise) and what kacrab does about
+each one now.
 
 ## Retryable vs fatal
 
@@ -70,3 +72,33 @@ bound: `send` blocks up to `max.block.ms` when `buffer.memory` is exhausted, and
 the wire pipeline rejects with `Backpressure` when every in-flight slot is full.
 The goal is bounded memory under sustained overload — the property the
 [production-acceptance soak](./benchmarks.md) is meant to confirm over hours.
+
+## The consumer's storms
+
+The consumer weathers its own set, each covered in depth in Part V:
+
+- **A moved coordinator** (broker restart, `__consumer_offsets` reassignment)
+  answers `NOT_COORDINATOR`; kacrab drops the cached coordinator and
+  re-discovers it, retrying commits and rejoins — without this, every commit
+  fails forever after a failover
+  ([rebalancing](./consumer/rebalancing.md)).
+- **An aged-out or out-of-range offset** is partition-local and routine:
+  the one partition resets via `auto.offset.reset`, the rest of the poll
+  keeps flowing ([fetching](./consumer/fetching.md)).
+- **A truncated log after leader change** is detected with
+  `OffsetForLeaderEpoch` and the position steps down to the divergence point
+  instead of reading offsets that no longer exist (KIP-320).
+
+## Field notes
+
+- Every failure here maps to a time budget you own: `delivery.timeout.ms`
+  for produced records, `max.block.ms` for buffer waits,
+  `default.api.timeout.ms` for consumer/admin calls. Set them to your real
+  freshness requirements — the [field guide](./field-guide/foundations.md)
+  has the ladder.
+- Back-pressure symptoms ("send is hanging!") usually mean the budget is
+  working: the buffer is full because the cluster is slow. Fix the cluster
+  or widen the buffer knowingly; don't reach for `max.block.ms=0` first.
+- The burst-wedge above is the argument for *testing your own failover*:
+  it only reproduces with multiple partitions, a mid-burst broker loss, and
+  batching — no unit test finds it.

@@ -1,9 +1,13 @@
-# Security: SASL & TLS
+# Proving who we are: SASL & TLS
 
-kacrab speaks every authentication mechanism the Java client does, over plain
-TCP or TLS. This chapter covers the handshakes — including the parts that are
-easy to get *almost* right, which is the same as getting wrong. Every path here
-is [verified end-to-end against real brokers](./verification.md).
+Past the friendly single-broker campsite, the road runs through checkpoints:
+production clusters demand you prove who you are before they say a word. This
+leg of the journey held the most traps of any — two authentication mechanisms
+hide an extra protocol round that a client can skip and *appear* to work,
+right up until the first real request. kacrab speaks every mechanism the Java
+client does, over plain TCP or TLS, and every path here is
+[verified end-to-end against real brokers](./verification.md) — including a
+real Kerberos KDC.
 
 `security.protocol` selects the combination:
 
@@ -136,3 +140,18 @@ loads from PEM (inline or file), JKS, or PKCS12 — the same `ssl.truststore.*` 
 > real MIT Kerberos KDC, and one-way + mutual TLS, each authenticating and running
 > `ApiVersions`, with negative cases (bad credentials, expired token, untrusted
 > cert) confirming rejection is fast and clear. See [Verification](./verification.md).
+
+## Field notes
+
+- Production baseline: `SASL_SSL` + `SCRAM-SHA-512` (or OAUTHBEARER against
+  an identity provider). `PLAIN` sends the password to the broker — only
+  ever inside TLS.
+- Keep `ssl.endpoint.identification.algorithm=https` (the default). Blanking
+  it disables the hostname check and invites exactly the man-in-the-middle
+  that SCRAM's server-signature verification exists to catch.
+- Auth failures are **fatal and fast** by design. A wrong password surfaces
+  as the broker's real reason at connect — if you see a 30-second timeout
+  instead, you are running a client with the bug this chapter opened with.
+- JVM `sasl.jaas.config` class names cannot cross into a Rust process;
+  custom flows use the native `sasl_client_authenticator` hook — see the
+  [foundations field guide](./field-guide/foundations.md).

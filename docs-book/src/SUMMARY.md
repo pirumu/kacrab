@@ -1,31 +1,46 @@
 # Summary
 
-[Introduction](./introduction.md)
+[The expedition brief](./introduction.md)
 
-# Architecture
+# Part I — Setting out
 
-- [System overview](./overview.md)
-- [The wire layer](./wire.md)
-- [The producer pipeline](./producer/pipeline.md)
+- [The map](./overview.md)
+- [First contact: the wire layer](./wire.md)
+- [Learning the language: protocol codegen](./codegen.md)
+
+# Part II — The producer's road
+
+- [Following one record](./producer/pipeline.md)
+- [Choosing a partition](./producer/partitioning.md)
+- [Exactly once, even when the network lies](./producer/idempotency.md)
+- [Traveling light: compression](./compression.md)
+
+# Part III — Hostile territory
+
+- [Proving who we are: SASL & TLS](./security.md)
+- [When brokers die: failure modes](./failure-modes.md)
+
+# Part IV — A side expedition: the admin client
+
 - [The admin client](./admin.md)
+
+# Part V — The road back: the consumer
+
 - [The consumer client](./consumer.md)
+- [Sharing the load: groups & rebalancing](./consumer/rebalancing.md)
+- [Reading in order: fetching, positions & offsets](./consumer/fetching.md)
 
-# Algorithms (the deep dives)
+# Part VI — Proof
 
-- [Idempotency & transactions](./producer/idempotency.md)
-- [Partitioning (murmur2 + sticky/adaptive)](./producer/partitioning.md)
-- [Group membership & rebalancing](./consumer/rebalancing.md)
-- [Fetching, positions & offsets](./consumer/fetching.md)
-- [Compression](./compression.md)
-- [Security: SASL & TLS](./security.md)
-- [Protocol code generation](./codegen.md)
-
-# Correctness & performance
-
-- [Failure modes](./failure-modes.md)
 - [Testing, coverage & CI](./testing-and-ci.md)
 - [Verification against real brokers](./verification.md)
 - [Benchmarks & methodology](./benchmarks.md)
+
+# Part VII — The field guide
+
+- [Foundations every client shares](./field-guide/foundations.md)
+- [Tuning the producer](./field-guide/producer.md)
+- [Tuning the consumer](./field-guide/consumer.md)
 
 # Reference
 

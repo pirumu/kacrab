@@ -1,11 +1,14 @@
-# Idempotency & transactions
+# Exactly once, even when the network lies
 
-This is the producer's correctness core. The promise of an idempotent producer
-is simple to state and hard to keep: **every record is written to the log
-exactly once and in order, even across retries, reconnects, and broker
-failovers.** Kafka delivers this with a `(producer id, epoch, base sequence)`
-triple stamped on every record batch, and a per-partition state machine on both
-the client and the broker. kacrab reproduces that state machine.
+This is the hardest leg of the producer's road, and the one the rest of the
+journey was planned around. The promise of an idempotent producer is simple to
+state and brutal to keep: **every record is written to the log exactly once
+and in order, even across retries, reconnects, and broker failovers** — even
+when the network swallows a response and refuses to say whether the write
+landed. Kafka delivers this with a `(producer id, epoch, base sequence)`
+triple stamped on every record batch, and a per-partition state machine on
+both the client and the broker. kacrab reproduces that state machine — the
+*real* one, from the Java client's source, not a simplified sketch.
 
 > **The invariant we defend**
 >
@@ -144,3 +147,19 @@ to each batch.
 > The whole transactional path was smoke-tested against a real broker
 > (`InitProducerId` → `begin` → `send` → `commit` → delivery receipt). See the
 > `real_kafka_producer` test in [Verification](../verification.md).
+
+## Field notes
+
+Everything in this chapter runs at the **default** config — that is the point:
+
+- `enable.idempotence=true` and `acks=all` are the defaults; leave them.
+  Turning idempotence off to "save overhead" forfeits both dedup *and*
+  ordering under retry, for a few bytes per batch.
+- `max.in.flight.requests.per.connection ≤ 5` is the ceiling under which the
+  sequencing above holds; 5 is the default and the sweet spot.
+- Bound retries with `delivery.timeout.ms`, not `retries` — the state machine
+  makes retries safe, so let time be the budget.
+- `transactional.id`: stable per logical producer, unique per instance —
+  sharing one across two live producers triggers fencing *by design*.
+
+The [producer field guide](../field-guide/producer.md) puts these in context.
