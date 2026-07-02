@@ -338,11 +338,10 @@ subscribe as a group, `max.poll.records=500`, no compression.
 
 | Metric | kacrab | Java `kafka-consumer-perf-test` |
 | --- | ---: | ---: |
-| Throughput | ~516K records/sec (~5,042 MB/sec) | ~158K records/sec (~1,542 MB/sec) |
-| Fetch-phase rate | ~529K records/sec | ~199K records/sec |
+| Throughput | ~480-516K records/sec (~4,680-5,040 MB/sec) | ~158K records/sec (~1,542 MB/sec) |
 | Rebalance (join) time | ~4 ms | ~132 ms |
 
-kacrab consumes large records **~3.3x faster** than Java. Variants (single
+kacrab consumes large records **~3-3.3x faster** than Java. Variants (single
 runs): KIP-848 `group.protocol=consumer` ~432K records/sec (join ~24 ms),
 manual assign ~538K records/sec. Same-workload footprint (`/usr/bin/time -l`,
 one run, ~1 GB consumed): kacrab ~0.15 s CPU / ~12 MiB peak RSS vs Java
@@ -351,26 +350,34 @@ includes JVM startup).
 
 ### Throughput (5,000,000 x 10 B, 16 partitions, `kacrab-c16p`)
 
-| Metric | kacrab (defaults) | kacrab (`max.poll.records=50000`) | Java (defaults) |
-| --- | ---: | ---: | ---: |
-| Throughput | ~132K records/sec | ~8.49M records/sec | ~9.23M records/sec |
-| Rebalance (join) time | ~12 ms | ~15 ms | ~133 ms |
+| Metric | kacrab | Java `kafka-consumer-perf-test` |
+| --- | ---: | ---: |
+| Throughput | ~11.8M records/sec (~113 MB/sec) | ~9.25M records/sec (~88 MB/sec) |
+| Fetch-phase rate | ~12.2M records/sec | ~12.3M records/sec |
+| Rebalance (join) time | ~12-14 ms | ~133 ms |
+| CPU (user+sys, one run) | ~0.40 s | ~2.51 s |
+| Peak RSS (one run) | ~536 MiB | ~312 MiB |
 
-**Known bottleneck (as of 2026-07-02): the consumer has no cross-poll fetch
-buffering.** Every `poll` issues one blocking Fetch RPC per leader, decodes at
-most `max.poll.records` records out of the response, and discards the surplus —
-the broker re-serves up to `max.partition.fetch.bytes x partitions` (~16 MiB
-here) for every 500 records consumed, so small-record throughput collapses to
-the per-poll round trip. Java instead buffers whole fetch responses client-side
-(`CompletedFetches`), drains 500 records per poll from memory, and only
-re-fetches partitions whose buffer ran dry. The `max.poll.records=50000` column
-is the proof: with the cap no longer discarding data, the same wire path runs
-within ~8% of Java **at a cap Java does not need**. The 10 KiB scenario dodges
-the bug because ~300 records fill a fetch response, under the 500 cap. The fix
-is Java-parity fetch buffering (decode whole responses into a per-partition
-buffer, drain in `poll`, refetch only empty partitions, clear on
-seek/reset/revoke); until it lands, treat the 10 B row as the known-bug
-baseline, not the architecture's ceiling.
+kacrab wins wall throughput by **~28%** at identical defaults
+(`max.poll.records=500`). The fetch-phase rates are near-identical — both
+clients saturate the same broker read path — so the wall-clock edge is kacrab's
+~10x-faster group join plus no JVM warmup inside the measured window. One
+honest asymmetry: on this 5M-tiny-record burst kacrab's peak RSS is ~1.7x
+Java's — 5M owned `ConsumerRecord`s (each with a heap topic `String`) churn
+through the allocator in ~0.4 s and macOS malloc retains the freed magazines.
+It plateaus (three consecutive 5M-record runs peak the same ~538 MiB, so
+nothing leaks), and the 10 KiB workload shows the opposite (12 vs 230 MiB), but
+a topic-interning follow-up (`Arc<str>` in `ConsumerRecord`) would shrink it.
+
+These numbers land on the first fetch-buffering implementation (2026-07-02).
+Before it, every `poll` issued a Fetch RPC, kept `max.poll.records` records,
+and discarded the response surplus the broker had just served — small-record
+throughput collapsed to ~132K records/sec (the broker re-served ~16 MiB per 500
+records consumed). The consumer now buffers raw fetch responses across polls
+(Java's `CompletedFetches`): one partition is decoded at a time, `poll` drains
+`max.poll.records` slices from memory, a partition is only re-fetched once its
+buffer runs dry (~12 Fetch RPCs per 5M-record run, down from 10,000), and
+buffered data is invalidated on seek/reset/revoke and retained across pause.
 
 ### Consumer Comparison Caveats
 

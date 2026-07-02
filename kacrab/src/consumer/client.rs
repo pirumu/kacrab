@@ -98,6 +98,10 @@ pub struct Consumer {
     last_modern_heartbeat: Option<Instant>,
     /// Per-broker incremental fetch sessions (KIP-227).
     fetch_sessions: fetch::FetchSessions,
+    /// Fetched-but-undrained records kept across polls (Java's
+    /// `completedFetches`): `poll` drains this `max.poll.records` at a time and
+    /// a partition is only re-fetched once its buffered data runs dry.
+    fetch_buffer: fetch::FetchBuffer,
     /// Ordered queue of asynchronous commits, drained one at a time by
     /// `async_commit_task` so two `commit_async` calls never land out of order —
     /// otherwise a stale commit could move the committed offset backwards (Java's
@@ -239,6 +243,7 @@ impl Consumer {
             modern_group: None,
             last_modern_heartbeat: None,
             fetch_sessions: fetch::FetchSessions::default(),
+            fetch_buffer: fetch::FetchBuffer::default(),
             async_commits,
             async_commit_task,
         })
@@ -765,7 +770,26 @@ impl Consumer {
                 self.reset_positions(&metadata).await?;
                 self.validate_positions(&metadata).await?;
 
-                let fetchable = self.subscription.fetchable_partitions();
+                // Serve buffered records first (Java's `collectFetch`): while
+                // data waits client-side no Fetch RPC is issued, so one fetch
+                // round's surplus is drained across polls instead of being
+                // re-served by the broker every poll.
+                let drained = self
+                    .fetch_buffer
+                    .drain(&self.subscription, self.config.max_poll_records)?;
+                if !drained.is_empty() {
+                    return Ok(self.deliver(drained));
+                }
+
+                // Fetch only partitions with no buffered data; the buffered
+                // ones are deliberately absent from the request, so the
+                // incremental fetch session forgets them until they run dry.
+                let fetchable: Vec<_> = self
+                    .subscription
+                    .fetchable_partitions()
+                    .into_iter()
+                    .filter(|(partition, _position)| !self.fetch_buffer.has(partition))
+                    .collect();
                 fetchable_empty = fetchable.is_empty();
                 if !fetchable.is_empty() {
                     self.metrics.record_fetch();
@@ -782,7 +806,6 @@ impl Consumer {
                             max_wait_ms,
                         },
                         &fetchable,
-                        self.config.max_poll_records,
                         &mut self.fetch_sessions,
                     )
                     .await?;
@@ -797,25 +820,14 @@ impl Consumer {
                         self.wire
                             .invalidate_topic_partition(&partition.topic, partition.partition);
                     }
-                    let mut records = ConsumerRecords::empty();
-                    for partition_fetch in progress.partitions {
-                        self.subscription.advance_position(
-                            &partition_fetch.partition,
-                            partition_fetch.next_offset,
-                            partition_fetch.next_leader_epoch,
-                        );
-                        records.push_partition(
-                            partition_fetch.partition.topic,
-                            partition_fetch.partition.partition,
-                            partition_fetch.records,
-                        );
+                    for raw in progress.partitions {
+                        self.fetch_buffer.push(raw);
                     }
-                    if !records.is_empty() {
-                        // Interceptors may rewrite or filter the batch before it
-                        // reaches the caller (Kafka `onConsume`).
-                        let records = self.interceptors.on_consume(records);
-                        self.metrics.record_records(records.count());
-                        return Ok(records);
+                    let drained = self
+                        .fetch_buffer
+                        .drain(&self.subscription, self.config.max_poll_records)?;
+                    if !drained.is_empty() {
+                        return Ok(self.deliver(drained));
                     }
                 }
             } else if !self.is_subscribed() {
@@ -833,6 +845,29 @@ impl Consumer {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
+    }
+
+    /// Advance positions past the drained records and hand them to the
+    /// interceptor chain — the tail of a record-yielding `poll`.
+    fn deliver(&mut self, drained: Vec<fetch::PartitionFetch>) -> ConsumerRecords {
+        let mut records = ConsumerRecords::empty();
+        for partition_fetch in drained {
+            self.subscription.advance_position(
+                &partition_fetch.partition,
+                partition_fetch.next_offset,
+                partition_fetch.next_leader_epoch,
+            );
+            records.push_partition(
+                partition_fetch.partition.topic,
+                partition_fetch.partition.partition,
+                partition_fetch.records,
+            );
+        }
+        // Interceptors may rewrite or filter the batch before it reaches the
+        // caller (Kafka `onConsume`).
+        let records = self.interceptors.on_consume(records);
+        self.metrics.record_records(records.count());
+        records
     }
 
     /// Interrupt a blocking [`Consumer::poll`] on this consumer. The next (or

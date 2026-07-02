@@ -12,18 +12,25 @@ issues.
 
 ### Added
 
+- Consumer cross-poll fetch buffering (Java's `CompletedFetches`): raw fetch
+  responses are buffered client-side, `poll` drains them `max.poll.records` at
+  a time (one partition decoded at a time), and a partition is only re-fetched
+  once its buffer runs dry. Buffered data is invalidated lazily on
+  seek/reset/revoke and retained across pause. Previously each poll re-fetched
+  — and the broker re-served — the response surplus past `max.poll.records`,
+  which capped small-record consumption at ~132K records/sec; the same
+  workload now runs ~11.8M records/sec (~12 Fetch RPCs per 5M-record run,
+  down from 10,000).
 - Real-Kafka consumer benchmark (`consumer_kafka_bench`) mirroring Java's
   `kafka-consumer-perf-test.sh` (same tool props, poll loop, timeout semantics,
   and final CSV columns), with a `KACRAB_BENCH_PREFILL=1` topic prefill, a Java
   baseline wrapper (`benches/scripts/consumer_default_matrix.sh`), and
   `make bench-kafka-consumer` / `bench-kafka-consumer-java-default` targets.
-  First head-to-head (2026-07-02): kacrab consumes 10 KiB records ~3.3x faster
-  than Java (~5.0 GB/s vs ~1.5 GB/s) at ~19x less CPU and ~20x less memory, but
-  small-record subscribe throughput collapses to ~132K records/sec vs Java's
-  ~9.2M because the consumer lacks cross-poll fetch buffering (each poll
-  re-fetches and discards the response surplus past `max.poll.records`); with
-  `max.poll.records=50000` the same wire path reaches ~8.5M records/sec. The
-  buffering fix is tracked in `benches/README.md`.
+  Head-to-head at identical defaults (2026-07-02, native Kafka 4.3.0): kacrab
+  consumes 10 B records ~28% faster than Java (~11.8M vs ~9.25M records/sec)
+  and 10 KiB records ~3x faster (~4.7-5.0 GB/s vs ~1.5 GB/s) at a fraction of
+  the CPU, with ~10x-faster group joins; caveats (peak-RSS churn on tiny-record
+  bursts, Fetch v12 vs v17) in `benches/README.md`.
 
 - Consumer client (`consumer` feature): `kacrab::consumer::Consumer` with manual
   partition assignment and classic consumer-group subscription. Fetch with

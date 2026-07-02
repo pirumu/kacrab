@@ -740,7 +740,7 @@ const fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     use super::{
         BENCH_RUNS, ConsumerPerfSummary, JoinTimeTracker, Scenario, civil_from_days,

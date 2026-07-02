@@ -66,29 +66,29 @@ The consumer benchmark mirrors Java's `kafka-consumer-perf-test.sh` exactly
 (fresh group per run, the tool's own props, 100 ms poll slices, the same CSV
 columns) against prefilled topics on the same native broker (2026-07-02):
 
-| Metric (100K × 10 KiB, 3 partitions) | kacrab | Java `kafka-consumer-perf-test` |
+| Metric (5M × 10B, 16 partitions) | kacrab | Java `kafka-consumer-perf-test` |
 |---|---:|---:|
-| Throughput | ~516K rec/s (~5,042 MB/s) | ~158K rec/s (~1,542 MB/s) |
+| Throughput | ~11.8M rec/s (~113 MB/s) | ~9.25M rec/s (~88 MB/s) |
+| Rebalance (join) time | ~12–14 ms | ~133 ms |
+| CPU (one run) | ~0.40 s | ~2.51 s |
+
+| Metric (100K × 10 KiB, 3 partitions) | kacrab | Java |
+|---|---:|---:|
+| Throughput | ~480–516K rec/s (~4,700–5,000 MB/s) | ~158K rec/s (~1,542 MB/s) |
 | Rebalance (join) time | ~4 ms | ~132 ms |
 | CPU / peak RSS (one run, ~1 GB) | ~0.15 s / ~12 MiB | ~2.85 s / ~230 MiB |
 
-On large records kacrab consumes **~3.3× faster** at ~19× less CPU and ~20×
-less memory. Small records tell the opposite story, deliberately documented:
-
-| Metric (5M × 10B, 16 partitions) | kacrab (defaults) | kacrab (`max.poll.records=50000`) | Java (defaults) |
-|---|---:|---:|---:|
-| Throughput | ~132K rec/s | ~8.49M rec/s | ~9.23M rec/s |
-
-The collapse at defaults is a known bottleneck, not a wire-path deficit: the
-consumer has no cross-poll fetch buffering yet, so every `poll` issues a fetch,
-keeps at most `max.poll.records` records, and discards the rest of the response
-the broker just served — up to ~16 MiB re-served per 500 records consumed. The
-`max.poll.records=50000` column shows the same wire path within ~8% of Java once
-the cap stops discarding data, and the 10 KiB scenario dodges the bug entirely
-(~300 records fill a response, under the cap). Java buffers whole fetch
-responses client-side and drains them across polls; the matching fix
-(per-partition fetch buffer, refetch only when dry, cleared on
-seek/reset/revoke) is the consumer's next perf milestone.
+kacrab consumes small records **~28% faster** and large records **~3×
+faster** than Java at identical defaults. The load-bearing piece is cross-poll
+fetch buffering (Java's `CompletedFetches`, implemented 2026-07-02): raw fetch
+responses are buffered client-side, `poll` drains them `max.poll.records` at a
+time, and a partition is only re-fetched once its buffer runs dry — ~12 Fetch
+RPCs for a 5M-record run instead of 10,000. Before it, each poll discarded the
+response surplus and small-record throughput sat at ~132K rec/s; the benchmark
+caught it on its first run. One honest asymmetry survives: on the 5M-tiny-record
+burst kacrab's peak RSS (~536 MiB) exceeds Java's (~312 MiB) from allocation
+churn of 5M owned records in ~0.4 s — it plateaus across runs (not a leak), and
+the 10 KiB workload flips it (12 vs 230 MiB).
 
 ## Micro-benchmarks
 

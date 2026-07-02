@@ -38,12 +38,21 @@ positioned partitions are eligible for a fetch.
 
 ## The fetch loop
 
-Each `poll` groups the fetchable partitions **by leader**, sends one `Fetch` per
-leader, decodes the returned record batches into `ConsumerRecord`s, and advances
-each partition's position past what it yields. A `max.poll.records` budget caps
-the batch; a partition trimmed by the budget keeps its unyielded records for the
-next poll (its position only advances past what was returned). Fetches are capped
-at v12 so partitions stay keyed by topic name.
+One fetch typically returns far more than one poll may yield (up to
+`max.partition.fetch.bytes` per partition against a `max.poll.records` cap of
+500), so responses are **buffered across polls** — Java's `completedFetches` +
+`nextInLineFetch`, kacrab's `FetchBuffer`. Each `poll` first drains the buffer:
+up to `max.poll.records` records are returned straight from memory, no RPC,
+advancing each partition's position past what was yielded. Only when nothing is
+buffered does `poll` group the fetchable partitions **by leader** and send one
+`Fetch` per leader; the raw response blobs are queued per partition and decoded
+one partition at a time as their turn comes, so memory holds the raw blobs plus
+at most one decoded partition. A partition is only re-fetched once its buffered
+data runs dry — for a 5M-record scenario that is ~12 Fetch RPCs instead of
+10,000. Buffered data is invalidated lazily at drain time (a seek/reset moved
+the position, or a rebalance revoked the partition) and retained across
+`pause`/`resume`. Fetches are capped at v12 so partitions stay keyed by topic
+name.
 
 Because the broker holds a fetch for up to `fetch.max.wait.ms` waiting for
 `fetch.min.bytes`, kacrab **clamps that wait to the caller's remaining poll
@@ -57,7 +66,9 @@ Re-sending every partition's offset on every fetch is wasteful when the
 assignment is stable. A fetch **session** lets the broker remember the set: the
 first fetch to a leader is *full* and opens a session; later fetches send only
 the partitions whose position **changed**, plus a *forgotten* list for ones no
-longer fetchable. The broker replies with only the partitions that have new data.
+longer fetchable (including partitions sitting a fetch out because they still
+have buffered data). The broker replies with only the partitions that have new
+data.
 
 ```mermaid
 stateDiagram-v2

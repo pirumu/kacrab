@@ -162,6 +162,13 @@ impl SubscriptionState {
         }
     }
 
+    /// Whether a partition is currently paused.
+    pub(super) fn is_paused(&self, partition: &TopicPartition) -> bool {
+        self.assignment
+            .get(&Self::key(partition))
+            .is_some_and(|state| state.paused)
+    }
+
     /// The paused partitions.
     pub(super) fn paused(&self) -> Vec<TopicPartition> {
         self.assignment
