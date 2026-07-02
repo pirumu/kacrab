@@ -1,6 +1,6 @@
 [package]
 name = "kacrab"
-version = "0.0.1"
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -14,6 +14,12 @@ keywords = ["kafka", "producer", "async", "client", "protocol"]
 # Integration tests reference local docker-compose fixtures and are large; they
 # are not useful to downstream consumers, so keep them out of the package.
 exclude = ["tests/**"]
+
+# docs.rs builds with default features (= none), which would hide the entire
+# producer/consumer/admin API. `gssapi` stays off: it links system Kerberos,
+# which the docs.rs sandbox does not provide.
+[package.metadata.docs.rs]
+features = ["producer", "consumer", "admin", "compression", "macros"]
 
 [features]
 default = []
