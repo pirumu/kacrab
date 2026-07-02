@@ -1,6 +1,6 @@
 .PHONY: help check build release run test test-bench-scripts test-codegen test-protocol \
         test-protocol-java test-protocol-java-matrix test-protocol-full \
-        clippy fmt fmt-check doc clean audit deny udeps machete outdated \
+        clippy fmt fmt-check doc doc-check clean audit deny udeps machete outdated \
         install-hooks commit-lint \
         kafka-start kafka-stop kafka-data-du kafka-topic-prune-delete-dirs \
         kafka-tools-check kafka-topic-describe kafka-topic-create \
@@ -42,6 +42,7 @@ help:
 	@echo "  install-hooks - use tracked git hooks from .githooks"
 	@echo "  commit-lint - lint the latest commit message"
 	@echo "  doc         - cargo doc --no-deps --open (with -D warnings)"
+	@echo "  doc-check   - cargo doc --no-deps --all-features, no --open (CI rustdoc gate)"
 	@echo "  clean       - cargo clean"
 	@echo ""
 	@echo "Strict (require extra tools — see 'make tools'):"
@@ -52,9 +53,9 @@ help:
 	@echo "  outdated    - cargo outdated"
 	@echo ""
 	@echo "Pipelines:"
-	@echo "  ci          - fmt-check + clippy + test"
+	@echo "  ci          - fmt-check + clippy + doc-check + test"
 	@echo "  test-protocol-full - protocol tests + Java oracle matrix"
-	@echo "  ci-strict   - ci + audit + deny + machete + doc"
+	@echo "  ci-strict   - ci + audit + deny + machete"
 	@echo "  tools       - install all auxiliary cargo tools"
 	@echo ""
 	@echo "Kafka bench helpers:"
@@ -123,6 +124,11 @@ commit-lint:
 
 doc:
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --open
+
+# CI-safe rustdoc gate: no --open, all features so the docs.rs surface
+# (producer/consumer/admin + codecs) is what actually gets checked.
+doc-check:
+	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
 clean:
 	cargo clean
@@ -207,9 +213,9 @@ outdated:
 	@command -v cargo-outdated >/dev/null 2>&1 || { echo "cargo-outdated not installed. Run: make tools"; exit 1; }
 	cargo outdated --workspace --root-deps-only
 
-ci: fmt-check clippy test
+ci: fmt-check clippy doc-check test
 
-ci-strict: fmt-check clippy test audit deny machete doc
+ci-strict: fmt-check clippy doc-check test audit deny machete
 
 tools:
 	cargo install --locked cargo-audit cargo-deny cargo-machete cargo-outdated cargo-udeps
