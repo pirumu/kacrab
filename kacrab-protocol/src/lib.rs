@@ -15,7 +15,7 @@
 //! | [`tagged`]    | [`RawTaggedField`] + flexible-version tagged-field section.   |
 //! | [`crc`]       | CRC32C compute + validation.                                  |
 //! | [`frame`]     | TCP length-prefix framing + request encoding helpers.         |
-//! | [`record`]    | Record batch v2: [`RecordBatch`], [`Record`], [`RecordHeader`]. |
+//! | [`record`]    | Record batch v2: [`RecordBatch`](record::RecordBatch), [`Record`](record::Record), [`RecordHeader`](record::RecordHeader). |
 //! | [`compression`]| Codec dispatch (gzip/snappy/lz4/zstd, feature-gated).        |
 //! | [`version`]   | API version resolution + header version selection.            |
 //! | [`generated`] | Codegen output (committed). One module per Kafka message.     |

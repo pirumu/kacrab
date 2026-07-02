@@ -33,7 +33,7 @@ pub struct GetTelemetrySubscriptionsResponseData {
     /// Flag to indicate monotonic/counter metrics are to be emitted as deltas or cumulative
     /// values.
     pub delta_temporality: bool,
-    /// Requested metrics prefix string match. Empty array: No metrics subscribed, Array[0] empty
+    /// Requested metrics prefix string match. Empty array: No metrics subscribed, Array\[0\] empty
     /// string: All metrics subscribed.
     pub requested_metrics: Vec<KafkaString>,
     pub _unknown_tagged_fields: Vec<RawTaggedField>,

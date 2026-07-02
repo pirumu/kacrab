@@ -63,6 +63,11 @@ jobs:
       - name: Clippy (pedantic + nursery + cargo, -D warnings)
         run: make clippy
 
+      # Guards the docs.rs build: rustdoc deny-lints (broken intra-doc links)
+      # only fire when docs are actually built, which test/clippy never do.
+      - name: Rustdoc (workspace, all features, -D warnings)
+        run: make doc-check
+
       - name: Test (workspace, all features)
         run: make test
 

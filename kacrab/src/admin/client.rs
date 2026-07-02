@@ -2479,8 +2479,8 @@ impl AdminClient {
         Ok(entries)
     }
 
-    /// Alter client quotas (controller-routed). A [`ClientQuotaOp`] with a `None`
-    /// value removes that quota.
+    /// Alter client quotas (controller-routed). A [`ClientQuotaOp`](super::ClientQuotaOp)
+    /// with a `None` value removes that quota.
     ///
     /// # Errors
     /// Returns the first per-entity broker error code or a routing error.

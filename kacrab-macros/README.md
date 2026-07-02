@@ -1,6 +1,6 @@
 # kacrab-macros
 
-Procedural macros for [`kacrab`](../kacrab/).
+Procedural macros for [`kacrab`](https://docs.rs/kacrab).
 
 This crate is maintainer-facing proc-macro support for the main `kacrab` crate.
 Use the public re-export from `kacrab` instead of depending on this crate
@@ -25,7 +25,7 @@ not the protocol generator.
 
 ```toml
 [dependencies]
-kacrab = { git = "https://github.com/pirumu/kacrab", features = ["macros"] }
+kacrab = { version = "0.1", features = ["macros"] }
 ```
 
 ## Author

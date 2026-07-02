@@ -22,8 +22,8 @@ use crate::common::{OffsetAndMetadata, TopicPartition};
 /// A topic to create with [`AdminClient::create_topics`](super::AdminClient::create_topics).
 ///
 /// Set partition count and replication factor for broker-assigned placement, or
-/// supply explicit [`replica_assignments`](NewTopic::replica_assignments) for
-/// manual placement (the two are mutually exclusive, matching Kafka).
+/// build with [`NewTopic::with_replica_assignments`] for manual placement (the
+/// two are mutually exclusive, matching Kafka).
 #[derive(Debug, Clone)]
 pub struct NewTopic {
     name: String,

@@ -2,43 +2,52 @@
 
 Internal benchmark suite for the kacrab workspace. **Not published.**
 
-Current benchmark targets are measurement hooks for the wire/producer
-architecture work. They are not release-throughput guarantees.
+Benchmark targets here are measurement hooks for the wire/producer/consumer
+work. They are local checkpoints, not release-throughput guarantees.
 
-## Benchmark Surface
+Headline results (2026-07-02, native Apache Kafka 4.3.0, default Kafka-compatible
+configs on both sides — full tables under
+[Real-Kafka Producer Baselines](#real-kafka-producer-baselines) and
+[Real-Kafka Consumer Baselines](#real-kafka-consumer-baselines)):
 
-- **Throughput** - N messages of size S to a topic with P partitions.
-  Records msgs/sec and bytes/sec on identical hardware.
-- **Latency** - sustained load, captures p50/p99/p999.
-- **Memory** - long-running soak, verifies steady-state allocation.
-- **Codec micro-benchmarks** - record batch v2 encode/decode, varint
-  fast paths, CRC32C throughput.
-- **Producer accumulator micro-benchmarks** - append and drain throughput for
-  the per-topic-partition accumulator.
-- **Wire pipeline micro-benchmarks** - `WireClient::send_to_broker` request/sec
-  against local mock brokers.
-- **Producer dispatcher stress benchmarks** - accumulator plus multi-broker
-  produce dispatch over local mock leaders.
+- **Producer**: ~+25% records/sec over Java `kafka-producer-perf-test` at
+  `acks=all` + idempotence, with ~3.9x less peak RSS and ~1.5x less CPU.
+- **Consumer**: ~1.9x (10 B records) to ~4x (10 KiB records) Java's
+  `kafka-consumer-perf-test` throughput, at ~16-20x less peak RSS and ~9-17x
+  less CPU, with group joins ~15x faster.
 
-The current real-Kafka head-to-head plus a CPU/peak-memory comparison live under
-[Real-Kafka Baselines](#real-kafka-baselines): kacrab beats the Java client's
-throughput and uses roughly 4x less memory and 1.5x less CPU for the same run.
-Sustained production acceptance is the longer-term goal.
+## Layout
 
-## Scope
+Criterion micro-benchmarks (`benches/`):
 
 - `producer_accumulator` - per-topic-partition append/drain micro-benchmarks.
-- `wire_pipeline` - broker request pipeline request/sec against mock brokers.
-- `producer_dispatcher` - accumulator plus multi-broker produce dispatch.
-- `producer_mock_bench` - executable mock broker smoke benchmark.
-- `producer_kafka_bench` - executable real Kafka smoke benchmark.
-- `consumer_kafka_bench` - executable real Kafka consumer benchmark mirroring
-  Java's `kafka-consumer-perf-test.sh`.
+- `wire_pipeline` - `WireClient::send_to_broker` request/sec against local mock
+  brokers.
+- `producer_dispatcher` - accumulator plus multi-broker produce dispatch over
+  local mock leaders.
+
+Executable smoke benchmarks (`src/bin/`, print scenario summaries; the real
+Kafka ones need a running broker):
+
+- `producer_mock_bench` - mock broker smoke benchmark.
+- `producer_kafka_bench` - real Kafka producer benchmark mirroring Java's
+  `kafka-producer-perf-test.sh`.
+- `consumer_kafka_bench` - real Kafka consumer benchmark mirroring Java's
+  `kafka-consumer-perf-test.sh`.
+
+Java comparison wrappers (`scripts/`):
+
+- `producer_default_matrix.sh` / `consumer_default_matrix.sh` - run the Java
+  perf tools 5x per scenario with effective-config snapshots, invoked by the
+  `bench-kafka-java-default` / `bench-kafka-consumer-java-default` Makefile
+  targets.
+- `producer_counter_metrics.py` - parses `--print-metrics` output into the
+  compact counter lines; unit-tested via `make test-bench-scripts`.
 
 ## Running
 
 ```bash
-cargo bench -p kacrab-benches              # all benches (once wired up)
+cargo bench -p kacrab-benches                                    # all Criterion benches
 cargo bench -p kacrab-benches --bench producer_accumulator
 cargo bench -p kacrab-benches --bench wire_pipeline
 cargo bench -p kacrab-benches --bench producer_dispatcher
@@ -46,135 +55,168 @@ cargo run -p kacrab-benches --release --bin producer_mock_bench
 cargo run -p kacrab-benches --release --bin producer_kafka_bench
 KACRAB_ONLY_10KIB=1 cargo run -p kacrab-benches --release --bin producer_kafka_bench
 KACRAB_BENCH_PREFILL=1 cargo run -p kacrab-benches --release --bin consumer_kafka_bench
+make bench-kafka bench-kafka-java-default
 make bench-kafka-consumer bench-kafka-consumer-java-default
 ```
 
-`producer_mock_bench` runs two single-shot mock-broker scenarios: 5M messages ×
-10 bytes and 100K messages × 10 KiB, each waiting for mock produce
-acknowledgements. It is useful for local hot-path smoke testing, but it is not a
-real Kafka comparison.
+## Broker Setup
 
-The Criterion micro-benchmarks live under `benches/`. The executable smoke
-benchmarks live under `src/bin/` because they print scenario summaries and, for
-the real Kafka path, depend on a running broker.
+**Benchmark against a native broker, not one behind a Docker-VM port forward.**
+A Colima/OrbStack/Docker Desktop published port on macOS is a VM tunnel that
+roughly triples request RTT and silently caps every number (10 KiB producer
+throughput measured ~3x lower through the tunnel). The Makefile drives a native
+Kafka install for exactly this reason:
 
-For real Kafka localhost benchmarks without Docker Desktop, use the root compose
-file with Docker-compatible runtimes such as Colima or OrbStack:
+```bash
+make kafka-start              # kafka-server-start.sh -daemon (KAFKA_BIN + KAFKA_SERVER_PROPERTIES)
+make kafka-topic-recreate     # fresh KACRAB_BENCH_TOPIC before a comparison run
+make kafka-topic-describe
+make kafka-data-du            # largest broker data dirs
+make kafka-topic-delete
+make kafka-stop
+make kafka-topic-prune-delete-dirs   # rm stale *-delete dirs; stop Kafka first
+```
+
+Defaults: `KAFKA_BIN=$HOME/.local/share/kacrab-kafka/current/bin`,
+`KACRAB_BOOTSTRAP=127.0.0.1:9092`, `KACRAB_BENCH_TOPIC=kacrab-bench`,
+`KACRAB_PARTITIONS=3`, `KACRAB_REPLICATION_FACTOR=1` — all overridable, e.g.
+`KACRAB_PARTITIONS=16 KACRAB_BENCH_TOPIC=kacrab-16p make kafka-topic-create`.
+
+`bench-kafka` and `bench-kafka-java-default` both create `KACRAB_BENCH_TOPIC`
+if it is missing. After large benchmark passes, delete the topic and stop Kafka
+before pruning `*-delete` directories; this keeps local broker data from
+silently growing across parity runs.
+
+The root `docker-compose.kafka.yml` still works for functional (non-benchmark)
+runs against `apache/kafka:4.3.0` — it exposes Kafka on `localhost:9092` and
+creates `kacrab-bench` with 3 partitions (override with `KAFKA_HOST_PORT`,
+`KAFKA_BENCH_TOPIC`, `KAFKA_BENCH_PARTITIONS`, `KAFKA_IMAGE`):
 
 ```bash
 docker compose -f docker-compose.kafka.yml up -d
-docker compose -f docker-compose.kafka.yml ps
-docker compose -f docker-compose.kafka.yml logs -f kafka-init
 docker compose -f docker-compose.kafka.yml down
 ```
 
-The compose file exposes Kafka on `localhost:9092` and creates
-`kacrab-bench` with 3 partitions by default. Override with
-`KAFKA_HOST_PORT`, `KAFKA_BENCH_TOPIC`, or `KAFKA_BENCH_PARTITIONS`.
+## Producer Benchmark (`producer_kafka_bench`)
 
-`producer_kafka_bench` uses `KACRAB_BOOTSTRAP` and `KACRAB_BENCH_TOPIC`
-when set, defaulting to `127.0.0.1:9092` and `kacrab-bench`. It uses the
-public `Producer::builder().set(...).build()` API, warms up metadata, the
-broker session, and one outer API chunk outside the measured window, then sends
-records through the Java-style public producer path. The benchmark calls
-`send_with_callback` once per record, while the producer accumulator/sender
-automatically groups records into Produce requests. Callback-completion latency
-is reported with the same `ProducerPerformance.Stats` window and total line
-shape as Kafka Java.
-
-Current Java-parity audit runs should use the root Makefile targets instead of
-the older exploratory env matrix:
-
-```bash
-make kafka-topic-recreate
-make bench-kafka
-make bench-kafka-java-default
-make kafka-topic-delete
-make kafka-stop
-make kafka-topic-prune-delete-dirs
-```
-
-`bench-kafka` and `bench-kafka-java-default` both create
-`KACRAB_BENCH_TOPIC` if it is missing, with `KACRAB_PARTITIONS=3` and
-`KACRAB_REPLICATION_FACTOR=1` by default. Use `make kafka-topic-recreate` for a
-fresh topic before a comparison run. After large benchmark passes, delete the
-topic and stop Kafka before pruning topic `*-delete` directories; this keeps
-local broker data from silently growing across parity runs.
-
-The current parity target fixes two scenarios, runs 5 times per scenario, and
-prints effective config snapshots before each measured run. Rust prints the
-Java producer-perf style throughput/latency line for every run, then prints a
-five-run `rust average counters` line using the same compact counter schema as
-the per-run output. The Java wrapper also parses
-`kafka-producer-perf-test.sh --print-metrics` into per-run and five-run average
-compact counter lines, including `request_size_avg` from Java
-`request-size-avg` and Rust generated ProduceRequest encoded length. Java
-`batch_splits` comes from producer-perf's `batch-split-total`; Rust currently
-reports `batch_splits=not_tracked` and exposes ProduceRequest grouping splits
-separately as `request_splits`. Rust also reports `compression_ratio` from
-actual dispatcher-encoded record batches. Java producer-perf public metrics do not expose
-exact record-batch count or records-per-batch count, so those fields are
-labeled `not_exposed_by_producer_perf`; do not treat them as parity proof.
+Mirrors Java's `ProducerPerformance` (`kafka-producer-perf-test.sh`): a port of
+its `Stats` class drives the same window sampling, total summary line, and
+callback-success-only accounting, with latency measured from just before each
+send to callback completion like the Java tool. The bench uses the public
+`Producer::builder().set(...).build()` API, warms up metadata, the broker
+session, and one outer API chunk outside the measured window, then sends
+records through the Java-style public producer path: one synchronous
+`send_with_callback` call per record (the send API is a plain `fn`, appending
+inline when the partition resolves synchronously), while the accumulator/sender
+groups records into Produce requests internally. On `Backpressure` the loop waits for the drain and retries the
+same record (closed-loop), so latency measures service time rather than an
+unbounded enqueue backlog.
 
 By default the binary sets only `bootstrap.servers` and `client.id` and relies
 on the producer's normal Kafka-compatible defaults (`acks=all`,
-`enable.idempotence=true`, no compression). Set `KACRAB_BENCH_ACKS1=1` for the
-relaxed throughput-comparison config (`acks=1`, idempotence disabled).
+`enable.idempotence=true`, no compression).
 
-Useful real-Kafka knobs (all read from the environment by `producer_kafka_bench`,
-so set them inline before `cargo run`):
+The default parity pass runs two fixed scenarios (5M x 10 B and 100K x 10 KiB),
+5 runs per scenario, printing effective config snapshots before each measured
+run plus a five-run `rust average counters` line in the same compact counter
+schema as the per-run output. The Java wrapper parses
+`kafka-producer-perf-test.sh --print-metrics` into the same per-run and
+five-run average counter lines. Known schema gaps: Rust reports
+`batch_splits=not_tracked` (grouping splits are exposed separately as
+`request_splits`), and Java producer-perf does not expose exact record-batch
+counts, so those fields are labeled `not_exposed_by_producer_perf` — do not
+treat them as parity proof.
+
+Knobs (all read from the environment, so set them inline before `cargo run`):
 
 - `KACRAB_BOOTSTRAP` — broker address (default `127.0.0.1:9092`).
 - `KACRAB_BENCH_TOPIC` — topic (default `kacrab-bench`).
 - `KACRAB_BENCH_ACKS1=1` — switch to `acks=1` + `enable.idempotence=false` (the
   relaxed comparison config); the default is `acks=all` + idempotence on.
-- `KACRAB_BENCH_BATCH_SIZE=N` — override producer `batch.size` (probe whether
-  throughput is round-trip / pipelining bound).
+- `KACRAB_BENCH_BATCH_SIZE=N` — override `batch.size` (probe whether throughput
+  is round-trip / pipelining bound).
+- `KACRAB_BENCH_LINGER_MS=N` — override `linger.ms` (isolate whether
+  large-record throughput is linger-bound).
+- `KACRAB_BENCH_BUFFER_MEMORY=N` — override `buffer.memory` (a huge buffer
+  removes append backpressure, so the run measures pure drain).
 - `KACRAB_BENCH_MAX_REQUEST_SIZE=N` — override `max.request.size`, lifting the
   1 MiB default so large-record runs with a bigger `batch.size` do not trip
   `RecordTooLarge` on coalesced requests.
-- `KACRAB_BENCH_SYNC_SEND=1` — use the synchronous send path (real sticky
-  partitioner, non-blocking partition assignment) instead of the async path.
-- `KACRAB_BENCH_SEND_CONCURRENCY=N` — number of concurrent in-flight send tasks
-  (default `1`).
+- `KACRAB_BENCH_NO_ADAPTIVE=1` — set
+  `partitioner.adaptive.partitioning.enable=false` (uniform round-robin sticky
+  spread).
+- `KACRAB_BENCH_SPREAD=N` — bypass the sticky partitioner with explicit
+  round-robin over N partitions (isolate concurrency-bound throughput).
+- `KACRAB_BENCH_SEND_CONCURRENCY=N` — number of concurrent send tasks sharing
+  one `Producer` via `Arc` (default `1`), exercising the thread-safe `send(&self)`
+  surface.
 - `KACRAB_BENCH_CURRENT_THREAD=1` — force the single-thread Tokio runtime
-  (default: multi-thread).
-- `KACRAB_BENCH_WORKERS=N` — worker threads for the multi-thread runtime
-  (default `4`).
-- `KACRAB_BENCH_NO_METRICS=1` — disable the producer accounting metrics (broker
-  Produce requests, records, retries, errors, requeues, fill ratio); these are
-  enabled by default.
-- `KACRAB_ONLY_10B=1` — run only the 5M × 10B scenario.
-- `KACRAB_ONLY_10KIB=1` — run only the 100K × 10 KiB scenario.
-- `KACRAB_BENCH_MESSAGES=N` — run a single 10B scenario with `N` records.
-- `KACRAB_BENCH_RUNS=N` — number of runs per scenario.
-- `KACRAB_BENCH_API` — accepted for old scripts but a no-op; every value resolves
-  to the Java-style per-record public API. The benchmark calls
-  `send_with_callback` once per record and measures callback latency from just
-  before send to callback completion, matching Kafka Java producer-perf tracking.
+  (default: multi-thread); `KACRAB_BENCH_WORKERS=N` — worker threads for the
+  multi-thread runtime (default `4`).
+- `KACRAB_BENCH_NO_METRICS=1` — disable the producer accounting metrics
+  (Produce requests, records, retries, errors, requeues, fill ratio); enabled
+  by default.
+- `KACRAB_ONLY_10B=1` / `KACRAB_ONLY_10KIB=1` — run a single scenario.
+- `KACRAB_BENCH_MESSAGES=N` — cap the record count: alone it runs only the 10 B
+  scenario with N records; combined with `KACRAB_ONLY_10KIB=1` it caps the
+  10 KiB scenario.
+- `KACRAB_BENCH_RUNS=N` — number of runs per scenario (default 5).
+- `KACRAB_BENCH_SYNC_SEND=1` — legacy flag: the per-record path is always the
+  synchronous Java-style send now; the flag only prints the sync-now
+  buffer-spin counter after the run.
+- `KACRAB_BENCH_API` — accepted for old scripts but a no-op; every value
+  resolves to the Java-style per-record public API.
 
 The public API hot path is allocation-conscious rather than magically
-wire-zero-copy: payloads are cloned as `Bytes` handles, and benchmark topics are
-shared as `Arc<str>` handles, so input data is not copied per message. Kafka
-Produce still requires serialized record batches and request frames on the wire,
-including size fields and record-batch CRCs, so the client must materialize
-encoded bytes before writing to the socket. Kafka Java exposes `check.crcs` on
-the consumer/fetch side to skip fetched-record CRC verification; it does not
-remove producer-side CRC generation for Produce requests. Future work can
-reduce this further with pooled encode buffers and fewer intermediate frame/body
-moves, but it cannot skip Kafka serialization itself.
+wire-zero-copy: payloads are cloned as `Bytes` handles and topics shared as
+`Arc<str>`, so input data is not copied per message. Kafka Produce still
+requires serialized record batches and request frames (size fields,
+record-batch CRCs) on the wire, so the client must materialize encoded bytes
+before writing to the socket; `check.crcs` only skips consumer-side
+verification in Java, not producer-side CRC generation.
 
-## Real-Kafka Baselines
+## Consumer Benchmark (`consumer_kafka_bench`)
+
+Mirrors Java's `ConsumerPerformance` (`kafka-consumer-perf-test.sh`) run for
+run: a fresh group id per run, `auto.offset.reset=earliest`, the tool's own
+props (`max.partition.fetch.bytes=1MiB`, `receive.buffer.bytes=2MiB`,
+`check.crcs=false`), 100 ms poll slices until the expected record count, a 10 s
+record-fetch timeout, and the same final CSV columns. Both sides read prefilled
+topics (`KACRAB_BENCH_PREFILL=1` on first use writes the scenario records
+through the kacrab producer), so every measured run consumes identical,
+page-cache-warm broker data. Note: if the broker's log retention is short
+(e.g. `log.retention.hours=1`), prefilled topics expire — re-prefill before
+measuring. `make bench-kafka-consumer` and
+`make bench-kafka-consumer-java-default` run the pair; the Java wrapper prints
+an effective-config snapshot per run like the producer matrix does.
+
+Knobs (all read once at startup — nothing in the poll loop touches the
+environment):
+
+- `KACRAB_BOOTSTRAP`, `KACRAB_BENCH_RUNS`, `KACRAB_ONLY_10B`,
+  `KACRAB_ONLY_10KIB`, `KACRAB_BENCH_MESSAGES` — as in the producer bench.
+- `KACRAB_BENCH_TOPIC` — overrides both scenario topics; defaults are
+  `kacrab-bench` for 10 B and `kacrab-bench-10k` for 10 KiB.
+- `KACRAB_BENCH_GROUP_PROTOCOL` — `classic` (default) or `consumer` (KIP-848).
+- `KACRAB_BENCH_ASSIGN=1` + `KACRAB_BENCH_PARTITIONS=N` — manual-assign mode
+  over partitions `0..N` (no group membership, auto-commit off), isolating the
+  pure fetch path; Java's tool has no equivalent mode.
+- `KACRAB_BENCH_MAX_POLL_RECORDS`, `KACRAB_BENCH_FETCH_SIZE`,
+  `KACRAB_BENCH_FETCH_MAX_BYTES`, `KACRAB_BENCH_SOCKET_BUFFER`,
+  `KACRAB_BENCH_CHECK_CRCS`, `KACRAB_BENCH_FROM_LATEST`,
+  `KACRAB_BENCH_TIMEOUT_MS` — consumer/tool prop overrides.
+- `KACRAB_BENCH_PREFILL=1` — write the scenario records before measuring.
+- `KACRAB_BENCH_CURRENT_THREAD=1` / `KACRAB_BENCH_WORKERS=N` — Tokio runtime
+  shape, as in the producer bench.
+
+## Real-Kafka Producer Baselines
 
 Measured 2026-07-02 against native Apache Kafka 4.3.0 single-node KRaft on the
 same machine (`127.0.0.1:9092`), through the public producer API at the
 **default Kafka-compatible config** (`acks=all`, `enable.idempotence=true`), no
 compression. Client and broker share the host (no CPU pinning or page-cache
 isolation), so treat these as local checkpoints, not production acceptance
-numbers. **Benchmark against a native broker, not one behind a Docker-VM port
-forward** — a Colima/OrbStack published port is an SSH tunnel that roughly
-triples request RTT and silently caps every number (10 KiB throughput measured
-~3x lower through the tunnel).
+numbers.
 
 Benchmark host:
 
@@ -187,7 +229,7 @@ Reproduce:
 
 ```bash
 # kacrab
-KACRAB_BENCH_SYNC_SEND=1 KACRAB_BENCH_TOPIC=kacrab-16p \
+KACRAB_BENCH_TOPIC=kacrab-16p \
   cargo run -p kacrab-benches --release --bin producer_kafka_bench
 
 # Java, same broker/topic/config
@@ -248,86 +290,14 @@ coalesces one ready batch from every partition (`records_per_request` = 3 on a
 This is where the native-vs-JVM gap shows. Throughput is **broker-bound** (both
 clients spend most of the run waiting on `acks=all` round-trips), so the +25%
 records/sec edge comes from keeping the broker busier (pipeline depth plus
-one-batch-per-partition request coalescing), not from cheaper per-record CPU. The real efficiency difference is in **memory**
-(no JVM heap/metaspace, ~4x less resident) and **CPU per record** (~1.5x less
-work for the same 5M records, while also pushing higher throughput). The Java
-CPU figure includes one-time JVM startup + JIT warmup that amortizes over a
-long-lived producer; the peak-RSS figure is steady-state and persistent.
-
-Measured with Criterion against local mock brokers. Async groups use longer
-measurement time instead of reducing sample count, and the accumulator
-append/drain benchmark uses `BatchSize::LargeInput` so the per-iteration
-`Vec<ProducerRecord>` setup does not get treated as a tiny input:
-
-- `producer_dispatcher/multi_broker_dispatch`: 9.50-9.80M messages/sec.
-  Criterion reported `+109.67%` to `+122.84%` throughput versus the previous
-  saved sample.
-- `producer_accumulator/append_and_drain/1024`: 26.64-26.77M records/sec.
-- `producer_accumulator/append_and_drain/16384`: 28.26-28.54M records/sec.
-
-Producer mock broker executable:
-
-- `producer_mock_bench` reports both outer public API chunks and actual mock
-  broker Produce requests, because dispatcher-side batch splitting can issue
-  more broker requests than public per-record send loops.
-
-Wire pipeline:
-
-- `wire_pipeline/api_versions_send_to_broker`: 170.86-173.37K requests/sec.
-
-### Limits Of This Pass
-
-- Real Kafka and Java executable numbers are five-run smoke measurements, not
-  release benchmark gates.
-- The latest Rust latency pass was stable on throughput but still local-only:
-  100K × 10 KiB kacrab std dev was 2,021 messages/sec, while the Java pass std
-  dev was 5,970 records/sec.
-- Client and broker share the same machine, CPU, memory, and disk. There was no
-  CPU pinning, broker log-dir purge between every trial, page-cache isolation,
-  or background-load control.
-- The Kafka setup is single-node KRaft with RF=1 and no replication durability
-  target. The baselines above run the default `acks=all` + idempotence config;
-  the relaxed `acks=1` / no-idempotence config is opt-in via
-  `KACRAB_BENCH_ACKS1=1`.
-- Kacrab throughput prints payload MiB/sec. Kafka's Java perf tool prints
-  decimal MB/sec, so MiB/sec and MB/sec values should not be compared as the
-  same unit.
-- The executable Rust bench ports Kafka Java `ProducerPerformance.Stats`
-  sampling, window reporting, total summary, and callback-success-only
-  accounting, plus a coarse `/usr/bin/time -l` CPU-time and peak-RSS comparison
-  against the Java perf tool. It still does not collect sampled CPU profiles,
-  allocator profiles, broker disk metrics, or end-to-end replicated durability
-  latency.
-- Mock broker and Criterion numbers are useful for client hot-path regression
-  checks, but they do not include real broker storage, replication, fetch, or
-  network effects.
-- The default `producer_kafka_bench` path uses Java-style per-record
-  `send_with_callback`; batching is internal to the producer.
+one-batch-per-partition request coalescing), not from cheaper per-record CPU.
+The real efficiency difference is in **memory** (no JVM heap/metaspace, ~4x
+less resident) and **CPU per record** (~1.5x less work for the same 5M records,
+while also pushing higher throughput). The Java CPU figure includes one-time
+JVM startup + JIT warmup that amortizes over a long-lived producer; the
+peak-RSS figure is steady-state and persistent.
 
 ## Real-Kafka Consumer Baselines
-
-`consumer_kafka_bench` mirrors Java's `ConsumerPerformance`
-(`kafka-consumer-perf-test.sh`) run for run: a fresh group id per run,
-`auto.offset.reset=earliest`, the tool's own props
-(`max.partition.fetch.bytes=1MiB`, `receive.buffer.bytes=2MiB`,
-`check.crcs=false`), 100 ms poll slices until the expected record count, a 10 s
-record-fetch timeout, and the same final CSV columns. Both sides read
-prefilled topics (`KACRAB_BENCH_PREFILL=1` on first use writes the scenario
-records through the kacrab producer), so every measured run consumes identical,
-page-cache-warm broker data. `make bench-kafka-consumer` and
-`make bench-kafka-consumer-java-default` run the pair; the Java wrapper prints
-an effective-config snapshot per run like the producer matrix does.
-
-Knobs (all read once at startup): `KACRAB_BOOTSTRAP`, `KACRAB_BENCH_TOPIC`
-(overrides both scenario topics; defaults are `kacrab-bench` for 10 B and
-`kacrab-bench-10k` for 10 KiB), `KACRAB_BENCH_RUNS`, `KACRAB_ONLY_10B`,
-`KACRAB_ONLY_10KIB`, `KACRAB_BENCH_MESSAGES`, `KACRAB_BENCH_PREFILL`,
-`KACRAB_BENCH_GROUP_PROTOCOL` (`classic`|`consumer` for KIP-848),
-`KACRAB_BENCH_ASSIGN=1` + `KACRAB_BENCH_PARTITIONS=N` (manual-assign mode, no
-group), `KACRAB_BENCH_MAX_POLL_RECORDS`, `KACRAB_BENCH_FETCH_SIZE`,
-`KACRAB_BENCH_FETCH_MAX_BYTES`, `KACRAB_BENCH_SOCKET_BUFFER`,
-`KACRAB_BENCH_CHECK_CRCS`, `KACRAB_BENCH_FROM_LATEST`,
-`KACRAB_BENCH_TIMEOUT_MS`.
 
 Measured 2026-07-02 against the same native Apache Kafka 4.3.0 single-node
 KRaft broker and host as the producer baselines (M3 Pro, `127.0.0.1:9092`,
@@ -407,6 +377,48 @@ assign).
   columns compare 1:1 (and are ~5% smaller than decimal-MB figures).
 - Five-run local smoke measurements on shared client/broker hardware; the same
   Limits Of This Pass caveats as the producer baselines apply.
+
+## Mock-Broker And Criterion Numbers
+
+`producer_mock_bench` runs two single-shot mock-broker scenarios: 5M messages ×
+10 bytes and 100K messages × 10 KiB, each waiting for mock produce
+acknowledgements. It reports both outer public API chunks and actual mock
+broker Produce requests, because dispatcher-side batch splitting can issue more
+broker requests than public per-record send loops. Useful for local hot-path
+smoke testing, not a real Kafka comparison.
+
+Last recorded Criterion samples against local mock brokers (re-run locally for
+current numbers; async groups use longer measurement time instead of reduced
+sample counts, and the accumulator benchmark uses `BatchSize::LargeInput`):
+
+- `producer_dispatcher/multi_broker_dispatch`: 9.50-9.80M messages/sec.
+- `producer_accumulator/append_and_drain/1024`: 26.64-26.77M records/sec.
+- `producer_accumulator/append_and_drain/16384`: 28.26-28.54M records/sec.
+- `wire_pipeline/api_versions_send_to_broker`: 170.86-173.37K requests/sec.
+
+## Limits Of This Pass
+
+- Real Kafka and Java executable numbers are five-run smoke measurements, not
+  release benchmark gates.
+- Client and broker share the same machine, CPU, memory, and disk. There was no
+  CPU pinning, broker log-dir purge between every trial, page-cache isolation,
+  or background-load control.
+- The Kafka setup is single-node KRaft with RF=1 and no replication durability
+  target. The baselines above run the default `acks=all` + idempotence config;
+  the relaxed `acks=1` / no-idempotence config is opt-in via
+  `KACRAB_BENCH_ACKS1=1`.
+- kacrab producer throughput prints payload MiB/sec while Kafka's Java producer
+  perf tool prints decimal MB/sec, so those two columns are not the same unit
+  (the consumer benches compute identical mebibyte columns on both sides).
+- The executable Rust benches port Kafka Java `ProducerPerformance.Stats` /
+  `ConsumerPerformance` sampling, window reporting, total summary, and
+  callback-success-only accounting, plus a coarse `/usr/bin/time -l` CPU-time
+  and peak-RSS comparison against the Java tools. They still do not collect
+  sampled CPU profiles, allocator profiles, broker disk metrics, or end-to-end
+  replicated durability latency.
+- Mock broker and Criterion numbers are useful for client hot-path regression
+  checks, but they do not include real broker storage, replication, fetch, or
+  network effects.
 
 ## Author
 
