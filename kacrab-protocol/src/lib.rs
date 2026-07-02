@@ -40,12 +40,9 @@ pub mod uuid;
 pub mod version;
 
 // ---------------------------------------------------------------------------
-// Facade re-exports — the user-visible API surface.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Symbols re-exported at the crate root for `generated/*.rs` (each generated
-// file uses `use crate::*;`). Prefer the module path in hand-written code:
+// Internal re-exports (`#[doc(hidden)]`) — symbols re-exported at the crate root
+// for `generated/*.rs` (each generated file uses `use crate::*;`). Not part of
+// the public API. Prefer the module path in hand-written code:
 // `crate::primitives::read_i32`, not `crate::read_i32`.
 // ---------------------------------------------------------------------------
 #[doc(hidden)]
@@ -73,6 +70,9 @@ pub use crate::string::{
 pub use crate::tagged::{read_tagged_fields, tagged_fields_len, write_tagged_fields};
 #[doc(hidden)]
 pub use crate::uuid::{read_uuid, write_uuid};
+// ---------------------------------------------------------------------------
+// Facade re-exports — the user-visible API surface.
+// ---------------------------------------------------------------------------
 pub use crate::{
     error::{ProtocolError, Result},
     string::KafkaString,

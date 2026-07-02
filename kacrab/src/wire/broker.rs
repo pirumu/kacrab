@@ -56,7 +56,9 @@ const SASL_HANDSHAKE_CORRELATION_ID: i32 = 1;
 const SASL_AUTHENTICATE_CORRELATION_ID: i32 = 2;
 /// Use the newest non-flexible `SaslHandshake` version generated from Kafka 4.3.
 const SASL_HANDSHAKE_VERSION: i16 = 1;
-/// Use the latest generated `SaslAuthenticate` version so session lifetime is available.
+/// Use the latest generated `SaslAuthenticate` version; v2 only adds
+/// flexible/tagged-field encoding over v1, which already carries
+/// `session_lifetime_ms`.
 const SASL_AUTHENTICATE_VERSION: i16 = 2;
 /// Timeout scanning should be frequent enough to clean expired requests quickly
 /// but bounded so broker tasks do not spin on sub-millisecond intervals.
@@ -121,10 +123,11 @@ pub(crate) struct BrokerHandle {
     /// the control plane can read the broker's advertised version for an API
     /// (for example, gating client-side epoch bumps on the coordinator's
     /// `InitProducerId` support). `None` until the first connection negotiates.
-    /// Only the producer control plane reads it (`negotiated_version`), so the
-    /// connection only stores it under the `producer` feature; the broker task
-    /// keeps its own clone to write into regardless.
-    #[cfg(feature = "producer")]
+    /// Read by the producer control plane (coordinator capability gating) and by
+    /// the consumer's fetch path to pick the negotiated Fetch request version
+    /// (`negotiated_version`), so the connection stores it under either feature;
+    /// the broker task keeps its own clone to write into regardless.
+    #[cfg(any(feature = "producer", feature = "consumer"))]
     capabilities: Arc<std::sync::RwLock<Option<BrokerCapabilities>>>,
 }
 
@@ -232,18 +235,18 @@ impl BrokerHandle {
             kerberos_login,
         };
         let _task = tokio::spawn(task.run());
-        #[cfg(not(feature = "producer"))]
+        #[cfg(not(any(feature = "producer", feature = "consumer")))]
         drop(capabilities);
         Self {
             tx,
-            #[cfg(feature = "producer")]
+            #[cfg(any(feature = "producer", feature = "consumer"))]
             capabilities,
         }
     }
 
     /// Highest mutually-supported version the broker advertised for `api_key`,
     /// or `None` until the connection has completed `ApiVersions` negotiation.
-    #[cfg(feature = "producer")]
+    #[cfg(any(feature = "producer", feature = "consumer"))]
     pub(crate) fn negotiated_version(&self, api_key: ApiKey) -> Option<i16> {
         self.capabilities
             .read()
@@ -387,10 +390,15 @@ impl BrokerTask {
                     let delay = match backoff.next_delay() {
                         Ok(delay) => delay,
                         Err(error) => {
-                            let error = error.to_string();
-                            fail_pending_setup_error(&mut pending, || {
-                                WireError::RandomBytes(error.clone())
-                            });
+                            // `next_delay` fails only when the OS RNG fails,
+                            // yielding `RandomBytes`; copy the typed getrandom
+                            // error out (it is `Copy`) so each pending command
+                            // fails with the real cause and its source chain.
+                            if let WireError::RandomBytes(rng_error) = error {
+                                fail_pending_setup_error(&mut pending, || {
+                                    WireError::RandomBytes(rng_error)
+                                });
+                            }
                             if pending.is_empty() && !rx_open {
                                 return;
                             }
@@ -713,7 +721,7 @@ impl BrokerTask {
             oauthbearer_auth_bytes(&self.config.sasl, &self.config.tls, &self.oauth_token_cache)
                 .await?;
         let response = self.sasl_authenticate_round(stream, auth_bytes).await?;
-        if response.auth_bytes.as_ref().is_empty() {
+        if response.auth_bytes.is_empty() {
             return Ok(());
         }
         let error = String::from_utf8_lossy(response.auth_bytes.as_ref()).into_owned();

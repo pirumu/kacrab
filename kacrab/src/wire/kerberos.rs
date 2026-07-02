@@ -88,6 +88,10 @@ impl KerberosRenewalTask {
         let handle = tokio::spawn(async move {
             let mut lifetime = lifetime;
             loop {
+                // Best-effort jitter: on the astronomically-rare RNG failure fall
+                // back to no jitter for this cycle rather than aborting renewal — a
+                // missed ticket refresh (ticket expiry) is far worse than one
+                // un-jittered wake-up, and there is no logging channel to warn on.
                 let sample = random_unit_interval().unwrap_or(0.0);
                 let delay = kerberos_refresh_delay(
                     lifetime,

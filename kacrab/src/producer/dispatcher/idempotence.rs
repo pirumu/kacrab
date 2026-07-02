@@ -24,7 +24,6 @@ pub(crate) struct ProducerIdempotenceState {
     pub(crate) new_partitions_in_transaction: AHashSet<TopicPartitionKey>,
     pub(crate) pending_partitions_in_transaction: AHashSet<TopicPartitionKey>,
     pub(crate) partitions_in_transaction: AHashSet<TopicPartitionKey>,
-    pub(crate) transaction_partitions: AHashSet<TopicPartitionKey>,
     pub(crate) abortable_error: Option<ErrorCode>,
     pub(crate) fatal_error: Option<ErrorCode>,
     pub(crate) epoch_bump_required: bool,
@@ -90,7 +89,6 @@ impl ProducerIdempotenceState {
         for partition in partitions {
             let _removed = self.pending_partitions_in_transaction.remove(partition);
             let _inserted = self.partitions_in_transaction.insert(partition.clone());
-            let _inserted = self.transaction_partitions.insert(partition.clone());
         }
     }
 
@@ -106,7 +104,7 @@ impl ProducerIdempotenceState {
     }
 
     pub(crate) fn transaction_contains_partition(&self, key: &TopicPartitionKey) -> bool {
-        self.partitions_in_transaction.contains(key) || self.transaction_partitions.contains(key)
+        self.partitions_in_transaction.contains(key)
     }
 
     pub(crate) fn clear_pending_transaction_operation(&mut self, operation: TransactionOperation) {
@@ -155,7 +153,6 @@ impl ProducerIdempotenceState {
         self.new_partitions_in_transaction.clear();
         self.pending_partitions_in_transaction.clear();
         self.partitions_in_transaction.clear();
-        self.transaction_partitions.clear();
         if clear_abortable_error {
             self.abortable_error = None;
         }
@@ -351,6 +348,12 @@ impl ProducerIdempotenceState {
     /// a transactional producer transitions to an abortable error (or fatal when
     /// the coordinator cannot bump the epoch) and an idempotent producer requests
     /// an epoch bump.
+    ///
+    /// The two boolean flags are order-sensitive: `transactional` picks the
+    /// transactional recovery path (abortable, or fatal when the coordinator
+    /// cannot bump the epoch) over the idempotent epoch bump; `loss_is_ambiguous`
+    /// marks a final failure that could not rule out a partial write, which the
+    /// idempotent path requires before bumping.
     pub(crate) fn resolve_unresolved_sequence_after_drain(
         &mut self,
         topic: &str,

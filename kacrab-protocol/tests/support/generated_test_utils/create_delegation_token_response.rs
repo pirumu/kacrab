@@ -1,16 +1,31 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::create_delegation_token_response::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for CreateDelegationTokenResponseData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             error_code: 42_i16,
             principal_type: KafkaString::from("test".to_owned()),
             principal_name: KafkaString::from("test".to_owned()),
-            token_requester_principal_type: KafkaString::from("test".to_owned()),
-            token_requester_principal_name: KafkaString::from("test".to_owned()),
+            token_requester_principal_type: if version >= 3 {
+                KafkaString::from("test".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            token_requester_principal_name: if version >= 3 {
+                KafkaString::from("test".to_owned())
+            } else {
+                KafkaString::default()
+            },
             issue_timestamp_ms: 9_876_543_210_i64,
             expiry_timestamp_ms: 9_876_543_210_i64,
             max_timestamp_ms: 9_876_543_210_i64,
@@ -23,7 +38,7 @@ impl TestInstance for CreateDelegationTokenResponseData {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         Self {
             error_code: 0_i16,
             principal_type: KafkaString::default(),
@@ -39,7 +54,7 @@ impl TestInstance for CreateDelegationTokenResponseData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             error_code: 0_i16,
             principal_type: KafkaString::default(),
@@ -55,13 +70,21 @@ impl TestInstance for CreateDelegationTokenResponseData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             error_code: 43_i16,
             principal_type: KafkaString::from("test-2".to_owned()),
             principal_name: KafkaString::from("test-2".to_owned()),
-            token_requester_principal_type: KafkaString::from("test-2".to_owned()),
-            token_requester_principal_name: KafkaString::from("test-2".to_owned()),
+            token_requester_principal_type: if version >= 3 {
+                KafkaString::from("test-2".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            token_requester_principal_name: if version >= 3 {
+                KafkaString::from("test-2".to_owned())
+            } else {
+                KafkaString::default()
+            },
             issue_timestamp_ms: 9_876_543_211_i64,
             expiry_timestamp_ms: 9_876_543_211_i64,
             max_timestamp_ms: 9_876_543_211_i64,
@@ -71,13 +94,21 @@ impl TestInstance for CreateDelegationTokenResponseData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             error_code: i16::MIN,
             principal_type: KafkaString::from("boundary".to_owned()),
             principal_name: KafkaString::from("boundary".to_owned()),
-            token_requester_principal_type: KafkaString::from("boundary".to_owned()),
-            token_requester_principal_name: KafkaString::from("boundary".to_owned()),
+            token_requester_principal_type: if version >= 3 {
+                KafkaString::from("boundary".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            token_requester_principal_name: if version >= 3 {
+                KafkaString::from("boundary".to_owned())
+            } else {
+                KafkaString::default()
+            },
             issue_timestamp_ms: i64::MIN,
             expiry_timestamp_ms: i64::MIN,
             max_timestamp_ms: i64::MIN,
@@ -87,13 +118,21 @@ impl TestInstance for CreateDelegationTokenResponseData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             error_code: 42_i16,
             principal_type: KafkaString::from("test".to_owned()),
             principal_name: KafkaString::from("test".to_owned()),
-            token_requester_principal_type: KafkaString::from("test".to_owned()),
-            token_requester_principal_name: KafkaString::from("test".to_owned()),
+            token_requester_principal_type: if version >= 3 {
+                KafkaString::from("test".to_owned())
+            } else {
+                KafkaString::default()
+            },
+            token_requester_principal_name: if version >= 3 {
+                KafkaString::from("test".to_owned())
+            } else {
+                KafkaString::default()
+            },
             issue_timestamp_ms: 9_876_543_210_i64,
             expiry_timestamp_ms: 9_876_543_210_i64,
             max_timestamp_ms: 9_876_543_210_i64,
@@ -108,65 +147,73 @@ impl TestInstance for CreateDelegationTokenResponseData {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateDelegationTokenResponseData as TestInstance>::test_populated();
+    let message = <CreateDelegationTokenResponseData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateDelegationTokenResponseData as TestInstance>::test_populated();
+    let message = <CreateDelegationTokenResponseData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateDelegationTokenResponseData as TestInstance>::test_null_optionals();
+    let message = <CreateDelegationTokenResponseData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateDelegationTokenResponseData as TestInstance>::test_null_optionals();
+    let message = <CreateDelegationTokenResponseData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateDelegationTokenResponseData as TestInstance>::test_empty_collections();
+    let message =
+        <CreateDelegationTokenResponseData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateDelegationTokenResponseData as TestInstance>::test_empty_collections();
+    let message =
+        <CreateDelegationTokenResponseData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
     let message =
-        <CreateDelegationTokenResponseData as TestInstance>::test_multi_element_collections();
+        <CreateDelegationTokenResponseData as TestInstance>::test_multi_element_collections(
+            version,
+        );
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
     let message =
-        <CreateDelegationTokenResponseData as TestInstance>::test_multi_element_collections();
+        <CreateDelegationTokenResponseData as TestInstance>::test_multi_element_collections(
+            version,
+        );
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateDelegationTokenResponseData as TestInstance>::test_numeric_boundaries();
+    let message =
+        <CreateDelegationTokenResponseData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateDelegationTokenResponseData as TestInstance>::test_numeric_boundaries();
+    let message =
+        <CreateDelegationTokenResponseData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateDelegationTokenResponseData as TestInstance>::test_tagged_fields();
+    let message = <CreateDelegationTokenResponseData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateDelegationTokenResponseData as TestInstance>::test_tagged_fields();
+    let message = <CreateDelegationTokenResponseData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

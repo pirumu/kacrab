@@ -98,8 +98,12 @@ pub enum WireError {
         error: ErrorCode,
     },
     /// Secure random bytes could not be generated for jitter/backoff decisions.
+    ///
+    /// Carries the typed `getrandom::Error` rather than a stringified copy.
+    /// (`getrandom::Error` does not implement `std::error::Error` in this
+    /// version, so it is rendered via `Display` rather than a `#[source]` chain.)
     #[error("random byte generation failed: {0}")]
-    RandomBytes(String),
+    RandomBytes(getrandom::Error),
     /// Broker does not support a mutually compatible API version.
     #[error("no compatible API version for {0:?}")]
     UnsupportedApiVersion(ApiKey),

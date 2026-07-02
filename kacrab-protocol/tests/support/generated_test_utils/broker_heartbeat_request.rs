@@ -1,25 +1,36 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::broker_heartbeat_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for BrokerHeartbeatRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             broker_id: 12345_i32,
             broker_epoch: 9_876_543_210_i64,
             current_metadata_offset: 9_876_543_210_i64,
             want_fence: true,
             want_shut_down: true,
-            offline_log_dirs: vec![KafkaUuid::ONE],
-            cordoned_log_dirs: Some(vec![KafkaUuid::ONE]),
+            offline_log_dirs: if version >= 1 {
+                vec![KafkaUuid::ONE]
+            } else {
+                Vec::new()
+            },
+            cordoned_log_dirs: (version >= 2).then(|| Some(vec![KafkaUuid::ONE])).flatten(),
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         Self {
             broker_id: 0_i32,
             broker_epoch: 0_i64,
@@ -31,7 +42,7 @@ impl TestInstance for BrokerHeartbeatRequestData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
             broker_id: 0_i32,
             broker_epoch: 0_i64,
@@ -39,43 +50,57 @@ impl TestInstance for BrokerHeartbeatRequestData {
             want_fence: false,
             want_shut_down: false,
             offline_log_dirs: Vec::new(),
-            cordoned_log_dirs: Some(Vec::new()),
+            cordoned_log_dirs: (version >= 2).then(|| Some(Vec::new())).flatten(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             broker_id: 23456_i32,
             broker_epoch: 9_876_543_211_i64,
             current_metadata_offset: 9_876_543_211_i64,
             want_fence: false,
             want_shut_down: false,
-            offline_log_dirs: vec![KafkaUuid::ONE, KafkaUuid::from_parts(2, 3)],
-            cordoned_log_dirs: Some(vec![KafkaUuid::ONE, KafkaUuid::from_parts(2, 3)]),
+            offline_log_dirs: if version >= 1 {
+                vec![KafkaUuid::ONE, KafkaUuid::from_parts(2, 3)]
+            } else {
+                Vec::new()
+            },
+            cordoned_log_dirs: (version >= 2)
+                .then(|| Some(vec![KafkaUuid::ONE, KafkaUuid::from_parts(2, 3)]))
+                .flatten(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             broker_id: i32::MIN,
             broker_epoch: i64::MIN,
             current_metadata_offset: i64::MIN,
             want_fence: true,
             want_shut_down: true,
-            offline_log_dirs: vec![KafkaUuid::ONE],
-            cordoned_log_dirs: Some(vec![KafkaUuid::ONE]),
+            offline_log_dirs: if version >= 1 {
+                vec![KafkaUuid::ONE]
+            } else {
+                Vec::new()
+            },
+            cordoned_log_dirs: (version >= 2).then(|| Some(vec![KafkaUuid::ONE])).flatten(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             broker_id: 12345_i32,
             broker_epoch: 9_876_543_210_i64,
             current_metadata_offset: 9_876_543_210_i64,
             want_fence: true,
             want_shut_down: true,
-            offline_log_dirs: vec![KafkaUuid::ONE],
-            cordoned_log_dirs: Some(vec![KafkaUuid::ONE]),
+            offline_log_dirs: if version >= 1 {
+                vec![KafkaUuid::ONE]
+            } else {
+                Vec::new()
+            },
+            cordoned_log_dirs: (version >= 2).then(|| Some(vec![KafkaUuid::ONE])).flatten(),
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -84,63 +109,65 @@ impl TestInstance for BrokerHeartbeatRequestData {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <BrokerHeartbeatRequestData as TestInstance>::test_populated();
+    let message = <BrokerHeartbeatRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <BrokerHeartbeatRequestData as TestInstance>::test_populated();
+    let message = <BrokerHeartbeatRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <BrokerHeartbeatRequestData as TestInstance>::test_null_optionals();
+    let message = <BrokerHeartbeatRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <BrokerHeartbeatRequestData as TestInstance>::test_null_optionals();
+    let message = <BrokerHeartbeatRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <BrokerHeartbeatRequestData as TestInstance>::test_empty_collections();
+    let message = <BrokerHeartbeatRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <BrokerHeartbeatRequestData as TestInstance>::test_empty_collections();
+    let message = <BrokerHeartbeatRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <BrokerHeartbeatRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <BrokerHeartbeatRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <BrokerHeartbeatRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <BrokerHeartbeatRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <BrokerHeartbeatRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <BrokerHeartbeatRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <BrokerHeartbeatRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <BrokerHeartbeatRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <BrokerHeartbeatRequestData as TestInstance>::test_tagged_fields();
+    let message = <BrokerHeartbeatRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <BrokerHeartbeatRequestData as TestInstance>::test_tagged_fields();
+    let message = <BrokerHeartbeatRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

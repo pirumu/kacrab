@@ -1,54 +1,61 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::voters_record::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for VotersRecordData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             version: 42_i16,
-            voters: vec![<Voter as TestInstance>::test_populated()],
+            voters: vec![<Voter as TestInstance>::test_populated(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             version: 0_i16,
-            voters: vec![<Voter as TestInstance>::test_null_optionals()],
+            voters: vec![<Voter as TestInstance>::test_null_optionals(version)],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             version: 0_i16,
             voters: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             version: 43_i16,
             voters: vec![
-                <Voter as TestInstance>::test_populated(),
-                <Voter as TestInstance>::test_multi_element_collections(),
+                <Voter as TestInstance>::test_populated(version),
+                <Voter as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             version: i16::MIN,
-            voters: vec![<Voter as TestInstance>::test_numeric_boundaries()],
+            voters: vec![<Voter as TestInstance>::test_numeric_boundaries(version)],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             version: 42_i16,
-            voters: vec![<Voter as TestInstance>::test_tagged_fields()],
+            voters: vec![<Voter as TestInstance>::test_tagged_fields(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -57,66 +64,73 @@ impl TestInstance for VotersRecordData {
     }
 }
 impl TestInstance for Voter {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             voter_id: 12345_i32,
             voter_directory_id: KafkaUuid::ONE,
-            endpoints: vec![<Endpoint as TestInstance>::test_populated()],
-            k_raft_version_feature: <KRaftVersionFeature as TestInstance>::test_populated(),
+            endpoints: vec![<Endpoint as TestInstance>::test_populated(version)],
+            k_raft_version_feature: <KRaftVersionFeature as TestInstance>::test_populated(version),
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             voter_id: 0_i32,
             voter_directory_id: KafkaUuid::ZERO,
-            endpoints: vec![<Endpoint as TestInstance>::test_null_optionals()],
-            k_raft_version_feature: <KRaftVersionFeature as TestInstance>::test_null_optionals(),
-            _unknown_tagged_fields: Vec::new(),
-        }
-    }
-    fn test_empty_collections() -> Self {
-        Self {
-            voter_id: 0_i32,
-            voter_directory_id: KafkaUuid::ZERO,
-            endpoints: Vec::new(),
-            k_raft_version_feature: <KRaftVersionFeature as TestInstance>::test_null_optionals(),
-            _unknown_tagged_fields: Vec::new(),
-        }
-    }
-    fn test_multi_element_collections() -> Self {
-        Self {
-            voter_id: 23456_i32,
-            voter_directory_id: KafkaUuid::from_parts(2, 3),
-            endpoints: vec![
-                <Endpoint as TestInstance>::test_populated(),
-                <Endpoint as TestInstance>::test_multi_element_collections(),
-            ],
-            k_raft_version_feature:
-                <KRaftVersionFeature as TestInstance>::test_multi_element_collections(),
-            _unknown_tagged_fields: Vec::new(),
-        }
-    }
-    fn test_numeric_boundaries() -> Self {
-        Self {
-            voter_id: i32::MIN,
-            voter_directory_id: KafkaUuid::ONE,
-            endpoints: vec![<Endpoint as TestInstance>::test_numeric_boundaries()],
-            k_raft_version_feature: <KRaftVersionFeature as TestInstance>::test_numeric_boundaries(
+            endpoints: vec![<Endpoint as TestInstance>::test_null_optionals(version)],
+            k_raft_version_feature: <KRaftVersionFeature as TestInstance>::test_null_optionals(
+                version,
             ),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
+        Self {
+            voter_id: 0_i32,
+            voter_directory_id: KafkaUuid::ZERO,
+            endpoints: Vec::new(),
+            k_raft_version_feature: <KRaftVersionFeature as TestInstance>::test_null_optionals(
+                version,
+            ),
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_multi_element_collections(version: i16) -> Self {
+        Self {
+            voter_id: 23456_i32,
+            voter_directory_id: KafkaUuid::from_parts(2, 3),
+            endpoints: vec![
+                <Endpoint as TestInstance>::test_populated(version),
+                <Endpoint as TestInstance>::test_multi_element_collections(version),
+            ],
+            k_raft_version_feature:
+                <KRaftVersionFeature as TestInstance>::test_multi_element_collections(version),
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_numeric_boundaries(version: i16) -> Self {
+        Self {
+            voter_id: i32::MIN,
+            voter_directory_id: KafkaUuid::ONE,
+            endpoints: vec![<Endpoint as TestInstance>::test_numeric_boundaries(version)],
+            k_raft_version_feature: <KRaftVersionFeature as TestInstance>::test_numeric_boundaries(
+                version,
+            ),
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             voter_id: 12345_i32,
             voter_directory_id: KafkaUuid::ONE,
-            endpoints: vec![<Endpoint as TestInstance>::test_tagged_fields()],
-            k_raft_version_feature: <KRaftVersionFeature as TestInstance>::test_tagged_fields(),
+            endpoints: vec![<Endpoint as TestInstance>::test_tagged_fields(version)],
+            k_raft_version_feature: <KRaftVersionFeature as TestInstance>::test_tagged_fields(
+                version,
+            ),
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -125,7 +139,7 @@ impl TestInstance for Voter {
     }
 }
 impl TestInstance for Endpoint {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             host: KafkaString::from("test".to_owned()),
@@ -136,7 +150,7 @@ impl TestInstance for Endpoint {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
@@ -145,7 +159,7 @@ impl TestInstance for Endpoint {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             host: KafkaString::default(),
@@ -153,7 +167,7 @@ impl TestInstance for Endpoint {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             host: KafkaString::from("test-2".to_owned()),
@@ -161,7 +175,7 @@ impl TestInstance for Endpoint {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
             host: KafkaString::from("boundary".to_owned()),
@@ -169,7 +183,7 @@ impl TestInstance for Endpoint {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             host: KafkaString::from("test".to_owned()),
@@ -182,7 +196,7 @@ impl TestInstance for Endpoint {
     }
 }
 impl TestInstance for KRaftVersionFeature {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             min_supported_version: 42_i16,
             max_supported_version: 42_i16,
@@ -192,7 +206,7 @@ impl TestInstance for KRaftVersionFeature {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             min_supported_version: 0_i16,
@@ -200,28 +214,28 @@ impl TestInstance for KRaftVersionFeature {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             min_supported_version: 0_i16,
             max_supported_version: 0_i16,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             min_supported_version: 43_i16,
             max_supported_version: 43_i16,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             min_supported_version: i16::MIN,
             max_supported_version: i16::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             min_supported_version: 42_i16,
             max_supported_version: 42_i16,
@@ -233,63 +247,63 @@ impl TestInstance for KRaftVersionFeature {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <VotersRecordData as TestInstance>::test_populated();
+    let message = <VotersRecordData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <VotersRecordData as TestInstance>::test_populated();
+    let message = <VotersRecordData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <VotersRecordData as TestInstance>::test_null_optionals();
+    let message = <VotersRecordData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <VotersRecordData as TestInstance>::test_null_optionals();
+    let message = <VotersRecordData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <VotersRecordData as TestInstance>::test_empty_collections();
+    let message = <VotersRecordData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <VotersRecordData as TestInstance>::test_empty_collections();
+    let message = <VotersRecordData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <VotersRecordData as TestInstance>::test_multi_element_collections();
+    let message = <VotersRecordData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <VotersRecordData as TestInstance>::test_multi_element_collections();
+    let message = <VotersRecordData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <VotersRecordData as TestInstance>::test_numeric_boundaries();
+    let message = <VotersRecordData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <VotersRecordData as TestInstance>::test_numeric_boundaries();
+    let message = <VotersRecordData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <VotersRecordData as TestInstance>::test_tagged_fields();
+    let message = <VotersRecordData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <VotersRecordData as TestInstance>::test_tagged_fields();
+    let message = <VotersRecordData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

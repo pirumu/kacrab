@@ -350,6 +350,17 @@ impl ProducerSenderRuntime {
         self.sender.try_lock()
     }
 
+    /// Non-blocking sticky/keyed partition assignment for the sync send path,
+    /// routed through the bypass handles so adaptive rotation can re-sample the
+    /// accumulator's live partition queue depths.
+    pub(crate) fn try_assign_cached_sticky_partition_now(
+        &self,
+        record: &mut ProducerRecord,
+    ) -> bool {
+        self.bypass_dispatcher
+            .try_assign_cached_sticky_partition_now(record, &self.bypass_accumulator)
+    }
+
     /// Clone the shared `ProducerSender` handle so the rare synchronous-send slow
     /// path (cold metadata / buffer-full / transactional / custom partitioner) can
     /// drive the awaiting append from a dedicated drain task without owning the
@@ -3098,7 +3109,16 @@ impl ProducerSenderState {
                 .await?;
             match progress {
                 ReadyDispatchProgress::Idle => return Ok(dispatched_any),
-                ReadyDispatchProgress::Started(_) => return Ok(true),
+                ReadyDispatchProgress::Started(DispatchStart::Spawned) => return Ok(true),
+                // Ready batches existed but every one was deferred back (its
+                // partition is already at the in-flight depth cap). Reporting this
+                // as "dispatched" would make the caller re-poll immediately and
+                // livelock in a hot drain/defer/requeue spin for the whole
+                // in-flight round trip; report it like Idle so the caller waits
+                // for a completion.
+                ReadyDispatchProgress::Started(DispatchStart::Empty) => {
+                    return Ok(dispatched_any);
+                },
                 ReadyDispatchProgress::Continue => dispatched_any = true,
             }
         }
@@ -3540,7 +3560,16 @@ impl ProducerSenderState {
         accumulator: &SharedAccumulator,
         now: std::time::Instant,
     ) -> Result<Option<DispatchSelection>, DispatchPrepareError> {
-        let batches = accumulator.drain_ready(now);
+        // Idempotent ordering dispatches at most one new request per partition per
+        // selection, so drain only each partition's front batch; draining the whole
+        // ready backlog would requeue all but one per partition every cycle — O(N)
+        // churn under the accumulator lock per dispatch. Non-idempotent dispatch
+        // coalesces every ready batch into one request, so it drains them all.
+        let batches = if self.idempotent_ordering {
+            accumulator.drain_front_ready(now)
+        } else {
+            accumulator.drain_ready(now)
+        };
         if batches.is_empty() {
             return Ok(None);
         }

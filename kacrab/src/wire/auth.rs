@@ -154,7 +154,9 @@ pub(crate) fn plain_auth_bytes(jaas_config: Option<&str>) -> Result<Bytes, crate
     Ok(Bytes::from(bytes))
 }
 
-/// Builds the SASL/OAUTHBEARER client response from a static token source.
+/// Builds the SASL/OAUTHBEARER client response, resolving the bearer token
+/// from the configured source (a static token or an OAuth token endpoint, with
+/// retry/backoff and refresh caching handled by `oauthbearer_token`).
 ///
 /// Kafka's wire payload follows RFC 7628: GS2 header, optional key/value
 /// attributes, the Bearer token, then a final empty field.
@@ -1007,13 +1009,13 @@ fn oauthbearer_form_body(config: &SaslConfig) -> Result<String, crate::wire::Wir
     }
     let client_id = oauth_config_value(
         config,
-        config.oauthbearer_client_id.as_ref(),
+        config.oauthbearer_client_id.as_deref(),
         "clientId",
         "sasl.oauthbearer.client.credentials.client.id",
     )?;
     let client_secret = oauth_config_value(
         config,
-        config.oauthbearer_client_secret.as_ref(),
+        config.oauthbearer_client_secret.as_deref(),
         "clientSecret",
         "sasl.oauthbearer.client.credentials.client.secret",
     )?;
@@ -1239,12 +1241,12 @@ fn oauth_scope(config: &SaslConfig) -> Option<String> {
 
 fn oauth_config_value(
     config: &SaslConfig,
-    direct: Option<&String>,
+    direct: Option<&str>,
     jaas_key: &str,
     config_key: &str,
 ) -> Result<String, crate::wire::WireError> {
     direct
-        .cloned()
+        .map(str::to_owned)
         .or_else(|| {
             config
                 .jaas_config

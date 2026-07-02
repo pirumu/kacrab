@@ -1,6 +1,7 @@
 //! Individual records inside a [`crate::record::RecordBatch`].
 //!
-//! Wire layout (all integers are zigzag varints):
+//! Wire layout (integers are zigzag varints, except `attributes` which is a
+//! fixed `i8`):
 //!
 //! ```text
 //! length (varint) | attributes (i8) | timestampDelta (varlong)

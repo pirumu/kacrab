@@ -93,9 +93,8 @@ impl GssapiAuthenticator {
             .map_err(gssapi_error)?;
         let cred = Cred::acquire(None, None, CredUsage::Initiate, Some(&desired_mechs))
             .map_err(gssapi_error)?;
-        if let Some(kerberos_login) = &self.kerberos_login
-            && let Ok(lifetime) = cred.lifetime()
-        {
+        if let Some(kerberos_login) = &self.kerberos_login {
+            let lifetime = cred.lifetime().map_err(gssapi_error)?;
             kerberos_login.start_renewal(lifetime)?;
         }
         Ok(ClientCtx::new(

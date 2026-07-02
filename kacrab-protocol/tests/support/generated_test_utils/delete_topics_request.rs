@@ -1,13 +1,28 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::delete_topics_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for DeleteTopicsRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
-            topics: vec![<DeleteTopicState as TestInstance>::test_populated()],
-            topic_names: vec![KafkaString::from("test".to_owned())],
+            topics: if version >= 6 {
+                vec![<DeleteTopicState as TestInstance>::test_populated(version)]
+            } else {
+                Vec::new()
+            },
+            topic_names: if version <= 5 {
+                vec![KafkaString::from("test".to_owned())]
+            } else {
+                Vec::new()
+            },
             timeout_ms: 12345_i32,
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -15,15 +30,25 @@ impl TestInstance for DeleteTopicsRequestData {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
-            topics: vec![<DeleteTopicState as TestInstance>::test_null_optionals()],
-            topic_names: vec![KafkaString::default()],
+            topics: if version >= 6 {
+                vec![<DeleteTopicState as TestInstance>::test_null_optionals(
+                    version,
+                )]
+            } else {
+                Vec::new()
+            },
+            topic_names: if version <= 5 {
+                vec![KafkaString::default()]
+            } else {
+                Vec::new()
+            },
             timeout_ms: 0_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             topics: Vec::new(),
             topic_names: Vec::new(),
@@ -31,32 +56,60 @@ impl TestInstance for DeleteTopicsRequestData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
-            topics: vec![
-                <DeleteTopicState as TestInstance>::test_populated(),
-                <DeleteTopicState as TestInstance>::test_multi_element_collections(),
-            ],
-            topic_names: vec![
-                KafkaString::from("test".to_owned()),
-                KafkaString::from("test-2".to_owned()),
-            ],
+            topics: if version >= 6 {
+                vec![
+                    <DeleteTopicState as TestInstance>::test_populated(version),
+                    <DeleteTopicState as TestInstance>::test_multi_element_collections(version),
+                ]
+            } else {
+                Vec::new()
+            },
+            topic_names: if version <= 5 {
+                vec![
+                    KafkaString::from("test".to_owned()),
+                    KafkaString::from("test-2".to_owned()),
+                ]
+            } else {
+                Vec::new()
+            },
             timeout_ms: 23456_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
-            topics: vec![<DeleteTopicState as TestInstance>::test_numeric_boundaries()],
-            topic_names: vec![KafkaString::from("boundary".to_owned())],
+            topics: if version >= 6 {
+                vec![<DeleteTopicState as TestInstance>::test_numeric_boundaries(
+                    version,
+                )]
+            } else {
+                Vec::new()
+            },
+            topic_names: if version <= 5 {
+                vec![KafkaString::from("boundary".to_owned())]
+            } else {
+                Vec::new()
+            },
             timeout_ms: i32::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
-            topics: vec![<DeleteTopicState as TestInstance>::test_tagged_fields()],
-            topic_names: vec![KafkaString::from("test".to_owned())],
+            topics: if version >= 6 {
+                vec![<DeleteTopicState as TestInstance>::test_tagged_fields(
+                    version,
+                )]
+            } else {
+                Vec::new()
+            },
+            topic_names: if version <= 5 {
+                vec![KafkaString::from("test".to_owned())]
+            } else {
+                Vec::new()
+            },
             timeout_ms: 12345_i32,
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -66,7 +119,7 @@ impl TestInstance for DeleteTopicsRequestData {
     }
 }
 impl TestInstance for DeleteTopicState {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             name: Some(KafkaString::from("test".to_owned())),
             topic_id: KafkaUuid::ONE,
@@ -76,7 +129,7 @@ impl TestInstance for DeleteTopicState {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             name: None,
@@ -84,28 +137,28 @@ impl TestInstance for DeleteTopicState {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: Some(KafkaString::default()),
             topic_id: KafkaUuid::ZERO,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             name: Some(KafkaString::from("test-2".to_owned())),
             topic_id: KafkaUuid::from_parts(2, 3),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             name: Some(KafkaString::from("boundary".to_owned())),
             topic_id: KafkaUuid::ONE,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             name: Some(KafkaString::from("test".to_owned())),
             topic_id: KafkaUuid::ONE,
@@ -117,63 +170,65 @@ impl TestInstance for DeleteTopicState {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <DeleteTopicsRequestData as TestInstance>::test_populated();
+    let message = <DeleteTopicsRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DeleteTopicsRequestData as TestInstance>::test_populated();
+    let message = <DeleteTopicsRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <DeleteTopicsRequestData as TestInstance>::test_null_optionals();
+    let message = <DeleteTopicsRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DeleteTopicsRequestData as TestInstance>::test_null_optionals();
+    let message = <DeleteTopicsRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <DeleteTopicsRequestData as TestInstance>::test_empty_collections();
+    let message = <DeleteTopicsRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DeleteTopicsRequestData as TestInstance>::test_empty_collections();
+    let message = <DeleteTopicsRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <DeleteTopicsRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <DeleteTopicsRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DeleteTopicsRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <DeleteTopicsRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <DeleteTopicsRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <DeleteTopicsRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DeleteTopicsRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <DeleteTopicsRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <DeleteTopicsRequestData as TestInstance>::test_tagged_fields();
+    let message = <DeleteTopicsRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DeleteTopicsRequestData as TestInstance>::test_tagged_fields();
+    let message = <DeleteTopicsRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

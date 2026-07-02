@@ -1,54 +1,67 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::read_share_group_state_summary_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for ReadShareGroupStateSummaryRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("test".to_owned()),
-            topics: vec![<ReadStateSummaryData as TestInstance>::test_populated()],
+            topics: vec![<ReadStateSummaryData as TestInstance>::test_populated(
+                version,
+            )],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             group_id: KafkaString::default(),
-            topics: vec![<ReadStateSummaryData as TestInstance>::test_null_optionals()],
+            topics: vec![<ReadStateSummaryData as TestInstance>::test_null_optionals(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             group_id: KafkaString::default(),
             topics: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("test-2".to_owned()),
             topics: vec![
-                <ReadStateSummaryData as TestInstance>::test_populated(),
-                <ReadStateSummaryData as TestInstance>::test_multi_element_collections(),
+                <ReadStateSummaryData as TestInstance>::test_populated(version),
+                <ReadStateSummaryData as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("boundary".to_owned()),
-            topics: vec![<ReadStateSummaryData as TestInstance>::test_numeric_boundaries()],
+            topics: vec![<ReadStateSummaryData as TestInstance>::test_numeric_boundaries(version)],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("test".to_owned()),
-            topics: vec![<ReadStateSummaryData as TestInstance>::test_tagged_fields()],
+            topics: vec![<ReadStateSummaryData as TestInstance>::test_tagged_fields(
+                version,
+            )],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -57,52 +70,56 @@ impl TestInstance for ReadShareGroupStateSummaryRequestData {
     }
 }
 impl TestInstance for ReadStateSummaryData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::ONE,
-            partitions: vec![<PartitionData as TestInstance>::test_populated()],
+            partitions: vec![<PartitionData as TestInstance>::test_populated(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             topic_id: KafkaUuid::ZERO,
-            partitions: vec![<PartitionData as TestInstance>::test_null_optionals()],
+            partitions: vec![<PartitionData as TestInstance>::test_null_optionals(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::ZERO,
             partitions: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::from_parts(2, 3),
             partitions: vec![
-                <PartitionData as TestInstance>::test_populated(),
-                <PartitionData as TestInstance>::test_multi_element_collections(),
+                <PartitionData as TestInstance>::test_populated(version),
+                <PartitionData as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::ONE,
-            partitions: vec![<PartitionData as TestInstance>::test_numeric_boundaries()],
+            partitions: vec![<PartitionData as TestInstance>::test_numeric_boundaries(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::ONE,
-            partitions: vec![<PartitionData as TestInstance>::test_tagged_fields()],
+            partitions: vec![<PartitionData as TestInstance>::test_tagged_fields(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -111,7 +128,7 @@ impl TestInstance for ReadStateSummaryData {
     }
 }
 impl TestInstance for PartitionData {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             partition: 12345_i32,
             leader_epoch: 12345_i32,
@@ -121,7 +138,7 @@ impl TestInstance for PartitionData {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             partition: 0_i32,
@@ -129,28 +146,28 @@ impl TestInstance for PartitionData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             partition: 0_i32,
             leader_epoch: 0_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             partition: 23456_i32,
             leader_epoch: 23456_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             partition: i32::MIN,
             leader_epoch: i32::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             partition: 12345_i32,
             leader_epoch: 12345_i32,
@@ -162,67 +179,77 @@ impl TestInstance for PartitionData {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <ReadShareGroupStateSummaryRequestData as TestInstance>::test_populated();
+    let message = <ReadShareGroupStateSummaryRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ReadShareGroupStateSummaryRequestData as TestInstance>::test_populated();
+    let message = <ReadShareGroupStateSummaryRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <ReadShareGroupStateSummaryRequestData as TestInstance>::test_null_optionals();
+    let message =
+        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ReadShareGroupStateSummaryRequestData as TestInstance>::test_null_optionals();
+    let message =
+        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <ReadShareGroupStateSummaryRequestData as TestInstance>::test_empty_collections();
+    let message =
+        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ReadShareGroupStateSummaryRequestData as TestInstance>::test_empty_collections();
+    let message =
+        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
     let message =
-        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_multi_element_collections();
+        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_multi_element_collections(
+            version,
+        );
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
     let message =
-        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_multi_element_collections();
+        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_multi_element_collections(
+            version,
+        );
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
     let message =
-        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_numeric_boundaries();
+        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
     let message =
-        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_numeric_boundaries();
+        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <ReadShareGroupStateSummaryRequestData as TestInstance>::test_tagged_fields();
+    let message =
+        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ReadShareGroupStateSummaryRequestData as TestInstance>::test_tagged_fields();
+    let message =
+        <ReadShareGroupStateSummaryRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

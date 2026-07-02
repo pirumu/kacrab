@@ -243,7 +243,7 @@ std::thread_local! {
     static PRODUCER_RECORD_CLONES: Cell<usize> = const { Cell::new(0) };
 }
 
-/// One record targeted at an explicit topic partition.
+/// One record to send: a topic plus an explicit or metadata-selected partition.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ProducerRecord {
     /// Topic name.
@@ -422,18 +422,6 @@ impl ProducerRecord {
         }
         self.timestamp_ms = Some(timestamp_ms);
         Ok(self)
-    }
-
-    /// Set the create-time timestamp in milliseconds since Unix epoch.
-    ///
-    /// This is an alias for [`Self::try_timestamp_ms`] that reads naturally in
-    /// Constructor tests.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ProducerError::InvalidRecord`] when `timestamp_ms` is negative.
-    pub fn timestamp_ms(self, timestamp_ms: i64) -> Result<Self> {
-        self.try_timestamp_ms(timestamp_ms)
     }
 
     /// Append one non-null Kafka record header.
@@ -1064,7 +1052,7 @@ fn clone_wire_error_for_delivery(error: &WireError) -> Option<WireError> {
             partition: *partition,
             error: *error,
         }),
-        WireError::RandomBytes(message) => Some(WireError::RandomBytes(message.clone())),
+        WireError::RandomBytes(error) => Some(WireError::RandomBytes(*error)),
         WireError::UnsupportedApiVersion(api_key) => {
             Some(WireError::UnsupportedApiVersion(*api_key))
         },
@@ -1190,7 +1178,7 @@ mod tests {
         assert!(ProducerRecord::try_new("orders", -1).is_err());
         assert!(
             ProducerRecord::unassigned("orders")
-                .timestamp_ms(-1)
+                .try_timestamp_ms(-1)
                 .is_err()
         );
     }

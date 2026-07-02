@@ -167,44 +167,42 @@ fn write_string_option_as_non_nullable(
     effective_versions: &VersionRange,
     buf_expr: &TokenStream,
 ) -> TokenStream {
-    let needs_flex = true; // FieldType::String always needs flex branching
-    if needs_flex && !eff_flex.is_none() {
-        if version_check_always_true(eff_flex, effective_versions) {
-            quote! {
-                {
-                    let _nn_default = KafkaString::default();
-                    let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
-                    write_compact_string(#buf_expr, _nn_val)?;
-                }
-            }
-        } else if version_check_never_true(eff_flex, effective_versions) {
-            quote! {
-                {
-                    let _nn_default = KafkaString::default();
-                    let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
-                    write_string(#buf_expr, _nn_val)?;
-                }
-            }
-        } else {
-            let flex_check = flexible_version_check_with_context(eff_flex, effective_versions);
-            quote! {
-                {
-                    let _nn_default = KafkaString::default();
-                    let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
-                    if #flex_check {
-                        write_compact_string(#buf_expr, _nn_val)?;
-                    } else {
-                        write_string(#buf_expr, _nn_val)?;
-                    }
-                }
-            }
-        }
-    } else {
+    // `FieldType::String` always needs flex branching, so we gate only on `eff_flex`.
+    if eff_flex.is_none() {
         quote! {
             {
                 let _nn_default = KafkaString::default();
                 let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
                 write_string(#buf_expr, _nn_val)?;
+            }
+        }
+    } else if version_check_always_true(eff_flex, effective_versions) {
+        quote! {
+            {
+                let _nn_default = KafkaString::default();
+                let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
+                write_compact_string(#buf_expr, _nn_val)?;
+            }
+        }
+    } else if version_check_never_true(eff_flex, effective_versions) {
+        quote! {
+            {
+                let _nn_default = KafkaString::default();
+                let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
+                write_string(#buf_expr, _nn_val)?;
+            }
+        }
+    } else {
+        let flex_check = flexible_version_check_with_context(eff_flex, effective_versions);
+        quote! {
+            {
+                let _nn_default = KafkaString::default();
+                let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
+                if #flex_check {
+                    write_compact_string(#buf_expr, _nn_val)?;
+                } else {
+                    write_string(#buf_expr, _nn_val)?;
+                }
             }
         }
     }
@@ -216,44 +214,42 @@ fn write_bytes_option_as_non_nullable(
     effective_versions: &VersionRange,
     buf_expr: &TokenStream,
 ) -> TokenStream {
-    let needs_flex = true;
-    if needs_flex && !eff_flex.is_none() {
-        if version_check_always_true(eff_flex, effective_versions) {
-            quote! {
-                {
-                    let _nn_default = Bytes::new();
-                    let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
-                    write_compact_bytes(#buf_expr, _nn_val)?;
-                }
-            }
-        } else if version_check_never_true(eff_flex, effective_versions) {
-            quote! {
-                {
-                    let _nn_default = Bytes::new();
-                    let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
-                    write_bytes(#buf_expr, _nn_val)?;
-                }
-            }
-        } else {
-            let flex_check = flexible_version_check_with_context(eff_flex, effective_versions);
-            quote! {
-                {
-                    let _nn_default = Bytes::new();
-                    let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
-                    if #flex_check {
-                        write_compact_bytes(#buf_expr, _nn_val)?;
-                    } else {
-                        write_bytes(#buf_expr, _nn_val)?;
-                    }
-                }
-            }
-        }
-    } else {
+    // `FieldType::Bytes` always needs flex branching, so we gate only on `eff_flex`.
+    if eff_flex.is_none() {
         quote! {
             {
                 let _nn_default = Bytes::new();
                 let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
                 write_bytes(#buf_expr, _nn_val)?;
+            }
+        }
+    } else if version_check_always_true(eff_flex, effective_versions) {
+        quote! {
+            {
+                let _nn_default = Bytes::new();
+                let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
+                write_compact_bytes(#buf_expr, _nn_val)?;
+            }
+        }
+    } else if version_check_never_true(eff_flex, effective_versions) {
+        quote! {
+            {
+                let _nn_default = Bytes::new();
+                let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
+                write_bytes(#buf_expr, _nn_val)?;
+            }
+        }
+    } else {
+        let flex_check = flexible_version_check_with_context(eff_flex, effective_versions);
+        quote! {
+            {
+                let _nn_default = Bytes::new();
+                let _nn_val = self.#var_ident.as_ref().unwrap_or(&_nn_default);
+                if #flex_check {
+                    write_compact_bytes(#buf_expr, _nn_val)?;
+                } else {
+                    write_bytes(#buf_expr, _nn_val)?;
+                }
             }
         }
     }

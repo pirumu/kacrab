@@ -1,8 +1,8 @@
 //! Zstandard codec (`zstd` crate).
 //!
 //! The module path `crate::compression::zstd` shadows the external `zstd`
-//! crate inside this file — use a fully-qualified `::zstd::...` import to
-//! reach the codec when implementing the bodies below.
+//! crate inside this file — the codec is reached via a fully-qualified
+//! `::zstd::...` path.
 
 use super::{Compression, CompressionError, CompressionErrorKind, Result};
 

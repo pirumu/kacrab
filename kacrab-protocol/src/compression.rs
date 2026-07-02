@@ -97,7 +97,7 @@ impl Compression {
     /// * `Lz4` level handling depends on the active backend feature:
     ///   * with `lz4` only — level ignored, always fast mode.
     ///   * with `lz4-hc` — level `0..=2` → fast, `3..=12` → HC mode, values above `12` clamp to
-    ///     `12`, negative levels treated as `0`.
+    ///     `12`, negative/zero levels clamp to fast level `1`.
     pub fn compress_with_level(self, payload: &[u8], level: Option<i32>) -> Result<Vec<u8>> {
         match self {
             Self::None => {

@@ -304,12 +304,11 @@ fn message_kind_key_arms(pairs: &[MessagePair], kind: MessageKind) -> Vec<TokenS
         .iter()
         .map(|pair| {
             let variant = Ident::new(&pair.variant, Span::call_site());
-            let api_variant = Ident::new(&pair.variant, Span::call_site());
             let enum_name = match kind {
                 MessageKind::Request => quote! { RequestKind },
                 MessageKind::Response => quote! { ResponseKind },
             };
-            quote! { #enum_name::#variant(_) => ApiKey::#api_variant }
+            quote! { #enum_name::#variant(_) => ApiKey::#variant }
         })
         .collect()
 }

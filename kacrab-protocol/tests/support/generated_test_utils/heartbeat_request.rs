@@ -1,22 +1,31 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::heartbeat_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for HeartbeatRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("test".to_owned()),
             generation_id: 12345_i32,
             member_id: KafkaString::from("test".to_owned()),
-            group_instance_id: Some(KafkaString::from("test".to_owned())),
+            group_instance_id: (version >= 3)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         Self {
             group_id: KafkaString::default(),
             generation_id: 0_i32,
@@ -25,39 +34,47 @@ impl TestInstance for HeartbeatRequestData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
             group_id: KafkaString::default(),
             generation_id: 0_i32,
             member_id: KafkaString::default(),
-            group_instance_id: Some(KafkaString::default()),
+            group_instance_id: (version >= 3)
+                .then(|| Some(KafkaString::default()))
+                .flatten(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("test-2".to_owned()),
             generation_id: 23456_i32,
             member_id: KafkaString::from("test-2".to_owned()),
-            group_instance_id: Some(KafkaString::from("test-2".to_owned())),
+            group_instance_id: (version >= 3)
+                .then(|| Some(KafkaString::from("test-2".to_owned())))
+                .flatten(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("boundary".to_owned()),
             generation_id: i32::MIN,
             member_id: KafkaString::from("boundary".to_owned()),
-            group_instance_id: Some(KafkaString::from("boundary".to_owned())),
+            group_instance_id: (version >= 3)
+                .then(|| Some(KafkaString::from("boundary".to_owned())))
+                .flatten(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             group_id: KafkaString::from("test".to_owned()),
             generation_id: 12345_i32,
             member_id: KafkaString::from("test".to_owned()),
-            group_instance_id: Some(KafkaString::from("test".to_owned())),
+            group_instance_id: (version >= 3)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -66,63 +83,63 @@ impl TestInstance for HeartbeatRequestData {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <HeartbeatRequestData as TestInstance>::test_populated();
+    let message = <HeartbeatRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <HeartbeatRequestData as TestInstance>::test_populated();
+    let message = <HeartbeatRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <HeartbeatRequestData as TestInstance>::test_null_optionals();
+    let message = <HeartbeatRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <HeartbeatRequestData as TestInstance>::test_null_optionals();
+    let message = <HeartbeatRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <HeartbeatRequestData as TestInstance>::test_empty_collections();
+    let message = <HeartbeatRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <HeartbeatRequestData as TestInstance>::test_empty_collections();
+    let message = <HeartbeatRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <HeartbeatRequestData as TestInstance>::test_multi_element_collections();
+    let message = <HeartbeatRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <HeartbeatRequestData as TestInstance>::test_multi_element_collections();
+    let message = <HeartbeatRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <HeartbeatRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <HeartbeatRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <HeartbeatRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <HeartbeatRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <HeartbeatRequestData as TestInstance>::test_tagged_fields();
+    let message = <HeartbeatRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <HeartbeatRequestData as TestInstance>::test_tagged_fields();
+    let message = <HeartbeatRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

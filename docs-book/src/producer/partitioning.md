@@ -24,9 +24,19 @@ With no key, partitioning by round-robin per record would scatter a batch across
 every partition and defeat batching. Kafka's `BuiltInPartitioner` instead is
 **sticky**: it picks one partition and keeps using it until the current batch
 fills, then rotates. kacrab mirrors this, and the **adaptive** variant weights
-the choice by partition availability (a slow/unavailable leader gets less
-traffic), matching Kafka's `partitioner.adaptive.partitioning.enable` and
+each rotation by the partitions' *live* accumulator queue depths (a shorter
+queue gets more traffic; a slow/unavailable leader gets less), matching Kafka's
+`partitioner.adaptive.partitioning.enable` and
 `partitioner.availability.timeout.ms`.
+
+The queue depths are **re-sampled from the accumulator at every sticky
+rotation** — on the synchronous send path as well as the awaiting one, mirroring
+Java's sender refreshing `partitionLoadStats` on every `RecordAccumulator.ready()`
+pass. This freshness is load-bearing, not a nicety: rotating on a frozen
+snapshot locks in whatever weighting the last refresh saw, the favored partition
+keeps absorbing most new batches, its queue serializes dispatch, and the
+imbalance never self-corrects (observed as a 62/31/8 split across three
+partitions that halved large-record throughput).
 
 ```mermaid
 flowchart TD

@@ -24,12 +24,17 @@ pub fn parse_spec(path: &Path) -> Result<MessageSpec, ParseSchemaError> {
 
 /// Parse every `*.json` file in `dir` (non-recursive), sorted by message name.
 pub fn parse_all_specs(dir: &Path) -> Result<Vec<MessageSpec>, ParseSchemaError> {
-    let mut entries: Vec<PathBuf> = fs::read_dir(dir)
-        .map_err(|e| ParseSchemaError::new(dir, ParseSchemaErrorKind::from(e)))?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
-        .collect();
+    let read_dir =
+        fs::read_dir(dir).map_err(|e| ParseSchemaError::new(dir, ParseSchemaErrorKind::from(e)))?;
+    let mut entries: Vec<PathBuf> = Vec::new();
+    for entry in read_dir {
+        let path = entry
+            .map_err(|e| ParseSchemaError::new(dir, ParseSchemaErrorKind::from(e)))?
+            .path();
+        if path.extension().is_some_and(|ext| ext == "json") {
+            entries.push(path);
+        }
+    }
     entries.sort();
 
     let mut specs: Vec<MessageSpec> = Vec::with_capacity(entries.len());

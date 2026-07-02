@@ -282,12 +282,7 @@ pub fn read_compact_array_length(buf: &mut Bytes) -> Result<i32> {
             .ok_or(PrimitiveErrorKind::InvalidVarint {
                 max_bytes: VARINT_MAX_BYTES,
             })?;
-        i32::try_from(len).map_err(|_| {
-            PrimitiveErrorKind::InvalidVarint {
-                max_bytes: VARINT_MAX_BYTES,
-            }
-            .into()
-        })
+        i32::try_from(len).map_err(|_| PrimitiveErrorKind::LengthOutOfRange { length: len }.into())
     }
 }
 

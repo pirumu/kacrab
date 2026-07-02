@@ -1,54 +1,65 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::delete_records_response::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for DeleteRecordsResponseData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             throttle_time_ms: 12345_i32,
-            topics: vec![<DeleteRecordsTopicResult as TestInstance>::test_populated()],
+            topics: vec![<DeleteRecordsTopicResult as TestInstance>::test_populated(
+                version,
+            )],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             throttle_time_ms: 0_i32,
-            topics: vec![<DeleteRecordsTopicResult as TestInstance>::test_null_optionals()],
+            topics: vec![<DeleteRecordsTopicResult as TestInstance>::test_null_optionals(version)],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             throttle_time_ms: 0_i32,
             topics: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             throttle_time_ms: 23456_i32,
             topics: vec![
-                <DeleteRecordsTopicResult as TestInstance>::test_populated(),
-                <DeleteRecordsTopicResult as TestInstance>::test_multi_element_collections(),
+                <DeleteRecordsTopicResult as TestInstance>::test_populated(version),
+                <DeleteRecordsTopicResult as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             throttle_time_ms: i32::MIN,
-            topics: vec![<DeleteRecordsTopicResult as TestInstance>::test_numeric_boundaries()],
+            topics: vec![
+                <DeleteRecordsTopicResult as TestInstance>::test_numeric_boundaries(version),
+            ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             throttle_time_ms: 12345_i32,
-            topics: vec![<DeleteRecordsTopicResult as TestInstance>::test_tagged_fields()],
+            topics: vec![<DeleteRecordsTopicResult as TestInstance>::test_tagged_fields(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -57,54 +68,62 @@ impl TestInstance for DeleteRecordsResponseData {
     }
 }
 impl TestInstance for DeleteRecordsTopicResult {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
-            partitions: vec![<DeleteRecordsPartitionResult as TestInstance>::test_populated()],
+            partitions: vec![
+                <DeleteRecordsPartitionResult as TestInstance>::test_populated(version),
+            ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
-            partitions: vec![<DeleteRecordsPartitionResult as TestInstance>::test_null_optionals()],
+            partitions: vec![
+                <DeleteRecordsPartitionResult as TestInstance>::test_null_optionals(version),
+            ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             partitions: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             partitions: vec![
-                <DeleteRecordsPartitionResult as TestInstance>::test_populated(),
-                <DeleteRecordsPartitionResult as TestInstance>::test_multi_element_collections(),
+                <DeleteRecordsPartitionResult as TestInstance>::test_populated(version),
+                <DeleteRecordsPartitionResult as TestInstance>::test_multi_element_collections(
+                    version,
+                ),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
             partitions: vec![
-                <DeleteRecordsPartitionResult as TestInstance>::test_numeric_boundaries(),
+                <DeleteRecordsPartitionResult as TestInstance>::test_numeric_boundaries(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
-            partitions: vec![<DeleteRecordsPartitionResult as TestInstance>::test_tagged_fields()],
+            partitions: vec![
+                <DeleteRecordsPartitionResult as TestInstance>::test_tagged_fields(version),
+            ],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -113,7 +132,7 @@ impl TestInstance for DeleteRecordsTopicResult {
     }
 }
 impl TestInstance for DeleteRecordsPartitionResult {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             low_watermark: 9_876_543_210_i64,
@@ -124,7 +143,7 @@ impl TestInstance for DeleteRecordsPartitionResult {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             partition_index: 0_i32,
@@ -133,7 +152,7 @@ impl TestInstance for DeleteRecordsPartitionResult {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             partition_index: 0_i32,
             low_watermark: 0_i64,
@@ -141,7 +160,7 @@ impl TestInstance for DeleteRecordsPartitionResult {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             partition_index: 23456_i32,
             low_watermark: 9_876_543_211_i64,
@@ -149,7 +168,7 @@ impl TestInstance for DeleteRecordsPartitionResult {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             partition_index: i32::MIN,
             low_watermark: i64::MIN,
@@ -157,7 +176,7 @@ impl TestInstance for DeleteRecordsPartitionResult {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             low_watermark: 9_876_543_210_i64,
@@ -170,63 +189,65 @@ impl TestInstance for DeleteRecordsPartitionResult {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <DeleteRecordsResponseData as TestInstance>::test_populated();
+    let message = <DeleteRecordsResponseData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DeleteRecordsResponseData as TestInstance>::test_populated();
+    let message = <DeleteRecordsResponseData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <DeleteRecordsResponseData as TestInstance>::test_null_optionals();
+    let message = <DeleteRecordsResponseData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DeleteRecordsResponseData as TestInstance>::test_null_optionals();
+    let message = <DeleteRecordsResponseData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <DeleteRecordsResponseData as TestInstance>::test_empty_collections();
+    let message = <DeleteRecordsResponseData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DeleteRecordsResponseData as TestInstance>::test_empty_collections();
+    let message = <DeleteRecordsResponseData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <DeleteRecordsResponseData as TestInstance>::test_multi_element_collections();
+    let message =
+        <DeleteRecordsResponseData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DeleteRecordsResponseData as TestInstance>::test_multi_element_collections();
+    let message =
+        <DeleteRecordsResponseData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <DeleteRecordsResponseData as TestInstance>::test_numeric_boundaries();
+    let message = <DeleteRecordsResponseData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DeleteRecordsResponseData as TestInstance>::test_numeric_boundaries();
+    let message = <DeleteRecordsResponseData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <DeleteRecordsResponseData as TestInstance>::test_tagged_fields();
+    let message = <DeleteRecordsResponseData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <DeleteRecordsResponseData as TestInstance>::test_tagged_fields();
+    let message = <DeleteRecordsResponseData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

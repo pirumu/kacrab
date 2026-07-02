@@ -163,9 +163,16 @@ fn classify_status<'a>(
     native_keys: &NativeConfigKeys,
 ) -> StatusDecision<'a> {
     if config.origin == ConfigOrigin::KacrabRuntime {
+        // Only genuine socket options carry the `socket2` feature; in-process
+        // buffer/queue sizing overlays do not, so avoid labeling them "socket".
+        let comment = if config.feature.as_deref() == Some("socket2") {
+            "Kacrab runtime socket option generated from the runtime config overlay."
+        } else {
+            "Kacrab runtime option generated from the runtime config overlay."
+        };
         return StatusDecision {
             expr: quote!(ConfigStatus::Native),
-            comment: "Kacrab runtime socket option generated from the runtime config overlay.",
+            comment,
         };
     }
     if native_keys.contains(&(client, config.key.clone())) {

@@ -11,26 +11,42 @@ Measured against native Apache Kafka 4.3.0 single-node KRaft on the same machine
 through the public producer API at the **default** Kafka-compatible config
 (`acks=all`, `enable.idempotence=true`, no compression):
 
-| Metric (5M × 10B, 16 partitions) | kacrab | Java `kafka-producer-perf-test` |
+| Metric (5M × 10B, 16 partitions, 2026-07-02) | kacrab | Java `kafka-producer-perf-test` |
 |---|---:|---:|
-| Throughput | ~4.70M rec/s (≈44.8 MiB/s) | 3.6–4.2M rec/s |
-| Latency avg | ~1.7 ms | 0.27–0.35 ms |
-| Latency p99 | ~15 ms | 1–2 ms |
+| Throughput | ~4.79–4.86M rec/s (≈46.3 MiB/s) | 3.80–3.84M rec/s |
+| Latency avg | ~1.7 ms | ~0.38 ms |
+| Latency p99 | ~13 ms | ~3 ms |
 | retries / errors | 0 / 0 | 0 / 0 |
 
-| Resource (same run, `/usr/bin/time -l`) | kacrab | Java | Java overhead |
+| Metric (100K × 10 KiB, 3 partitions, default `batch.size`) | kacrab | Java |
+|---|---:|---:|
+| Throughput | ~542–570 MB/s (55.5–58.4K rec/s) | 417–453 MB/s (42.7–46.4K rec/s) |
+| Latency avg / p99 | ~36 ms / ~78 ms | ~43 ms / ~92 ms |
+
+| Resource (same 10B workload, `/usr/bin/time -l`, 2026-06-28) | kacrab | Java | Java overhead |
 |---|---:|---:|---:|
 | Peak RSS | ~68 MiB | ~268 MiB | **~3.9×** |
 | Total CPU (user+sys) | ~2.7 s | ~4.1 s | **~1.5×** |
 
-## Why parity, not a blowout
+## Where the +25–28% comes from
 
 Throughput here is **broker-bound**: both clients spend most of the run waiting
-on `acks=all` round trips, so the client language barely moves the throughput
-needle. The real native-vs-JVM win shows up where it can: ~4× less resident
-memory (no JVM heap/metaspace) and ~1.5× less CPU per record. The Java CPU figure
-also includes one-time JVM startup + JIT warmup that amortizes over a long-lived
-producer; the peak-RSS gap is steady-state.
+on `acks=all` round trips, so cheaper per-record CPU barely moves the needle.
+kacrab's records/sec edge comes from keeping the broker's write path busier —
+a deeper per-partition pipeline plus coalescing one ready batch from every
+partition into each produce request (on 10 KiB records, where each batch holds a
+single record, that coalescing is the entire difference between ~540 MB/s and
+one-record-per-round-trip collapse). The native-vs-JVM win also shows up in
+efficiency: ~4× less resident memory (no JVM heap/metaspace) and ~1.5× less CPU
+per record. The Java CPU figure also includes one-time JVM startup + JIT warmup
+that amortizes over a long-lived producer; the peak-RSS gap is steady-state.
+
+> **Bench against a native broker.** A broker behind a Colima/OrbStack published
+> port is reached through an SSH tunnel that roughly triples request RTT — it
+> silently caps every number (10 KiB throughput measured ~3× lower through the
+> tunnel). And never read env vars on a per-record path in the harness itself:
+> macOS `getenv` takes a global libc lock, and one `env::var` call inside the
+> record factory cost ~28% of small-record throughput until it was hoisted.
 
 ## The latency tradeoff
 

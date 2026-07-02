@@ -204,17 +204,23 @@ pub(super) async fn fetch(
             .push((partition.clone(), *position));
     }
 
-    // `send_to_broker` treats `version` as a ceiling and negotiates down against
-    // each broker's advertised range, so passing the v12 cap keeps fetches
-    // name-keyed regardless of how high the broker goes.
-    let version = FETCH_MAX_VERSION;
-
     let mut budget = max_records;
 
     for (leader, entries) in by_leader {
         if budget == 0 {
             break;
         }
+        // Pick the Fetch request version from this broker's negotiated
+        // `ApiVersions`, capped at `FETCH_MAX_VERSION` (v12) so fetches stay
+        // name-keyed (topic-id fetch is unsupported). Falls back to the v12 cap
+        // until `ApiVersions` has completed. `send_to_broker` re-clamps the
+        // ceiling against the broker's range, so this is behaviourally identical
+        // to passing the raw cap — it just makes the negotiated version explicit.
+        let version = wire
+            .negotiated_version(leader, ApiKey::Fetch)
+            .map_or(FETCH_MAX_VERSION, |negotiated| {
+                negotiated.min(FETCH_MAX_VERSION)
+            });
         let session = sessions.by_broker.entry(leader).or_default();
         let request = build_fetch_request(config, session, &entries, max_wait_ms);
         let response: FetchResponseData = wire

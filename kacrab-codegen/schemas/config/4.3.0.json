@@ -1316,8 +1316,7 @@
             "kind": "null"
           },
           "importance": "LOW",
-          "documentation": "Initial reusable in-process read buffer capacity for broker frame reads.",
-          "feature": "socket2"
+          "documentation": "Initial reusable in-process read buffer capacity for broker frame reads."
         },
         {
           "origin": "kacrab_runtime",
@@ -2682,8 +2681,7 @@
             "kind": "null"
           },
           "importance": "LOW",
-          "documentation": "Initial reusable in-process read buffer capacity for broker frame reads.",
-          "feature": "socket2"
+          "documentation": "Initial reusable in-process read buffer capacity for broker frame reads."
         }
       ]
     },
@@ -3770,8 +3768,7 @@
             "kind": "null"
           },
           "importance": "LOW",
-          "documentation": "Initial reusable in-process read buffer capacity for broker frame reads.",
-          "feature": "socket2"
+          "documentation": "Initial reusable in-process read buffer capacity for broker frame reads."
         }
       ]
     }

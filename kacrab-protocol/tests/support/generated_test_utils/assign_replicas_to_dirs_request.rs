@@ -1,29 +1,38 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::assign_replicas_to_dirs_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for AssignReplicasToDirsRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             broker_id: 12345_i32,
             broker_epoch: 9_876_543_210_i64,
-            directories: vec![<DirectoryData as TestInstance>::test_populated()],
+            directories: vec![<DirectoryData as TestInstance>::test_populated(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             broker_id: 0_i32,
             broker_epoch: 0_i64,
-            directories: vec![<DirectoryData as TestInstance>::test_null_optionals()],
+            directories: vec![<DirectoryData as TestInstance>::test_null_optionals(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             broker_id: 0_i32,
             broker_epoch: 0_i64,
@@ -31,30 +40,32 @@ impl TestInstance for AssignReplicasToDirsRequestData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             broker_id: 23456_i32,
             broker_epoch: 9_876_543_211_i64,
             directories: vec![
-                <DirectoryData as TestInstance>::test_populated(),
-                <DirectoryData as TestInstance>::test_multi_element_collections(),
+                <DirectoryData as TestInstance>::test_populated(version),
+                <DirectoryData as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             broker_id: i32::MIN,
             broker_epoch: i64::MIN,
-            directories: vec![<DirectoryData as TestInstance>::test_numeric_boundaries()],
+            directories: vec![<DirectoryData as TestInstance>::test_numeric_boundaries(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             broker_id: 12345_i32,
             broker_epoch: 9_876_543_210_i64,
-            directories: vec![<DirectoryData as TestInstance>::test_tagged_fields()],
+            directories: vec![<DirectoryData as TestInstance>::test_tagged_fields(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -63,52 +74,54 @@ impl TestInstance for AssignReplicasToDirsRequestData {
     }
 }
 impl TestInstance for DirectoryData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             id: KafkaUuid::ONE,
-            topics: vec![<TopicData as TestInstance>::test_populated()],
+            topics: vec![<TopicData as TestInstance>::test_populated(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             id: KafkaUuid::ZERO,
-            topics: vec![<TopicData as TestInstance>::test_null_optionals()],
+            topics: vec![<TopicData as TestInstance>::test_null_optionals(version)],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             id: KafkaUuid::ZERO,
             topics: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             id: KafkaUuid::from_parts(2, 3),
             topics: vec![
-                <TopicData as TestInstance>::test_populated(),
-                <TopicData as TestInstance>::test_multi_element_collections(),
+                <TopicData as TestInstance>::test_populated(version),
+                <TopicData as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             id: KafkaUuid::ONE,
-            topics: vec![<TopicData as TestInstance>::test_numeric_boundaries()],
+            topics: vec![<TopicData as TestInstance>::test_numeric_boundaries(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             id: KafkaUuid::ONE,
-            topics: vec![<TopicData as TestInstance>::test_tagged_fields()],
+            topics: vec![<TopicData as TestInstance>::test_tagged_fields(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -117,52 +130,56 @@ impl TestInstance for DirectoryData {
     }
 }
 impl TestInstance for TopicData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::ONE,
-            partitions: vec![<PartitionData as TestInstance>::test_populated()],
+            partitions: vec![<PartitionData as TestInstance>::test_populated(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             topic_id: KafkaUuid::ZERO,
-            partitions: vec![<PartitionData as TestInstance>::test_null_optionals()],
+            partitions: vec![<PartitionData as TestInstance>::test_null_optionals(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::ZERO,
             partitions: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::from_parts(2, 3),
             partitions: vec![
-                <PartitionData as TestInstance>::test_populated(),
-                <PartitionData as TestInstance>::test_multi_element_collections(),
+                <PartitionData as TestInstance>::test_populated(version),
+                <PartitionData as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::ONE,
-            partitions: vec![<PartitionData as TestInstance>::test_numeric_boundaries()],
+            partitions: vec![<PartitionData as TestInstance>::test_numeric_boundaries(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             topic_id: KafkaUuid::ONE,
-            partitions: vec![<PartitionData as TestInstance>::test_tagged_fields()],
+            partitions: vec![<PartitionData as TestInstance>::test_tagged_fields(version)],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -171,7 +188,7 @@ impl TestInstance for TopicData {
     }
 }
 impl TestInstance for PartitionData {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             _unknown_tagged_fields: vec![RawTaggedField {
@@ -180,32 +197,32 @@ impl TestInstance for PartitionData {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             partition_index: 0_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             partition_index: 0_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             partition_index: 23456_i32,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             partition_index: i32::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             _unknown_tagged_fields: vec![RawTaggedField {
@@ -216,65 +233,69 @@ impl TestInstance for PartitionData {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_populated();
+    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_populated();
+    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_null_optionals();
+    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_null_optionals();
+    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_empty_collections();
+    let message =
+        <AssignReplicasToDirsRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_empty_collections();
+    let message =
+        <AssignReplicasToDirsRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
     let message =
-        <AssignReplicasToDirsRequestData as TestInstance>::test_multi_element_collections();
+        <AssignReplicasToDirsRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
     let message =
-        <AssignReplicasToDirsRequestData as TestInstance>::test_multi_element_collections();
+        <AssignReplicasToDirsRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_numeric_boundaries();
+    let message =
+        <AssignReplicasToDirsRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_numeric_boundaries();
+    let message =
+        <AssignReplicasToDirsRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_tagged_fields();
+    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_tagged_fields();
+    let message = <AssignReplicasToDirsRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

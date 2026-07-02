@@ -36,6 +36,13 @@ pub fn generate_test_utils_file(spec: &MessageSpec) -> Result<TokenStream, Codeg
         append_protocol_cases(&versions, schema_name, &java_class, &populated_cases);
 
     Ok(quote! {
+        #![allow(
+            clippy::all,
+            clippy::pedantic,
+            clippy::nursery,
+            reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint style for reproducible output, matching the generated protocol modules."
+        )]
+
         #bytes_import
         #protocol_import
         use kacrab_protocol::generated::#mod_name::*;
@@ -199,74 +206,74 @@ fn case_helpers(versions: &[i16], top_name: &Ident) -> TokenStream {
     } else {
         quote! {
             fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-                let message = <#top_name as TestInstance>::test_populated();
+                let message = <#top_name as TestInstance>::test_populated(version);
                 let mut out = BytesMut::new();
                 message.write(&mut out, version)?;
                 Ok(crate::hex(out.as_ref())?)
             }
 
             fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-                let message = <#top_name as TestInstance>::test_populated();
+                let message = <#top_name as TestInstance>::test_populated(version);
                 Ok(message.encoded_len(version)?)
             }
 
             fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-                let message = <#top_name as TestInstance>::test_null_optionals();
+                let message = <#top_name as TestInstance>::test_null_optionals(version);
                 let mut out = BytesMut::new();
                 message.write(&mut out, version)?;
                 Ok(crate::hex(out.as_ref())?)
             }
 
             fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-                let message = <#top_name as TestInstance>::test_null_optionals();
+                let message = <#top_name as TestInstance>::test_null_optionals(version);
                 Ok(message.encoded_len(version)?)
             }
 
             fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-                let message = <#top_name as TestInstance>::test_empty_collections();
+                let message = <#top_name as TestInstance>::test_empty_collections(version);
                 let mut out = BytesMut::new();
                 message.write(&mut out, version)?;
                 Ok(crate::hex(out.as_ref())?)
             }
 
             fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-                let message = <#top_name as TestInstance>::test_empty_collections();
+                let message = <#top_name as TestInstance>::test_empty_collections(version);
                 Ok(message.encoded_len(version)?)
             }
 
             fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-                let message = <#top_name as TestInstance>::test_multi_element_collections();
+                let message = <#top_name as TestInstance>::test_multi_element_collections(version);
                 let mut out = BytesMut::new();
                 message.write(&mut out, version)?;
                 Ok(crate::hex(out.as_ref())?)
             }
 
             fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-                let message = <#top_name as TestInstance>::test_multi_element_collections();
+                let message = <#top_name as TestInstance>::test_multi_element_collections(version);
                 Ok(message.encoded_len(version)?)
             }
 
             fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-                let message = <#top_name as TestInstance>::test_numeric_boundaries();
+                let message = <#top_name as TestInstance>::test_numeric_boundaries(version);
                 let mut out = BytesMut::new();
                 message.write(&mut out, version)?;
                 Ok(crate::hex(out.as_ref())?)
             }
 
             fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-                let message = <#top_name as TestInstance>::test_numeric_boundaries();
+                let message = <#top_name as TestInstance>::test_numeric_boundaries(version);
                 Ok(message.encoded_len(version)?)
             }
 
             fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-                let message = <#top_name as TestInstance>::test_tagged_fields();
+                let message = <#top_name as TestInstance>::test_tagged_fields(version);
                 let mut out = BytesMut::new();
                 message.write(&mut out, version)?;
                 Ok(crate::hex(out.as_ref())?)
             }
 
             fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-                let message = <#top_name as TestInstance>::test_tagged_fields();
+                let message = <#top_name as TestInstance>::test_tagged_fields(version);
                 Ok(message.encoded_len(version)?)
             }
 

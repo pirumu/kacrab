@@ -1,10 +1,17 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::share_group_describe_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for ShareGroupDescribeRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             group_ids: vec![KafkaString::from("test".to_owned())],
             include_authorized_operations: true,
@@ -14,21 +21,21 @@ impl TestInstance for ShareGroupDescribeRequestData {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         Self {
             group_ids: vec![KafkaString::default()],
             include_authorized_operations: false,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             group_ids: Vec::new(),
             include_authorized_operations: false,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             group_ids: vec![
                 KafkaString::from("test".to_owned()),
@@ -38,14 +45,14 @@ impl TestInstance for ShareGroupDescribeRequestData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             group_ids: vec![KafkaString::from("boundary".to_owned())],
             include_authorized_operations: true,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             group_ids: vec![KafkaString::from("test".to_owned())],
             include_authorized_operations: true,
@@ -57,63 +64,65 @@ impl TestInstance for ShareGroupDescribeRequestData {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <ShareGroupDescribeRequestData as TestInstance>::test_populated();
+    let message = <ShareGroupDescribeRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ShareGroupDescribeRequestData as TestInstance>::test_populated();
+    let message = <ShareGroupDescribeRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <ShareGroupDescribeRequestData as TestInstance>::test_null_optionals();
+    let message = <ShareGroupDescribeRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ShareGroupDescribeRequestData as TestInstance>::test_null_optionals();
+    let message = <ShareGroupDescribeRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <ShareGroupDescribeRequestData as TestInstance>::test_empty_collections();
+    let message = <ShareGroupDescribeRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ShareGroupDescribeRequestData as TestInstance>::test_empty_collections();
+    let message = <ShareGroupDescribeRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <ShareGroupDescribeRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <ShareGroupDescribeRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ShareGroupDescribeRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <ShareGroupDescribeRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <ShareGroupDescribeRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <ShareGroupDescribeRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ShareGroupDescribeRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <ShareGroupDescribeRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <ShareGroupDescribeRequestData as TestInstance>::test_tagged_fields();
+    let message = <ShareGroupDescribeRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <ShareGroupDescribeRequestData as TestInstance>::test_tagged_fields();
+    let message = <ShareGroupDescribeRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

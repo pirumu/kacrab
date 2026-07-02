@@ -627,6 +627,47 @@ impl RecordAccumulator {
         ready
     }
 
+    /// Drain at most one ready front batch per partition.
+    ///
+    /// The dispatch selector emits at most one new request per partition per
+    /// cycle, so draining every ready batch (like [`drain_ready`]) only to
+    /// re-enqueue all but one is O(N) wasted work per dispatch. This drains
+    /// exactly what one selection consumes — the lowest-sequence (front) batch of
+    /// each partition that is ready — keeping the re-dispatch hot path O(partitions)
+    /// so the wire pipeline stays full under real broker latency.
+    pub fn drain_front_ready(&mut self, now: Instant) -> Vec<ReadyBatch> {
+        let batch_size = self.config.batch_size;
+        let linger = self.config.linger;
+        let mut ready = Vec::new();
+        for (key, queue) in &mut self.partitions {
+            if !queue
+                .batches
+                .front()
+                .is_some_and(|batch| batch_is_ready(batch, now, batch_size, linger))
+            {
+                continue;
+            }
+            let Some(batch) = queue.batches.pop_front() else {
+                continue;
+            };
+            let bytes = ready_batch_bytes(&batch);
+            let _removed = self.buffered_batch_identities.remove(&batch.identity);
+            self.buffered_bytes = self.buffered_bytes.saturating_sub(batch.buffer_bytes);
+            ready.push(ReadyBatch {
+                identity: batch.identity,
+                topic: key.topic.to_string(),
+                partition: key.partition,
+                records: batch.records,
+                delivery: batch.delivery,
+                bytes,
+                pooled_buffer_bytes: batch.buffer_bytes,
+                first_append_at: batch.first_append_at,
+                producer_state: batch.producer_state,
+            });
+        }
+        ready
+    }
+
     /// Return the next time any buffered batch should be considered ready.
     pub fn next_ready_at(&self, now: Instant) -> Option<Instant> {
         let batch_size = self.config.batch_size;
@@ -893,6 +934,11 @@ impl SharedAccumulator {
     /// Drain all batches that are ready to dispatch.
     pub fn drain_ready(&self, now: Instant) -> Vec<ReadyBatch> {
         self.lock().drain_ready(now)
+    }
+
+    /// Drain at most one ready front batch per partition (re-dispatch hot path).
+    pub fn drain_front_ready(&self, now: Instant) -> Vec<ReadyBatch> {
+        self.lock().drain_front_ready(now)
     }
 
     pub(crate) fn has_available_memory_for_reserved_with_compression_ratio(

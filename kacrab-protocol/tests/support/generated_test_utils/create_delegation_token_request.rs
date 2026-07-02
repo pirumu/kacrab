@@ -1,14 +1,25 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::create_delegation_token_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for CreateDelegationTokenRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
-            owner_principal_type: Some(KafkaString::from("test".to_owned())),
-            owner_principal_name: Some(KafkaString::from("test".to_owned())),
-            renewers: vec![<CreatableRenewers as TestInstance>::test_populated()],
+            owner_principal_type: (version >= 3)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
+            owner_principal_name: (version >= 3)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
+            renewers: vec![<CreatableRenewers as TestInstance>::test_populated(version)],
             max_lifetime_ms: 9_876_543_210_i64,
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -16,50 +27,70 @@ impl TestInstance for CreateDelegationTokenRequestData {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
             owner_principal_type: None,
             owner_principal_name: None,
-            renewers: vec![<CreatableRenewers as TestInstance>::test_null_optionals()],
+            renewers: vec![<CreatableRenewers as TestInstance>::test_null_optionals(
+                version,
+            )],
             max_lifetime_ms: 0_i64,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(version: i16) -> Self {
         Self {
-            owner_principal_type: Some(KafkaString::default()),
-            owner_principal_name: Some(KafkaString::default()),
+            owner_principal_type: (version >= 3)
+                .then(|| Some(KafkaString::default()))
+                .flatten(),
+            owner_principal_name: (version >= 3)
+                .then(|| Some(KafkaString::default()))
+                .flatten(),
             renewers: Vec::new(),
             max_lifetime_ms: 0_i64,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
-            owner_principal_type: Some(KafkaString::from("test-2".to_owned())),
-            owner_principal_name: Some(KafkaString::from("test-2".to_owned())),
+            owner_principal_type: (version >= 3)
+                .then(|| Some(KafkaString::from("test-2".to_owned())))
+                .flatten(),
+            owner_principal_name: (version >= 3)
+                .then(|| Some(KafkaString::from("test-2".to_owned())))
+                .flatten(),
             renewers: vec![
-                <CreatableRenewers as TestInstance>::test_populated(),
-                <CreatableRenewers as TestInstance>::test_multi_element_collections(),
+                <CreatableRenewers as TestInstance>::test_populated(version),
+                <CreatableRenewers as TestInstance>::test_multi_element_collections(version),
             ],
             max_lifetime_ms: 9_876_543_211_i64,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
-            owner_principal_type: Some(KafkaString::from("boundary".to_owned())),
-            owner_principal_name: Some(KafkaString::from("boundary".to_owned())),
-            renewers: vec![<CreatableRenewers as TestInstance>::test_numeric_boundaries()],
+            owner_principal_type: (version >= 3)
+                .then(|| Some(KafkaString::from("boundary".to_owned())))
+                .flatten(),
+            owner_principal_name: (version >= 3)
+                .then(|| Some(KafkaString::from("boundary".to_owned())))
+                .flatten(),
+            renewers: vec![<CreatableRenewers as TestInstance>::test_numeric_boundaries(version)],
             max_lifetime_ms: i64::MIN,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
-            owner_principal_type: Some(KafkaString::from("test".to_owned())),
-            owner_principal_name: Some(KafkaString::from("test".to_owned())),
-            renewers: vec![<CreatableRenewers as TestInstance>::test_tagged_fields()],
+            owner_principal_type: (version >= 3)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
+            owner_principal_name: (version >= 3)
+                .then(|| Some(KafkaString::from("test".to_owned())))
+                .flatten(),
+            renewers: vec![<CreatableRenewers as TestInstance>::test_tagged_fields(
+                version,
+            )],
             max_lifetime_ms: 9_876_543_210_i64,
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
@@ -69,7 +100,7 @@ impl TestInstance for CreateDelegationTokenRequestData {
     }
 }
 impl TestInstance for CreatableRenewers {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             principal_type: KafkaString::from("test".to_owned()),
             principal_name: KafkaString::from("test".to_owned()),
@@ -79,7 +110,7 @@ impl TestInstance for CreatableRenewers {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             principal_type: KafkaString::default(),
@@ -87,28 +118,28 @@ impl TestInstance for CreatableRenewers {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             principal_type: KafkaString::default(),
             principal_name: KafkaString::default(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             principal_type: KafkaString::from("test-2".to_owned()),
             principal_name: KafkaString::from("test-2".to_owned()),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             principal_type: KafkaString::from("boundary".to_owned()),
             principal_name: KafkaString::from("boundary".to_owned()),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             principal_type: KafkaString::from("test".to_owned()),
             principal_name: KafkaString::from("test".to_owned()),
@@ -120,65 +151,69 @@ impl TestInstance for CreatableRenewers {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateDelegationTokenRequestData as TestInstance>::test_populated();
+    let message = <CreateDelegationTokenRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateDelegationTokenRequestData as TestInstance>::test_populated();
+    let message = <CreateDelegationTokenRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateDelegationTokenRequestData as TestInstance>::test_null_optionals();
+    let message = <CreateDelegationTokenRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateDelegationTokenRequestData as TestInstance>::test_null_optionals();
+    let message = <CreateDelegationTokenRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateDelegationTokenRequestData as TestInstance>::test_empty_collections();
+    let message =
+        <CreateDelegationTokenRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateDelegationTokenRequestData as TestInstance>::test_empty_collections();
+    let message =
+        <CreateDelegationTokenRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
     let message =
-        <CreateDelegationTokenRequestData as TestInstance>::test_multi_element_collections();
+        <CreateDelegationTokenRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
     let message =
-        <CreateDelegationTokenRequestData as TestInstance>::test_multi_element_collections();
+        <CreateDelegationTokenRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateDelegationTokenRequestData as TestInstance>::test_numeric_boundaries();
+    let message =
+        <CreateDelegationTokenRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateDelegationTokenRequestData as TestInstance>::test_numeric_boundaries();
+    let message =
+        <CreateDelegationTokenRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateDelegationTokenRequestData as TestInstance>::test_tagged_fields();
+    let message = <CreateDelegationTokenRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateDelegationTokenRequestData as TestInstance>::test_tagged_fields();
+    let message = <CreateDelegationTokenRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

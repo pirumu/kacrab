@@ -1,12 +1,19 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    reason = "Generated test fixtures mirror Kafka's schema shape and trade hand-written lint \
+              style for reproducible output, matching the generated protocol modules."
+)]
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{generated::create_topics_request::*, *};
 
 use crate::TestInstance;
 
 impl TestInstance for CreateTopicsRequestData {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
-            topics: vec![<CreatableTopic as TestInstance>::test_populated()],
+            topics: vec![<CreatableTopic as TestInstance>::test_populated(version)],
             timeout_ms: 12345_i32,
             validate_only: true,
             _unknown_tagged_fields: vec![RawTaggedField {
@@ -15,15 +22,17 @@ impl TestInstance for CreateTopicsRequestData {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         Self {
-            topics: vec![<CreatableTopic as TestInstance>::test_null_optionals()],
+            topics: vec![<CreatableTopic as TestInstance>::test_null_optionals(
+                version,
+            )],
             timeout_ms: 0_i32,
             validate_only: false,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             topics: Vec::new(),
             timeout_ms: 0_i32,
@@ -31,28 +40,32 @@ impl TestInstance for CreateTopicsRequestData {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             topics: vec![
-                <CreatableTopic as TestInstance>::test_populated(),
-                <CreatableTopic as TestInstance>::test_multi_element_collections(),
+                <CreatableTopic as TestInstance>::test_populated(version),
+                <CreatableTopic as TestInstance>::test_multi_element_collections(version),
             ],
             timeout_ms: 23456_i32,
             validate_only: false,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
-            topics: vec![<CreatableTopic as TestInstance>::test_numeric_boundaries()],
+            topics: vec![<CreatableTopic as TestInstance>::test_numeric_boundaries(
+                version,
+            )],
             timeout_ms: i32::MIN,
             validate_only: true,
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
-            topics: vec![<CreatableTopic as TestInstance>::test_tagged_fields()],
+            topics: vec![<CreatableTopic as TestInstance>::test_tagged_fields(
+                version,
+            )],
             timeout_ms: 12345_i32,
             validate_only: true,
             _unknown_tagged_fields: vec![RawTaggedField {
@@ -63,31 +76,39 @@ impl TestInstance for CreateTopicsRequestData {
     }
 }
 impl TestInstance for CreatableTopic {
-    fn test_populated() -> Self {
+    fn test_populated(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             num_partitions: 12345_i32,
             replication_factor: 42_i16,
-            assignments: vec![<CreatableReplicaAssignment as TestInstance>::test_populated()],
-            configs: vec![<CreatableTopicConfig as TestInstance>::test_populated()],
+            assignments: vec![
+                <CreatableReplicaAssignment as TestInstance>::test_populated(version),
+            ],
+            configs: vec![<CreatableTopicConfig as TestInstance>::test_populated(
+                version,
+            )],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
             num_partitions: 0_i32,
             replication_factor: 0_i16,
-            assignments: vec![<CreatableReplicaAssignment as TestInstance>::test_null_optionals()],
-            configs: vec![<CreatableTopicConfig as TestInstance>::test_null_optionals()],
+            assignments: vec![
+                <CreatableReplicaAssignment as TestInstance>::test_null_optionals(version),
+            ],
+            configs: vec![<CreatableTopicConfig as TestInstance>::test_null_optionals(
+                version,
+            )],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             num_partitions: 0_i32,
@@ -97,41 +118,47 @@ impl TestInstance for CreatableTopic {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             num_partitions: 23456_i32,
             replication_factor: 43_i16,
             assignments: vec![
-                <CreatableReplicaAssignment as TestInstance>::test_populated(),
-                <CreatableReplicaAssignment as TestInstance>::test_multi_element_collections(),
+                <CreatableReplicaAssignment as TestInstance>::test_populated(version),
+                <CreatableReplicaAssignment as TestInstance>::test_multi_element_collections(
+                    version,
+                ),
             ],
             configs: vec![
-                <CreatableTopicConfig as TestInstance>::test_populated(),
-                <CreatableTopicConfig as TestInstance>::test_multi_element_collections(),
+                <CreatableTopicConfig as TestInstance>::test_populated(version),
+                <CreatableTopicConfig as TestInstance>::test_multi_element_collections(version),
             ],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
             num_partitions: i32::MIN,
             replication_factor: i16::MIN,
             assignments: vec![
-                <CreatableReplicaAssignment as TestInstance>::test_numeric_boundaries(),
+                <CreatableReplicaAssignment as TestInstance>::test_numeric_boundaries(version),
             ],
-            configs: vec![<CreatableTopicConfig as TestInstance>::test_numeric_boundaries()],
+            configs: vec![<CreatableTopicConfig as TestInstance>::test_numeric_boundaries(version)],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             num_partitions: 12345_i32,
             replication_factor: 42_i16,
-            assignments: vec![<CreatableReplicaAssignment as TestInstance>::test_tagged_fields()],
-            configs: vec![<CreatableTopicConfig as TestInstance>::test_tagged_fields()],
+            assignments: vec![
+                <CreatableReplicaAssignment as TestInstance>::test_tagged_fields(version),
+            ],
+            configs: vec![<CreatableTopicConfig as TestInstance>::test_tagged_fields(
+                version,
+            )],
             _unknown_tagged_fields: vec![RawTaggedField {
                 tag: 254,
                 data: Bytes::from_static(&[0xab]),
@@ -140,7 +167,7 @@ impl TestInstance for CreatableTopic {
     }
 }
 impl TestInstance for CreatableReplicaAssignment {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             broker_ids: vec![12345_i32],
@@ -150,7 +177,7 @@ impl TestInstance for CreatableReplicaAssignment {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             partition_index: 0_i32,
@@ -158,28 +185,28 @@ impl TestInstance for CreatableReplicaAssignment {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             partition_index: 0_i32,
             broker_ids: Vec::new(),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             partition_index: 23456_i32,
             broker_ids: vec![12345_i32, 23456_i32],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             partition_index: i32::MIN,
             broker_ids: vec![i32::MIN],
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             partition_index: 12345_i32,
             broker_ids: vec![12345_i32],
@@ -191,7 +218,7 @@ impl TestInstance for CreatableReplicaAssignment {
     }
 }
 impl TestInstance for CreatableTopicConfig {
-    fn test_populated() -> Self {
+    fn test_populated(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             value: Some(KafkaString::from("test".to_owned())),
@@ -201,7 +228,7 @@ impl TestInstance for CreatableTopicConfig {
             }],
         }
     }
-    fn test_null_optionals() -> Self {
+    fn test_null_optionals(_version: i16) -> Self {
         drop(Self::default());
         Self {
             name: KafkaString::default(),
@@ -209,28 +236,28 @@ impl TestInstance for CreatableTopicConfig {
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_empty_collections() -> Self {
+    fn test_empty_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::default(),
             value: Some(KafkaString::default()),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_multi_element_collections() -> Self {
+    fn test_multi_element_collections(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test-2".to_owned()),
             value: Some(KafkaString::from("test-2".to_owned())),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_numeric_boundaries() -> Self {
+    fn test_numeric_boundaries(_version: i16) -> Self {
         Self {
             name: KafkaString::from("boundary".to_owned()),
             value: Some(KafkaString::from("boundary".to_owned())),
             _unknown_tagged_fields: Vec::new(),
         }
     }
-    fn test_tagged_fields() -> Self {
+    fn test_tagged_fields(_version: i16) -> Self {
         Self {
             name: KafkaString::from("test".to_owned()),
             value: Some(KafkaString::from("test".to_owned())),
@@ -242,63 +269,65 @@ impl TestInstance for CreatableTopicConfig {
     }
 }
 fn encode_populated(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateTopicsRequestData as TestInstance>::test_populated();
+    let message = <CreateTopicsRequestData as TestInstance>::test_populated(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_populated(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateTopicsRequestData as TestInstance>::test_populated();
+    let message = <CreateTopicsRequestData as TestInstance>::test_populated(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_null_optionals(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateTopicsRequestData as TestInstance>::test_null_optionals();
+    let message = <CreateTopicsRequestData as TestInstance>::test_null_optionals(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_null_optionals(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateTopicsRequestData as TestInstance>::test_null_optionals();
+    let message = <CreateTopicsRequestData as TestInstance>::test_null_optionals(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_empty_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateTopicsRequestData as TestInstance>::test_empty_collections();
+    let message = <CreateTopicsRequestData as TestInstance>::test_empty_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_empty_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateTopicsRequestData as TestInstance>::test_empty_collections();
+    let message = <CreateTopicsRequestData as TestInstance>::test_empty_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_multi_element_collections(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateTopicsRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <CreateTopicsRequestData as TestInstance>::test_multi_element_collections(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_multi_element_collections(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateTopicsRequestData as TestInstance>::test_multi_element_collections();
+    let message =
+        <CreateTopicsRequestData as TestInstance>::test_multi_element_collections(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_numeric_boundaries(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateTopicsRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <CreateTopicsRequestData as TestInstance>::test_numeric_boundaries(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_numeric_boundaries(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateTopicsRequestData as TestInstance>::test_numeric_boundaries();
+    let message = <CreateTopicsRequestData as TestInstance>::test_numeric_boundaries(version);
     Ok(message.encoded_len(version)?)
 }
 fn encode_tagged_fields(version: i16) -> crate::MatrixResult<String> {
-    let message = <CreateTopicsRequestData as TestInstance>::test_tagged_fields();
+    let message = <CreateTopicsRequestData as TestInstance>::test_tagged_fields(version);
     let mut out = BytesMut::new();
     message.write(&mut out, version)?;
     Ok(crate::hex(out.as_ref())?)
 }
 fn encoded_len_tagged_fields(version: i16) -> crate::MatrixResult<usize> {
-    let message = <CreateTopicsRequestData as TestInstance>::test_tagged_fields();
+    let message = <CreateTopicsRequestData as TestInstance>::test_tagged_fields(version);
     Ok(message.encoded_len(version)?)
 }
 fn reencode(version: i16, hex_input: &str) -> crate::MatrixResult<String> {

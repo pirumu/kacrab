@@ -2,7 +2,7 @@
 
 /// Exception class names whose Java classes extend `RetriableException`.
 ///
-/// Derived from the Kafka 4.2.0 exception hierarchy. Used to flag emitted
+/// Derived from the Kafka 4.3.0 exception hierarchy. Used to flag emitted
 /// [`crate::errors_java::ErrorEntry`] variants as retriable.
 pub(crate) const RETRIABLE_EXCEPTIONS: &[&str] = &[
     "CoordinatorLoadInProgressException",

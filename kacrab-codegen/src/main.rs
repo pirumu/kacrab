@@ -27,8 +27,6 @@
 //!     --output-dir  /tmp/kacrab-out \
 //!     --dry-run
 //! ```
-//!
-//! [`prettyplease`]: https://docs.rs/prettyplease
 
 use std::{
     collections::HashSet,

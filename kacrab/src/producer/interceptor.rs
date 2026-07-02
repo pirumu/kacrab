@@ -155,9 +155,9 @@ impl ProducerInterceptors {
 
     pub(crate) fn close(&self) {
         for interceptor in self.inner.iter() {
-            let _ignored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ignored = catch_interceptor_unwind(|| {
                 interceptor.close();
-            }));
+            });
         }
     }
 }

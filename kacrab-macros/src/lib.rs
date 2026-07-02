@@ -282,7 +282,7 @@ fn expand_field(field: ConfigField, client_tokens: &Tokens) -> Result<FieldExpan
             default: #kafka_default,
             status: #status,
             comment: #comment,
-            documentation: #comment,
+            documentation: "",
             source: #source,
             platforms: &[#(#platforms),*],
             feature: #feature,

@@ -26,7 +26,8 @@ pub struct FieldSpec {
     pub about: String,
     /// Optional default value (raw spec string, type-dependent).
     pub default: Option<String>,
-    /// Whether unknown encodings should be silently dropped.
+    /// Whether a non-default value may be dropped when the negotiated version
+    /// lacks this field.
     pub ignorable: bool,
     /// Whether this field acts as a map key for cross-version diffs.
     pub map_key: bool,

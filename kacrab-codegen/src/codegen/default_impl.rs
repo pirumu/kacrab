@@ -89,6 +89,14 @@ fn resolve_explicit_default(
             inner
         });
     }
+    if matches!(field.field_type, FieldType::Float64) {
+        let inner = format_numeric_default(default_str, field)?;
+        return Ok(if is_nullable {
+            quote! { Some(#inner) }
+        } else {
+            inner
+        });
+    }
     if default_str.parse::<i64>().is_ok() {
         let inner = format_numeric_default(default_str, field)?;
         return Ok(if is_nullable {

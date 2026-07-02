@@ -107,9 +107,9 @@ pub struct ConsumerRuntimeConfig {
     pub check_crcs: bool,
     /// Per-request timeout for consumer RPCs.
     pub request_timeout: Duration,
-    /// Whether background auto-commit is enabled (used from Phase 2).
+    /// Whether background auto-commit is enabled.
     pub enable_auto_commit: bool,
-    /// Background auto-commit interval (used from Phase 2).
+    /// Background auto-commit interval.
     pub auto_commit_interval: Duration,
     /// Group session timeout (`session.timeout.ms`).
     pub session_timeout: Duration,
@@ -131,8 +131,8 @@ impl ConsumerRuntimeConfig {
     /// Build runtime consumer settings from the public typed Kafka config.
     ///
     /// # Errors
-    /// Returns [`ConsumerError::InvalidConfig`]-style errors for out-of-domain
-    /// enum values (`auto.offset.reset`, `isolation.level`).
+    /// Returns [`ConsumerError::InvalidArgument`] for out-of-domain enum values
+    /// (`auto.offset.reset`, `isolation.level`, `group.protocol`).
     pub fn from_config(config: &ConsumerConfig) -> Result<Self> {
         Ok(Self {
             group_id: config.group_id.clone(),
@@ -166,13 +166,17 @@ fn clamp_i32(value: impl TryInto<i32>) -> i32 {
     value.try_into().unwrap_or(i32::MAX)
 }
 
-fn invalid(key: &'static str, _value: &str) -> ConsumerError {
-    ConsumerError::InvalidState(match key {
-        "auto.offset.reset" => "invalid auto.offset.reset (expected earliest|latest|none)",
-        "isolation.level" => "invalid isolation.level (expected read_uncommitted|read_committed)",
-        "group.protocol" => "invalid group.protocol (expected classic|consumer)",
-        _ => "invalid consumer config value",
-    })
+fn invalid(key: &'static str, value: &str) -> ConsumerError {
+    let expected = match key {
+        "auto.offset.reset" => "earliest|latest|none",
+        "isolation.level" => "read_uncommitted|read_committed",
+        "group.protocol" => "classic|consumer",
+        _ => "a supported value",
+    };
+    ConsumerError::InvalidArgument {
+        field: key,
+        message: format!("unsupported value {value:?} (expected {expected})"),
+    }
 }
 
 #[cfg(test)]

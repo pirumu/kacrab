@@ -28,7 +28,9 @@ pub struct ApiVersionRange {
 
 /// Resolve the highest API version supported by both client and broker.
 ///
-/// Returns `None` if the supported ranges are disjoint.
+/// Returns `None` when the broker range is empty (`min_version > max_version`),
+/// when `api_key` is not a known API key, or when the client and broker ranges
+/// are disjoint.
 #[must_use]
 pub fn resolve_api_version(api_key: i16, broker_range: ApiVersionRange) -> Option<i16> {
     if broker_range.min_version > broker_range.max_version {

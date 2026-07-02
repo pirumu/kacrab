@@ -24,9 +24,11 @@ pub use self::{
 /// Result alias for record-batch operations.
 pub type Result<T> = core::result::Result<T, RecordError>;
 
-/// Maximum number of records permitted in a single batch. Used to cap
-/// `Vec::with_capacity` so a hostile broker cannot trigger a 2 GiB
-/// allocation by sending `record_count = i32::MAX`.
+/// Maximum number of records permitted in a single batch.
+///
+/// Used to cap `Vec::with_capacity` so a hostile broker cannot trigger a
+/// multi-hundred-GiB allocation (each `Record` is ~100 bytes, so `i32::MAX`
+/// records ≈ 200 GiB) by sending `record_count = i32::MAX`.
 pub const MAX_RECORDS_PER_BATCH: usize = 1_000_000;
 
 fn max_i32_len() -> usize {

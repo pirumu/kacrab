@@ -34,7 +34,11 @@ pub fn read_tagged_fields(buf: &mut Bytes) -> Result<Vec<RawTaggedField>> {
         count,
         max: usize::MAX,
     })?;
-    let mut fields = Vec::with_capacity(count_usize);
+    // Bound the pre-allocation by the bytes left in `buf`: every field needs at
+    // least a tag and a size varint, so `remaining` caps the possible count and
+    // a hostile `count` can't force a huge reservation. For valid input this is
+    // exactly `count_usize`.
+    let mut fields = Vec::with_capacity(count_usize.min(buf.remaining()));
     let mut prev_tag: Option<u32> = None;
 
     for _ in 0..count {
@@ -72,8 +76,9 @@ pub fn read_tagged_fields(buf: &mut Bytes) -> Result<Vec<RawTaggedField>> {
 
 /// Write the tagged-fields section.
 ///
-/// Caller must supply fields sorted by ascending tag; this is asserted, not
-/// re-sorted, to keep the wire encoding deterministic without surprise costs.
+/// Caller must supply fields sorted by ascending tag; this is validated
+/// (returning [`TaggedFieldError::OutOfOrder`]), not re-sorted, to keep the
+/// wire encoding deterministic without surprise costs.
 pub fn write_tagged_fields(buf: &mut BytesMut, fields: &[RawTaggedField]) -> Result<()> {
     let mut prev_tag: Option<u32> = None;
     for field in fields {
