@@ -56,8 +56,10 @@ then, each round:
 `seek`/`seek_to_beginning`/`seek_to_end`, `position`, and `pause`/`resume`/
 `paused` give the usual position control; `wakeup` interrupts a blocking `poll`.
 
-`Fetch` is negotiated no higher than v12 so partitions stay keyed by topic
-*name* — v13+ switches to topic ids under the strict codec. Fetches use
+`Fetch` negotiates up to the broker's version: v13+ keys partitions by **topic
+id** (KIP-516), resolved from the routing metadata and mapped back to names on
+the response; a topic without an id (or a pre-v13 broker) downgrades that fetch
+to v12, the last name-keyed version, matching Java. Fetches use
 incremental fetch sessions (KIP-227): the first fetch to a leader is a full fetch
 that opens a session, and later fetches send only the partitions whose position
 changed (plus a forgotten list for ones no longer fetchable), so the broker

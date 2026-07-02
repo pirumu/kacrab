@@ -12,6 +12,18 @@ issues.
 
 ### Added
 
+- Consumer topic-id-keyed `Fetch` (KIP-516): fetches now negotiate up to the
+  broker's `Fetch` version (v18 on Kafka 4.3) instead of capping at the
+  name-keyed v12. Topic ids are resolved from the routing metadata, responses
+  map ids back to names via the request's id set (Java's `sessionTopicNames`),
+  fetch sessions carry their ids into the forgotten list, and a topic without
+  an id — or a pre-v13 broker — downgrades that fetch to v12 exactly like
+  Java's `AbstractFetch`. `UNKNOWN_TOPIC_ID`/`INCONSISTENT_TOPIC_ID` are
+  handled as retriable per-partition metadata refreshes, and a session whose
+  topic ids changed (recreated topic) or whose keying mode flipped re-opens
+  with a full fetch. Verified against a real Apache Kafka 4.3.0 broker
+  (negotiates v18) across the full consumer suite, throughput-neutral on the
+  consumer benchmark.
 - Consumer cross-poll fetch buffering (Java's `CompletedFetches`): raw fetch
   responses are buffered client-side, `poll` drains them `max.poll.records` at
   a time, and a partition is only re-fetched once its buffer runs dry.
@@ -46,7 +58,7 @@ issues.
   consumes 10 B records ~28% faster than Java (~11.8M vs ~9.25M records/sec)
   and 10 KiB records ~3x faster (~4.7-5.0 GB/s vs ~1.5 GB/s) at a fraction of
   the CPU, with ~10x-faster group joins; caveats (peak-RSS churn on tiny-record
-  bursts, Fetch v12 vs v17) in `benches/README.md`.
+  bursts) in `benches/README.md`.
 
 - Consumer client (`consumer` feature): `kacrab::consumer::Consumer` with manual
   partition assignment and classic consumer-group subscription. Fetch with
