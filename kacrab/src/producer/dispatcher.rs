@@ -582,6 +582,7 @@ impl ProducerDispatcher {
     pub(crate) fn try_assign_cached_sticky_partition_now(
         &self,
         record: &mut ProducerRecord,
+        accumulator: &SharedAccumulator,
     ) -> bool {
         if record.has_assigned_partition() {
             return true;
@@ -609,6 +610,24 @@ impl ProducerDispatcher {
         let Some(metadata) = self.wire.cached_metadata_for(std::slice::from_ref(&topic)) else {
             return false;
         };
+        // Adaptive sticky rotation must re-sample partition queue depths (like the
+        // awaiting twin `assign_partition_with_accumulator`, and like Kafka's
+        // sender refreshing `partitionLoadStats` every `RecordAccumulator.ready()`
+        // pass). Rotating on a frozen table locks in whatever weighting the last
+        // refresh saw: the favored partition keeps absorbing most new batches, its
+        // queue serializes dispatch, and the imbalance never self-corrects.
+        if self.partitioner_adaptive_partitioning_enable
+            && self.uses_sticky_partitioner(record)
+            && let Some(topic_metadata) = metadata.topic(record.topic.as_ref())
+        {
+            state.update_partition_load_stats_from_accumulator_at(PartitionLoadRefresh {
+                topic: record.topic.as_ref(),
+                topic_metadata,
+                accumulator,
+                now: Instant::now(),
+                availability_timeout: self.partitioner_availability_timeout,
+            });
+        }
         match state.partition_for_record(
             &metadata,
             record,

@@ -434,9 +434,7 @@ impl Producer {
     /// contention — the caller then takes the slow drain path.
     fn try_assign_partition_now(&self, record: &mut ProducerRecord) -> bool {
         record.has_assigned_partition()
-            || self
-                .control_dispatcher
-                .try_assign_cached_sticky_partition_now(record)
+            || self.sender.try_assign_cached_sticky_partition_now(record)
     }
 
     /// Run a record's user callback (when the error is callback-eligible) and then
