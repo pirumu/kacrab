@@ -11,8 +11,7 @@ and **both consumer-group protocols** — the classic client-side-assignment
 protocol (eager `range`/`roundrobin`/`sticky` and incremental `cooperative-sticky`
 assignors) and the KIP-848 server-side protocol (`group.protocol=consumer`) —
 plus record fetching with incremental fetch sessions, offset commit/fetch, and
-interceptors. The design of record and the phased plan live in
-`docs/consumer-design.md`.
+interceptors.
 
 This chapter is the architectural tour. The algorithms behind it get their own
 deep dives: [Group membership & rebalancing](./consumer/rebalancing.md) (the two

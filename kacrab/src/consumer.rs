@@ -5,8 +5,9 @@
 //! producer and admin clients. "Java-compatible" means Kafka-protocol- and
 //! behaviour-compatible, not a literal port.
 //!
-//! See `docs/consumer-design.md` for the design and rationale. The consumer
-//! supports manual assignment, topic and pattern subscription, both group
+//! See the consumer chapters of the book (`docs-book/`) for the design and
+//! rationale. The consumer supports manual assignment, topic and pattern
+//! subscription, both group
 //! protocols (classic `JoinGroup`/`SyncGroup` and KIP-848
 //! `ConsumerGroupHeartbeat`), fetch with incremental sessions, and offset
 //! commit/fetch.

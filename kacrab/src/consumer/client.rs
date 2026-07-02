@@ -55,7 +55,7 @@ use crate::{
 
 /// A native, Java-compatible Kafka consumer.
 ///
-/// See `docs/consumer-design.md`. Supports manual assignment and group
+/// Supports manual assignment and group
 /// subscription (eager `range`/`roundrobin`/`sticky` and incremental
 /// `cooperative-sticky` rebalancing), fetching, and offset commit/fetch.
 #[derive(Debug)]

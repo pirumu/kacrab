@@ -45,7 +45,7 @@ issues.
   version bump is regenerate-and-reconcile.
 - `client.dns.lookup` is now honoured: broker hostnames are resolved on connect
   and every resolved address is tried under `use_all_dns_ips`.
-- Consumer chapter in the book and `docs/consumer-design.md` design doc.
+- Consumer chapters in the book (overview, fetching, rebalancing).
 
 ### Changed
 
