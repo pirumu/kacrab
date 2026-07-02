@@ -1,12 +1,15 @@
 //! Building `Fetch` requests, buffering responses, and decoding records.
 //!
-//! Fetches are capped at Fetch v12 so partitions are keyed by topic *name* —
-//! this sidesteps the v13+ topic-id strict-codec requirement. Incremental fetch
-//! sessions (KIP-227) are implemented per broker: the first fetch to a leader is
-//! a full fetch that establishes a session, and subsequent fetches send only the
-//! partitions whose position changed (plus a forgotten list for removed ones),
-//! letting the broker return only partitions with new data. Behaviour is
-//! identical to full fetches — it is purely a smaller request.
+//! Fetches negotiate up to the broker's `Fetch` version. v13+ keys partitions
+//! by *topic id* (KIP-516): ids are resolved from the routing metadata and the
+//! response's ids are mapped back to names via the session's id→name map,
+//! mirroring Java's `sessionTopicNames`. Like Java, a fetch whose topics do not
+//! all have ids downgrades to v12, the last name-keyed version. Incremental
+//! fetch sessions (KIP-227) are implemented per broker: the first fetch to a
+//! leader is a full fetch that establishes a session, and subsequent fetches
+//! send only the partitions whose position changed (plus a forgotten list for
+//! removed ones), letting the broker return only partitions with new data.
+//! Behaviour is identical to full fetches — it is purely a smaller request.
 //!
 //! Fetch responses are buffered across polls ([`FetchBuffer`], Java's
 //! `completedFetches` + `nextInLineFetch`): one fetch typically returns far more
@@ -19,6 +22,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 use kacrab_protocol::{
+    KafkaUuid,
     generated::{
         ApiKey, ErrorCode, FetchRequestData, FetchResponseData,
         fetch_request::{FetchPartition, FetchTopic, ForgottenTopic, ReplicaState},
@@ -38,9 +42,25 @@ use crate::{
     wire::{ClusterMetadata, WireClient},
 };
 
-/// Highest `Fetch` version we negotiate. v12 is the last name-keyed version;
-/// v13+ requires topic ids under the strict codec.
-const FETCH_MAX_VERSION: i16 = 12;
+/// The last name-keyed `Fetch` version — the downgrade target when a topic id
+/// is missing (topic-id fetch needs every topic's id), mirroring Java's
+/// `AbstractFetch` v12 fallback. Also the safe pre-`ApiVersions` default.
+const FETCH_NAME_KEYED_VERSION: i16 = 12;
+
+/// The first `Fetch` version keyed by topic *id* instead of name (KIP-516).
+const FETCH_TOPIC_ID_MIN_VERSION: i16 = 13;
+
+/// Pick the `Fetch` version and keying mode, like Java's `AbstractFetch`: the
+/// negotiated version when every topic has an id, else the v12 name-keyed cap.
+const fn select_fetch_version(negotiated: i16, all_topics_have_ids: bool) -> (i16, bool) {
+    if all_topics_have_ids && negotiated >= FETCH_TOPIC_ID_MIN_VERSION {
+        (negotiated, true)
+    } else if negotiated < FETCH_NAME_KEYED_VERSION {
+        (negotiated, false)
+    } else {
+        (FETCH_NAME_KEYED_VERSION, false)
+    }
+}
 
 /// The `LogAppendTime` bit (bit 3) in a record batch's attributes.
 const LOG_APPEND_TIME_BIT: i16 = 0x0008;
@@ -60,6 +80,12 @@ struct BrokerFetchSession {
     /// The positions the broker currently holds for this session, so we can send
     /// only what changed and forget what is gone.
     sent: HashMap<(String, i32), FetchPosition>,
+    /// Whether the session was established with topic-id-keyed fetches (v13+).
+    uses_topic_ids: bool,
+    /// The id each session topic was sent under (empty when name-keyed) —
+    /// Java's `sessionTopicNames`, kept name-keyed to match `sent`. Forgotten
+    /// topics reference these ids, and responses map ids back through them.
+    topic_ids: HashMap<String, KafkaUuid>,
 }
 
 impl BrokerFetchSession {
@@ -82,15 +108,42 @@ impl BrokerFetchSession {
         self.session_id = INVALID_SESSION_ID;
         self.epoch = INITIAL_SESSION_EPOCH;
         self.sent.clear();
+        self.uses_topic_ids = false;
+        self.topic_ids.clear();
+    }
+
+    /// Whether an established session can continue incrementally with this
+    /// fetch's keying: the same id/name mode, and no topic whose id changed
+    /// (a recreated topic). A mismatch means the broker's session cache is
+    /// keyed by stale identities — the caller resets and re-opens with a full
+    /// fetch, the outcome Java reaches via its "replaced" forgotten list.
+    fn is_compatible(&self, use_topic_ids: bool, topic_ids: &HashMap<String, KafkaUuid>) -> bool {
+        if self.uses_topic_ids != use_topic_ids {
+            return false;
+        }
+        !use_topic_ids
+            || topic_ids.iter().all(|(topic, id)| {
+                self.topic_ids
+                    .get(topic)
+                    .is_none_or(|session_id| session_id == id)
+            })
     }
 
     /// Record a successful response: adopt the broker's session id and, when a
-    /// session exists, advance the epoch and snapshot what the broker now holds.
-    fn advance(&mut self, response_session_id: i32, entries: &[(TopicPartition, FetchPosition)]) {
+    /// session exists, advance the epoch and snapshot what the broker now holds
+    /// (positions and, for id-keyed sessions, the topic ids they went under).
+    fn advance(
+        &mut self,
+        response_session_id: i32,
+        entries: &[(TopicPartition, FetchPosition)],
+        topic_ids: &HashMap<String, KafkaUuid>,
+    ) {
         self.session_id = response_session_id;
         if response_session_id == INVALID_SESSION_ID {
             self.epoch = INITIAL_SESSION_EPOCH;
             self.sent.clear();
+            self.uses_topic_ids = false;
+            self.topic_ids.clear();
         } else {
             self.epoch = self.next_epoch();
             self.sent = entries
@@ -99,6 +152,12 @@ impl BrokerFetchSession {
                     ((partition.topic.clone(), partition.partition), *position)
                 })
                 .collect();
+            self.uses_topic_ids = !topic_ids.is_empty();
+            self.topic_ids
+                .extend(topic_ids.iter().map(|(topic, id)| (topic.clone(), *id)));
+            // Topics no longer in the session don't need their id retained.
+            self.topic_ids
+                .retain(|topic, _| self.sent.keys().any(|(sent, _)| sent == topic));
         }
     }
 }
@@ -163,10 +222,13 @@ const fn classify_partition_error(error: ErrorCode) -> PartitionErrorAction {
         // — a normal condition handled by re-resolving the position.
         ErrorCode::OffsetOutOfRange => PartitionErrorAction::Reset,
         // Leadership moved or the cached metadata is stale — re-resolve and retry.
+        // The topic-id pair covers a topic recreated under a new id (v13+).
         ErrorCode::NotLeaderOrFollower
         | ErrorCode::FencedLeaderEpoch
         | ErrorCode::UnknownLeaderEpoch
         | ErrorCode::UnknownTopicOrPartition
+        | ErrorCode::UnknownTopicId
+        | ErrorCode::InconsistentTopicId
         | ErrorCode::ReplicaNotAvailable
         | ErrorCode::LeaderNotAvailable
         | ErrorCode::KafkaStorageError
@@ -221,19 +283,46 @@ pub(super) async fn fetch(
     }
 
     for (leader, entries) in by_leader {
-        // Pick the Fetch request version from this broker's negotiated
-        // `ApiVersions`, capped at `FETCH_MAX_VERSION` (v12) so fetches stay
-        // name-keyed (topic-id fetch is unsupported). Falls back to the v12 cap
-        // until `ApiVersions` has completed. `send_to_broker` re-clamps the
-        // ceiling against the broker's range, so this is behaviourally identical
-        // to passing the raw cap — it just makes the negotiated version explicit.
-        let version = wire
+        // Resolve every topic's id from the routing metadata; topic-id fetch
+        // (v13+) needs all of them, so one missing id downgrades to v12.
+        let mut topic_ids: HashMap<String, KafkaUuid> = HashMap::new();
+        let mut all_have_ids = true;
+        for (partition, _) in &entries {
+            if topic_ids.contains_key(&partition.topic) {
+                continue;
+            }
+            match metadata.topic(&partition.topic).map(|topic| topic.topic_id) {
+                Some(id) if !id.is_nil() => {
+                    let _previous = topic_ids.insert(partition.topic.clone(), id);
+                },
+                _ => all_have_ids = false,
+            }
+        }
+        // Pick the Fetch version from this broker's negotiated `ApiVersions`
+        // (falling back to the name-keyed v12 until `ApiVersions` has
+        // completed), then key by topic id or name like Java's `AbstractFetch`.
+        // `send_to_broker` re-clamps the ceiling against the broker's range.
+        let negotiated = wire
             .negotiated_version(leader, ApiKey::Fetch)
-            .map_or(FETCH_MAX_VERSION, |negotiated| {
-                negotiated.min(FETCH_MAX_VERSION)
-            });
+            .unwrap_or(FETCH_NAME_KEYED_VERSION);
+        let (version, use_topic_ids) = select_fetch_version(negotiated, all_have_ids);
+        if !use_topic_ids {
+            topic_ids.clear();
+        }
+
         let session = sessions.by_broker.entry(leader).or_default();
-        let request = build_fetch_request(config, session, &entries, max_wait_ms);
+        // A keying-mode flip or a changed topic id (recreated topic) leaves the
+        // broker's session cache keyed by stale identities — re-open it full.
+        if !session.is_full() && !session.is_compatible(use_topic_ids, &topic_ids) {
+            session.reset();
+        }
+        let request = build_fetch_request(
+            config,
+            session,
+            &entries,
+            max_wait_ms,
+            use_topic_ids.then_some(&topic_ids),
+        );
         let response: FetchResponseData = wire
             .send_to_broker(leader, ApiKey::Fetch, version, &request)
             .await?;
@@ -247,6 +336,16 @@ pub(super) async fn fetch(
             session.reset();
             continue;
         }
+        // A topic id in the session no longer matches the broker's (topic
+        // recreated) — refresh the affected partitions' metadata and re-open
+        // the session, like Java's `FETCH_SESSION_TOPIC_ID_ERROR` handling.
+        if top_level == ErrorCode::FetchSessionTopicIdError {
+            session.reset();
+            progress
+                .stale
+                .extend(entries.iter().map(|(partition, _)| partition.clone()));
+            continue;
+        }
         if top_level.is_error() {
             return Err(ConsumerError::broker(
                 "fetch",
@@ -254,14 +353,21 @@ pub(super) async fn fetch(
                 "fetch request rejected",
             ));
         }
-        session.advance(response.session_id, &entries);
+        session.advance(response.session_id, &entries, &topic_ids);
 
         let want: HashMap<(String, i32), FetchPosition> = entries
             .iter()
             .map(|(tp, pos)| ((tp.topic.clone(), tp.partition), *pos))
             .collect();
+        // v13+ responses key topics by id — map them back through the ids the
+        // request was built with (Java's `sessionTopicNames`, set at build
+        // time; a broker that declined the session still responds id-keyed).
+        let topic_names: HashMap<KafkaUuid, &str> = topic_ids
+            .iter()
+            .map(|(name, id)| (*id, name.as_str()))
+            .collect();
 
-        collect_fetches(response, &want, &mut progress)?;
+        collect_fetches(response, &want, &topic_names, &mut progress)?;
     }
 
     Ok(progress)
@@ -270,16 +376,26 @@ pub(super) async fn fetch(
 /// Process one broker's fetch response into raw per-partition data, recovering
 /// partition-level errors per partition (reset out-of-range positions, flag
 /// stale-leader partitions for a metadata refresh) and only failing on a
-/// genuinely fatal code. Partitions the caller did not ask for are ignored.
+/// genuinely fatal code. Partitions the caller did not ask for are ignored —
+/// including id-keyed topics (v13+, empty name) whose id `topic_names` cannot
+/// resolve, matching Java's unresolved-id skip.
 fn collect_fetches(
     response: FetchResponseData,
     want: &HashMap<(String, i32), FetchPosition>,
+    topic_names: &HashMap<KafkaUuid, &str>,
     progress: &mut FetchProgress,
 ) -> Result<()> {
     for topic in response.responses {
+        let name = if topic.topic.as_str().is_empty() {
+            let Some(name) = topic_names.get(&topic.topic_id) else {
+                continue;
+            };
+            (*name).to_owned()
+        } else {
+            topic.topic.as_str().to_owned()
+        };
         for partition in topic.partitions {
-            let tp =
-                TopicPartition::new(topic.topic.as_str().to_owned(), partition.partition_index);
+            let tp = TopicPartition::new(name.clone(), partition.partition_index);
             let Some(position) = want.get(&(tp.topic.clone(), tp.partition)).copied() else {
                 continue;
             };
@@ -535,9 +651,12 @@ fn build_fetch_request(
     session: &BrokerFetchSession,
     entries: &[(TopicPartition, FetchPosition)],
     max_wait_ms: i32,
+    topic_ids: Option<&HashMap<String, KafkaUuid>>,
 ) -> FetchRequestData {
     let full = session.is_full();
-    let mut topics: Vec<FetchTopic> = Vec::new();
+    // Grouped by name (v13+ sends only the id on the wire, so the wire struct
+    // can't be the grouping key), then lowered to `FetchTopic`s at the end.
+    let mut grouped: Vec<(&str, Vec<FetchPartition>)> = Vec::new();
     for (partition, position) in entries {
         // Incremental fetch: only send partitions whose position changed since the
         // broker last saw them; a full fetch sends everything.
@@ -556,24 +675,38 @@ fn build_fetch_request(
             last_fetched_epoch: -1,
             log_start_offset: -1,
             partition_max_bytes: config.max_partition_fetch_bytes,
-            replica_directory_id: kacrab_protocol::KafkaUuid::default(),
+            replica_directory_id: KafkaUuid::default(),
             high_watermark: i64::MAX,
             _unknown_tagged_fields: Vec::new(),
         };
-        if let Some(topic) = topics
+        if let Some((_, partitions)) = grouped
             .iter_mut()
-            .find(|topic| topic.topic.as_str() == partition.topic)
+            .find(|(topic, _)| *topic == partition.topic)
         {
-            topic.partitions.push(wire_partition);
+            partitions.push(wire_partition);
         } else {
-            topics.push(FetchTopic {
-                topic: partition.topic.clone().into(),
-                topic_id: kacrab_protocol::KafkaUuid::default(),
-                partitions: vec![wire_partition],
-                _unknown_tagged_fields: Vec::new(),
-            });
+            grouped.push((partition.topic.as_str(), vec![wire_partition]));
         }
     }
+    // Topic-id keyed fetches (v13+) leave the name empty and set the id; the
+    // strict codec rejects a non-default name at v13+ and vice versa.
+    let topics: Vec<FetchTopic> = grouped
+        .into_iter()
+        .map(|(name, partitions)| match topic_ids {
+            Some(ids) => FetchTopic {
+                topic: kacrab_protocol::KafkaString::default(),
+                topic_id: ids.get(name).copied().unwrap_or_default(),
+                partitions,
+                _unknown_tagged_fields: Vec::new(),
+            },
+            None => FetchTopic {
+                topic: name.to_owned().into(),
+                topic_id: KafkaUuid::default(),
+                partitions,
+                _unknown_tagged_fields: Vec::new(),
+            },
+        })
+        .collect();
     let forgotten = if full {
         Vec::new()
     } else {
@@ -602,7 +735,9 @@ fn build_fetch_request(
 }
 
 /// The partitions the broker still holds in the session that are no longer
-/// fetchable, grouped by topic — the incremental fetch's forgotten list.
+/// fetchable, grouped by topic — the incremental fetch's forgotten list. In an
+/// id-keyed session the forgotten topics carry the id the broker knows them
+/// under (`session.topic_ids`) and an empty name, per the v13+ strict codec.
 fn build_forgotten(
     session: &BrokerFetchSession,
     entries: &[(TopicPartition, FetchPosition)],
@@ -611,26 +746,37 @@ fn build_forgotten(
         .iter()
         .map(|(partition, _)| (partition.topic.as_str(), partition.partition))
         .collect();
-    let mut forgotten: Vec<ForgottenTopic> = Vec::new();
+    let mut grouped: Vec<(&str, Vec<i32>)> = Vec::new();
     for (topic, partition) in session.sent.keys() {
         if current.contains(&(topic.as_str(), *partition)) {
             continue;
         }
-        if let Some(entry) = forgotten
-            .iter_mut()
-            .find(|forgotten| forgotten.topic.as_str() == topic)
-        {
-            entry.partitions.push(*partition);
+        if let Some((_, partitions)) = grouped.iter_mut().find(|(name, _)| name == topic) {
+            partitions.push(*partition);
         } else {
-            forgotten.push(ForgottenTopic {
-                topic: topic.clone().into(),
-                topic_id: kacrab_protocol::KafkaUuid::default(),
-                partitions: vec![*partition],
-                _unknown_tagged_fields: Vec::new(),
-            });
+            grouped.push((topic.as_str(), vec![*partition]));
         }
     }
-    forgotten
+    grouped
+        .into_iter()
+        .map(|(name, partitions)| {
+            if session.uses_topic_ids {
+                ForgottenTopic {
+                    topic: kacrab_protocol::KafkaString::default(),
+                    topic_id: session.topic_ids.get(name).copied().unwrap_or_default(),
+                    partitions,
+                    _unknown_tagged_fields: Vec::new(),
+                }
+            } else {
+                ForgottenTopic {
+                    topic: name.to_owned().into(),
+                    topic_id: KafkaUuid::default(),
+                    partitions,
+                    _unknown_tagged_fields: Vec::new(),
+                }
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -770,11 +916,12 @@ mod tests {
 
         // A response with a real session id advances the epoch and records state.
         let entries = vec![entry("t", 0, 10), entry("t", 1, 20)];
-        session.advance(42, &entries);
+        session.advance(42, &entries, &HashMap::new());
         assert!(!session.is_full());
         assert_eq!(session.session_id, 42);
         assert_eq!(session.epoch, 1);
         assert_eq!(session.sent.len(), 2);
+        assert!(!session.uses_topic_ids);
 
         // A reset returns to a full fetch.
         session.reset();
@@ -785,7 +932,7 @@ mod tests {
     #[test]
     fn session_without_broker_id_stays_full() {
         let mut session = BrokerFetchSession::default();
-        session.advance(INVALID_SESSION_ID, &[entry("t", 0, 5)]);
+        session.advance(INVALID_SESSION_ID, &[entry("t", 0, 5)], &HashMap::new());
         // The broker declined a session, so we keep sending full fetches.
         assert!(session.is_full());
         assert!(session.sent.is_empty());
@@ -807,7 +954,7 @@ mod tests {
 
         // A full fetch (epoch 0) sends every partition and no forgotten list.
         let entries = vec![entry("t", 0, 10), entry("t", 1, 20)];
-        let full = build_fetch_request(&config, &session, &entries, 500);
+        let full = build_fetch_request(&config, &session, &entries, 500, None);
         assert_eq!(full.session_epoch, INITIAL_SESSION_EPOCH);
         assert_eq!(
             full.topics
@@ -818,11 +965,11 @@ mod tests {
         );
         assert!(full.forgotten_topics_data.is_empty());
 
-        session.advance(99, &entries);
+        session.advance(99, &entries, &HashMap::new());
 
         // Incrementally, only the partition whose offset changed is resent.
         let changed = vec![entry("t", 0, 10), entry("t", 1, 25)];
-        let incremental = build_fetch_request(&config, &session, &changed, 500);
+        let incremental = build_fetch_request(&config, &session, &changed, 500, None);
         assert_eq!(incremental.session_id, 99);
         assert_eq!(incremental.session_epoch, 1);
         let sent: Vec<i32> = incremental
@@ -880,7 +1027,8 @@ mod tests {
             ],
         );
         let mut progress = FetchProgress::default();
-        collect_fetches(response, &want_two(), &mut progress).expect("no fatal error");
+        collect_fetches(response, &want_two(), &HashMap::new(), &mut progress)
+            .expect("no fatal error");
         assert_eq!(progress.resets, vec![TopicPartition::new("t", 0)]);
         assert!(progress.stale.is_empty());
         assert_eq!(progress.partitions.len(), 1);
@@ -899,7 +1047,7 @@ mod tests {
             vec![partition_data(0, ErrorCode::NotLeaderOrFollower, None)],
         );
         let mut progress = FetchProgress::default();
-        collect_fetches(response, &want_two(), &mut progress).expect("retriable");
+        collect_fetches(response, &want_two(), &HashMap::new(), &mut progress).expect("retriable");
         assert_eq!(progress.stale, vec![TopicPartition::new("t", 0)]);
         assert!(progress.resets.is_empty());
         assert!(progress.partitions.is_empty());
@@ -912,7 +1060,7 @@ mod tests {
             vec![partition_data(0, ErrorCode::CorruptMessage, None)],
         );
         let mut progress = FetchProgress::default();
-        assert!(collect_fetches(response, &want_two(), &mut progress).is_err());
+        assert!(collect_fetches(response, &want_two(), &HashMap::new(), &mut progress).is_err());
     }
 
     fn buffer_with(topic: &str, partition: i32, offset: i64, count: i32) -> FetchBuffer {
@@ -1043,10 +1191,163 @@ mod tests {
         assert!(!buffer.has(&TopicPartition::new("t", 0)));
     }
 
+    fn uuid(byte: u8) -> KafkaUuid {
+        KafkaUuid::from_parts(u64::from(byte), u64::from(byte))
+    }
+
+    fn ids(pairs: &[(&str, KafkaUuid)]) -> HashMap<String, KafkaUuid> {
+        pairs
+            .iter()
+            .map(|(name, id)| ((*name).to_owned(), *id))
+            .collect()
+    }
+
+    #[test]
+    fn version_selection_mirrors_java_downgrade() {
+        // Every topic has an id and the broker speaks v13+ — use the
+        // negotiated version, id-keyed.
+        assert_eq!(select_fetch_version(17, true), (17, true));
+        assert_eq!(select_fetch_version(13, true), (13, true));
+        // A missing topic id downgrades to the v12 name-keyed cap (Java's
+        // `AbstractFetch` fallback), whatever the broker supports.
+        assert_eq!(select_fetch_version(17, false), (12, false));
+        // Brokers below v13 stay name-keyed even with ids available.
+        assert_eq!(select_fetch_version(12, true), (12, false));
+        assert_eq!(select_fetch_version(4, false), (4, false));
+    }
+
+    #[test]
+    fn topic_id_request_omits_names_and_encodes_at_v17() {
+        let config = test_config();
+        let session = BrokerFetchSession::default();
+        let entries = vec![entry("t", 0, 10), entry("u", 1, 20)];
+        let topic_ids = ids(&[("t", uuid(1)), ("u", uuid(2))]);
+
+        let request = build_fetch_request(&config, &session, &entries, 500, Some(&topic_ids));
+        for topic in &request.topics {
+            assert!(topic.topic.as_str().is_empty());
+            assert!(!topic.topic_id.is_nil());
+        }
+        let sent: HashSet<KafkaUuid> = request.topics.iter().map(|t| t.topic_id).collect();
+        assert_eq!(sent, [uuid(1), uuid(2)].into_iter().collect());
+
+        // The strict codec accepts the id-keyed shape at v17 and rejects it at
+        // the name-keyed v12 (proof the two shapes cannot be mixed up).
+        let mut buf = BytesMut::new();
+        request.write(&mut buf, 17).expect("v17 encode");
+        assert_eq!(buf.len(), request.encoded_len(17).expect("v17 len"));
+        assert!(request.write(&mut BytesMut::new(), 12).is_err());
+    }
+
+    #[test]
+    fn name_keyed_request_encodes_at_v12_but_not_v17() {
+        let config = test_config();
+        let session = BrokerFetchSession::default();
+        let entries = vec![entry("t", 0, 10)];
+        let request = build_fetch_request(&config, &session, &entries, 500, None);
+        assert_eq!(request.topics[0].topic.as_str(), "t");
+        assert!(request.topics[0].topic_id.is_nil());
+        request.write(&mut BytesMut::new(), 12).expect("v12 encode");
+        assert!(request.write(&mut BytesMut::new(), 17).is_err());
+    }
+
+    #[test]
+    fn session_compatibility_tracks_ids_and_mode() {
+        let mut session = BrokerFetchSession::default();
+        let entries = vec![entry("t", 0, 10)];
+        session.advance(42, &entries, &ids(&[("t", uuid(1))]));
+        assert!(session.uses_topic_ids);
+
+        // Same id, or a brand-new topic joining the session: compatible.
+        assert!(session.is_compatible(true, &ids(&[("t", uuid(1))])));
+        assert!(session.is_compatible(true, &ids(&[("t", uuid(1)), ("u", uuid(2))])));
+        // The topic was recreated under a new id: incompatible.
+        assert!(!session.is_compatible(true, &ids(&[("t", uuid(9))])));
+        // Keying-mode flip (id-keyed session, name-keyed fetch): incompatible.
+        assert!(!session.is_compatible(false, &HashMap::new()));
+
+        // A name-keyed session is incompatible with an id-keyed fetch.
+        session.reset();
+        session.advance(42, &entries, &HashMap::new());
+        assert!(!session.is_compatible(true, &ids(&[("t", uuid(1))])));
+        assert!(session.is_compatible(false, &HashMap::new()));
+    }
+
+    #[test]
+    fn forgotten_topics_carry_the_session_ids() {
+        let mut session = BrokerFetchSession::default();
+        session.advance(
+            7,
+            &[entry("t", 0, 1), entry("u", 0, 1)],
+            &ids(&[("t", uuid(1)), ("u", uuid(2))]),
+        );
+        // u-0 dropped out of the fetchable set: it must be forgotten under the
+        // id the broker's session cache knows it by, with an empty name.
+        let forgotten = build_forgotten(&session, &[entry("t", 0, 1)]);
+        assert_eq!(forgotten.len(), 1);
+        assert!(forgotten[0].topic.as_str().is_empty());
+        assert_eq!(forgotten[0].topic_id, uuid(2));
+        assert_eq!(forgotten[0].partitions, vec![0]);
+    }
+
+    #[test]
+    fn collect_fetches_resolves_topics_by_id() {
+        // A v13+ response: the topic arrives with an empty name and an id.
+        let mut response = fetch_response(
+            "",
+            vec![partition_data(
+                0,
+                ErrorCode::None,
+                Some(encode_batch(100, 2)),
+            )],
+        );
+        response.responses[0].topic_id = uuid(1);
+        let topic_names: HashMap<KafkaUuid, &str> = std::iter::once((uuid(1), "t")).collect();
+
+        let mut progress = FetchProgress::default();
+        collect_fetches(response, &want_two(), &topic_names, &mut progress).expect("collect");
+        assert_eq!(progress.partitions.len(), 1);
+        assert_eq!(
+            progress.partitions[0].partition,
+            TopicPartition::new("t", 0)
+        );
+
+        // An id the request never sent cannot be resolved — skipped, like Java.
+        let mut unknown = fetch_response(
+            "",
+            vec![partition_data(
+                0,
+                ErrorCode::None,
+                Some(encode_batch(100, 2)),
+            )],
+        );
+        unknown.responses[0].topic_id = uuid(9);
+        let mut progress = FetchProgress::default();
+        collect_fetches(unknown, &want_two(), &topic_names, &mut progress).expect("collect");
+        assert!(progress.partitions.is_empty());
+    }
+
+    #[test]
+    fn unknown_topic_id_errors_are_retriable() {
+        // A recreated topic surfaces UNKNOWN_TOPIC_ID / INCONSISTENT_TOPIC_ID —
+        // both flag the partition stale for a metadata refresh, never fatal.
+        for error in [ErrorCode::UnknownTopicId, ErrorCode::InconsistentTopicId] {
+            let response = fetch_response("t", vec![partition_data(0, error, None)]);
+            let mut progress = FetchProgress::default();
+            collect_fetches(response, &want_two(), &HashMap::new(), &mut progress)
+                .expect("retriable");
+            assert_eq!(progress.stale, vec![TopicPartition::new("t", 0)]);
+        }
+    }
+
     #[test]
     fn forgotten_lists_partitions_dropped_from_the_session() {
         let mut session = BrokerFetchSession::default();
-        session.advance(7, &[entry("t", 0, 1), entry("t", 1, 1), entry("u", 0, 1)]);
+        session.advance(
+            7,
+            &[entry("t", 0, 1), entry("t", 1, 1), entry("u", 0, 1)],
+            &HashMap::new(),
+        );
         // Now only t-0 remains fetchable; t-1 and u-0 must be forgotten.
         let forgotten = build_forgotten(&session, &[entry("t", 0, 1)]);
         let mut pairs: Vec<(String, i32)> = forgotten

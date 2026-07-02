@@ -394,8 +394,9 @@ assign).
 
 ### Consumer Comparison Caveats
 
-- kacrab caps Fetch at v12 (topic-name-keyed); Java 4.3 negotiates v17
-  (topic-id-keyed) with slightly smaller requests. Same fetched data.
+- kacrab negotiates topic-id-keyed Fetch (v13+, KIP-516) like Java, up to the
+  broker's max (v18 on Kafka 4.3), downgrading to the name-keyed v12 only when
+  a topic id is unavailable.
 - kacrab has no rebalance-listener callback, so its rebalance time is observed
   as the `assignment()` empty -> non-empty transition around `poll`, quantized
   to one poll slice (<= 100 ms overestimate); Java records the exact in-callback

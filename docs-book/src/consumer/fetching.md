@@ -59,8 +59,12 @@ to its own timeout. One guard matters (Java's buffered-node gate): a node that
 still hosts buffered partitions is not fetched from at all. Omitting its
 buffered partitions would drop them from the broker's fetch-session cache, and
 a request listing only caught-up partitions would long-poll
-`fetch.max.wait.ms` while the buffer drains dry behind it. Fetches are capped
-at v12 so partitions stay keyed by topic name.
+`fetch.max.wait.ms` while the buffer drains dry behind it. Fetches negotiate up
+to the broker's version: v13+ keys partitions by **topic id** (KIP-516), with
+ids resolved from the routing metadata and mapped back to names on the response
+(Java's `sessionTopicNames`); a topic with no id — or a pre-v13 broker —
+downgrades that fetch to v12, the last name-keyed version, exactly like Java's
+`AbstractFetch`.
 
 Because the broker holds a fetch for up to `fetch.max.wait.ms` waiting for
 `fetch.min.bytes`, kacrab **clamps that wait to the caller's remaining poll
