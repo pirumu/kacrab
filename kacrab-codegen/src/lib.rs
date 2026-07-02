@@ -4,7 +4,7 @@
 //!
 //! 1. [`parser`]      — load + parse JSON message specs into an IR.
 //! 2. [`codegen`]     — lower the IR into a Rust `TokenStream`.
-//! 3. [`format`]      — pretty-print the `TokenStream` via `prettyplease`.
+//! 3. [`format`](mod@format) — pretty-print the `TokenStream` via `prettyplease`.
 //! 4. [`errors_java`] — (optional) parse upstream `Errors.java` for the Kafka error-code table.
 //! 5. [`kafka_config`] — (optional) extract upstream `ConfigDef` declarations.
 //!

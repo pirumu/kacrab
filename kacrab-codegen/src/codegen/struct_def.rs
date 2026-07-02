@@ -73,6 +73,12 @@ pub(crate) fn extract_struct_name(ft: &FieldType) -> Option<String> {
     }
 }
 
+/// Escape `[`/`]` so Kafka schema `about` text is not parsed as a rustdoc
+/// intra-doc link (e.g. `Array[0]` would otherwise deny-lint as a broken link).
+fn doc_text(about: &str) -> String {
+    about.replace('[', "\\[").replace(']', "\\]")
+}
+
 /// Generate the `pub struct ...` definition for a [`StructDef`].
 pub(crate) fn generate_struct(def: &StructDef<'_>) -> TokenStream {
     let name = Ident::new(&def.name, Span::call_site());
@@ -88,7 +94,7 @@ pub(crate) fn generate_struct(def: &StructDef<'_>) -> TokenStream {
                     pub #rust_name: #rust_type,
                 }
             } else {
-                let doc = &field.about;
+                let doc = doc_text(&field.about);
                 quote! {
                     #[doc = #doc]
                     pub #rust_name: #rust_type,
@@ -100,7 +106,7 @@ pub(crate) fn generate_struct(def: &StructDef<'_>) -> TokenStream {
     let doc = if def.about.is_empty() {
         quote! {}
     } else {
-        let about = &def.about;
+        let about = doc_text(&def.about);
         quote! { #[doc = #about] }
     };
 
