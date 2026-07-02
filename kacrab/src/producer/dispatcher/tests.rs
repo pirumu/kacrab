@@ -2462,7 +2462,7 @@ async fn add_partition_to_transaction_handles_local_state_branches() {
             producer_epoch: 2,
         });
         state.in_transaction = true;
-        let _inserted = state.transaction_partitions.insert(TopicPartitionKey {
+        let _inserted = state.partitions_in_transaction.insert(TopicPartitionKey {
             topic: "orders".to_owned(),
             partition: 0,
         });
@@ -2493,7 +2493,7 @@ async fn add_partition_to_transaction_requires_initialized_identity_like_java() 
             let mut state = dispatcher.producer_state.lock().await;
             state.in_transaction = true;
             if !transaction_two_phase_commit {
-                let _inserted = state.transaction_partitions.insert(TopicPartitionKey {
+                let _inserted = state.partitions_in_transaction.insert(TopicPartitionKey {
                     topic: "orders".to_owned(),
                     partition: 0,
                 });

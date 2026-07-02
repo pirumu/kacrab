@@ -60,10 +60,10 @@ fn bench_producer_dispatcher(c: &mut Criterion) {
 
 async fn run_dispatcher_sample(iterations: usize) {
     let leaders = [
-        MockBroker::serve_produce_leader(7, iterations).await,
-        MockBroker::serve_produce_leader(8, iterations).await,
-        MockBroker::serve_produce_leader(9, iterations).await,
-        MockBroker::serve_produce_leader(10, iterations).await,
+        MockBroker::serve_produce_leader(7).await,
+        MockBroker::serve_produce_leader(8).await,
+        MockBroker::serve_produce_leader(9).await,
+        MockBroker::serve_produce_leader(10).await,
     ];
     let bootstrap = MockBroker::serve_bootstrap([
         (7, leaders[0].addr()),
@@ -82,7 +82,9 @@ async fn run_dispatcher_sample(iterations: usize) {
         "kacrab-bench",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let dispatcher = ProducerDispatcher::new(wire);
+    // Match the dispatcher's in-flight cap to the wire client above (BROKERS);
+    // a larger dispatcher cap would over-enqueue and hit WireError::Backpressure.
+    let dispatcher = ProducerDispatcher::new(wire).max_in_flight_requests_per_connection(BROKERS);
     let records = records_for_iteration();
     for _ in 0..iterations {
         let accumulator = SharedAccumulator::with_config(
@@ -103,8 +105,11 @@ async fn run_dispatcher_sample(iterations: usize) {
         let _receipts = black_box(receipts);
     }
     let _bootstrap_handled = bootstrap.join().await;
+    // The leaders serve produce responses until the client stops sending; the
+    // client is done, so abort them rather than joining (the wire keeps the
+    // sockets open, so a join would block on a read that never returns EOF).
     for leader in leaders {
-        let _leader_handled = leader.join().await;
+        leader.abort();
     }
 }
 
@@ -133,12 +138,16 @@ impl MockBroker {
         let addr = listener.local_addr().expect("bootstrap addr");
         let join = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept bootstrap");
-            let handshake = read_frame(&mut socket).await;
+            let handshake = read_frame(&mut socket)
+                .await
+                .expect("bootstrap handshake frame");
             socket
                 .write_all(&api_versions_response(handshake))
                 .await
                 .expect("write bootstrap handshake");
-            let mut request = read_frame(&mut socket).await;
+            let mut request = read_frame(&mut socket)
+                .await
+                .expect("bootstrap metadata frame");
             let header = RequestHeaderData::read(&mut request, 2).expect("metadata header");
             let response = metadata_response(brokers);
             socket
@@ -155,18 +164,23 @@ impl MockBroker {
         Self { addr, join }
     }
 
-    async fn serve_produce_leader(node_id: i32, produce_requests: usize) -> Self {
+    async fn serve_produce_leader(node_id: i32) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind leader");
         let addr = listener.local_addr().expect("leader addr");
         let join = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept leader");
-            let handshake = read_frame(&mut socket).await;
+            let handshake = read_frame(&mut socket)
+                .await
+                .expect("leader handshake frame");
             socket
                 .write_all(&api_versions_response(handshake))
                 .await
                 .expect("write leader handshake");
-            for _ in 0..produce_requests {
-                let mut request = read_frame(&mut socket).await;
+            // Serve every produce request the client sends until it disconnects.
+            // The dispatcher decides how many requests each drain becomes, so a
+            // fixed count would race the actual pipelining shape.
+            let mut served = 0usize;
+            while let Some(mut request) = read_frame(&mut socket).await {
                 let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
                 let produce = ProduceRequestData::read(&mut request, 13).expect("produce request");
                 let partition = produce.topic_data[0].partition_data[0].index;
@@ -180,10 +194,15 @@ impl MockBroker {
                     ))
                     .await
                     .expect("write produce response");
+                served = served.saturating_add(1);
             }
-            produce_requests.saturating_add(1)
+            served
         });
         Self { addr, join }
+    }
+
+    fn abort(self) {
+        self.join.abort();
     }
 
     const fn addr(&self) -> std::net::SocketAddr {
@@ -324,12 +343,14 @@ impl WriteResponse for ProduceResponseData {
     }
 }
 
-async fn read_frame(socket: &mut TcpStream) -> Bytes {
-    let len = socket.read_i32().await.expect("frame length");
+async fn read_frame(socket: &mut TcpStream) -> Option<Bytes> {
+    // Returns None once the client disconnects (clean EOF on the length prefix),
+    // so serve loops terminate instead of panicking on the closed socket.
+    let len = socket.read_i32().await.ok()?;
     let len = usize::try_from(len).expect("positive frame length");
     let mut bytes = vec![0; len];
     let _bytes_read = socket.read_exact(&mut bytes).await.expect("frame payload");
-    Bytes::from(bytes)
+    Some(Bytes::from(bytes))
 }
 
 criterion_group!(benches, bench_producer_dispatcher);

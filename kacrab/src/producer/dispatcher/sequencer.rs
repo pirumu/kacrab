@@ -31,12 +31,24 @@ impl EnqueueSequencer {
     /// Wait until it is `ticket`'s turn to enqueue. Returns immediately for a ticket whose
     /// turn has already passed (an in-task retry reusing its ticket), so retries never block.
     pub(crate) async fn wait_turn(&self, ticket: u64) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
         loop {
-            let notified = self.notify.notified();
+            // Register this waiter with `notify` BEFORE reading `serving`. A
+            // `Notified` future only registers when polled, and `advance_past`
+            // wakes via `notify_waiters()` (which stores no permit); without
+            // `enable()` an `advance_past` landing between the `serving` read and
+            // the `.await` is lost, stalling this ticket until the *next* advance.
+            // With one partition dispatching serially `serving` is always caught
+            // up so this never awaits; but with several partitions dispatching
+            // concurrently the lost wakeup serialized them and collapsed
+            // throughput (~26x on 10 KiB records across 3 partitions).
+            let _newly_registered = notified.as_mut().enable();
             if self.serving.load(Ordering::Acquire) >= ticket {
                 return;
             }
-            notified.await;
+            notified.as_mut().await;
+            notified.set(self.notify.notified());
         }
     }
 

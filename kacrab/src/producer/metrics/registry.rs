@@ -1431,7 +1431,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_total(
         &mut self,
         sensor: SensorId,
@@ -1444,7 +1446,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_total_with_config(
         &mut self,
         sensor: SensorId,
@@ -1458,7 +1462,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_total_with_quota(
         &mut self,
         sensor: SensorId,
@@ -1476,7 +1482,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_value(
         &mut self,
         sensor: SensorId,
@@ -1489,7 +1497,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_value_with_config(
         &mut self,
         sensor: SensorId,
@@ -1503,7 +1513,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_value_with_quota(
         &mut self,
         sensor: SensorId,
@@ -1521,7 +1533,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_avg(
         &mut self,
         sensor: SensorId,
@@ -1534,7 +1548,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_avg_with_config(
         &mut self,
         sensor: SensorId,
@@ -1548,7 +1564,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_avg_with_quota(
         &mut self,
         sensor: SensorId,
@@ -1562,7 +1580,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_count(
         &mut self,
         sensor: SensorId,
@@ -1575,7 +1595,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_count_with_config(
         &mut self,
         sensor: SensorId,
@@ -1589,7 +1611,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_count_with_quota(
         &mut self,
         sensor: SensorId,
@@ -1607,7 +1631,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_rate(
         &mut self,
         sensor: SensorId,
@@ -1620,7 +1646,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_rate_with_config(
         &mut self,
         sensor: SensorId,
@@ -1634,7 +1662,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_token_bucket(
         &mut self,
         sensor: SensorId,
@@ -1650,7 +1680,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_token_bucket_with_config(
         &mut self,
         sensor: SensorId,
@@ -1672,8 +1704,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing, both metric names are
-    /// absent, or a metric already exists globally.
+    /// Returns an error when the sensor is missing, both metric names are absent,
+    /// or a metric name is already registered to a different metric. Re-adding a
+    /// metric already on this sensor is a no-op.
     pub fn sensor_add_boolean_frequencies(
         &mut self,
         sensor: SensorId,
@@ -1692,8 +1725,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing, both metric names are
-    /// absent, or a metric already exists globally.
+    /// Returns an error when the sensor is missing, both metric names are absent,
+    /// or a metric name is already registered to a different metric. Re-adding a
+    /// metric already on this sensor is a no-op.
     pub fn sensor_add_boolean_frequencies_with_config(
         &mut self,
         sensor: SensorId,
@@ -1739,7 +1773,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or either metric already exists.
+    /// Returns an error when the sensor is missing, or when either metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_meter(
         &mut self,
         sensor: SensorId,
@@ -1758,7 +1794,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or either metric already exists.
+    /// Returns an error when the sensor is missing, or when either metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_meter_with_config(
         &mut self,
         sensor: SensorId,
@@ -1774,7 +1812,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_min(
         &mut self,
         sensor: SensorId,
@@ -1787,7 +1827,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_min_with_config(
         &mut self,
         sensor: SensorId,
@@ -1801,7 +1843,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_min_with_quota(
         &mut self,
         sensor: SensorId,
@@ -1815,7 +1859,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_max(
         &mut self,
         sensor: SensorId,
@@ -1828,7 +1874,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_max_with_config(
         &mut self,
         sensor: SensorId,
@@ -1842,7 +1890,9 @@ impl Metrics {
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing or the metric already exists.
+    /// Returns an error when the sensor is missing, or when the metric name is
+    /// already registered to a different metric. Re-adding a metric already on
+    /// this sensor is a no-op.
     pub fn sensor_add_max_with_quota(
         &mut self,
         sensor: SensorId,

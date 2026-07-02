@@ -90,7 +90,10 @@ async fn run_scenario(scenario: Scenario) {
         "kacrab-producer-mock-bench",
         [BrokerEndpoint::new(1, broker.addr())],
     );
-    let dispatcher = ProducerDispatcher::new(wire);
+    // Keep the dispatcher's in-flight cap consistent with the wire client above
+    // (max_in_flight/broker_queue_capacity of 1); otherwise the dispatcher's
+    // default cap would over-enqueue and hit WireError::Backpressure.
+    let dispatcher = ProducerDispatcher::new(wire).max_in_flight_requests_per_connection(1);
     dispatcher.enable_metrics();
     let value = Bytes::from(vec![b'x'; scenario.value_size]);
     let started = Instant::now();

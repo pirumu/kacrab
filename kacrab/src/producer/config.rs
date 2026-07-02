@@ -20,8 +20,9 @@ pub(super) const DEFAULT_TIMEOUT_MS: i32 = 30_000;
 /// Kafka default `delivery.timeout.ms`; this is the outer delivery bound that
 /// must remain larger than request timeout plus linger/retry time.
 pub(super) const DEFAULT_DELIVERY_TIMEOUT: Duration = Duration::from_mins(2);
-/// Kafka's effective default retries is `Integer.MAX_VALUE`; delivery timeout
-/// remains the real upper bound.
+/// Kafka's default `retries` is `Integer.MAX_VALUE` (effectively unlimited);
+/// Kacrab uses `usize::MAX` as the equivalent "retry until the deadline"
+/// sentinel, so `delivery.timeout.ms` remains the real upper bound.
 pub(super) const DEFAULT_RETRY_ATTEMPTS: usize = usize::MAX;
 /// Kafka default `retry.backoff.ms`.
 pub(super) const DEFAULT_RETRY_BACKOFF: Duration = Duration::from_millis(100);

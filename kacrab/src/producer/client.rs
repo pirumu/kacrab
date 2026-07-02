@@ -82,7 +82,7 @@ pub struct Producer {
     partitioner: ProducerPartitionerHandle,
     metric_reporters: Vec<Arc<dyn MetricReporter>>,
     // Lazily-spawned FIFO drain for the rare synchronous-send slow path (cold
-    // metadata, buffer-full, transactional, or custom-partitioner records).
+    // metadata, buffer-full, or custom-partitioner records).
     // `send`/`send_with_callback` are synchronous like Kafka's `Producer.send`;
     // records that cannot append synchronously are handed to this drain so
     // per-partition append order is preserved without blocking the caller thread.
@@ -352,11 +352,10 @@ impl Producer {
     pub async fn from_config(config: ProducerConfig) -> Result<Self> {
         let runtime = config.to_producer_runtime_config()?;
         let endpoints = resolve_bootstrap_brokers(&config).await?;
-        let wire = WireClient::connect_with_brokers(
-            config.to_connection_config(),
-            config.client_id,
-            endpoints,
-        );
+        let connection = config
+            .to_connection_config()
+            .map_err(|error| ProducerError::Config { error })?;
+        let wire = WireClient::connect_with_brokers(connection, config.client_id, endpoints);
         Ok(Self::from_parts(wire, runtime))
     }
 
@@ -364,8 +363,8 @@ impl Producer {
     /// `Producer.send(record)`. A record whose partition resolves synchronously is
     /// appended inline with zero per-record `.await`; the rare record that needs
     /// the network (cold metadata), must wait for buffer space, or belongs to a
-    /// transactional / custom-partitioner producer is handed to a FIFO drain that
-    /// preserves per-partition order without blocking the caller's thread.
+    /// custom-partitioner producer is handed to a FIFO drain that preserves
+    /// per-partition order without blocking the caller's thread.
     ///
     /// # Errors
     ///
@@ -1489,8 +1488,7 @@ struct SlowSendHandle {
 }
 
 /// A record routed to the slow drain because it could not be appended
-/// synchronously (cold metadata, full buffer, transactional, or custom
-/// partitioner).
+/// synchronously (cold metadata, full buffer, or custom partitioner).
 struct SlowSend {
     record: ProducerRecord,
     callback: Option<DeliveryCallback>,
@@ -1499,8 +1497,6 @@ struct SlowSend {
     enqueued_at: std::time::Instant,
 }
 
-/// Cloned handles the slow drain needs to assign + append without owning the
-/// (non-`Clone`) producer runtime.
 /// Deliver Kafka `ClusterResourceListener.onUpdate` to the interceptors, deduplicated
 /// against the last-seen cluster id so it fires only when the cluster id first
 /// resolves or changes. No-op when there are no interceptors.
@@ -1532,6 +1528,8 @@ fn notify_interceptors_cluster_update(
     interceptors.on_cluster_update(&ClusterResource { cluster_id });
 }
 
+/// Cloned handles the slow drain needs to assign + append without owning the
+/// (non-`Clone`) producer runtime.
 struct SlowSendContext {
     control_dispatcher: ProducerDispatcher,
     sender: Arc<tokio::sync::Mutex<ProducerSender>>,
@@ -2004,7 +2002,9 @@ impl ProducerBuilder {
             .map_err(|error| ProducerError::Config { error })?;
         let runtime = config.to_producer_runtime_config()?;
         let endpoints = resolve_bootstrap_brokers(&config).await?;
-        let mut connection = config.to_connection_config();
+        let mut connection = config
+            .to_connection_config()
+            .map_err(|error| ProducerError::Config { error })?;
         connection.sasl.client_authenticator = sasl_client_authenticator;
         connection.sasl.client_authenticator_factory = sasl_client_authenticator_factory;
         let interceptor_configs = InterceptorConfigs {
@@ -2061,7 +2061,9 @@ impl ProducerBuilder {
             .map_err(|error| ProducerError::Config { error })?;
         let runtime = config.to_producer_runtime_config()?;
         let endpoints = resolve_bootstrap_brokers(&config).await?;
-        let mut connection = config.to_connection_config();
+        let mut connection = config
+            .to_connection_config()
+            .map_err(|error| ProducerError::Config { error })?;
         connection.sasl.client_authenticator = sasl_client_authenticator;
         connection.sasl.client_authenticator_factory = sasl_client_authenticator_factory;
         let wire = WireClient::connect_with_brokers(connection, config.client_id, endpoints);
@@ -2116,7 +2118,9 @@ impl ProducerBuilder {
             .map_err(|error| ProducerError::Config { error })?;
         let runtime = config.to_producer_runtime_config()?;
         let endpoints = resolve_bootstrap_brokers(&config).await?;
-        let mut connection = config.to_connection_config();
+        let mut connection = config
+            .to_connection_config()
+            .map_err(|error| ProducerError::Config { error })?;
         connection.sasl.client_authenticator = sasl_client_authenticator;
         connection.sasl.client_authenticator_factory = sasl_client_authenticator_factory;
         let wire = WireClient::connect_with_brokers(connection, config.client_id, endpoints);

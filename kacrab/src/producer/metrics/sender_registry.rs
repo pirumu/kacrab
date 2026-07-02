@@ -500,6 +500,20 @@ fn metric_key(name: &MetricName) -> String {
 // `MetricName::tags()` returns a `&BTreeMap<String, String>`, already in sorted
 // key order, so `metric_key` produces a stable string for each metric.
 
+/// Assert — in debug/test builds only — that a metric registered successfully.
+///
+/// `sensor_add_*` is a no-op when the identical metric is already on the sensor,
+/// and only errors on a genuine name collision with a *different* metric — a
+/// setup bug that would otherwise leave a sensor silently reading zero. Release
+/// builds keep the intentional-ignore behavior; debug and test builds surface it.
+fn expect_metric_registered<E: core::fmt::Debug>(result: Result<(), E>) {
+    debug_assert!(
+        result.is_ok(),
+        "metric registration failed (duplicate metric name?): {result:?}"
+    );
+    let _ignored = result;
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Sensor builder threads sensor + rate/total metric names and descriptions."
@@ -515,7 +529,7 @@ fn meter(
     let sensor = metrics.sensor(sensor_name);
     let rate = metrics.metric_name(rate_name, CLIENT_GROUP, rate_desc);
     let total = metrics.metric_name(total_name, CLIENT_GROUP, total_desc);
-    let _ignored = metrics.sensor_add_meter(sensor, rate, total);
+    expect_metric_registered(metrics.sensor_add_meter(sensor, rate, total));
     sensor
 }
 
@@ -534,15 +548,15 @@ fn avg_max(
     let sensor = metrics.sensor(sensor_name);
     let avg = metrics.metric_name(avg_name, CLIENT_GROUP, avg_desc);
     let max = metrics.metric_name(max_name, CLIENT_GROUP, max_desc);
-    let _ignored = metrics.sensor_add_avg(sensor, avg);
-    let _ignored = metrics.sensor_add_max(sensor, max);
+    expect_metric_registered(metrics.sensor_add_avg(sensor, avg));
+    expect_metric_registered(metrics.sensor_add_max(sensor, max));
     sensor
 }
 
 fn avg_only(metrics: &mut Metrics, sensor_name: &str, avg_name: &str, avg_desc: &str) -> SensorId {
     let sensor = metrics.sensor(sensor_name);
     let avg = metrics.metric_name(avg_name, CLIENT_GROUP, avg_desc);
-    let _ignored = metrics.sensor_add_avg(sensor, avg);
+    expect_metric_registered(metrics.sensor_add_avg(sensor, avg));
     sensor
 }
 
@@ -554,7 +568,7 @@ fn value_only(
 ) -> SensorId {
     let sensor = metrics.sensor(sensor_name);
     let value = metrics.metric_name(value_name, CLIENT_GROUP, value_desc);
-    let _ignored = metrics.sensor_add_value(sensor, value);
+    expect_metric_registered(metrics.sensor_add_value(sensor, value));
     sensor
 }
 
@@ -575,7 +589,7 @@ fn topic_meter(
     let rate = metrics.metric_name_with_tags(rate_name, TOPIC_GROUP, rate_desc, [("topic", topic)]);
     let total =
         metrics.metric_name_with_tags(total_name, TOPIC_GROUP, total_desc, [("topic", topic)]);
-    let _ignored = metrics.sensor_add_meter(sensor, rate, total);
+    expect_metric_registered(metrics.sensor_add_meter(sensor, rate, total));
     sensor
 }
 
@@ -588,7 +602,7 @@ fn topic_avg(
 ) -> SensorId {
     let sensor = metrics.sensor(format!("topic.{topic}.{sensor_suffix}"));
     let avg = metrics.metric_name_with_tags(avg_name, TOPIC_GROUP, avg_desc, [("topic", topic)]);
-    let _ignored = metrics.sensor_add_avg(sensor, avg);
+    expect_metric_registered(metrics.sensor_add_avg(sensor, avg));
     sensor
 }
 

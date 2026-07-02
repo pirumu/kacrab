@@ -192,6 +192,21 @@ async fn build_producer(config: &ProducerConfig) -> Producer {
     if env::var("KACRAB_BENCH_ACKS1").is_ok() {
         builder = builder.set("acks", "1").set("enable.idempotence", "false");
     }
+    // KACRAB_BENCH_NO_ADAPTIVE disables adaptive partitioning to test uniform
+    // round-robin sticky spread across all partitions.
+    if env::var("KACRAB_BENCH_NO_ADAPTIVE").is_ok() {
+        builder = builder.set("partitioner.adaptive.partitioning.enable", "false");
+    }
+    // KACRAB_BENCH_LINGER_MS overrides linger.ms to isolate whether large-record
+    // throughput is linger-bound (1 record/batch waits the full linger).
+    if let Ok(linger) = env::var("KACRAB_BENCH_LINGER_MS") {
+        builder = builder.set("linger.ms", linger.as_str());
+    }
+    // KACRAB_BENCH_BUFFER_MEMORY isolates the buffer-full append spin: a huge buffer
+    // lets every record enqueue without backpressure, so the run measures pure drain.
+    if let Ok(buffer) = env::var("KACRAB_BENCH_BUFFER_MEMORY") {
+        builder = builder.set("buffer.memory", buffer.as_str());
+    }
     builder
         .build()
         .await
@@ -476,7 +491,17 @@ const fn benchmark_api_for(value: Option<&str>) -> DeliveryMode {
     DeliveryMode::PerRecord
 }
 
-fn benchmark_record(topic: Arc<str>, _index: usize) -> ProducerRecord {
+fn benchmark_record(topic: Arc<str>, index: usize) -> ProducerRecord {
+    // KACRAB_BENCH_SPREAD=N forces explicit round-robin over N partitions to
+    // isolate whether throughput is concurrency-bound (1-in-flight × N partitions).
+    if let Some(partitions) = env::var("KACRAB_BENCH_SPREAD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|partitions| *partitions > 0)
+    {
+        let partition = i32::try_from(index % partitions).unwrap_or(0);
+        return ProducerRecord::new(topic.as_ref(), partition);
+    }
     ProducerRecord::unassigned(topic)
 }
 
@@ -485,7 +510,14 @@ fn scenarios() -> Vec<Scenario> {
     // skips the large-payload scenario — used to profile a single hot partition without
     // the default 5,000,000-record flood overrunning delivery.timeout.ms.
     if env::var("KACRAB_ONLY_10KIB").is_ok() {
-        return vec![large_payload_scenario()];
+        let mut scenario = large_payload_scenario();
+        if let Some(messages) = env::var("KACRAB_BENCH_MESSAGES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            scenario.messages = messages;
+        }
+        return vec![scenario];
     }
     if let Some(messages) = env::var("KACRAB_BENCH_MESSAGES")
         .ok()

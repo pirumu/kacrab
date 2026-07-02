@@ -56,9 +56,12 @@ use super::{
     routing::{ProduceRoute, murmur2_java, route},
     transaction::{ProducerBatchState, ProducerIdentity, TransactionState},
 };
-use crate::wire::{
-    BackoffPolicy, BackoffState, BrokerEndpoint, PartitionLeaderChange, RequestMessage,
-    TopicMetadata, WireClient,
+use crate::{
+    common::CoordinatorType,
+    wire::{
+        BackoffPolicy, BackoffState, BrokerEndpoint, PartitionLeaderChange, RequestMessage,
+        TopicMetadata, WireClient,
+    },
 };
 
 mod idempotence;
@@ -374,7 +377,8 @@ impl ProducerDispatcher {
     /// partition with an unresolved sequence and still-in-flight batches stops
     /// draining new batches until it resolves. The returned indices are positions
     /// into `batches`; the caller removes them (and their parallel partition keys).
-    /// On error `batches` is left untouched so the caller can re-enqueue them all.
+    /// On error the caller re-enqueues every batch; any already re-stamped with a
+    /// fresh `producer_state` this cycle keep it and re-register as retries next drain.
     pub(crate) async fn prepare_drained_batches(
         &self,
         batches: &mut [ReadyBatch],
@@ -446,6 +450,19 @@ impl ProducerDispatcher {
     #[must_use]
     pub const fn delivery_timeout(mut self, timeout: Duration) -> Self {
         self.delivery_timeout = timeout;
+        self
+    }
+
+    /// Cap how many produce requests this dispatcher keeps in flight per broker.
+    ///
+    /// Mirrors `max.in.flight.requests.per.connection`. Keep it consistent with
+    /// the wire client's own `max_in_flight_requests_per_connection` /
+    /// `broker_queue_capacity`: a non-idempotent producer pipelines up to this
+    /// many requests per broker, so a dispatcher limit larger than the wire's
+    /// broker queue would over-enqueue and hit `WireError::Backpressure`.
+    #[must_use]
+    pub const fn max_in_flight_requests_per_connection(mut self, requests: usize) -> Self {
+        self.max_in_flight_requests_per_connection = requests;
         self
     }
 
@@ -948,7 +965,6 @@ impl ProducerDispatcher {
         state.new_partitions_in_transaction.clear();
         state.pending_partitions_in_transaction.clear();
         state.partitions_in_transaction.clear();
-        state.transaction_partitions.clear();
         drop(state);
         Ok(())
     }
@@ -1425,9 +1441,10 @@ impl ProducerDispatcher {
     }
 
     /// Register a dispatch's idempotent batches as in flight (Kafka
-    /// `addInFlightBatch`, done at drain). Each batch already carries its assigned
-    /// `producer_state` from `prepare_drained_batches`; retried batches re-register
-    /// the sequence they kept (a no-op on the set).
+    /// `addInFlightBatch`, done at drain). `inflight` holds only the batches that
+    /// carry a `producer_state` (see `idempotent_inflight_of`); batches drained
+    /// without one — e.g. via `dispatch_all` — contribute nothing. Retried batches
+    /// re-register the sequence they kept (a no-op on the set).
     async fn register_idempotent_inflight(&self, inflight: &[(String, i32, i32)]) {
         if !self.idempotence.enabled || inflight.is_empty() {
             return;
@@ -2508,7 +2525,7 @@ impl ProducerDispatcher {
                 metadata,
                 &record,
                 self.partitioner_ignore_keys,
-                true,
+                self.partitioner_adaptive_partitioning_enable,
                 self.partition_sticky_batch_size,
                 self.compression_ratio_estimation(record.topic.as_ref()),
             )?
@@ -2900,8 +2917,7 @@ impl ProducerDispatcher {
                 return Ok(());
             }
             if self.idempotence.transaction_two_phase_commit {
-                let _inserted = state.partitions_in_transaction.insert(key.clone());
-                let _inserted = state.transaction_partitions.insert(key);
+                let _inserted = state.partitions_in_transaction.insert(key);
                 state.transaction_started = true;
                 drop(state);
                 return Ok(());
@@ -3388,7 +3404,7 @@ impl ProducerDispatcher {
         }
 
         let coordinator_id = match self
-            .find_coordinator_id(transactional_id, 1, "find_coordinator")
+            .find_coordinator_id(transactional_id, CoordinatorType::Transaction)
             .await
         {
             Ok(coordinator_id) => coordinator_id,
@@ -3406,7 +3422,7 @@ impl ProducerDispatcher {
 
     async fn refresh_coordinator_id(&self, transactional_id: &str) -> Result<i32> {
         let coordinator_id = match self
-            .find_coordinator_id(transactional_id, 1, "find_coordinator")
+            .find_coordinator_id(transactional_id, CoordinatorType::Transaction)
             .await
         {
             Ok(coordinator_id) => coordinator_id,
@@ -3423,18 +3439,17 @@ impl ProducerDispatcher {
     }
 
     async fn group_coordinator_id(&self, group_id: &str) -> Result<i32> {
-        self.find_coordinator_id(group_id, 0, "find_coordinator")
+        self.find_coordinator_id(group_id, CoordinatorType::Group)
             .await
     }
 
     async fn find_coordinator_id(
         &self,
         key: &str,
-        key_type: i8,
-        operation: &'static str,
+        coordinator_type: CoordinatorType,
     ) -> Result<i32> {
         let request = FindCoordinatorRequestData {
-            key_type,
+            key_type: coordinator_type.key_type(),
             coordinator_keys: vec![KafkaString::from(key.to_owned())],
             ..FindCoordinatorRequestData::default()
         };
@@ -3462,7 +3477,10 @@ impl ProducerDispatcher {
                 break coordinator;
             }
             if attempts_remaining == 0 || !error.is_retriable() {
-                return Err(ProducerError::Transaction { operation, error });
+                return Err(ProducerError::Transaction {
+                    operation: "find_coordinator",
+                    error,
+                });
             }
             attempts_remaining = attempts_remaining.saturating_sub(1);
             self.sleep_retry_backoff(&mut retry_backoff).await?;

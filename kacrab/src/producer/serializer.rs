@@ -335,7 +335,16 @@ impl ProducerSerializer<f32> for FloatSerializer {
         _headers: &mut Vec<RecordHeader>,
         payload: Option<&f32>,
     ) -> Result<Option<Bytes>> {
-        Ok(payload.map(|payload| Bytes::copy_from_slice(&payload.to_bits().to_be_bytes())))
+        Ok(payload.map(|payload| {
+            // Canonicalize NaN to Java's `Float.floatToIntBits` value, matching
+            // `DoubleSerializer` and the Kafka wire form.
+            let bits = if payload.is_nan() {
+                0x7fc0_0000_u32
+            } else {
+                payload.to_bits()
+            };
+            Bytes::copy_from_slice(&bits.to_be_bytes())
+        }))
     }
 }
 
@@ -690,7 +699,7 @@ where
         key: Option<&K>,
         value: Option<&V>,
     ) -> Result<SendFuture> {
-        let topic = record.topic.to_string();
+        let topic = std::sync::Arc::clone(&record.topic);
         record.key = self
             .key_serializer
             .as_ref()

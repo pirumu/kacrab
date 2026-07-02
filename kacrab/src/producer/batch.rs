@@ -13,7 +13,7 @@ use super::{
 /// Kafka record-batch magic v2 is required for producer id, epoch, sequence,
 /// timestamp fields, and compression attributes used by modern brokers.
 const RECORD_BATCH_MAGIC_V2: i8 = 2;
-/// Kafka sentinel for non-idempotent producer id/epoch/base sequence.
+/// Kafka sentinel for a non-idempotent producer id.
 const NO_PRODUCER_ID: i64 = -1;
 /// Kafka sentinel for non-idempotent producer epoch/base sequence.
 const NO_PRODUCER_EPOCH_OR_SEQUENCE: i16 = -1;
@@ -206,11 +206,7 @@ fn producer_records(records: &[ProducerRecord]) -> (Vec<Record>, RecordBatchTime
 }
 
 fn clone_record_headers(record: &ProducerRecord) -> Vec<kacrab_protocol::record::RecordHeader> {
-    if record.headers.is_empty() {
-        Vec::new()
-    } else {
-        record.headers.clone()
-    }
+    record.headers.clone()
 }
 
 #[derive(Debug, Clone, Copy)]
