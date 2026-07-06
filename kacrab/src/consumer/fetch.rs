@@ -283,21 +283,7 @@ pub(super) async fn fetch(
     }
 
     for (leader, entries) in by_leader {
-        // Resolve every topic's id from the routing metadata; topic-id fetch
-        // (v13+) needs all of them, so one missing id downgrades to v12.
-        let mut topic_ids: HashMap<String, KafkaUuid> = HashMap::new();
-        let mut all_have_ids = true;
-        for (partition, _) in &entries {
-            if topic_ids.contains_key(&partition.topic) {
-                continue;
-            }
-            match metadata.topic(&partition.topic).map(|topic| topic.topic_id) {
-                Some(id) if !id.is_nil() => {
-                    let _previous = topic_ids.insert(partition.topic.clone(), id);
-                },
-                _ => all_have_ids = false,
-            }
-        }
+        let (mut topic_ids, all_have_ids) = resolve_topic_ids(metadata, &entries);
         // Pick the Fetch version from this broker's negotiated `ApiVersions`
         // (falling back to the name-keyed v12 until `ApiVersions` has
         // completed), then key by topic id or name like Java's `AbstractFetch`.
@@ -323,9 +309,27 @@ pub(super) async fn fetch(
             max_wait_ms,
             use_topic_ids.then_some(&topic_ids),
         );
-        let response: FetchResponseData = wire
+        let response: FetchResponseData = match wire
             .send_to_broker(leader, ApiKey::Fetch, version, &request)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            // One unreachable leader must not fail the whole poll and discard
+            // the data already collected from the other leaders. Flag its
+            // partitions stale (metadata refresh + retry next poll, like
+            // Java's per-node fetch handlers) and re-open the session full.
+            // Terminal setup failures (TLS/SASL) still surface — they would
+            // fail every leader identically, and silently retrying them
+            // forever would mask an auth problem as an idle consumer.
+            Err(error) if !error.is_fatal_setup() => {
+                session.reset();
+                progress
+                    .stale
+                    .extend(entries.iter().map(|(partition, _)| partition.clone()));
+                continue;
+            },
+            Err(error) => return Err(error.into()),
+        };
         let top_level = ErrorCode::from(response.error_code);
         // A stale/unknown session — drop it and re-establish with a full fetch on
         // the next poll (the partitions are unchanged, just the session bookkeeping).
@@ -371,6 +375,29 @@ pub(super) async fn fetch(
     }
 
     Ok(progress)
+}
+
+/// Resolve every topic's id from the routing metadata; topic-id fetch (v13+)
+/// needs all of them, so the returned flag reports whether any id is missing
+/// (downgrading that broker's fetch to v12).
+fn resolve_topic_ids(
+    metadata: &ClusterMetadata,
+    entries: &[(TopicPartition, FetchPosition)],
+) -> (HashMap<String, KafkaUuid>, bool) {
+    let mut topic_ids: HashMap<String, KafkaUuid> = HashMap::new();
+    let mut all_have_ids = true;
+    for (partition, _) in entries {
+        if topic_ids.contains_key(&partition.topic) {
+            continue;
+        }
+        match metadata.topic(&partition.topic).map(|topic| topic.topic_id) {
+            Some(id) if !id.is_nil() => {
+                let _previous = topic_ids.insert(partition.topic.clone(), id);
+            },
+            _ => all_have_ids = false,
+        }
+    }
+    (topic_ids, all_have_ids)
 }
 
 /// Process one broker's fetch response into raw per-partition data, recovering

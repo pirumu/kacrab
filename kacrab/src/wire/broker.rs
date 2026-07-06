@@ -376,7 +376,7 @@ impl BrokerTask {
                     }
                 },
                 Err(error) => {
-                    if is_fatal_setup_error(&error) {
+                    if error.is_fatal_setup() {
                         fail_pending_setup_error(&mut pending, || clone_setup_error(&error));
                         if pending.is_empty() && !rx_open {
                             return;
@@ -986,33 +986,10 @@ fn fail_pending_setup_error(
     }
 }
 
-/// Connection-setup failures that retrying cannot fix, so pending commands
-/// should fail fast with the real cause instead of looping under reconnect
-/// backoff until they time out. SASL handshake/authentication failures, a
-/// failed server-signature check, and TLS handshake/config failures are
-/// terminal here, matching Java's non-retriable `SaslAuthenticationException` /
-/// `SslAuthenticationException` / `IllegalSaslStateException` semantics; an
-/// `Invalid username or password` or an untrusted server certificate should
-/// surface immediately, not after `request.timeout.ms`.
-const fn is_fatal_setup_error(error: &WireError) -> bool {
-    matches!(
-        error,
-        WireError::UnsupportedTlsOption(_)
-            | WireError::InvalidTlsConfig(_)
-            | WireError::TlsHandshake(_)
-            | WireError::GssapiBackendUnavailable
-            | WireError::InvalidSaslConfig(_)
-            | WireError::UnsupportedSaslMechanism(_)
-            | WireError::SaslHandshake(_)
-            | WireError::SaslAuthentication(_)
-            | WireError::SaslServerSignatureMismatch
-    )
-}
-
 /// Reproduces a fatal setup error so every pending command can be failed with
 /// the same cause. [`WireError`] is not `Clone`, so the message-carrying
 /// variants are rebuilt by hand; this is only ever called for errors that
-/// [`is_fatal_setup_error`] accepts.
+/// [`WireError::is_fatal_setup`] accepts.
 fn clone_setup_error(error: &WireError) -> WireError {
     match error {
         WireError::UnsupportedTlsOption(message) => {
