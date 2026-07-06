@@ -306,13 +306,14 @@ pub const fn compact_array_length_len(len: i32) -> usize {
     }
 }
 
-/// Initial `Vec` capacity for a decoded array: the claimed element count
-/// clamped by the bytes actually remaining in the buffer (every element costs
-/// at least one wire byte) and a fixed budget. The claimed length comes off
-/// the wire, so it must never be trusted for allocation — a hostile or corrupt
-/// length of `i32::MAX` would otherwise reserve gigabytes up front and abort
-/// the process under `panic = "abort"`. Arrays longer than the budget grow on
-/// demand as elements are actually decoded.
+/// Initial `Vec` capacity for a decoded array.
+///
+/// The claimed element count comes off the wire, so it must never be trusted
+/// for allocation — a hostile or corrupt length of `i32::MAX` would otherwise
+/// reserve gigabytes up front and abort the process under `panic = "abort"`.
+/// The claim is clamped by the bytes actually remaining in the buffer (every
+/// element costs at least one wire byte) and a fixed budget; arrays longer
+/// than the budget grow on demand as elements are actually decoded.
 #[must_use]
 pub fn array_read_capacity(len: i32, remaining: usize) -> usize {
     /// Elements worth of `Vec` capacity we are willing to reserve up front.

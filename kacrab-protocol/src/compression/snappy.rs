@@ -41,11 +41,21 @@ pub fn compress_with_level(payload: &[u8], level: Option<i32>) -> Result<Vec<u8>
     Ok(output)
 }
 
-/// Decompress `payload`.
+/// Decompress `payload`, bounded by [`super::MAX_DECOMPRESSED_LEN`].
 pub fn decompress(payload: &[u8]) -> Result<Vec<u8>> {
+    decompress_bounded(payload, super::MAX_DECOMPRESSED_LEN)
+}
+
+/// Decompress `payload`, refusing to produce more than `max_len` bytes.
+///
+/// The snappy raw format carries a claimed decompressed length that `snap`
+/// allocates up front, and the xerial frame carries arbitrarily many blocks —
+/// both must be checked against the bound before decoding.
+pub fn decompress_bounded(payload: &[u8], max_len: usize) -> Result<Vec<u8>> {
     if payload.len() < XERIAL_HEADER.len()
         || payload.get(..XERIAL_HEADER.len()) != Some(&XERIAL_HEADER)
     {
+        check_claimed_len(payload, max_len, 0)?;
         return snap::raw::Decoder::new()
             .decompress_vec(payload)
             .map_err(|e| decode_err(e.to_string()));
@@ -78,6 +88,7 @@ pub fn decompress(payload: &[u8]) -> Result<Vec<u8>> {
         let Some(block) = payload.get(pos..block_end) else {
             return Err(decode_err("snappy: block out of range".into()));
         };
+        check_claimed_len(block, max_len, output.len())?;
         let decompressed = decoder
             .decompress_vec(block)
             .map_err(|e| decode_err(e.to_string()))?;
@@ -86,6 +97,19 @@ pub fn decompress(payload: &[u8]) -> Result<Vec<u8>> {
     }
 
     Ok(output)
+}
+
+/// Reject a snappy raw block whose claimed decompressed length would push the
+/// total output past `max_len` — before `snap` allocates the claimed size.
+fn check_claimed_len(block: &[u8], max_len: usize, already_produced: usize) -> Result<()> {
+    let claimed = snap::raw::decompress_len(block).map_err(|e| decode_err(e.to_string()))?;
+    if already_produced.saturating_add(claimed) > max_len {
+        return Err(CompressionError::new(
+            Compression::Snappy,
+            CompressionErrorKind::DecompressedTooLarge { limit: max_len },
+        ));
+    }
+    Ok(())
 }
 
 const fn encode_err(message: String) -> CompressionError {
@@ -100,4 +124,54 @@ const fn decode_err(message: String) -> CompressionError {
         Compression::Snappy,
         CompressionErrorKind::DecodeFailed { message },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{super::CompressionErrorKind, compress_with_level, decompress, decompress_bounded};
+
+    #[test]
+    fn decompress_bounded_rejects_a_decompression_bomb() {
+        // Multi-block xerial frame whose total claimed output exceeds the bound.
+        let payload = vec![0u8; 96 * 1024];
+        let compressed = compress_with_level(&payload, None).unwrap();
+
+        let err = decompress_bounded(&compressed, 64).unwrap_err();
+        assert!(
+            matches!(
+                err.kind,
+                CompressionErrorKind::DecompressedTooLarge { limit: 64 }
+            ),
+            "expected DecompressedTooLarge, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn decompress_bounded_rejects_a_raw_block_with_a_hostile_claimed_length() {
+        // A bare raw block (no xerial header) claiming a huge decompressed
+        // length must be rejected before `snap` allocates the claimed size.
+        let raw = snap::raw::Encoder::new()
+            .compress_vec(&[0u8; 1024])
+            .unwrap();
+
+        let err = decompress_bounded(&raw, 64).unwrap_err();
+        assert!(
+            matches!(
+                err.kind,
+                CompressionErrorKind::DecompressedTooLarge { limit: 64 }
+            ),
+            "expected DecompressedTooLarge, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn decompress_bounded_allows_output_at_exactly_the_limit() {
+        let payload = vec![0u8; 96 * 1024];
+        let compressed = compress_with_level(&payload, None).unwrap();
+
+        assert_eq!(decompress_bounded(&compressed, 96 * 1024).unwrap(), payload);
+        assert_eq!(decompress(&compressed).unwrap(), payload);
+    }
 }

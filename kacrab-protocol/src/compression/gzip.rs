@@ -1,6 +1,6 @@
 //! Gzip codec (`flate2` Rust backend).
 
-use std::io::{Read, Write};
+use std::io::Write;
 
 use super::{Compression, CompressionError, CompressionErrorKind, Result};
 
@@ -17,14 +17,16 @@ pub fn compress_with_level(payload: &[u8], level: Option<i32>) -> Result<Vec<u8>
     encoder.finish().map_err(|e| encode_err(e.to_string()))
 }
 
-/// Decompress `payload`.
+/// Decompress `payload`, bounded by [`super::MAX_DECOMPRESSED_LEN`].
 pub fn decompress(payload: &[u8]) -> Result<Vec<u8>> {
-    let mut decoder = flate2::read::GzDecoder::new(payload);
-    let mut output = Vec::new();
-    let _read = decoder
-        .read_to_end(&mut output)
-        .map_err(|e| decode_err(e.to_string()))?;
-    Ok(output)
+    decompress_bounded(payload, super::MAX_DECOMPRESSED_LEN)
+}
+
+/// Decompress `payload`, refusing to produce more than `max_len` bytes —
+/// gzip expands up to ~1000:1, so an unbounded read is a decompression bomb.
+pub fn decompress_bounded(payload: &[u8], max_len: usize) -> Result<Vec<u8>> {
+    let decoder = flate2::read::GzDecoder::new(payload);
+    super::read_to_end_bounded(decoder, max_len, Compression::Gzip)
 }
 
 const fn encode_err(message: String) -> CompressionError {
@@ -34,9 +36,34 @@ const fn encode_err(message: String) -> CompressionError {
     )
 }
 
-const fn decode_err(message: String) -> CompressionError {
-    CompressionError::new(
-        Compression::Gzip,
-        CompressionErrorKind::DecodeFailed { message },
-    )
+#[cfg(test)]
+mod tests {
+    use super::{super::CompressionErrorKind, compress_with_level, decompress, decompress_bounded};
+
+    #[test]
+    fn decompress_bounded_rejects_a_decompression_bomb() {
+        // Highly repetitive data compresses to a tiny payload that would
+        // expand far past the bound.
+        let payload = vec![0u8; 4096];
+        let compressed = compress_with_level(&payload, None).unwrap();
+
+        let err = decompress_bounded(&compressed, 64).unwrap_err();
+        assert!(
+            matches!(
+                err.kind,
+                CompressionErrorKind::DecompressedTooLarge { limit: 64 }
+            ),
+            "expected DecompressedTooLarge, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn decompress_bounded_allows_output_at_exactly_the_limit() {
+        let payload = vec![0u8; 4096];
+        let compressed = compress_with_level(&payload, None).unwrap();
+
+        assert_eq!(decompress_bounded(&compressed, 4096).unwrap(), payload);
+        assert_eq!(decompress(&compressed).unwrap(), payload);
+    }
 }
