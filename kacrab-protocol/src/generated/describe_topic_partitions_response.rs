@@ -57,7 +57,7 @@ impl DescribeTopicPartitionsResponseData {
         throttle_time_ms = read_i32(buf)?;
         topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(DescribeTopicPartitionsResponseTopic::read(buf, version)?);
             }
@@ -202,7 +202,7 @@ impl DescribeTopicPartitionsResponseTopic {
         is_internal = read_bool(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(DescribeTopicPartitionsResponsePartition::read(
                     buf, version,
@@ -353,7 +353,7 @@ impl DescribeTopicPartitionsResponsePartition {
         leader_epoch = read_i32(buf)?;
         replica_nodes = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i32(buf)?);
             }
@@ -361,7 +361,7 @@ impl DescribeTopicPartitionsResponsePartition {
         };
         isr_nodes = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i32(buf)?);
             }
@@ -372,7 +372,7 @@ impl DescribeTopicPartitionsResponsePartition {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_i32(buf)?);
                 }
@@ -384,7 +384,7 @@ impl DescribeTopicPartitionsResponsePartition {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_i32(buf)?);
                 }
@@ -393,7 +393,7 @@ impl DescribeTopicPartitionsResponsePartition {
         };
         offline_replicas = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i32(buf)?);
             }

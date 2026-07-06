@@ -80,7 +80,7 @@ impl ShareGroupHeartbeatRequestData {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_compact_string(buf)?);
                 }

@@ -49,7 +49,7 @@ impl DescribeShareGroupOffsetsResponseData {
         throttle_time_ms = read_i32(buf)?;
         groups = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(DescribeShareGroupOffsetsResponseGroup::read(buf, version)?);
             }
@@ -148,7 +148,7 @@ impl DescribeShareGroupOffsetsResponseGroup {
         group_id = read_compact_string(buf)?;
         topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(DescribeShareGroupOffsetsResponseTopic::read(buf, version)?);
             }
@@ -244,7 +244,7 @@ impl DescribeShareGroupOffsetsResponseTopic {
         topic_id = read_uuid(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(DescribeShareGroupOffsetsResponsePartition::read(
                     buf, version,

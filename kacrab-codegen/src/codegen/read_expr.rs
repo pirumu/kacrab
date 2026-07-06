@@ -258,6 +258,11 @@ fn generate_read_array_expr(
         _ => read_expr_for_type_with_buf(inner, false, flexible, buf_expr),
     };
 
+    // The claimed length is wire data — never trust it for allocation.
+    // `array_read_capacity` clamps the preallocation by the bytes remaining and
+    // a fixed budget; the loop still decodes every claimed element (failing on
+    // truncation), the clamp only stops a hostile length from reserving
+    // gigabytes up front.
     if nullable {
         quote! {
             {
@@ -265,7 +270,7 @@ fn generate_read_array_expr(
                 if len < 0 {
                     None
                 } else {
-                    let mut arr = Vec::with_capacity(len as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (#buf_expr).len()));
                     for _ in 0..len {
                         arr.push(#inner_read);
                     }
@@ -277,7 +282,7 @@ fn generate_read_array_expr(
         quote! {
             {
                 let len = #len_read;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (#buf_expr).len()));
                 for _ in 0..len {
                     arr.push(#inner_read);
                 }

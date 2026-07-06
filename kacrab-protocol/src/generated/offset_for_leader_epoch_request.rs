@@ -51,7 +51,7 @@ impl OffsetForLeaderEpochRequestData {
         if version >= 4 {
             topics = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(OffsetForLeaderTopic::read(buf, version)?);
                 }
@@ -60,7 +60,7 @@ impl OffsetForLeaderEpochRequestData {
         } else {
             topics = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(OffsetForLeaderTopic::read(buf, version)?);
                 }
@@ -177,7 +177,7 @@ impl OffsetForLeaderTopic {
         if version >= 4 {
             partitions = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(OffsetForLeaderPartition::read(buf, version)?);
                 }
@@ -186,7 +186,7 @@ impl OffsetForLeaderTopic {
         } else {
             partitions = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(OffsetForLeaderPartition::read(buf, version)?);
                 }

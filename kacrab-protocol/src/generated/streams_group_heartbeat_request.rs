@@ -197,7 +197,7 @@ impl StreamsGroupHeartbeatRequestData {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TaskIds::read(buf, version)?);
                 }
@@ -209,7 +209,7 @@ impl StreamsGroupHeartbeatRequestData {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TaskIds::read(buf, version)?);
                 }
@@ -221,7 +221,7 @@ impl StreamsGroupHeartbeatRequestData {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TaskIds::read(buf, version)?);
                 }
@@ -242,7 +242,7 @@ impl StreamsGroupHeartbeatRequestData {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(KeyValue::read(buf, version)?);
                 }
@@ -254,7 +254,7 @@ impl StreamsGroupHeartbeatRequestData {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TaskOffset::read(buf, version)?);
                 }
@@ -266,7 +266,7 @@ impl StreamsGroupHeartbeatRequestData {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TaskOffset::read(buf, version)?);
                 }
@@ -543,7 +543,7 @@ impl Topology {
         epoch = read_i32(buf)?;
         subtopologies = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(Subtopology::read(buf, version)?);
             }
@@ -661,7 +661,7 @@ impl Subtopology {
         subtopology_id = read_compact_string(buf)?;
         source_topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_compact_string(buf)?);
             }
@@ -669,7 +669,7 @@ impl Subtopology {
         };
         source_topic_regex = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_compact_string(buf)?);
             }
@@ -677,7 +677,7 @@ impl Subtopology {
         };
         state_changelog_topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(TopicInfo::read(buf, version)?);
             }
@@ -685,7 +685,7 @@ impl Subtopology {
         };
         repartition_sink_topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_compact_string(buf)?);
             }
@@ -693,7 +693,7 @@ impl Subtopology {
         };
         repartition_source_topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(TopicInfo::read(buf, version)?);
             }
@@ -701,7 +701,7 @@ impl Subtopology {
         };
         copartition_groups = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(CopartitionGroup::read(buf, version)?);
             }
@@ -832,7 +832,7 @@ impl CopartitionGroup {
         let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
         source_topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i16(buf)?);
             }
@@ -840,7 +840,7 @@ impl CopartitionGroup {
         };
         source_topic_regex = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i16(buf)?);
             }
@@ -848,7 +848,7 @@ impl CopartitionGroup {
         };
         repartition_source_topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i16(buf)?);
             }
@@ -1018,7 +1018,7 @@ impl TopicInfo {
         replication_factor = read_i16(buf)?;
         topic_configs = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(KeyValue::read(buf, version)?);
             }
@@ -1241,7 +1241,7 @@ impl TaskIds {
         subtopology_id = read_compact_string(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i32(buf)?);
             }

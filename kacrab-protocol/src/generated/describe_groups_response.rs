@@ -52,7 +52,7 @@ impl DescribeGroupsResponseData {
         if version >= 5 {
             groups = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribedGroup::read(buf, version)?);
                 }
@@ -61,7 +61,7 @@ impl DescribeGroupsResponseData {
         } else {
             groups = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribedGroup::read(buf, version)?);
                 }
@@ -245,7 +245,7 @@ impl DescribedGroup {
         if version >= 5 {
             members = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribedGroupMember::read(buf, version)?);
                 }
@@ -254,7 +254,7 @@ impl DescribedGroup {
         } else {
             members = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribedGroupMember::read(buf, version)?);
                 }

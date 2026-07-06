@@ -58,7 +58,7 @@ impl DescribeDelegationTokenResponseData {
         if version >= 2 {
             tokens = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribedDelegationToken::read(buf, version)?);
                 }
@@ -67,7 +67,7 @@ impl DescribeDelegationTokenResponseData {
         } else {
             tokens = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribedDelegationToken::read(buf, version)?);
                 }
@@ -268,7 +268,7 @@ impl DescribedDelegationToken {
         if version >= 2 {
             renewers = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribedDelegationTokenRenewer::read(buf, version)?);
                 }
@@ -277,7 +277,7 @@ impl DescribedDelegationToken {
         } else {
             renewers = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribedDelegationTokenRenewer::read(buf, version)?);
                 }

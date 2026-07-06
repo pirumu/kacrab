@@ -48,7 +48,7 @@ impl IncrementalAlterConfigsRequestData {
         if version >= 1 {
             resources = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(AlterConfigsResource::read(buf, version)?);
                 }
@@ -57,7 +57,7 @@ impl IncrementalAlterConfigsRequestData {
         } else {
             resources = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(AlterConfigsResource::read(buf, version)?);
                 }
@@ -176,7 +176,7 @@ impl AlterConfigsResource {
         if version >= 1 {
             configs = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(AlterableConfig::read(buf, version)?);
                 }
@@ -185,7 +185,7 @@ impl AlterConfigsResource {
         } else {
             configs = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(AlterableConfig::read(buf, version)?);
                 }

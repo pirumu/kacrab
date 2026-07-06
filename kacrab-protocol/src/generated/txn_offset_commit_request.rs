@@ -117,7 +117,7 @@ impl TxnOffsetCommitRequestData {
         if version >= 3 {
             topics = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TxnOffsetCommitRequestTopic::read(buf, version)?);
                 }
@@ -126,7 +126,7 @@ impl TxnOffsetCommitRequestData {
         } else {
             topics = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TxnOffsetCommitRequestTopic::read(buf, version)?);
                 }
@@ -293,7 +293,7 @@ impl TxnOffsetCommitRequestTopic {
         if version >= 3 {
             partitions = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TxnOffsetCommitRequestPartition::read(buf, version)?);
                 }
@@ -302,7 +302,7 @@ impl TxnOffsetCommitRequestTopic {
         } else {
             partitions = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TxnOffsetCommitRequestPartition::read(buf, version)?);
                 }

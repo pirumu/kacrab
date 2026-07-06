@@ -5,7 +5,7 @@
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{
     KafkaString, RawTaggedField,
-    generated::{ApiVersionsRequestData, RequestHeaderData, ResponseHeaderData},
+    generated::{ApiVersionsRequestData, FetchResponseData, RequestHeaderData, ResponseHeaderData},
 };
 
 #[test]
@@ -70,4 +70,27 @@ fn api_versions_request_v3_round_trips_compact_strings_and_tags() {
 
     assert_eq!(decoded, original);
     assert!(input.is_empty(), "decoder should consume the whole buffer");
+}
+
+#[test]
+fn hostile_array_length_fails_cleanly_instead_of_allocating() {
+    // A FetchResponse v12 frame whose `responses` compact-array length claims
+    // ~i32::MAX topics but carries no element bytes. The decoder must clamp its
+    // preallocation to the bytes actually present and fail on the first missing
+    // element — not reserve gigabytes for the claimed count (which would abort
+    // the process under `panic = "abort"`).
+    let mut hostile = BytesMut::new();
+    hostile.extend_from_slice(&0i32.to_be_bytes()); // throttle_time_ms
+    hostile.extend_from_slice(&0i16.to_be_bytes()); // error_code
+    hostile.extend_from_slice(&0i32.to_be_bytes()); // session_id
+    // Compact array length: unsigned varint of (len + 1) = i32::MAX
+    // → claimed len = i32::MAX - 1.
+    hostile.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0x07]);
+
+    let mut input = hostile.freeze();
+    let result = FetchResponseData::read(&mut input, 12);
+    assert!(
+        result.is_err(),
+        "a truncated hostile-length array must fail to decode"
+    );
 }

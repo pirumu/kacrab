@@ -50,7 +50,7 @@ impl DeleteAclsResponseData {
         if version >= 2 {
             filter_results = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DeleteAclsFilterResult::read(buf, version)?);
                 }
@@ -59,7 +59,7 @@ impl DeleteAclsResponseData {
         } else {
             filter_results = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DeleteAclsFilterResult::read(buf, version)?);
                 }
@@ -177,7 +177,7 @@ impl DeleteAclsFilterResult {
         if version >= 2 {
             matching_acls = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DeleteAclsMatchingAcl::read(buf, version)?);
                 }
@@ -186,7 +186,7 @@ impl DeleteAclsFilterResult {
         } else {
             matching_acls = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DeleteAclsMatchingAcl::read(buf, version)?);
                 }

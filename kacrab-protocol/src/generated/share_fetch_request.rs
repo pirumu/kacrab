@@ -143,7 +143,7 @@ impl ShareFetchRequestData {
         }
         topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(FetchTopic::read(buf, version)?);
             }
@@ -151,7 +151,7 @@ impl ShareFetchRequestData {
         };
         forgotten_topics_data = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(ForgottenTopic::read(buf, version)?);
             }
@@ -286,7 +286,7 @@ impl FetchTopic {
         topic_id = read_uuid(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(FetchPartition::read(buf, version)?);
             }
@@ -372,7 +372,7 @@ impl FetchPartition {
         partition_index = read_i32(buf)?;
         acknowledgement_batches = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(AcknowledgementBatch::read(buf, version)?);
             }
@@ -459,7 +459,7 @@ impl AcknowledgementBatch {
         last_offset = read_i64(buf)?;
         acknowledge_types = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i8(buf)?);
             }
@@ -537,7 +537,7 @@ impl ForgottenTopic {
         topic_id = read_uuid(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i32(buf)?);
             }

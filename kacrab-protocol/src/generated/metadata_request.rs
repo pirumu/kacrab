@@ -69,7 +69,7 @@ impl MetadataRequestData {
                     if len < 0 {
                         None
                     } else {
-                        let mut arr = Vec::with_capacity(len as usize);
+                        let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                         for _ in 0..len {
                             arr.push(MetadataRequestTopic::read(buf, version)?);
                         }
@@ -82,7 +82,7 @@ impl MetadataRequestData {
                     if len < 0 {
                         None
                     } else {
-                        let mut arr = Vec::with_capacity(len as usize);
+                        let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                         for _ in 0..len {
                             arr.push(MetadataRequestTopic::read(buf, version)?);
                         }
@@ -93,7 +93,7 @@ impl MetadataRequestData {
         } else {
             topics = Some({
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(MetadataRequestTopic::read(buf, version)?);
                 }

@@ -45,7 +45,7 @@ impl VotersRecordData {
         version_ = read_i16(buf)?;
         voters = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(Voter::read(buf, version)?);
             }
@@ -139,7 +139,7 @@ impl Voter {
         voter_directory_id = read_uuid(buf)?;
         endpoints = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(Endpoint::read(buf, version)?);
             }

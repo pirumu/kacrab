@@ -69,7 +69,7 @@ impl OffsetFetchResponseData {
             if version >= 6 {
                 topics = {
                     let len = read_compact_array_length(buf)?;
-                    let mut arr = Vec::with_capacity(len.max(0) as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(OffsetFetchResponseTopic::read(buf, version)?);
                     }
@@ -78,7 +78,7 @@ impl OffsetFetchResponseData {
             } else {
                 topics = {
                     let len = read_array_length(buf)?;
-                    let mut arr = Vec::with_capacity(len.max(0) as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(OffsetFetchResponseTopic::read(buf, version)?);
                     }
@@ -92,7 +92,7 @@ impl OffsetFetchResponseData {
         if version >= 8 {
             groups = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(OffsetFetchResponseGroup::read(buf, version)?);
                 }
@@ -245,7 +245,7 @@ impl OffsetFetchResponseTopic {
         if version >= 6 {
             partitions = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(OffsetFetchResponsePartition::read(buf, version)?);
                 }
@@ -254,7 +254,7 @@ impl OffsetFetchResponseTopic {
         } else {
             partitions = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(OffsetFetchResponsePartition::read(buf, version)?);
                 }
@@ -496,7 +496,7 @@ impl OffsetFetchResponseGroup {
         group_id = read_compact_string(buf)?;
         topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(OffsetFetchResponseTopics::read(buf, version)?);
             }
@@ -590,7 +590,7 @@ impl OffsetFetchResponseTopics {
         }
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(OffsetFetchResponsePartitions::read(buf, version)?);
             }

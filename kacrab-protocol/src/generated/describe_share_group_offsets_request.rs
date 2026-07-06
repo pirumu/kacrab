@@ -39,7 +39,7 @@ impl DescribeShareGroupOffsetsRequestData {
         let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
         groups = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(DescribeShareGroupOffsetsRequestGroup::read(buf, version)?);
             }
@@ -125,7 +125,7 @@ impl DescribeShareGroupOffsetsRequestGroup {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeShareGroupOffsetsRequestTopic::read(buf, version)?);
                 }
@@ -217,7 +217,7 @@ impl DescribeShareGroupOffsetsRequestTopic {
         topic_name = read_compact_string(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i32(buf)?);
             }

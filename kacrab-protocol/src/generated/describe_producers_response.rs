@@ -49,7 +49,7 @@ impl DescribeProducersResponseData {
         throttle_time_ms = read_i32(buf)?;
         topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(TopicResponse::read(buf, version)?);
             }
@@ -132,7 +132,7 @@ impl TopicResponse {
         name = read_compact_string(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(PartitionResponse::read(buf, version)?);
             }
@@ -227,7 +227,7 @@ impl PartitionResponse {
         error_message = read_compact_nullable_string(buf)?;
         active_producers = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(ProducerState::read(buf, version)?);
             }

@@ -58,7 +58,7 @@ impl AlterPartitionResponseData {
         error_code = read_i16(buf)?;
         topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(TopicData::read(buf, version)?);
             }
@@ -144,7 +144,7 @@ impl TopicData {
         topic_id = read_uuid(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(PartitionData::read(buf, version)?);
             }
@@ -264,7 +264,7 @@ impl PartitionData {
         leader_epoch = read_i32(buf)?;
         isr = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i32(buf)?);
             }

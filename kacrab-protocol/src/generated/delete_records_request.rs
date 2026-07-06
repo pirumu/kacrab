@@ -48,7 +48,7 @@ impl DeleteRecordsRequestData {
         if version >= 2 {
             topics = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DeleteRecordsTopic::read(buf, version)?);
                 }
@@ -57,7 +57,7 @@ impl DeleteRecordsRequestData {
         } else {
             topics = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DeleteRecordsTopic::read(buf, version)?);
                 }
@@ -167,7 +167,7 @@ impl DeleteRecordsTopic {
         if version >= 2 {
             partitions = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DeleteRecordsPartition::read(buf, version)?);
                 }
@@ -176,7 +176,7 @@ impl DeleteRecordsTopic {
         } else {
             partitions = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DeleteRecordsPartition::read(buf, version)?);
                 }

@@ -56,7 +56,7 @@ impl DescribeConfigsRequestData {
         if version >= 4 {
             resources = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeConfigsResource::read(buf, version)?);
                 }
@@ -65,7 +65,7 @@ impl DescribeConfigsRequestData {
         } else {
             resources = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeConfigsResource::read(buf, version)?);
                 }
@@ -201,7 +201,7 @@ impl DescribeConfigsResource {
                 if len < 0 {
                     None
                 } else {
-                    let mut arr = Vec::with_capacity(len as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(read_compact_string(buf)?);
                     }
@@ -214,7 +214,7 @@ impl DescribeConfigsResource {
                 if len < 0 {
                     None
                 } else {
-                    let mut arr = Vec::with_capacity(len as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(read_string(buf)?);
                     }

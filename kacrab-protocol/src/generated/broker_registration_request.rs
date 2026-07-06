@@ -107,7 +107,7 @@ impl BrokerRegistrationRequestData {
         incarnation_id = read_uuid(buf)?;
         listeners = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(Listener::read(buf, version)?);
             }
@@ -115,7 +115,7 @@ impl BrokerRegistrationRequestData {
         };
         features = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(Feature::read(buf, version)?);
             }
@@ -128,7 +128,7 @@ impl BrokerRegistrationRequestData {
         if version >= 2 {
             log_dirs = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_uuid(buf)?);
                 }

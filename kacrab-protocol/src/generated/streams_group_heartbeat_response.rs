@@ -159,7 +159,7 @@ impl StreamsGroupHeartbeatResponseData {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(Status::read(buf, version)?);
                 }
@@ -171,7 +171,7 @@ impl StreamsGroupHeartbeatResponseData {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TaskIds::read(buf, version)?);
                 }
@@ -183,7 +183,7 @@ impl StreamsGroupHeartbeatResponseData {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TaskIds::read(buf, version)?);
                 }
@@ -195,7 +195,7 @@ impl StreamsGroupHeartbeatResponseData {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TaskIds::read(buf, version)?);
                 }
@@ -208,7 +208,7 @@ impl StreamsGroupHeartbeatResponseData {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(EndpointToPartitions::read(buf, version)?);
                 }
@@ -430,7 +430,7 @@ impl EndpointToPartitions {
         user_endpoint = Endpoint::read(buf, version)?;
         active_partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(TopicPartition::read(buf, version)?);
             }
@@ -438,7 +438,7 @@ impl EndpointToPartitions {
         };
         standby_partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(TopicPartition::read(buf, version)?);
             }
@@ -588,7 +588,7 @@ impl TopicPartition {
         topic = read_compact_string(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i32(buf)?);
             }
@@ -663,7 +663,7 @@ impl TaskIds {
         subtopology_id = read_compact_string(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i32(buf)?);
             }

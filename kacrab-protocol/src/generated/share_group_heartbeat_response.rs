@@ -193,7 +193,7 @@ impl Assignment {
         let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
         topic_partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(TopicPartitions::read(buf, version)?);
             }
@@ -267,7 +267,7 @@ impl TopicPartitions {
         topic_id = read_uuid(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i32(buf)?);
             }

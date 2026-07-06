@@ -57,7 +57,7 @@ impl BeginQuorumEpochResponseData {
         if version >= 1 {
             topics = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TopicData::read(buf, version)?);
                 }
@@ -66,7 +66,7 @@ impl BeginQuorumEpochResponseData {
         } else {
             topics = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TopicData::read(buf, version)?);
                 }
@@ -81,7 +81,8 @@ impl BeginQuorumEpochResponseData {
                         let mut tag_buf = field.data.clone();
                         node_endpoints = {
                             let len = read_compact_array_length(&mut tag_buf)?;
-                            let mut arr = Vec::with_capacity(len.max(0) as usize);
+                            let mut arr =
+                                Vec::with_capacity(array_read_capacity(len, (&mut tag_buf).len()));
                             for _ in 0..len {
                                 arr.push(NodeEndpoint::read(&mut tag_buf, version)?);
                             }
@@ -213,7 +214,7 @@ impl TopicData {
         if version >= 1 {
             partitions = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(PartitionData::read(buf, version)?);
                 }
@@ -222,7 +223,7 @@ impl TopicData {
         } else {
             partitions = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(PartitionData::read(buf, version)?);
                 }

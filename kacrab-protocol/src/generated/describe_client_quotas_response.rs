@@ -75,7 +75,7 @@ impl DescribeClientQuotasResponseData {
                 if len < 0 {
                     None
                 } else {
-                    let mut arr = Vec::with_capacity(len as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(EntryData::read(buf, version)?);
                     }
@@ -88,7 +88,7 @@ impl DescribeClientQuotasResponseData {
                 if len < 0 {
                     None
                 } else {
-                    let mut arr = Vec::with_capacity(len as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(EntryData::read(buf, version)?);
                     }
@@ -235,7 +235,7 @@ impl EntryData {
         if version >= 1 {
             entity = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(EntityData::read(buf, version)?);
                 }
@@ -244,7 +244,7 @@ impl EntryData {
         } else {
             entity = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(EntityData::read(buf, version)?);
                 }
@@ -254,7 +254,7 @@ impl EntryData {
         if version >= 1 {
             values = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(ValueData::read(buf, version)?);
                 }
@@ -263,7 +263,7 @@ impl EntryData {
         } else {
             values = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(ValueData::read(buf, version)?);
                 }

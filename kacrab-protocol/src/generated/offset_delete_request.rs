@@ -48,7 +48,7 @@ impl OffsetDeleteRequestData {
         group_id = read_string(buf)?;
         topics = {
             let len = read_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(OffsetDeleteRequestTopic::read(buf, version)?);
             }
@@ -117,7 +117,7 @@ impl OffsetDeleteRequestTopic {
         name = read_string(buf)?;
         partitions = {
             let len = read_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(OffsetDeleteRequestPartition::read(buf, version)?);
             }

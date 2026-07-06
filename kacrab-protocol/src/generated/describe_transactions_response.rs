@@ -49,7 +49,7 @@ impl DescribeTransactionsResponseData {
         throttle_time_ms = read_i32(buf)?;
         transaction_states = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(TransactionState::read(buf, version)?);
             }
@@ -188,7 +188,7 @@ impl TransactionState {
         producer_epoch = read_i16(buf)?;
         topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(TopicData::read(buf, version)?);
             }
@@ -283,7 +283,7 @@ impl TopicData {
         topic = read_compact_string(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i32(buf)?);
             }

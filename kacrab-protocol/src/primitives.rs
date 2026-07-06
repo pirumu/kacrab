@@ -306,6 +306,23 @@ pub const fn compact_array_length_len(len: i32) -> usize {
     }
 }
 
+/// Initial `Vec` capacity for a decoded array: the claimed element count
+/// clamped by the bytes actually remaining in the buffer (every element costs
+/// at least one wire byte) and a fixed budget. The claimed length comes off
+/// the wire, so it must never be trusted for allocation — a hostile or corrupt
+/// length of `i32::MAX` would otherwise reserve gigabytes up front and abort
+/// the process under `panic = "abort"`. Arrays longer than the budget grow on
+/// demand as elements are actually decoded.
+#[must_use]
+pub fn array_read_capacity(len: i32, remaining: usize) -> usize {
+    /// Elements worth of `Vec` capacity we are willing to reserve up front.
+    const MAX_PREALLOC_ELEMENTS: usize = 1024;
+    usize::try_from(len)
+        .unwrap_or(0)
+        .min(remaining)
+        .min(MAX_PREALLOC_ELEMENTS)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -315,7 +332,22 @@ mod tests {
 
     use bytes::BytesMut;
 
-    use super::{signed_varint_len, signed_varlong_len, write_signed_varint, write_signed_varlong};
+    use super::{
+        array_read_capacity, signed_varint_len, signed_varlong_len, write_signed_varint,
+        write_signed_varlong,
+    };
+
+    #[test]
+    fn array_read_capacity_never_trusts_the_claimed_length() {
+        // A hostile length is clamped by the bytes actually remaining.
+        assert_eq!(array_read_capacity(i32::MAX, 7), 7);
+        // Negative (null-array sentinel leaking through) reserves nothing.
+        assert_eq!(array_read_capacity(-1, 100), 0);
+        // A sane length within the budget is used as-is.
+        assert_eq!(array_read_capacity(3, 100), 3);
+        // Huge-but-plausible lengths stop at the fixed budget.
+        assert_eq!(array_read_capacity(1_000_000, usize::MAX), 1024);
+    }
 
     #[test]
     fn signed_varint_len_matches_written_bytes() {

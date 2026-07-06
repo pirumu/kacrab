@@ -39,7 +39,7 @@ impl DescribeQuorumRequestData {
         let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
         topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(TopicData::read(buf, version)?);
             }
@@ -119,7 +119,7 @@ impl TopicData {
         topic_name = read_compact_string(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(PartitionData::read(buf, version)?);
             }

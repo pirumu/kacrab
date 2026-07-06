@@ -62,7 +62,7 @@ impl ElectLeadersResponseData {
         if version >= 2 {
             replica_election_results = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(ReplicaElectionResult::read(buf, version)?);
                 }
@@ -71,7 +71,7 @@ impl ElectLeadersResponseData {
         } else {
             replica_election_results = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(ReplicaElectionResult::read(buf, version)?);
                 }
@@ -191,7 +191,7 @@ impl ReplicaElectionResult {
         if version >= 2 {
             partition_result = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(PartitionResult::read(buf, version)?);
                 }
@@ -200,7 +200,7 @@ impl ReplicaElectionResult {
         } else {
             partition_result = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(PartitionResult::read(buf, version)?);
                 }
