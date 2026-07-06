@@ -142,6 +142,11 @@ jobs:
       # from stdin; Heimdal's --password-file flag is macOS-only).
       # udp_preference_limit=1 forces TCP to the KDC — the published UDP port
       # mapping is the unreliable half of Docker's loopback story.
+      # qualify_shortname must be explicitly emptied: MIT krb5 1.18+ otherwise
+      # appends resolv.conf's first search domain to the single-label SPN host
+      # ("localhost" → localhost.<azure-vnet-suffix>) even with
+      # dns_canonicalize_hostname=false, and the realm heuristic then asks the
+      # KDC for a cross-realm krbtgt/<AZURE-SUFFIX> that does not exist.
       - name: Obtain Kerberos ticket and run GSSAPI suite
         run: |
           cat > /tmp/kacrab_krb5.conf <<'EOF'
@@ -151,6 +156,7 @@ jobs:
             dns_lookup_kdc = false
             rdns = false
             dns_canonicalize_hostname = false
+            qualify_shortname =
             udp_preference_limit = 1
           [realms]
             KACRAB.LOCAL = {
@@ -164,7 +170,10 @@ jobs:
           export KRB5CCNAME=FILE:/tmp/kacrab_krb5cc
           printf '%s\n' kacrab-secret | kinit kacrab@KACRAB.LOCAL
           klist
-          KACRAB_GSSAPI_BOOTSTRAP=localhost:19095 \
+          # KRB5_TRACE makes any failure self-diagnosing (prints the exact SPN
+          # and TGS exchanges); on success it is a few dozen stderr lines on a
+          # weekly job.
+          KACRAB_GSSAPI_BOOTSTRAP=localhost:19095 KRB5_TRACE=/dev/stderr \
             cargo test -p kacrab --all-features --test real_kafka_gssapi -- --ignored --nocapture
 
       - name: KDC and broker logs on failure

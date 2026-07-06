@@ -28,11 +28,15 @@ openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
   -out server.crt -days 3650 \
   -extfile <(printf 'subjectAltName=DNS:localhost,IP:127.0.0.1') >/dev/null 2>&1
 
-# Client key + CSR + cert (signed by CA) for mTLS.
+# Client key + CSR + cert (signed by CA) for mTLS. The explicit extensions
+# force an X.509 v3 certificate: a bare `x509 -req` emits v1 on OpenSSL < 3.2,
+# which rustls rejects outright (UnsupportedCertVersion) when loading the
+# client identity.
 openssl req -newkey rsa:2048 -nodes -keyout client.key -out client.csr \
   -subj "/CN=kacrab-client" >/dev/null 2>&1
 openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
-  -out client.crt -days 3650 >/dev/null 2>&1
+  -out client.crt -days 3650 \
+  -extfile <(printf 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth') >/dev/null 2>&1
 
 # Broker keystore (server identity) and truststore (CA) as PKCS12.
 openssl pkcs12 -export -name kafka -in server.crt -inkey server.key -certfile ca.crt \
