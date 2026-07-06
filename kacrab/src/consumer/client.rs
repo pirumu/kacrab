@@ -248,6 +248,7 @@ impl Consumer {
             async_commit_rx,
             wire.clone(),
             metrics.clone(),
+            runtime.retry_backoff_policy(),
         ));
         Ok(Self {
             wire,
@@ -891,10 +892,15 @@ impl Consumer {
                 return Ok(ConsumerRecords::empty());
             }
             // Nothing fetchable this round (leaders unresolved, or subscribed but
-            // not yet assigned) and no fetch in flight — back off briefly so we
-            // don't spin.
+            // not yet assigned) and no fetch in flight — back off for
+            // `retry.backoff.ms` (Java's idle wait) so we don't spin, clamped to
+            // the remaining poll budget so a short `poll` timeout is honoured.
             if fetchable_empty && self.in_flight_fetch.is_none() {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                let wait = self
+                    .config
+                    .retry_backoff
+                    .min(timeout.saturating_sub(start.elapsed()));
+                tokio::time::sleep(wait).await;
             }
         }
     }
@@ -1111,7 +1117,9 @@ impl Consumer {
         if let Some(id) = self.coordinator_id {
             return Ok(id);
         }
-        let id = coordinator::find_coordinator(&self.wire, group_id).await?;
+        let id =
+            coordinator::find_coordinator(&self.wire, group_id, self.config.retry_backoff_policy())
+                .await?;
         self.coordinator_id = Some(id);
         Ok(id)
     }
@@ -1844,6 +1852,7 @@ async fn async_commit_loop(
     mut receiver: tokio::sync::mpsc::UnboundedReceiver<AsyncCommitOp>,
     wire: WireClient,
     metrics: ConsumerMetrics,
+    retry_backoff: crate::wire::BackoffPolicy,
 ) {
     // The coordinator re-found after a failover, preferred over each commit's
     // enqueue-time snapshot from then on (the snapshot goes stale the moment
@@ -1878,7 +1887,9 @@ async fn async_commit_loop(
                 // and retry, so async commits heal across a coordinator move
                 // instead of failing until the consumer is rebuilt.
                 Err(error) if !refound && is_coordinator_moved(&error) => {
-                    match coordinator::find_coordinator(&wire, &commit.group_id).await {
+                    match coordinator::find_coordinator(&wire, &commit.group_id, retry_backoff)
+                        .await
+                    {
                         Ok(id) => {
                             coordinator_id = id;
                             refound_coordinator = Some(id);

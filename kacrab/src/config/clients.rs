@@ -1933,6 +1933,24 @@ kafka_config! {
         #[comment("Recovery strategy used when no known broker is available.")]
         metadata_recovery_strategy: String,
 
+        #[key("retry.backoff.max.ms")]
+        #[default(DurationMs::from_millis(1_000))]
+        #[kafka_type("long")]
+        #[kafka_default("1000 (1 second)")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/consumer-configs/#consumerconfigs_retry.backoff.max.ms")]
+        #[comment("Maximum consumer retry backoff for retriable request failures.")]
+        retry_backoff_max_ms: DurationMs,
+
+        #[key("retry.backoff.ms")]
+        #[default(DurationMs::from_millis(100))]
+        #[kafka_type("long")]
+        #[kafka_default("100")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/consumer-configs/#consumerconfigs_retry.backoff.ms")]
+        #[comment("Initial consumer retry backoff for retriable request failures and idle-poll waits.")]
+        retry_backoff_ms: DurationMs,
+
         #[key("security.protocol")]
         #[default(String::from("PLAINTEXT"))]
         #[kafka_type("string")]
