@@ -1,19 +1,17 @@
 # Security Policy
 
-`kacrab` is pre-release and not ready for production use. It is intended to
-remain 100% pure Rust, with no C Kafka client bindings and no unsafe code in
-the workspace.
+`kacrab` is intended to remain 100% pure Rust, with no C Kafka client bindings
+and no unsafe code in the workspace.
 
-Even so, security reports are welcome, especially for issues involving protocol
+Security reports are welcome, especially for issues involving protocol
 parsing, malformed broker responses, TLS/SASL handling, panic-on-input bugs,
 resource exhaustion, or incorrect error propagation.
 
 ## Supported Versions
 
-There are no supported stable releases yet.
-
-Security fixes are handled on `main` until the project starts publishing
-supported release lines.
+Security fixes land on `master` and ship in the latest `0.x` release on
+[crates.io](https://crates.io/crates/kacrab). Only the latest published
+release is supported.
 
 ## Reporting a Vulnerability
 
@@ -45,4 +43,4 @@ Out of scope:
 
 - Vulnerabilities in an unsupported local Kafka deployment.
 - Issues that require modifying the local build environment.
-- General pre-release missing features without a concrete security impact.
+- Missing features without a concrete security impact.

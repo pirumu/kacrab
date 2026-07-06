@@ -4,9 +4,8 @@ This document tracks current project direction. It is not a dated delivery
 plan, and it intentionally avoids milestone labels that imply release
 readiness.
 
-`kacrab` is pre-release. The goal remains a high-performance, 100% pure Rust
-Kafka client with no `librdkafka`, no C client bindings, and no unsafe code in
-the workspace.
+The goal remains a high-performance, 100% pure Rust Kafka client with no
+`librdkafka`, no C client bindings, and no unsafe code in the workspace.
 
 ## Current Baseline
 

@@ -203,9 +203,8 @@ the implemented surface — not a literal class-for-class port:
 
 ## Status
 
-`kacrab` is pre-release: the public API and runtime behavior are not stable
-release guarantees yet. Protocol, wire, auth, producer, consumer, and admin all
-have a verified usable baseline; the remaining work before production-ready is
+Protocol, wire, auth, producer, consumer, and admin all have a verified usable
+baseline; the remaining work before production-ready is
 measurement under load (sustained multi-broker stress, cross-DC/high-RTT
 coverage, memory soak, latency-percentile gates), not correctness. See the
 [roadmap](https://github.com/pirumu/kacrab/blob/master/ROADMAP.md).

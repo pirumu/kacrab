@@ -16,7 +16,7 @@ that bus factor are structural, not aspirational:
 - **The maintainer path below is real** — the explicit goal is at least two
   people with merge rights once the project has sustained contributors.
 
-The project is pre-release, so governance is intentionally small and practical.
+The project is young, so governance is intentionally small and practical.
 The main priority is building a correct, high-throughput, 100% pure Rust Kafka
 client without unsafe code or native Kafka client bindings, while protecting
 the wire and producer architecture.
