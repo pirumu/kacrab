@@ -1,0 +1,176 @@
+name: real-broker-auth
+
+# Weekly sweep of the authenticated-listener integration suites: SASL
+# (PLAIN / SCRAM / OAUTHBEARER + delegation tokens), TLS (SSL / SASL_SSL /
+# mTLS), and GSSAPI against a real MIT KDC. These exercise handshake code
+# that rarely changes but needs heavy fixtures (cert generation, a KDC
+# container that apt-installs krb5 on boot), so they run on a schedule
+# instead of per-PR — plus on any PR that touches the auth stack itself,
+# and on demand via workflow_dispatch.
+
+on:
+  schedule:
+    # Mondays 03:00 UTC.
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/real-broker-auth.yml"
+      - "docker-compose.auth.yml"
+      - "docker-compose.tls.yml"
+      - "docker-compose.gssapi.yml"
+      - "scripts/gen-tls-certs.sh"
+      - "kacrab/src/wire/auth.rs"
+      - "kacrab/src/wire/gssapi.rs"
+      - "kacrab/src/wire/tls.rs"
+      - "kacrab/tests/real_kafka_sasl.rs"
+      - "kacrab/tests/real_kafka_tls.rs"
+      - "kacrab/tests/real_kafka_gssapi.rs"
+      - "kacrab/tests/real_kafka_admin_token.rs"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-broker-auth-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  sasl:
+    name: SASL broker (PLAIN · SCRAM · OAUTHBEARER · tokens)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start SASL Kafka (background)
+        run: docker compose -f docker-compose.auth.yml up -d
+
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev
+
+      - name: Pinned Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build real-broker test binaries
+        run: cargo test -p kacrab --all-features --no-run
+
+      - name: Wait for broker health
+        run: docker compose -f docker-compose.auth.yml up -d --wait kafka-auth
+
+      - name: SASL suite
+        run: cargo test -p kacrab --all-features --test real_kafka_sasl -- --ignored --test-threads=1 --nocapture
+
+      - name: Delegation-token suite
+        run: cargo test -p kacrab --all-features --test real_kafka_admin_token -- --ignored --test-threads=1 --nocapture
+
+      - name: Broker logs on failure
+        if: failure()
+        run: docker logs kacrab-kafka-auth --tail 300
+
+  tls:
+    name: TLS broker (SSL · SASL_SSL · mTLS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      KACRAB_TLS_DIR: ${{ github.workspace }}/.tls-certs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate certificates
+        run: bash scripts/gen-tls-certs.sh "$KACRAB_TLS_DIR"
+
+      - name: Start TLS Kafka (background)
+        run: docker compose -f docker-compose.tls.yml up -d
+
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev
+
+      - name: Pinned Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build real-broker test binaries
+        run: cargo test -p kacrab --all-features --no-run
+
+      - name: Wait for broker health
+        run: docker compose -f docker-compose.tls.yml up -d --wait kafka-tls
+
+      - name: TLS suite
+        run: cargo test -p kacrab --all-features --test real_kafka_tls -- --ignored --test-threads=1 --nocapture
+
+      - name: Broker logs on failure
+        if: failure()
+        run: docker logs kacrab-kafka-tls --tail 300
+
+  gssapi:
+    name: GSSAPI broker (MIT KDC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      # The KDC container apt-installs krb5 on boot (~2 min), so start it
+      # first and let the Rust build absorb the wait.
+      - name: Start KDC + GSSAPI Kafka (background)
+        run: docker compose -f docker-compose.gssapi.yml up -d
+
+      # krb5-user provides kinit for obtaining the client TGT on the runner.
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev krb5-user
+
+      - name: Pinned Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build real-broker test binaries
+        run: cargo test -p kacrab --all-features --no-run
+
+      - name: Wait for KDC and broker health
+        run: docker compose -f docker-compose.gssapi.yml up -d --wait kdc kafka-gssapi
+
+      # Realm layout mirrors the host steps documented in
+      # docker-compose.gssapi.yml, adapted for MIT kinit (reads the password
+      # from stdin; Heimdal's --password-file flag is macOS-only).
+      # udp_preference_limit=1 forces TCP to the KDC — the published UDP port
+      # mapping is the unreliable half of Docker's loopback story.
+      - name: Obtain Kerberos ticket and run GSSAPI suite
+        run: |
+          cat > /tmp/kacrab_krb5.conf <<'EOF'
+          [libdefaults]
+            default_realm = KACRAB.LOCAL
+            dns_lookup_realm = false
+            dns_lookup_kdc = false
+            rdns = false
+            dns_canonicalize_hostname = false
+            udp_preference_limit = 1
+          [realms]
+            KACRAB.LOCAL = {
+              kdc = localhost:1088
+              admin_server = localhost:1088
+            }
+          [domain_realm]
+            localhost = KACRAB.LOCAL
+          EOF
+          export KRB5_CONFIG=/tmp/kacrab_krb5.conf
+          export KRB5CCNAME=FILE:/tmp/kacrab_krb5cc
+          printf '%s\n' kacrab-secret | kinit kacrab@KACRAB.LOCAL
+          klist
+          KACRAB_GSSAPI_BOOTSTRAP=localhost:19095 \
+            cargo test -p kacrab --all-features --test real_kafka_gssapi -- --ignored --nocapture
+
+      - name: KDC and broker logs on failure
+        if: failure()
+        run: |
+          echo "===== kacrab-kdc ====="
+          docker logs kacrab-kdc --tail 150
+          echo "===== kacrab-kafka-gssapi ====="
+          docker logs kacrab-kafka-gssapi --tail 150
