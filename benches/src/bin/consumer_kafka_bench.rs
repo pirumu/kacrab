@@ -374,7 +374,7 @@ async fn run_scenario(
         let assigned: Vec<_> = (0..partitions)
             .map(|partition| TopicPartition::new(scenario.topic.clone(), partition))
             .collect();
-        consumer.assign(assigned.clone());
+        consumer.assign(assigned.clone()).expect("manual assign");
         consumer
             .seek_to_beginning(&assigned)
             .await

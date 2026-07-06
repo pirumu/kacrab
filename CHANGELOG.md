@@ -7,6 +7,24 @@ This project is pre-1.0; minor releases may still change public APIs.
 The format is based on human-readable release notes. Each entry includes the
 release date and links to relevant pull requests or issues.
 
+## Unreleased
+
+### Added
+
+- `Consumer::close_timeout(Duration)` — close with a caller-chosen bound on
+  the final commit-and-leave work, the analogue of Java's `close(Duration)`.
+  `close()` keeps its `request.timeout.ms` bound.
+
+### Changed
+
+- Subscription modes are now mutually exclusive, matching Java's
+  `SubscriptionState`: mixing a manual `assign` with `subscribe` /
+  `subscribe_pattern` (in either order, or switching between topic and
+  pattern subscriptions) returns `ConsumerError::InvalidState` instead of
+  silently replacing the previous mode. Call `unsubscribe` to switch modes.
+  `Consumer::assign` accordingly now returns `Result`, and an empty `assign`
+  is treated as `unsubscribe` (Java parity).
+
 ## 0.1.2 — 2026-07-07
 
 Wire-pipeline correctness fix

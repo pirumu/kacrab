@@ -10,7 +10,8 @@ use super::config::AutoOffsetReset;
 use crate::common::TopicPartition;
 
 /// The next position to fetch on a partition: the offset plus the leader epoch
-/// it was derived from (for KIP-320 fencing, wired in a later phase).
+/// it was derived from (KIP-320 — `offsets::validate_offsets` checks it against
+/// the leader via `OffsetsForLeaderEpoch` to detect log truncation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct FetchPosition {
     /// Next offset to fetch.
@@ -66,6 +67,12 @@ impl SubscriptionState {
     /// The default reset strategy (`auto.offset.reset`).
     pub(super) const fn default_reset(&self) -> AutoOffsetReset {
         self.default_reset
+    }
+
+    /// Whether the current assignment came from a manual [`assign`](Self::assign)
+    /// (as opposed to group management or no assignment at all).
+    pub(super) const fn is_user_assigned(&self) -> bool {
+        matches!(self.subscription_type, SubscriptionType::UserAssigned)
     }
 
     fn key(partition: &TopicPartition) -> (String, i32) {
