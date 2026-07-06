@@ -28,10 +28,10 @@ publish = true
 # Workspace-shared deps. Members reference via `{ workspace = true }`.
 # ============================================================================
 [workspace.dependencies]
-kacrab = { version = "0.1.0", path = "kacrab" }
-kacrab-macros = { version = "0.1.0", path = "kacrab-macros" }
-kacrab-codegen = { version = "0.1.0", path = "kacrab-codegen" }
-kacrab-protocol = { version = "0.1.0", path = "kacrab-protocol" }
+kacrab = { version = "0.1.1", path = "kacrab" }
+kacrab-macros = { version = "0.1.1", path = "kacrab-macros" }
+kacrab-codegen = { version = "0.1.1", path = "kacrab-codegen" }
+kacrab-protocol = { version = "0.1.1", path = "kacrab-protocol" }
 
 # Async runtime. No default features — each member opts into what it needs
 # (`rt`, `rt-multi-thread`, `net`, `io-util`, `macros`, `sync`, `time`, ...).

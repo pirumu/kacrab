@@ -2,13 +2,75 @@
 
 All notable changes to this project should be documented in this file.
 
-This project is pre-release and has not published a stable release yet.
+This project is pre-1.0; minor releases may still change public APIs.
 
-The format is based on human-readable release notes. Once releases begin, each
-entry should include the release date and links to relevant pull requests or
-issues.
+The format is based on human-readable release notes. Each entry includes the
+release date and links to relevant pull requests or issues.
 
-## Unreleased
+## 0.1.1 — 2026-07-06
+
+Hardening release: every finding from an external review of 0.1.0, fixed and
+real-broker verified ([#39](https://github.com/pirumu/kacrab/pull/39)).
+
+### Security
+
+- Generated protocol decoders no longer trust wire-claimed array lengths for
+  `Vec` preallocation. A hostile or corrupt response claiming `i32::MAX`
+  elements previously reserved gigabytes up front and aborted the process
+  under `panic = "abort"`; the preallocation is now clamped by the bytes
+  actually remaining and a fixed budget (`array_read_capacity`), and a
+  truncated hostile-length array fails decode cleanly.
+- Decompression output is bounded. gzip and zstd decoded to `Vec` with no
+  output cap, lz4 capped each 64 KiB block but not the frame total, and
+  snappy trusted the raw format's claimed length (allocated up front) — a
+  crafted batch could inflate a tiny payload until the allocator gave out.
+  All four codecs now refuse to produce more than
+  `compression::MAX_DECOMPRESSED_LEN` (1 GiB, ~10:1 over the 100 MiB wire
+  frame cap) and surface the new
+  `CompressionErrorKind::DecompressedTooLarge` instead of dying.
+
+### Fixed
+
+- A synchronous commit can no longer be overtaken by queued asynchronous
+  commits: `commit_sync` / auto-commit / `close` drain the async-commit queue
+  through an ordering barrier before committing, so a later sync commit
+  cannot be overwritten by an earlier queued one and the committed offset
+  never regresses (Java's `commitSync` semantics).
+- Asynchronous commits heal across a coordinator move: the commit worker
+  re-finds the coordinator once and retries on
+  `NOT_COORDINATOR`/`COORDINATOR_NOT_AVAILABLE`/`COORDINATOR_LOAD_IN_PROGRESS`,
+  matching the synchronous paths, instead of failing every subsequent
+  `commit_async` until the consumer was rebuilt.
+- `Consumer::close` applies queued asynchronous commits (firing their
+  callbacks) before stopping the commit worker instead of silently dropping
+  them.
+- One unreachable leader no longer fails the whole `poll` and discards the
+  data already fetched from the other leaders that round: the failed leader's
+  partitions are flagged for a metadata refresh and retried next poll, per
+  Java's per-node fetch handlers. Terminal TLS/SASL setup failures still
+  surface.
+- A short `poll` timeout is no longer overshot by the idle backoff — the
+  empty-round wait is clamped to the remaining poll budget.
+
+### Added
+
+- Consumer `retry.backoff.ms` (default 100 ms) and `retry.backoff.max.ms`
+  (default 1 s) as typed config. The idle-poll wait follows
+  `retry.backoff.ms` (was a fixed 50 ms), and coordinator lookups retry under
+  the exponential policy (base doubling to max, 20% jitter) matching Java
+  `AbstractCoordinator`'s `ExponentialBackoff` (was a fixed 500 ms).
+- `kacrab-protocol`: per-codec `decompress_bounded` and
+  `MAX_DECOMPRESSED_LEN` for callers that want an explicit decompression
+  budget; `primitives::array_read_capacity`.
+- Real-broker regression tests for the commit-ordering barrier and for
+  consumer-side decompression of broker-compressed batches across all four
+  codecs (the CLI helpers honor `KACRAB_KAFKA_BIN` for hosts where
+  `127.0.0.1:9092` is a native broker rather than the compose container).
+
+## 0.1.0 — 2026-07-02
+
+First crates.io release: `kacrab`, `kacrab-protocol`, and `kacrab-macros`
+([#36](https://github.com/pirumu/kacrab/pull/36)).
 
 ### Added
 

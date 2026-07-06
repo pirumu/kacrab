@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "kacrab"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "base64",
@@ -1104,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "kacrab-benches"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "criterion",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "kacrab-codegen"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "kacrab-examples"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "kacrab",
@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "kacrab-macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "kacrab",
  "proc-macro2",
@@ -1151,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "kacrab-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "bytes",
