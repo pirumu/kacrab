@@ -2,7 +2,7 @@
 
 Thanks for taking the time to contribute.
 
-`kacrab` is a pre-release, 100% pure Rust Kafka client. Protocol generation,
+`kacrab` is a 100% pure Rust Kafka client. Protocol generation,
 wire sessions, auth, producer, consumer, and admin are usable and verified
 against real brokers; the project is now hardening sustained-load behavior and
 release guarantees. Please keep changes focused and production-minded:

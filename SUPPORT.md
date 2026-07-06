@@ -1,7 +1,5 @@
 # Support
 
-`kacrab` is pre-release. It is not ready for production use.
-
 The project goal is a 100% pure Rust Kafka client with no unsafe code. Issues or
 requests that propose native Kafka client bindings are outside that direction.
 

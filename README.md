@@ -81,9 +81,6 @@ built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
 
 ## Status
 
-> **Warning:** `kacrab` is pre-release software. The public API and runtime
-> behavior are not stable release guarantees yet.
-
 Protocol, wire, auth, producer, consumer, and admin all have a verified usable
 baseline. The remaining work before calling this production-ready is
 **measurement under load, not correctness**: sustained multi-broker stress,
