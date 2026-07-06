@@ -6,11 +6,23 @@
 **A Rust-native Apache Kafka client for producer, consumer, and admin use cases,
 built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
 
+[![CI][ci-badge]][ci-url]
+[![crates.io][crates-badge]][crates-url]
+[![docs.rs][docs-badge]][docs-url]
+[![MSRV][msrv-badge]][msrv-url]
 [![MIT licensed][mit-badge]][mit-url]
 [![Apache-2.0 licensed][apache-badge]][apache-url]
 
 </div>
 
+[ci-badge]: https://github.com/pirumu/kacrab/actions/workflows/ci.yml/badge.svg?branch=master
+[ci-url]: https://github.com/pirumu/kacrab/actions/workflows/ci.yml
+[crates-badge]: https://img.shields.io/crates/v/kacrab.svg
+[crates-url]: https://crates.io/crates/kacrab
+[docs-badge]: https://docs.rs/kacrab/badge.svg
+[docs-url]: https://docs.rs/kacrab
+[msrv-badge]: https://img.shields.io/crates/msrv/kacrab.svg
+[msrv-url]: https://crates.io/crates/kacrab
 [mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
 [mit-url]: LICENSE-MIT
 [apache-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
@@ -302,13 +314,25 @@ and [`benches/README.md`](benches/README.md).
 
 ## Workspace
 
+Published on crates.io:
+
 - [`kacrab/`](kacrab/): public runtime crate: config, wire, common, producer,
-  consumer, admin.
+  consumer, admin —
+  [crates.io](https://crates.io/crates/kacrab) ·
+  [docs.rs](https://docs.rs/kacrab)
 - [`kacrab-protocol/`](kacrab-protocol/): protocol primitives, generated Kafka
-  schemas, record batch codecs, compression, Java interop tests.
+  schemas, record batch codecs, compression, Java interop tests —
+  [crates.io](https://crates.io/crates/kacrab-protocol) ·
+  [docs.rs](https://docs.rs/kacrab-protocol)
+- [`kacrab-macros/`](kacrab-macros/): helper macros for typed config surfaces
+  (use the re-export from `kacrab` rather than depending on it directly) —
+  [crates.io](https://crates.io/crates/kacrab-macros) ·
+  [docs.rs](https://docs.rs/kacrab-macros)
+
+Internal (not published):
+
 - [`kacrab-codegen/`](kacrab-codegen/): protocol and config code generation
   from upstream Kafka.
-- [`kacrab-macros/`](kacrab-macros/): helper macros for typed config surfaces.
 - [`examples/`](examples/): runnable producer/consumer/admin examples.
 - [`benches/`](benches/): internal benchmark crate: real-Kafka harnesses and
   microbenchmarks.

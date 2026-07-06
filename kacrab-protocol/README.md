@@ -3,6 +3,11 @@
 Kafka wire protocol primitives, generated request/response structs, record
 batches, compression, framing, and version negotiation for `kacrab`.
 
+[![CI](https://github.com/pirumu/kacrab/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/pirumu/kacrab/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/kacrab-protocol.svg)](https://crates.io/crates/kacrab-protocol)
+[![docs.rs](https://docs.rs/kacrab-protocol/badge.svg)](https://docs.rs/kacrab-protocol)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/pirumu/kacrab#license)
+
 ## Scope
 
 - `primitives`, `string`, `bytes_io`, `uuid`, and `tagged` implement Kafka wire

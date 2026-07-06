@@ -2,6 +2,11 @@
 
 Procedural macros for [`kacrab`](https://docs.rs/kacrab).
 
+[![CI](https://github.com/pirumu/kacrab/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/pirumu/kacrab/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/kacrab-macros.svg)](https://crates.io/crates/kacrab-macros)
+[![docs.rs](https://docs.rs/kacrab-macros/badge.svg)](https://docs.rs/kacrab-macros)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/pirumu/kacrab#license)
+
 This crate is maintainer-facing proc-macro support for the main `kacrab` crate.
 Use the public re-export from `kacrab` instead of depending on this crate
 directly.
