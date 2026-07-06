@@ -147,6 +147,11 @@ jobs:
       # ("localhost" → localhost.<azure-vnet-suffix>) even with
       # dns_canonicalize_hostname=false, and the realm heuristic then asks the
       # KDC for a cross-realm krbtgt/<AZURE-SUFFIX> that does not exist.
+      # (Reproduced and fix verified against the compose KDC with
+      # `kvno -S kafka localhost` in a --dns-search container.) The value must
+      # be the QUOTED empty string: profile strips the quotes, while a bare
+      # empty value makes the parser expect a `{` subsection and kinit dies
+      # with "Improper format of Kerberos configuration file".
       - name: Obtain Kerberos ticket and run GSSAPI suite
         run: |
           cat > /tmp/kacrab_krb5.conf <<'EOF'
@@ -156,7 +161,7 @@ jobs:
             dns_lookup_kdc = false
             rdns = false
             dns_canonicalize_hostname = false
-            qualify_shortname =
+            qualify_shortname = ""
             udp_preference_limit = 1
           [realms]
             KACRAB.LOCAL = {
