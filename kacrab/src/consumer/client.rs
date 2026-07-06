@@ -833,33 +833,17 @@ impl Consumer {
 
                 // Pipeline the next fetch (Java's network thread): dry
                 // partitions get their Fetch in flight while the caller
-                // processes this batch. Skip partitions whose leader still
-                // hosts buffered partitions (Java's buffered-node gate) — a
-                // fetch omitting them would drop them from the broker's
-                // session cache, and one listing only caught-up partitions
-                // would long-poll `fetch.max.wait.ms` while the buffer drains
-                // dry behind it.
-                let buffered_leaders: HashSet<i32> = self
-                    .fetch_buffer
-                    .partitions()
-                    .filter_map(|partition| {
+                // processes this batch, gated so buffered partitions and
+                // their leaders are left alone (see `select_fetchable`).
+                let buffered: Vec<TopicPartition> =
+                    self.fetch_buffer.partitions().cloned().collect();
+                let fetchable = fetch::select_fetchable(
+                    self.subscription.fetchable_partitions(),
+                    &buffered,
+                    |partition| {
                         offsets::partition_leader(&metadata, &partition.topic, partition.partition)
-                    })
-                    .collect();
-                let fetchable: Vec<_> = self
-                    .subscription
-                    .fetchable_partitions()
-                    .into_iter()
-                    .filter(|(partition, _position)| {
-                        !self.fetch_buffer.has(partition)
-                            && offsets::partition_leader(
-                                &metadata,
-                                &partition.topic,
-                                partition.partition,
-                            )
-                            .is_none_or(|leader| !buffered_leaders.contains(&leader))
-                    })
-                    .collect();
+                    },
+                );
                 fetchable_empty = fetchable.is_empty();
                 if !fetchable.is_empty() && self.in_flight_fetch.is_none() {
                     self.spawn_fetch(&metadata, fetchable);
@@ -892,14 +876,10 @@ impl Consumer {
                 return Ok(ConsumerRecords::empty());
             }
             // Nothing fetchable this round (leaders unresolved, or subscribed but
-            // not yet assigned) and no fetch in flight — back off for
-            // `retry.backoff.ms` (Java's idle wait) so we don't spin, clamped to
-            // the remaining poll budget so a short `poll` timeout is honoured.
+            // not yet assigned) and no fetch in flight — back off so we don't
+            // spin (see `idle_backoff`).
             if fetchable_empty && self.in_flight_fetch.is_none() {
-                let wait = self
-                    .config
-                    .retry_backoff
-                    .min(timeout.saturating_sub(start.elapsed()));
+                let wait = fetch::idle_backoff(self.config.retry_backoff, timeout, start.elapsed());
                 tokio::time::sleep(wait).await;
             }
         }
@@ -2089,6 +2069,89 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), consumer.drain_async_commits())
             .await
             .expect("drain returns when the worker is gone");
+    }
+
+    #[tokio::test]
+    async fn reap_fetch_puts_a_still_airborne_task_back() {
+        let mut consumer = consumer_no_group().await;
+        consumer.in_flight_fetch = Some(tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            FetchTaskOutcome {
+                result: Ok(fetch::FetchProgress::default()),
+                sessions: fetch::FetchSessions::default(),
+            }
+        }));
+        // Non-blocking reap of an unfinished task: nothing folded, the handle
+        // goes back so a later poll can reap it.
+        consumer.reap_fetch(None).await.expect("non-blocking reap");
+        assert!(consumer.in_flight_fetch.is_some(), "task is put back");
+        // A blocking reap bounded by a short wait also puts it back.
+        consumer
+            .reap_fetch(Some(Duration::from_millis(10)))
+            .await
+            .expect("bounded reap");
+        assert!(consumer.in_flight_fetch.is_some(), "task is put back again");
+        consumer.in_flight_fetch.take().expect("handle").abort();
+    }
+
+    #[tokio::test]
+    async fn reap_fetch_folds_progress_into_buffer_and_positions() {
+        let mut consumer = consumer_no_group().await;
+        let fetched = TopicPartition::new("t", 0);
+        let reset = TopicPartition::new("t", 1);
+        consumer.assign([fetched.clone(), reset.clone()]);
+        consumer.seek(&reset, 42).expect("seek assigned partition");
+
+        let progress = fetch::FetchProgress {
+            partitions: vec![fetch::RawPartitionFetch {
+                partition: fetched.clone(),
+                fetch_position: FetchPosition::new(0, None),
+                records: Bytes::from_static(b"raw"),
+            }],
+            resets: vec![reset.clone()],
+            stale: vec![TopicPartition::new("t", 2)],
+        };
+        consumer.in_flight_fetch = Some(tokio::spawn(async move {
+            FetchTaskOutcome {
+                result: Ok(progress),
+                sessions: fetch::FetchSessions::default(),
+            }
+        }));
+
+        consumer
+            .reap_fetch(Some(Duration::from_secs(5)))
+            .await
+            .expect("reap folds the finished fetch");
+        assert!(consumer.in_flight_fetch.is_none(), "task was consumed");
+        assert!(
+            consumer.fetch_buffer.has(&fetched),
+            "fetched data lands in the buffer"
+        );
+        assert_eq!(
+            consumer.subscription.position(&reset),
+            None,
+            "an out-of-range partition loses its position (re-resolved via auto.offset.reset)"
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_fetch_surfaces_a_dead_task_as_an_error() {
+        let mut consumer = consumer_no_group().await;
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            FetchTaskOutcome {
+                result: Ok(fetch::FetchProgress::default()),
+                sessions: fetch::FetchSessions::default(),
+            }
+        });
+        handle.abort();
+        consumer.in_flight_fetch = Some(handle);
+        let outcome = consumer.reap_fetch(Some(Duration::from_secs(5))).await;
+        assert!(
+            matches!(outcome, Err(ConsumerError::InvalidState(_))),
+            "an aborted background fetch surfaces as InvalidState, got {outcome:?}"
+        );
+        assert!(consumer.in_flight_fetch.is_none());
     }
 
     #[tokio::test]
