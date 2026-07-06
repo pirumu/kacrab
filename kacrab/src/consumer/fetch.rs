@@ -202,6 +202,43 @@ pub(super) struct FetchProgress {
     pub stale: Vec<TopicPartition>,
 }
 
+/// The partitions eligible for the next background fetch, out of the
+/// subscription's fetchable `candidates`.
+///
+/// Skips partitions still `buffered` client-side, and — Java's
+/// `AbstractFetch` buffered-node gate — every partition whose leader still
+/// hosts a buffered partition: a fetch omitting the buffered partitions would
+/// drop them from the broker's session cache, and one listing only caught-up
+/// partitions would long-poll `fetch.max.wait.ms` while the buffer drains dry
+/// behind it. Partitions without a resolved leader stay eligible; the fetch
+/// itself skips them until metadata resolves.
+pub(super) fn select_fetchable(
+    candidates: Vec<(TopicPartition, FetchPosition)>,
+    buffered: &[TopicPartition],
+    leader_of: impl Fn(&TopicPartition) -> Option<i32>,
+) -> Vec<(TopicPartition, FetchPosition)> {
+    let buffered_set: HashSet<&TopicPartition> = buffered.iter().collect();
+    let buffered_leaders: HashSet<i32> = buffered.iter().filter_map(&leader_of).collect();
+    candidates
+        .into_iter()
+        .filter(|(partition, _position)| {
+            !buffered_set.contains(partition)
+                && leader_of(partition).is_none_or(|leader| !buffered_leaders.contains(&leader))
+        })
+        .collect()
+}
+
+/// How long an empty poll round may sleep before re-checking: the idle wait
+/// (`retry.backoff.ms`, Java's spin guard) clamped to the remaining poll
+/// budget, so a short `poll` timeout is never overshot by the backoff.
+pub(super) fn idle_backoff(
+    retry_backoff: std::time::Duration,
+    timeout: std::time::Duration,
+    elapsed: std::time::Duration,
+) -> std::time::Duration {
+    retry_backoff.min(timeout.saturating_sub(elapsed))
+}
+
 /// How a partition-level fetch error is handled. Only genuinely fatal codes fail
 /// the whole `poll`; the rest are recovered per partition, mirroring Java's
 /// `AbstractFetch`.
@@ -283,21 +320,7 @@ pub(super) async fn fetch(
     }
 
     for (leader, entries) in by_leader {
-        // Resolve every topic's id from the routing metadata; topic-id fetch
-        // (v13+) needs all of them, so one missing id downgrades to v12.
-        let mut topic_ids: HashMap<String, KafkaUuid> = HashMap::new();
-        let mut all_have_ids = true;
-        for (partition, _) in &entries {
-            if topic_ids.contains_key(&partition.topic) {
-                continue;
-            }
-            match metadata.topic(&partition.topic).map(|topic| topic.topic_id) {
-                Some(id) if !id.is_nil() => {
-                    let _previous = topic_ids.insert(partition.topic.clone(), id);
-                },
-                _ => all_have_ids = false,
-            }
-        }
+        let (mut topic_ids, all_have_ids) = resolve_topic_ids(metadata, &entries);
         // Pick the Fetch version from this broker's negotiated `ApiVersions`
         // (falling back to the name-keyed v12 until `ApiVersions` has
         // completed), then key by topic id or name like Java's `AbstractFetch`.
@@ -323,9 +346,27 @@ pub(super) async fn fetch(
             max_wait_ms,
             use_topic_ids.then_some(&topic_ids),
         );
-        let response: FetchResponseData = wire
+        let response: FetchResponseData = match wire
             .send_to_broker(leader, ApiKey::Fetch, version, &request)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            // One unreachable leader must not fail the whole poll and discard
+            // the data already collected from the other leaders. Flag its
+            // partitions stale (metadata refresh + retry next poll, like
+            // Java's per-node fetch handlers) and re-open the session full.
+            // Terminal setup failures (TLS/SASL) still surface — they would
+            // fail every leader identically, and silently retrying them
+            // forever would mask an auth problem as an idle consumer.
+            Err(error) if !error.is_fatal_setup() => {
+                session.reset();
+                progress
+                    .stale
+                    .extend(entries.iter().map(|(partition, _)| partition.clone()));
+                continue;
+            },
+            Err(error) => return Err(error.into()),
+        };
         let top_level = ErrorCode::from(response.error_code);
         // A stale/unknown session — drop it and re-establish with a full fetch on
         // the next poll (the partitions are unchanged, just the session bookkeeping).
@@ -371,6 +412,29 @@ pub(super) async fn fetch(
     }
 
     Ok(progress)
+}
+
+/// Resolve every topic's id from the routing metadata; topic-id fetch (v13+)
+/// needs all of them, so the returned flag reports whether any id is missing
+/// (downgrading that broker's fetch to v12).
+fn resolve_topic_ids(
+    metadata: &ClusterMetadata,
+    entries: &[(TopicPartition, FetchPosition)],
+) -> (HashMap<String, KafkaUuid>, bool) {
+    let mut topic_ids: HashMap<String, KafkaUuid> = HashMap::new();
+    let mut all_have_ids = true;
+    for (partition, _) in entries {
+        if topic_ids.contains_key(&partition.topic) {
+            continue;
+        }
+        match metadata.topic(&partition.topic).map(|topic| topic.topic_id) {
+            Some(id) if !id.is_nil() => {
+                let _previous = topic_ids.insert(partition.topic.clone(), id);
+            },
+            _ => all_have_ids = false,
+        }
+    }
+    (topic_ids, all_have_ids)
 }
 
 /// Process one broker's fetch response into raw per-partition data, recovering
@@ -559,6 +623,7 @@ impl DecodedFetch {
 
 impl FetchBuffer {
     /// Whether a partition has buffered data (and must not be re-fetched yet).
+    #[cfg(test)]
     pub(super) fn has(&self, partition: &TopicPartition) -> bool {
         self.buffered
             .iter()
@@ -1362,5 +1427,106 @@ mod tests {
             .collect();
         pairs.sort();
         assert_eq!(pairs, vec![("t".to_owned(), 1), ("u".to_owned(), 0)]);
+    }
+
+    // --- select_fetchable (buffered-node gate) ---------------------------
+
+    fn candidate(topic: &str, partition: i32) -> (TopicPartition, FetchPosition) {
+        (
+            TopicPartition::new(topic, partition),
+            FetchPosition::new(0, None),
+        )
+    }
+
+    /// Leader resolver over a fixed `(topic, partition) -> leader` table;
+    /// unlisted partitions have no resolved leader.
+    fn leader_table(
+        entries: &[(&str, i32, i32)],
+    ) -> impl Fn(&TopicPartition) -> Option<i32> + use<> {
+        let table: HashMap<TopicPartition, i32> = entries
+            .iter()
+            .map(|(topic, partition, leader)| (TopicPartition::new(*topic, *partition), *leader))
+            .collect();
+        move |partition| table.get(partition).copied()
+    }
+
+    #[test]
+    fn select_fetchable_skips_partitions_still_buffered() {
+        let leaders = leader_table(&[("t", 0, 1), ("t", 1, 2)]);
+        let fetchable = select_fetchable(
+            vec![candidate("t", 0), candidate("t", 1)],
+            &[TopicPartition::new("t", 0)],
+            leaders,
+        );
+        assert_eq!(fetchable, vec![candidate("t", 1)]);
+    }
+
+    #[test]
+    fn select_fetchable_gates_every_partition_on_a_buffered_leader() {
+        // t-0 is buffered on leader 1; t-1 shares that leader, so it must NOT
+        // be fetched (Java's buffered-node gate) — a fetch omitting t-0 would
+        // evict it from the broker's session and long-poll behind the buffer.
+        let leaders = leader_table(&[("t", 0, 1), ("t", 1, 1), ("u", 0, 2)]);
+        let fetchable = select_fetchable(
+            vec![candidate("t", 1), candidate("u", 0)],
+            &[TopicPartition::new("t", 0)],
+            leaders,
+        );
+        assert_eq!(fetchable, vec![candidate("u", 0)]);
+    }
+
+    #[test]
+    fn select_fetchable_keeps_partitions_with_unresolved_leaders() {
+        // No leader resolved yet — still eligible; the fetch itself skips it
+        // until metadata resolves rather than stalling the whole poll.
+        let leaders = leader_table(&[("t", 0, 1)]);
+        let fetchable = select_fetchable(
+            vec![candidate("unknown", 0)],
+            &[TopicPartition::new("t", 0)],
+            leaders,
+        );
+        assert_eq!(fetchable, vec![candidate("unknown", 0)]);
+    }
+
+    #[test]
+    fn select_fetchable_passes_everything_with_an_empty_buffer() {
+        let leaders = leader_table(&[("t", 0, 1), ("t", 1, 1)]);
+        let fetchable = select_fetchable(vec![candidate("t", 0), candidate("t", 1)], &[], leaders);
+        assert_eq!(fetchable, vec![candidate("t", 0), candidate("t", 1)]);
+    }
+
+    // --- idle_backoff -----------------------------------------------------
+
+    #[test]
+    fn idle_backoff_clamps_to_the_remaining_poll_budget() {
+        use std::time::Duration;
+
+        // Plenty of budget left: the full retry backoff.
+        assert_eq!(
+            idle_backoff(
+                Duration::from_millis(100),
+                Duration::from_secs(1),
+                Duration::from_millis(0),
+            ),
+            Duration::from_millis(100)
+        );
+        // Less budget than backoff: only what remains.
+        assert_eq!(
+            idle_backoff(
+                Duration::from_millis(100),
+                Duration::from_millis(120),
+                Duration::from_millis(80),
+            ),
+            Duration::from_millis(40)
+        );
+        // Budget exhausted (or overshot): no sleep at all.
+        assert_eq!(
+            idle_backoff(
+                Duration::from_millis(100),
+                Duration::from_millis(50),
+                Duration::from_millis(60),
+            ),
+            Duration::ZERO
+        );
     }
 }

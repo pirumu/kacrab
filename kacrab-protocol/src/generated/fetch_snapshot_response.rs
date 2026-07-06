@@ -66,7 +66,7 @@ impl FetchSnapshotResponseData {
         error_code = read_i16(buf)?;
         topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(TopicSnapshot::read(buf, version)?);
             }
@@ -80,7 +80,8 @@ impl FetchSnapshotResponseData {
                         let mut tag_buf = field.data.clone();
                         node_endpoints = {
                             let len = read_compact_array_length(&mut tag_buf)?;
-                            let mut arr = Vec::with_capacity(len.max(0) as usize);
+                            let mut arr =
+                                Vec::with_capacity(array_read_capacity(len, (&mut tag_buf).len()));
                             for _ in 0..len {
                                 arr.push(NodeEndpoint::read(&mut tag_buf, version)?);
                             }
@@ -192,7 +193,7 @@ impl TopicSnapshot {
         name = read_compact_string(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(PartitionSnapshot::read(buf, version)?);
             }

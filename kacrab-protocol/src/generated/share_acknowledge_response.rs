@@ -87,7 +87,7 @@ impl ShareAcknowledgeResponseData {
         }
         responses = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(ShareAcknowledgeTopicResponse::read(buf, version)?);
             }
@@ -95,7 +95,7 @@ impl ShareAcknowledgeResponseData {
         };
         node_endpoints = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(NodeEndpoint::read(buf, version)?);
             }
@@ -208,7 +208,7 @@ impl ShareAcknowledgeTopicResponse {
         topic_id = read_uuid(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(PartitionData::read(buf, version)?);
             }

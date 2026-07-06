@@ -72,7 +72,7 @@ impl DescribeAclsResponseData {
         if version >= 2 {
             resources = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeAclsResource::read(buf, version)?);
                 }
@@ -81,7 +81,7 @@ impl DescribeAclsResponseData {
         } else {
             resources = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeAclsResource::read(buf, version)?);
                 }
@@ -222,7 +222,7 @@ impl DescribeAclsResource {
         if version >= 2 {
             acls = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(AclDescription::read(buf, version)?);
                 }
@@ -231,7 +231,7 @@ impl DescribeAclsResource {
         } else {
             acls = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(AclDescription::read(buf, version)?);
                 }

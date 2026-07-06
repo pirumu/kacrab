@@ -39,7 +39,7 @@ impl ReadShareGroupStateResponseData {
         let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
         results = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(ReadStateResult::read(buf, version)?);
             }
@@ -119,7 +119,7 @@ impl ReadStateResult {
         topic_id = read_uuid(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(PartitionResult::read(buf, version)?);
             }
@@ -232,7 +232,7 @@ impl PartitionResult {
         start_offset = read_i64(buf)?;
         state_batches = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(StateBatch::read(buf, version)?);
             }

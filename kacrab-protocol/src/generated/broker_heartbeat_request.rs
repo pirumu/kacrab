@@ -99,7 +99,8 @@ impl BrokerHeartbeatRequestData {
                         let mut tag_buf = field.data.clone();
                         offline_log_dirs = {
                             let len = read_compact_array_length(&mut tag_buf)?;
-                            let mut arr = Vec::with_capacity(len.max(0) as usize);
+                            let mut arr =
+                                Vec::with_capacity(array_read_capacity(len, (&mut tag_buf).len()));
                             for _ in 0..len {
                                 arr.push(read_uuid(&mut tag_buf)?);
                             }
@@ -115,7 +116,10 @@ impl BrokerHeartbeatRequestData {
                             if len < 0 {
                                 None
                             } else {
-                                let mut arr = Vec::with_capacity(len as usize);
+                                let mut arr = Vec::with_capacity(array_read_capacity(
+                                    len,
+                                    (&mut tag_buf).len(),
+                                ));
                                 for _ in 0..len {
                                     arr.push(read_uuid(&mut tag_buf)?);
                                 }

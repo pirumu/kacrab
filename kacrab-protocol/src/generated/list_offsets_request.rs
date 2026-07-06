@@ -74,7 +74,7 @@ impl ListOffsetsRequestData {
         if version >= 6 {
             topics = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(ListOffsetsTopic::read(buf, version)?);
                 }
@@ -83,7 +83,7 @@ impl ListOffsetsRequestData {
         } else {
             topics = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(ListOffsetsTopic::read(buf, version)?);
                 }
@@ -217,7 +217,7 @@ impl ListOffsetsTopic {
         if version >= 6 {
             partitions = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(ListOffsetsPartition::read(buf, version)?);
                 }
@@ -226,7 +226,7 @@ impl ListOffsetsTopic {
         } else {
             partitions = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(ListOffsetsPartition::read(buf, version)?);
                 }

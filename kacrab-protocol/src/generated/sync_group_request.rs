@@ -112,7 +112,7 @@ impl SyncGroupRequestData {
         if version >= 4 {
             assignments = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(SyncGroupRequestAssignment::read(buf, version)?);
                 }
@@ -121,7 +121,7 @@ impl SyncGroupRequestData {
         } else {
             assignments = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(SyncGroupRequestAssignment::read(buf, version)?);
                 }

@@ -60,7 +60,7 @@ impl AlterPartitionReassignmentsRequestData {
         }
         topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(ReassignableTopic::read(buf, version)?);
             }
@@ -164,7 +164,7 @@ impl ReassignableTopic {
         name = read_compact_string(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(ReassignablePartition::read(buf, version)?);
             }
@@ -245,7 +245,7 @@ impl ReassignablePartition {
             if len < 0 {
                 None
             } else {
-                let mut arr = Vec::with_capacity(len as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_i32(buf)?);
                 }

@@ -92,7 +92,7 @@ impl MetadataResponseData {
         if version >= 9 {
             brokers = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(MetadataResponseBroker::read(buf, version)?);
                 }
@@ -101,7 +101,7 @@ impl MetadataResponseData {
         } else {
             brokers = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(MetadataResponseBroker::read(buf, version)?);
                 }
@@ -121,7 +121,7 @@ impl MetadataResponseData {
         if version >= 9 {
             topics = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(MetadataResponseTopic::read(buf, version)?);
                 }
@@ -130,7 +130,7 @@ impl MetadataResponseData {
         } else {
             topics = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(MetadataResponseTopic::read(buf, version)?);
                 }
@@ -505,7 +505,7 @@ impl MetadataResponseTopic {
         if version >= 9 {
             partitions = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(MetadataResponsePartition::read(buf, version)?);
                 }
@@ -514,7 +514,7 @@ impl MetadataResponseTopic {
         } else {
             partitions = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(MetadataResponsePartition::read(buf, version)?);
                 }
@@ -723,7 +723,7 @@ impl MetadataResponsePartition {
         if version >= 9 {
             replica_nodes = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_i32(buf)?);
                 }
@@ -732,7 +732,7 @@ impl MetadataResponsePartition {
         } else {
             replica_nodes = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_i32(buf)?);
                 }
@@ -742,7 +742,7 @@ impl MetadataResponsePartition {
         if version >= 9 {
             isr_nodes = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_i32(buf)?);
                 }
@@ -751,7 +751,7 @@ impl MetadataResponsePartition {
         } else {
             isr_nodes = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_i32(buf)?);
                 }
@@ -762,7 +762,7 @@ impl MetadataResponsePartition {
             if version >= 9 {
                 offline_replicas = {
                     let len = read_compact_array_length(buf)?;
-                    let mut arr = Vec::with_capacity(len.max(0) as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(read_i32(buf)?);
                     }
@@ -771,7 +771,7 @@ impl MetadataResponsePartition {
             } else {
                 offline_replicas = {
                     let len = read_array_length(buf)?;
-                    let mut arr = Vec::with_capacity(len.max(0) as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(read_i32(buf)?);
                     }

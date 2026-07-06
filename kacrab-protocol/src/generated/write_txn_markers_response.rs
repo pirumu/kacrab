@@ -39,7 +39,7 @@ impl WriteTxnMarkersResponseData {
         let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
         markers = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(WritableTxnMarkerResult::read(buf, version)?);
             }
@@ -119,7 +119,7 @@ impl WritableTxnMarkerResult {
         producer_id = read_i64(buf)?;
         topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(WritableTxnMarkerTopicResult::read(buf, version)?);
             }
@@ -196,7 +196,7 @@ impl WritableTxnMarkerTopicResult {
         name = read_compact_string(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(WritableTxnMarkerPartitionResult::read(buf, version)?);
             }

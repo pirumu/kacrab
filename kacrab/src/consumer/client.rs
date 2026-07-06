@@ -110,8 +110,10 @@ pub struct Consumer {
     /// Ordered queue of asynchronous commits, drained one at a time by
     /// `async_commit_task` so two `commit_async` calls never land out of order —
     /// otherwise a stale commit could move the committed offset backwards (Java's
-    /// single network thread serializes commits the same way).
-    async_commits: tokio::sync::mpsc::UnboundedSender<AsyncCommit>,
+    /// single network thread serializes commits the same way). Synchronous
+    /// commits insert a [`AsyncCommitOp::Flush`] barrier and wait for it, so
+    /// they can never overtake a queued async commit either.
+    async_commits: tokio::sync::mpsc::UnboundedSender<AsyncCommitOp>,
     /// The background task draining `async_commits`, aborted on close.
     async_commit_task: JoinHandle<()>,
 }
@@ -133,6 +135,18 @@ struct AsyncCommit {
     generation_id: i32,
     member_id: String,
     interceptors: ConsumerInterceptors,
+}
+
+/// An operation for the asynchronous-commit worker.
+enum AsyncCommitOp {
+    /// Apply a queued commit.
+    Commit(AsyncCommit),
+    /// Ordering barrier: answered once every commit queued before it has been
+    /// applied. Synchronous commit paths wait on this before committing, so a
+    /// sync commit issued after `commit_async` can never land first at the
+    /// coordinator and move the committed offset backwards (Java's
+    /// `commitSync` drains pending async commits the same way).
+    Flush(tokio::sync::oneshot::Sender<()>),
 }
 
 /// Callback invoked with the result of an asynchronous offset commit.
@@ -234,6 +248,7 @@ impl Consumer {
             async_commit_rx,
             wire.clone(),
             metrics.clone(),
+            runtime.retry_backoff_policy(),
         ));
         Ok(Self {
             wire,
@@ -504,6 +519,9 @@ impl Consumer {
             return Ok(());
         }
         let group_id = self.require_group_id()?;
+        // Queued async commits must reach the coordinator first, or this
+        // commit could be overwritten by an older one still in the queue.
+        self.drain_async_commits().await;
         let (generation_id, member_id) = self.commit_identity();
         let mut refound = false;
         let result = loop {
@@ -587,11 +605,28 @@ impl Consumer {
             member_id,
             interceptors: self.interceptors.clone(),
         };
-        if let Err(tokio::sync::mpsc::error::SendError(commit)) = self.async_commits.send(commit) {
+        if let Err(tokio::sync::mpsc::error::SendError(AsyncCommitOp::Commit(commit))) =
+            self.async_commits.send(AsyncCommitOp::Commit(commit))
+        {
             // The worker is gone (consumer closing) — report rather than drop.
             (commit.callback)(Err(ConsumerError::InvalidState("consumer is closing")));
         }
         Ok(())
+    }
+
+    /// Wait until every queued asynchronous commit has been applied. Called by
+    /// the synchronous commit paths before they commit, so a later sync commit
+    /// cannot overtake an earlier `commit_async` and regress the committed
+    /// offset. Returns immediately when the worker is gone (consumer closing).
+    async fn drain_async_commits(&self) {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        if self
+            .async_commits
+            .send(AsyncCommitOp::Flush(sender))
+            .is_ok()
+        {
+            let _answered = receiver.await;
+        }
     }
 
     /// Fetch the last committed offset for each of the given partitions.
@@ -798,33 +833,17 @@ impl Consumer {
 
                 // Pipeline the next fetch (Java's network thread): dry
                 // partitions get their Fetch in flight while the caller
-                // processes this batch. Skip partitions whose leader still
-                // hosts buffered partitions (Java's buffered-node gate) — a
-                // fetch omitting them would drop them from the broker's
-                // session cache, and one listing only caught-up partitions
-                // would long-poll `fetch.max.wait.ms` while the buffer drains
-                // dry behind it.
-                let buffered_leaders: HashSet<i32> = self
-                    .fetch_buffer
-                    .partitions()
-                    .filter_map(|partition| {
+                // processes this batch, gated so buffered partitions and
+                // their leaders are left alone (see `select_fetchable`).
+                let buffered: Vec<TopicPartition> =
+                    self.fetch_buffer.partitions().cloned().collect();
+                let fetchable = fetch::select_fetchable(
+                    self.subscription.fetchable_partitions(),
+                    &buffered,
+                    |partition| {
                         offsets::partition_leader(&metadata, &partition.topic, partition.partition)
-                    })
-                    .collect();
-                let fetchable: Vec<_> = self
-                    .subscription
-                    .fetchable_partitions()
-                    .into_iter()
-                    .filter(|(partition, _position)| {
-                        !self.fetch_buffer.has(partition)
-                            && offsets::partition_leader(
-                                &metadata,
-                                &partition.topic,
-                                partition.partition,
-                            )
-                            .is_none_or(|leader| !buffered_leaders.contains(&leader))
-                    })
-                    .collect();
+                    },
+                );
                 fetchable_empty = fetchable.is_empty();
                 if !fetchable.is_empty() && self.in_flight_fetch.is_none() {
                     self.spawn_fetch(&metadata, fetchable);
@@ -857,10 +876,11 @@ impl Consumer {
                 return Ok(ConsumerRecords::empty());
             }
             // Nothing fetchable this round (leaders unresolved, or subscribed but
-            // not yet assigned) and no fetch in flight — back off briefly so we
-            // don't spin.
+            // not yet assigned) and no fetch in flight — back off so we don't
+            // spin (see `idle_backoff`).
             if fetchable_empty && self.in_flight_fetch.is_none() {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                let wait = fetch::idle_backoff(self.config.retry_backoff, timeout, start.elapsed());
+                tokio::time::sleep(wait).await;
             }
         }
     }
@@ -977,19 +997,25 @@ impl Consumer {
     /// wire client shuts its broker tasks down on drop.
     pub async fn close(mut self) {
         self.heartbeat_task.abort();
-        self.async_commit_task.abort();
         if let Some(fetch_task) = self.in_flight_fetch.take() {
             fetch_task.abort();
         }
-        self.interceptors.close();
         let close_timeout = self.config.request_timeout;
         let _timed_out = tokio::time::timeout(close_timeout, self.commit_and_leave()).await;
+        // Aborted only after `commit_and_leave` has drained it (bounded by the
+        // timeout above), so queued async commits are applied and their
+        // callbacks fired rather than silently dropped, matching Java's close.
+        self.async_commit_task.abort();
+        self.interceptors.close();
         drop(self);
     }
 
     /// Commit the current positions (auto-commit) and leave the group under
     /// whichever protocol is active. Awaited under a timeout by [`close`](Self::close).
     async fn commit_and_leave(&mut self) {
+        // Apply queued async commits (firing their callbacks) even when
+        // auto-commit is disabled and would otherwise short-circuit.
+        self.drain_async_commits().await;
         let _committed = self.auto_commit_now().await;
         // Static members (`group.instance.id`) stay in the group across a close so
         // a quick restart avoids a rebalance, matching Java.
@@ -1071,7 +1097,9 @@ impl Consumer {
         if let Some(id) = self.coordinator_id {
             return Ok(id);
         }
-        let id = coordinator::find_coordinator(&self.wire, group_id).await?;
+        let id =
+            coordinator::find_coordinator(&self.wire, group_id, self.config.retry_backoff_policy())
+                .await?;
         self.coordinator_id = Some(id);
         Ok(id)
     }
@@ -1572,6 +1600,9 @@ impl Consumer {
         if offsets.is_empty() {
             return Ok(());
         }
+        // Same barrier as `commit_sync_offsets`: an auto-commit of current
+        // positions must not be overwritten by an older queued async commit.
+        self.drain_async_commits().await;
         let group_id = self.config.group_id.clone();
         let (generation_id, member_id) = self.commit_identity();
         let mut refound = false;
@@ -1798,22 +1829,59 @@ async fn heartbeat_loop(
 /// `commit_async` was called (mirroring Java's single network thread). Exits when
 /// the consumer drops its `async_commits` sender.
 async fn async_commit_loop(
-    mut receiver: tokio::sync::mpsc::UnboundedReceiver<AsyncCommit>,
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<AsyncCommitOp>,
     wire: WireClient,
     metrics: ConsumerMetrics,
+    retry_backoff: crate::wire::BackoffPolicy,
 ) {
-    while let Some(commit) = receiver.recv().await {
-        let result = coordinator::commit_offsets(
-            &wire,
-            &coordinator::CommitTarget {
-                coordinator_id: commit.coordinator_id,
-                group_id: &commit.group_id,
-                generation_id: commit.generation_id,
-                member_id: &commit.member_id,
+    // The coordinator re-found after a failover, preferred over each commit's
+    // enqueue-time snapshot from then on (the snapshot goes stale the moment
+    // the coordinator moves, and the worker has no access to the consumer's
+    // cache to refresh it).
+    let mut refound_coordinator: Option<i32> = None;
+    while let Some(op) = receiver.recv().await {
+        let commit = match op {
+            AsyncCommitOp::Commit(commit) => commit,
+            AsyncCommitOp::Flush(done) => {
+                // Every commit queued before this barrier has been applied.
+                let _receiver_gone = done.send(());
+                continue;
             },
-            &commit.offsets,
-        )
-        .await;
+        };
+        let mut coordinator_id = refound_coordinator.unwrap_or(commit.coordinator_id);
+        let mut refound = false;
+        let result = loop {
+            let attempt = coordinator::commit_offsets(
+                &wire,
+                &coordinator::CommitTarget {
+                    coordinator_id,
+                    group_id: &commit.group_id,
+                    generation_id: commit.generation_id,
+                    member_id: &commit.member_id,
+                },
+                &commit.offsets,
+            )
+            .await;
+            match attempt {
+                // Mirror the sync paths' retry-once: re-find the coordinator
+                // and retry, so async commits heal across a coordinator move
+                // instead of failing until the consumer is rebuilt.
+                Err(error) if !refound && is_coordinator_moved(&error) => {
+                    match coordinator::find_coordinator(&wire, &commit.group_id, retry_backoff)
+                        .await
+                    {
+                        Ok(id) => {
+                            coordinator_id = id;
+                            refound_coordinator = Some(id);
+                            refound = true;
+                        },
+                        // Surface the commit failure, not the lookup failure.
+                        Err(_lookup) => break Err(error),
+                    }
+                },
+                outcome => break outcome,
+            }
+        };
         if result.is_ok() {
             metrics.record_commit();
             commit.interceptors.on_commit(&commit.offsets);
@@ -1979,6 +2047,111 @@ mod tests {
             assert!(consumer.note_coordinator_error(&moved));
             assert_eq!(consumer.coordinator_id, None);
         }
+    }
+
+    #[tokio::test]
+    async fn drain_async_commits_answers_the_flush_barrier() {
+        let consumer = consumer_with_group().await;
+        // With nothing queued the worker answers the barrier without broker
+        // I/O (the bootstrap broker is dead) — a hang here means the sync
+        // commit paths would block forever.
+        tokio::time::timeout(Duration::from_secs(5), consumer.drain_async_commits())
+            .await
+            .expect("flush barrier answered");
+    }
+
+    #[tokio::test]
+    async fn drain_async_commits_returns_when_the_worker_is_gone() {
+        let mut consumer = consumer_with_group().await;
+        consumer.async_commit_task.abort();
+        let _aborted = (&mut consumer.async_commit_task).await;
+        // The queue is closed — drain must return, not wait on a dead worker.
+        tokio::time::timeout(Duration::from_secs(5), consumer.drain_async_commits())
+            .await
+            .expect("drain returns when the worker is gone");
+    }
+
+    #[tokio::test]
+    async fn reap_fetch_puts_a_still_airborne_task_back() {
+        let mut consumer = consumer_no_group().await;
+        consumer.in_flight_fetch = Some(tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            FetchTaskOutcome {
+                result: Ok(fetch::FetchProgress::default()),
+                sessions: fetch::FetchSessions::default(),
+            }
+        }));
+        // Non-blocking reap of an unfinished task: nothing folded, the handle
+        // goes back so a later poll can reap it.
+        consumer.reap_fetch(None).await.expect("non-blocking reap");
+        assert!(consumer.in_flight_fetch.is_some(), "task is put back");
+        // A blocking reap bounded by a short wait also puts it back.
+        consumer
+            .reap_fetch(Some(Duration::from_millis(10)))
+            .await
+            .expect("bounded reap");
+        assert!(consumer.in_flight_fetch.is_some(), "task is put back again");
+        consumer.in_flight_fetch.take().expect("handle").abort();
+    }
+
+    #[tokio::test]
+    async fn reap_fetch_folds_progress_into_buffer_and_positions() {
+        let mut consumer = consumer_no_group().await;
+        let fetched = TopicPartition::new("t", 0);
+        let reset = TopicPartition::new("t", 1);
+        consumer.assign([fetched.clone(), reset.clone()]);
+        consumer.seek(&reset, 42).expect("seek assigned partition");
+
+        let progress = fetch::FetchProgress {
+            partitions: vec![fetch::RawPartitionFetch {
+                partition: fetched.clone(),
+                fetch_position: FetchPosition::new(0, None),
+                records: Bytes::from_static(b"raw"),
+            }],
+            resets: vec![reset.clone()],
+            stale: vec![TopicPartition::new("t", 2)],
+        };
+        consumer.in_flight_fetch = Some(tokio::spawn(async move {
+            FetchTaskOutcome {
+                result: Ok(progress),
+                sessions: fetch::FetchSessions::default(),
+            }
+        }));
+
+        consumer
+            .reap_fetch(Some(Duration::from_secs(5)))
+            .await
+            .expect("reap folds the finished fetch");
+        assert!(consumer.in_flight_fetch.is_none(), "task was consumed");
+        assert!(
+            consumer.fetch_buffer.has(&fetched),
+            "fetched data lands in the buffer"
+        );
+        assert_eq!(
+            consumer.subscription.position(&reset),
+            None,
+            "an out-of-range partition loses its position (re-resolved via auto.offset.reset)"
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_fetch_surfaces_a_dead_task_as_an_error() {
+        let mut consumer = consumer_no_group().await;
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            FetchTaskOutcome {
+                result: Ok(fetch::FetchProgress::default()),
+                sessions: fetch::FetchSessions::default(),
+            }
+        });
+        handle.abort();
+        consumer.in_flight_fetch = Some(handle);
+        let outcome = consumer.reap_fetch(Some(Duration::from_secs(5))).await;
+        assert!(
+            matches!(outcome, Err(ConsumerError::InvalidState(_))),
+            "an aborted background fetch surfaces as InvalidState, got {outcome:?}"
+        );
+        assert!(consumer.in_flight_fetch.is_none());
     }
 
     #[tokio::test]

@@ -135,7 +135,7 @@ impl JoinGroupResponseData {
         if version >= 6 {
             members = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(JoinGroupResponseMember::read(buf, version)?);
                 }
@@ -144,7 +144,7 @@ impl JoinGroupResponseData {
         } else {
             members = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(JoinGroupResponseMember::read(buf, version)?);
                 }

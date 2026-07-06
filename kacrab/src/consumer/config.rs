@@ -125,6 +125,11 @@ pub struct ConsumerRuntimeConfig {
     /// Server-side assignor name for the KIP-848 protocol
     /// (`group.remote.assignor`); `None` lets the coordinator choose.
     pub group_remote_assignor: Option<String>,
+    /// Initial retry backoff (`retry.backoff.ms`) — also the idle-poll wait
+    /// when nothing is fetchable yet.
+    pub retry_backoff: Duration,
+    /// Exponential retry backoff ceiling (`retry.backoff.max.ms`).
+    pub retry_backoff_max: Duration,
 }
 
 impl ConsumerRuntimeConfig {
@@ -158,7 +163,16 @@ impl ConsumerRuntimeConfig {
             group_protocol: GroupProtocol::parse(&config.group_protocol)?,
             group_remote_assignor: (!config.group_remote_assignor.is_empty())
                 .then(|| config.group_remote_assignor.clone()),
+            retry_backoff: config.retry_backoff_ms.duration(),
+            retry_backoff_max: config.retry_backoff_max_ms.duration(),
         })
+    }
+
+    /// Java-parity exponential retry policy (`retry.backoff.ms` doubling up to
+    /// `retry.backoff.max.ms`, 20% jitter — `AbstractCoordinator`'s
+    /// `ExponentialBackoff`).
+    pub(crate) fn retry_backoff_policy(&self) -> crate::wire::BackoffPolicy {
+        crate::wire::BackoffPolicy::new(self.retry_backoff, self.retry_backoff_max)
     }
 }
 
@@ -214,6 +228,8 @@ mod tests {
             ("isolation.level", "read_committed"),
             ("enable.auto.commit", "true"),
             ("partition.assignment.strategy", "roundrobin"),
+            ("retry.backoff.ms", "250"),
+            ("retry.backoff.max.ms", "2000"),
         ]
         .into_iter()
         .collect();
@@ -231,8 +247,11 @@ mod tests {
             runtime.partition_assignment_strategy,
             vec!["roundrobin".to_owned()]
         );
+        assert_eq!(runtime.retry_backoff, Duration::from_millis(250));
+        assert_eq!(runtime.retry_backoff_max, Duration::from_secs(2));
 
-        // An empty remote assignor maps to `None`.
+        // An empty remote assignor maps to `None`; retry backoff takes the
+        // Kafka defaults (100 ms doubling up to 1 s).
         let plain: ClientConfig = [("bootstrap.servers", "127.0.0.1:9092"), ("group.id", "g")]
             .into_iter()
             .collect();
@@ -241,6 +260,8 @@ mod tests {
                 .expect("runtime");
         assert_eq!(plain.group_protocol, GroupProtocol::Classic);
         assert_eq!(plain.group_remote_assignor, None);
+        assert_eq!(plain.retry_backoff, Duration::from_millis(100));
+        assert_eq!(plain.retry_backoff_max, Duration::from_secs(1));
     }
 
     #[test]

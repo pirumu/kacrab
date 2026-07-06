@@ -47,4 +47,12 @@ pub enum CompressionErrorKind {
         /// Message from the underlying codec.
         message: String,
     },
+
+    /// Decompressed output exceeded the safety limit — the payload is treated
+    /// as a decompression bomb rather than allowed to exhaust memory.
+    #[error("decompressed size exceeds the {limit}-byte limit")]
+    DecompressedTooLarge {
+        /// The enforced output limit in bytes.
+        limit: usize,
+    },
 }

@@ -110,8 +110,18 @@ pub fn compress_with_level(input: &[u8], level: Option<i32>) -> Result<Vec<u8>> 
     Ok(out.to_vec())
 }
 
-/// Decompress a Kafka-style LZ4 frame.
+/// Decompress a Kafka-style LZ4 frame, bounded by [`super::MAX_DECOMPRESSED_LEN`].
 pub fn decompress(input: &[u8]) -> Result<Vec<u8>> {
+    decompress_bounded(input, super::MAX_DECOMPRESSED_LEN)
+}
+
+/// Decompress a Kafka-style LZ4 frame, refusing to produce more than
+/// `max_len` bytes.
+///
+/// Each block is individually capped at 64 KiB, but the frame carries
+/// arbitrarily many blocks — without a total bound a small input is a
+/// decompression bomb.
+pub fn decompress_bounded(input: &[u8], max_len: usize) -> Result<Vec<u8>> {
     let mut offset = read_frame_header(input)?;
     let mut output: Vec<u8> = Vec::new();
 
@@ -145,12 +155,20 @@ pub fn decompress(input: &[u8]) -> Result<Vec<u8>> {
         })?;
         offset = block_end;
 
-        if is_compressed {
-            let decompressed = decompress_block(block)?;
-            output.extend_from_slice(&decompressed);
+        let decompressed;
+        let bytes: &[u8] = if is_compressed {
+            decompressed = decompress_block(block)?;
+            &decompressed
         } else {
-            output.extend_from_slice(block);
+            block
+        };
+        if output.len().saturating_add(bytes.len()) > max_len {
+            return Err(CompressionError::new(
+                Compression::Lz4,
+                CompressionErrorKind::DecompressedTooLarge { limit: max_len },
+            ));
         }
+        output.extend_from_slice(bytes);
     }
 
     Ok(output)
@@ -308,7 +326,38 @@ const fn decode_err(message: String) -> CompressionError {
 
 #[cfg(test)]
 mod tests {
-    use super::{BD, FLG, MAGIC, XXH32_PRIME_5, compress, decompress, xxh32};
+    use super::{
+        super::CompressionErrorKind, BD, FLG, MAGIC, XXH32_PRIME_5, compress, decompress,
+        decompress_bounded, xxh32,
+    };
+
+    #[test]
+    fn decompress_bounded_rejects_a_decompression_bomb() {
+        // Multi-block frame whose total output exceeds the bound.
+        let payload = vec![b'x'; 256 * 1024];
+        let compressed = compress(&payload).unwrap();
+
+        let err = decompress_bounded(&compressed, 64).unwrap_err();
+        assert!(
+            matches!(
+                err.kind,
+                CompressionErrorKind::DecompressedTooLarge { limit: 64 }
+            ),
+            "expected DecompressedTooLarge, got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn decompress_bounded_allows_output_at_exactly_the_limit() {
+        let payload = vec![b'x'; 256 * 1024];
+        let compressed = compress(&payload).unwrap();
+
+        assert_eq!(
+            decompress_bounded(&compressed, 256 * 1024).unwrap(),
+            payload
+        );
+    }
 
     #[test]
     fn frame_starts_with_kafka_lz4_magic() {

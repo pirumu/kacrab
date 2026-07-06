@@ -147,7 +147,7 @@ impl FetchRequestData {
         if version >= 12 {
             topics = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(FetchTopic::read(buf, version)?);
                 }
@@ -156,7 +156,7 @@ impl FetchRequestData {
         } else {
             topics = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(FetchTopic::read(buf, version)?);
                 }
@@ -167,7 +167,7 @@ impl FetchRequestData {
             if version >= 12 {
                 forgotten_topics_data = {
                     let len = read_compact_array_length(buf)?;
-                    let mut arr = Vec::with_capacity(len.max(0) as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(ForgottenTopic::read(buf, version)?);
                     }
@@ -176,7 +176,7 @@ impl FetchRequestData {
             } else {
                 forgotten_topics_data = {
                     let len = read_array_length(buf)?;
-                    let mut arr = Vec::with_capacity(len.max(0) as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(ForgottenTopic::read(buf, version)?);
                     }
@@ -510,7 +510,7 @@ impl FetchTopic {
         if version >= 12 {
             partitions = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(FetchPartition::read(buf, version)?);
                 }
@@ -519,7 +519,7 @@ impl FetchTopic {
         } else {
             partitions = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(FetchPartition::read(buf, version)?);
                 }
@@ -879,7 +879,7 @@ impl ForgottenTopic {
         if version >= 12 {
             partitions = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_i32(buf)?);
                 }
@@ -888,7 +888,7 @@ impl ForgottenTopic {
         } else {
             partitions = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_i32(buf)?);
                 }

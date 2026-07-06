@@ -43,7 +43,7 @@ impl DescribeLogDirsRequestData {
                 if len < 0 {
                     None
                 } else {
-                    let mut arr = Vec::with_capacity(len as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(DescribableLogDirTopic::read(buf, version)?);
                     }
@@ -56,7 +56,7 @@ impl DescribeLogDirsRequestData {
                 if len < 0 {
                     None
                 } else {
-                    let mut arr = Vec::with_capacity(len as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(DescribableLogDirTopic::read(buf, version)?);
                     }
@@ -191,7 +191,7 @@ impl DescribableLogDirTopic {
         if version >= 2 {
             partitions = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_i32(buf)?);
                 }
@@ -200,7 +200,7 @@ impl DescribableLogDirTopic {
         } else {
             partitions = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_i32(buf)?);
                 }

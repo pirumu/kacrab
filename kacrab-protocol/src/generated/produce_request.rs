@@ -73,7 +73,7 @@ impl ProduceRequestData {
         if version >= 9 {
             topic_data = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TopicProduceData::read(buf, version)?);
                 }
@@ -82,7 +82,7 @@ impl ProduceRequestData {
         } else {
             topic_data = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TopicProduceData::read(buf, version)?);
                 }
@@ -218,7 +218,7 @@ impl TopicProduceData {
         if version >= 9 {
             partition_data = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(PartitionProduceData::read(buf, version)?);
                 }
@@ -227,7 +227,7 @@ impl TopicProduceData {
         } else {
             partition_data = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(PartitionProduceData::read(buf, version)?);
                 }

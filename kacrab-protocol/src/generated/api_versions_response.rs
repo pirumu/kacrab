@@ -93,7 +93,7 @@ impl ApiVersionsResponseData {
         if version >= 3 {
             api_keys = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(ApiVersion::read(buf, version)?);
                 }
@@ -102,7 +102,7 @@ impl ApiVersionsResponseData {
         } else {
             api_keys = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(ApiVersion::read(buf, version)?);
                 }
@@ -120,7 +120,8 @@ impl ApiVersionsResponseData {
                         let mut tag_buf = field.data.clone();
                         supported_features = {
                             let len = read_compact_array_length(&mut tag_buf)?;
-                            let mut arr = Vec::with_capacity(len.max(0) as usize);
+                            let mut arr =
+                                Vec::with_capacity(array_read_capacity(len, (&mut tag_buf).len()));
                             for _ in 0..len {
                                 arr.push(SupportedFeatureKey::read(&mut tag_buf, version)?);
                             }
@@ -135,7 +136,8 @@ impl ApiVersionsResponseData {
                         let mut tag_buf = field.data.clone();
                         finalized_features = {
                             let len = read_compact_array_length(&mut tag_buf)?;
-                            let mut arr = Vec::with_capacity(len.max(0) as usize);
+                            let mut arr =
+                                Vec::with_capacity(array_read_capacity(len, (&mut tag_buf).len()));
                             for _ in 0..len {
                                 arr.push(FinalizedFeatureKey::read(&mut tag_buf, version)?);
                             }

@@ -67,7 +67,7 @@ impl DescribeQuorumResponseData {
         }
         topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(TopicData::read(buf, version)?);
             }
@@ -76,7 +76,7 @@ impl DescribeQuorumResponseData {
         if version >= 2 {
             nodes = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(Node::read(buf, version)?);
                 }
@@ -188,7 +188,7 @@ impl TopicData {
         topic_name = read_compact_string(buf)?;
         partitions = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(PartitionData::read(buf, version)?);
             }
@@ -320,7 +320,7 @@ impl PartitionData {
         high_watermark = read_i64(buf)?;
         current_voters = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(ReplicaState::read(buf, version)?);
             }
@@ -328,7 +328,7 @@ impl PartitionData {
         };
         observers = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(ReplicaState::read(buf, version)?);
             }
@@ -437,7 +437,7 @@ impl Node {
         node_id = read_i32(buf)?;
         listeners = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(Listener::read(buf, version)?);
             }

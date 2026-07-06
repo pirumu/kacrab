@@ -68,7 +68,7 @@ impl ConsumerProtocolSubscriptionData {
         let mut _unknown_tagged_fields: Vec<RawTaggedField> = Vec::new();
         topics = {
             let len = read_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_string(buf)?);
             }
@@ -78,7 +78,7 @@ impl ConsumerProtocolSubscriptionData {
         if version >= 1 {
             owned_partitions = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(TopicPartition::read(buf, version)?);
                 }
@@ -175,7 +175,7 @@ impl TopicPartition {
         topic = read_string(buf)?;
         partitions = {
             let len = read_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i32(buf)?);
             }

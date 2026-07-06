@@ -48,7 +48,7 @@ impl DeleteShareGroupOffsetsRequestData {
         group_id = read_compact_string(buf)?;
         topics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(DeleteShareGroupOffsetsRequestTopic::read(buf, version)?);
             }

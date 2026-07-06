@@ -53,7 +53,7 @@ pub use crate::bytes_io::{
 };
 #[doc(hidden)]
 pub use crate::primitives::{
-    array_length_len, compact_array_length_len, read_array_length, read_bool,
+    array_length_len, array_read_capacity, compact_array_length_len, read_array_length, read_bool,
     read_compact_array_length, read_f64, read_i8, read_i16, read_i32, read_i64, read_u16, read_u32,
     signed_varint_len, signed_varlong_len, unsigned_varint_len, unsigned_varlong_len,
     write_array_length, write_bool, write_compact_array_length, write_f64, write_i8, write_i16,

@@ -98,10 +98,14 @@ jobs:
       # run. --ignore-filename-regex drops generated Kafka protocol/config
       # artifacts (validated by generator + Java oracle tests instead) and the
       # consumer's broker-I/O orchestration modules (client/coordinator/next_gen):
-      # those are pure send-to-broker request/response flows exercised by the
-      # ignored real-broker suite (tests/real_kafka_consumer.rs), which CI cannot
-      # run since it needs a live Kafka container. Measured ~87% lines; the floor
-      # sits below that for headroom — raise as it grows.
+      # those are send-to-broker request/response flows exercised by the ignored
+      # real-broker suite (tests/real_kafka_consumer.rs), which CI cannot run
+      # since it needs a live Kafka container. The poll loop's pure branching
+      # (buffered-node gate, idle backoff) lives in fetch.rs precisely so it IS
+      # measured here; reap_fetch's fold-in has broker-free async tests in
+      # client.rs (correct but uncounted — including client.rs would put its
+      # untestable I/O facade in the denominator). The floor sits below the
+      # measured lines for headroom — raise as it grows.
       - name: Coverage
         run: cargo llvm-cov --workspace --all-features --ignore-filename-regex '(benches/|kacrab-codegen/src/main\.rs|kacrab-macros/src/lib\.rs|kacrab/src/config/catalog\.rs|kacrab/src/consumer/client\.rs|kacrab/src/consumer/coordinator\.rs|kacrab/src/consumer/next_gen\.rs|kacrab-protocol/src/generated|kacrab-protocol/tests/support/generated_test_utils/)' --fail-under-lines 80 --cobertura --output-path cobertura.xml
 

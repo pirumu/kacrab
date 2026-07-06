@@ -56,7 +56,7 @@ impl CreateTopicsRequestData {
         if version >= 5 {
             topics = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(CreatableTopic::read(buf, version)?);
                 }
@@ -65,7 +65,7 @@ impl CreateTopicsRequestData {
         } else {
             topics = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(CreatableTopic::read(buf, version)?);
                 }
@@ -207,7 +207,7 @@ impl CreatableTopic {
         if version >= 5 {
             assignments = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(CreatableReplicaAssignment::read(buf, version)?);
                 }
@@ -216,7 +216,7 @@ impl CreatableTopic {
         } else {
             assignments = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(CreatableReplicaAssignment::read(buf, version)?);
                 }
@@ -226,7 +226,7 @@ impl CreatableTopic {
         if version >= 5 {
             configs = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(CreatableTopicConfig::read(buf, version)?);
                 }
@@ -235,7 +235,7 @@ impl CreatableTopic {
         } else {
             configs = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(CreatableTopicConfig::read(buf, version)?);
                 }
@@ -371,7 +371,7 @@ impl CreatableReplicaAssignment {
         if version >= 5 {
             broker_ids = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_i32(buf)?);
                 }
@@ -380,7 +380,7 @@ impl CreatableReplicaAssignment {
         } else {
             broker_ids = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(read_i32(buf)?);
                 }

@@ -67,7 +67,7 @@ impl ListTransactionsResponseData {
         error_code = read_i16(buf)?;
         unknown_state_filters = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_compact_string(buf)?);
             }
@@ -75,7 +75,7 @@ impl ListTransactionsResponseData {
         };
         transaction_states = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(TransactionState::read(buf, version)?);
             }

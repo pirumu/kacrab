@@ -120,6 +120,121 @@ fn marker(codec: &str, index: usize) -> String {
     format!("kacrab-compress-{codec}-{index}-{}", "payload".repeat(64))
 }
 
+/// The kacrab CONSUMER must decode broker-stored compressed batches it did not
+/// produce: records go in through the broker's own console producer (inside
+/// the container) per codec, and come back out through kacrab's fetch → batch
+/// decode → bounded decompression path.
+#[cfg(feature = "consumer")]
+#[tokio::test]
+#[ignore = "requires the broker from docker-compose.kafka.yml and the docker CLI"]
+async fn real_kafka_consumer_decompresses_cli_produced_batches() {
+    let bootstrap =
+        env::var("KACRAB_BOOTSTRAP").unwrap_or_else(|_error| "127.0.0.1:9092".to_owned());
+    for codec in CODECS {
+        let topic = unique_topic();
+        create_topic(&topic);
+        // A compressible, codec-tagged payload, one record per line.
+        let expected: Vec<String> = (0..RECORDS_PER_CODEC)
+            .map(|index| format!("cli-{codec}-{index}-{}", "payload".repeat(64)))
+            .collect();
+        let lines = format!("{}\n", expected.join("\n"));
+        kafka_cli_stdin(
+            "kafka-console-producer.sh",
+            &["--topic", &topic, "--compression-codec", codec],
+            &lines,
+        );
+
+        let mut consumer = kacrab::consumer::Consumer::from_map([
+            ("bootstrap.servers", bootstrap.as_str()),
+            ("group.id", format!("cli-read-{topic}").as_str()),
+            ("auto.offset.reset", "earliest"),
+            ("enable.auto.commit", "false"),
+        ])
+        .await
+        .expect("consumer should connect");
+        consumer.assign([kacrab::common::TopicPartition::new(topic.clone(), 0)]);
+
+        let mut received: Vec<String> = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while received.len() < expected.len() && std::time::Instant::now() < deadline {
+            let records = match consumer.poll(std::time::Duration::from_millis(500)).await {
+                Ok(records) => records,
+                // Topic metadata can lag briefly right after the CLI creates
+                // the topic; retry within the deadline.
+                Err(kacrab::consumer::ConsumerError::Wire(error)) => {
+                    println!("  transient wire error while polling: {error}");
+                    continue;
+                },
+                Err(error) => panic!("poll should succeed: {error}"),
+            };
+            for record in &records {
+                let value = record.value.as_ref().expect("record should carry a value");
+                received.push(String::from_utf8(value.to_vec()).expect("utf-8 payload"));
+            }
+        }
+        assert_eq!(
+            received, expected,
+            "kacrab consumer should decode every CLI-produced {codec} record"
+        );
+        consumer.close().await;
+        delete_topic(&topic);
+        println!(
+            "{codec}: kacrab consumer decoded {} CLI-produced records",
+            expected.len()
+        );
+    }
+    println!("kacrab consumer decompressed every codec's CLI-produced batches: ALL OK");
+}
+
+/// Run a Kafka CLI tool with `payload` on stdin and `--bootstrap-server`
+/// appended; see [`cli_command`] for where the tool runs.
+#[cfg(feature = "consumer")]
+fn kafka_cli_stdin(script: &str, args: &[&str], payload: &str) {
+    use std::io::Write as _;
+
+    let mut child = cli_command(script, true)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("kafka CLI should spawn");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin should be piped")
+        .write_all(payload.as_bytes())
+        .expect("payload should be written");
+    let status = child.wait().expect("kafka CLI should run");
+    assert!(
+        status.success(),
+        "kafka CLI command failed: {script} {args:?}"
+    );
+}
+
+/// Build a command for a Kafka CLI script, pointed at the same broker the
+/// kacrab clients use: `docker exec` into the compose container by default, or
+/// a native install's `bin/` when `KACRAB_KAFKA_BIN` is set (for environments
+/// where `127.0.0.1:9092` is served by a local broker rather than the compose
+/// container). `--bootstrap-server` is pre-set accordingly.
+fn cli_command(script: &str, interactive: bool) -> Command {
+    if let Ok(bin) = env::var("KACRAB_KAFKA_BIN") {
+        let bootstrap =
+            env::var("KACRAB_BOOTSTRAP").unwrap_or_else(|_error| "127.0.0.1:9092".to_owned());
+        let mut command = Command::new(format!("{bin}/{script}"));
+        let _args = command.args(["--bootstrap-server", &bootstrap]);
+        return command;
+    }
+    let mut command = Command::new("docker");
+    let _args = command.arg("exec");
+    if interactive {
+        let _arg = command.arg("-i");
+    }
+    let _args = command
+        .arg(CONTAINER)
+        .arg(format!("/opt/kafka/bin/{script}"))
+        .args(["--bootstrap-server", "localhost:9092"]);
+    command
+}
+
 fn unique_topic() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -129,33 +244,24 @@ fn unique_topic() -> String {
 }
 
 fn create_topic(topic: &str) {
-    kafka_cli(&[
-        "/opt/kafka/bin/kafka-topics.sh",
-        "--bootstrap-server",
-        "localhost:9092",
-        "--create",
-        "--topic",
-        topic,
-        "--partitions",
-        "1",
-        "--replication-factor",
-        "1",
-    ]);
+    kafka_cli(
+        "kafka-topics.sh",
+        &[
+            "--create",
+            "--topic",
+            topic,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+        ],
+    );
 }
 
 fn delete_topic(topic: &str) {
     // Best-effort cleanup; ignore failures so a flaky delete does not fail the test.
-    let _output = Command::new("docker")
-        .args([
-            "exec",
-            CONTAINER,
-            "/opt/kafka/bin/kafka-topics.sh",
-            "--bootstrap-server",
-            "localhost:9092",
-            "--delete",
-            "--topic",
-            topic,
-        ])
+    let _output = cli_command("kafka-topics.sh", false)
+        .args(["--delete", "--topic", topic])
         .output();
 }
 
@@ -210,12 +316,15 @@ fn consume_all(topic: &str, count: usize) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-fn kafka_cli(args: &[&str]) {
-    let mut full = vec!["exec", CONTAINER];
-    full.extend_from_slice(args);
-    let status = Command::new("docker")
-        .args(&full)
+/// Run a Kafka CLI tool with `--bootstrap-server` appended; see
+/// [`cli_command`] for where the tool runs.
+fn kafka_cli(script: &str, args: &[&str]) {
+    let status = cli_command(script, false)
+        .args(args)
         .status()
-        .expect("docker exec should run");
-    assert!(status.success(), "kafka CLI command failed: {args:?}");
+        .expect("kafka CLI should run");
+    assert!(
+        status.success(),
+        "kafka CLI command failed: {script} {args:?}"
+    );
 }

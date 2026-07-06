@@ -61,7 +61,7 @@ impl DescribeLogDirsResponseData {
         if version >= 2 {
             results = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeLogDirsResult::read(buf, version)?);
                 }
@@ -70,7 +70,7 @@ impl DescribeLogDirsResponseData {
         } else {
             results = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeLogDirsResult::read(buf, version)?);
                 }
@@ -225,7 +225,7 @@ impl DescribeLogDirsResult {
         if version >= 2 {
             topics = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeLogDirsTopic::read(buf, version)?);
                 }
@@ -234,7 +234,7 @@ impl DescribeLogDirsResult {
         } else {
             topics = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeLogDirsTopic::read(buf, version)?);
                 }
@@ -390,7 +390,7 @@ impl DescribeLogDirsTopic {
         if version >= 2 {
             partitions = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeLogDirsPartition::read(buf, version)?);
                 }
@@ -399,7 +399,7 @@ impl DescribeLogDirsTopic {
         } else {
             partitions = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeLogDirsPartition::read(buf, version)?);
                 }

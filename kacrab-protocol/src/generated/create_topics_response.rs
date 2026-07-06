@@ -50,7 +50,7 @@ impl CreateTopicsResponseData {
         if version >= 5 {
             topics = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(CreatableTopicResult::read(buf, version)?);
                 }
@@ -59,7 +59,7 @@ impl CreateTopicsResponseData {
         } else {
             topics = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(CreatableTopicResult::read(buf, version)?);
                 }
@@ -234,7 +234,7 @@ impl CreatableTopicResult {
                 if len < 0 {
                     None
                 } else {
-                    let mut arr = Vec::with_capacity(len as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(CreatableTopicConfigs::read(buf, version)?);
                     }

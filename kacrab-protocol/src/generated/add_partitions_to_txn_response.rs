@@ -72,7 +72,7 @@ impl AddPartitionsToTxnResponseData {
         if version >= 4 {
             results_by_transaction = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(AddPartitionsToTxnResult::read(buf, version)?);
                 }
@@ -83,7 +83,7 @@ impl AddPartitionsToTxnResponseData {
             if version >= 3 {
                 results_by_topic_v3_and_below = {
                     let len = read_compact_array_length(buf)?;
-                    let mut arr = Vec::with_capacity(len.max(0) as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(AddPartitionsToTxnTopicResult::read(buf, version)?);
                     }
@@ -92,7 +92,7 @@ impl AddPartitionsToTxnResponseData {
             } else {
                 results_by_topic_v3_and_below = {
                     let len = read_array_length(buf)?;
-                    let mut arr = Vec::with_capacity(len.max(0) as usize);
+                    let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                     for _ in 0..len {
                         arr.push(AddPartitionsToTxnTopicResult::read(buf, version)?);
                     }
@@ -237,7 +237,7 @@ impl AddPartitionsToTxnResult {
         transactional_id = read_compact_string(buf)?;
         topic_results = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(AddPartitionsToTxnTopicResult::read(buf, version)?);
             }
@@ -322,7 +322,7 @@ impl AddPartitionsToTxnTopicResult {
         if version >= 3 {
             results_by_partition = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(AddPartitionsToTxnPartitionResult::read(buf, version)?);
                 }
@@ -331,7 +331,7 @@ impl AddPartitionsToTxnTopicResult {
         } else {
             results_by_partition = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(AddPartitionsToTxnPartitionResult::read(buf, version)?);
                 }

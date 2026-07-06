@@ -50,7 +50,7 @@ impl DescribeConfigsResponseData {
         if version >= 4 {
             results = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeConfigsResult::read(buf, version)?);
                 }
@@ -59,7 +59,7 @@ impl DescribeConfigsResponseData {
         } else {
             results = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeConfigsResult::read(buf, version)?);
                 }
@@ -199,7 +199,7 @@ impl DescribeConfigsResult {
         if version >= 4 {
             configs = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeConfigsResourceResult::read(buf, version)?);
                 }
@@ -208,7 +208,7 @@ impl DescribeConfigsResult {
         } else {
             configs = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeConfigsResourceResult::read(buf, version)?);
                 }
@@ -393,7 +393,7 @@ impl DescribeConfigsResourceResult {
         if version >= 4 {
             synonyms = {
                 let len = read_compact_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeConfigsSynonym::read(buf, version)?);
                 }
@@ -402,7 +402,7 @@ impl DescribeConfigsResourceResult {
         } else {
             synonyms = {
                 let len = read_array_length(buf)?;
-                let mut arr = Vec::with_capacity(len.max(0) as usize);
+                let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
                 for _ in 0..len {
                     arr.push(DescribeConfigsSynonym::read(buf, version)?);
                 }

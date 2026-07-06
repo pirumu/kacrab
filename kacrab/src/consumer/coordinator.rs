@@ -32,7 +32,7 @@ use super::{
 };
 use crate::{
     common::{OffsetAndMetadata, TopicPartition},
-    wire::{BrokerEndpoint, WireClient, WireError},
+    wire::{BackoffPolicy, BackoffState, BrokerEndpoint, WireClient, WireError},
 };
 
 /// `FindCoordinator` key type for a consumer group coordinator.
@@ -43,15 +43,18 @@ const OFFSET_COMMIT_MAX_VERSION: i16 = 9;
 const OFFSET_FETCH_MAX_VERSION: i16 = 7;
 /// Max `FindCoordinator` attempts while the coordinator is loading.
 const FIND_COORDINATOR_MAX_ATTEMPTS: u32 = 20;
-/// Backoff between `FindCoordinator` retries.
-const FIND_COORDINATOR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Resolve the group coordinator, register its endpoint, and return its node id.
 ///
 /// A freshly started broker loads `__consumer_offsets` lazily, so the first
 /// lookups can return `COORDINATOR_NOT_AVAILABLE` / `COORDINATOR_LOAD_IN_PROGRESS`
-/// — those are retried with backoff, matching the Java client.
-pub(super) async fn find_coordinator(wire: &WireClient, group_id: &str) -> Result<i32> {
+/// — those are retried under `retry_backoff` (exponential `retry.backoff.ms` →
+/// `retry.backoff.max.ms` with jitter, Java's `AbstractCoordinator` policy).
+pub(super) async fn find_coordinator(
+    wire: &WireClient,
+    group_id: &str,
+    retry_backoff: BackoffPolicy,
+) -> Result<i32> {
     let request = FindCoordinatorRequestData {
         key_type: COORDINATOR_KEY_TYPE_GROUP,
         coordinator_keys: vec![KafkaString::from(group_id.to_owned())],
@@ -60,6 +63,7 @@ pub(super) async fn find_coordinator(wire: &WireClient, group_id: &str) -> Resul
     let version = client_api_info(ApiKey::FindCoordinator).max_version;
 
     let mut attempts_remaining = FIND_COORDINATOR_MAX_ATTEMPTS;
+    let mut backoff = BackoffState::new(retry_backoff);
     let coordinator = loop {
         let broker_id = wire.any_broker_id()?;
         let response: FindCoordinatorResponseData = wire
@@ -88,7 +92,7 @@ pub(super) async fn find_coordinator(wire: &WireClient, group_id: &str) -> Resul
             ));
         }
         attempts_remaining = attempts_remaining.saturating_sub(1);
-        tokio::time::sleep(FIND_COORDINATOR_BACKOFF).await;
+        tokio::time::sleep(backoff.next_delay()?).await;
     };
     let port = u16::try_from(coordinator.port).map_err(|_error| {
         ConsumerError::broker(

@@ -49,6 +49,47 @@ pub use self::error::{CompressionError, CompressionErrorKind};
 /// Result alias for compression operations.
 pub type Result<T> = core::result::Result<T, CompressionError>;
 
+/// Hard ceiling on the decompressed size of a single payload.
+///
+/// Wire frames are already capped at [`crate::frame::MAX_FRAME_LENGTH`]
+/// (100 MiB), so this allows roughly a 10:1 expansion of the largest possible
+/// compressed batch while stopping a decompression bomb — a tiny payload that
+/// inflates without bound — from exhausting memory and aborting the process
+/// under `panic = "abort"`.
+pub const MAX_DECOMPRESSED_LEN: usize = 1 << 30;
+
+/// Read `reader` to the end, refusing to produce more than `max_len` bytes.
+/// Used by the streaming codecs (gzip, zstd), whose output size is unknown
+/// until decoded.
+#[cfg(any(feature = "gzip", feature = "zstd"))]
+fn read_to_end_bounded<R: std::io::Read>(
+    reader: R,
+    max_len: usize,
+    codec: Compression,
+) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    // Take one byte past the limit so an over-limit stream is distinguishable
+    // from one that ends exactly at it.
+    let limit = u64::try_from(max_len).unwrap_or(u64::MAX).saturating_add(1);
+    let mut output = Vec::new();
+    let _read = reader.take(limit).read_to_end(&mut output).map_err(|e| {
+        CompressionError::new(
+            codec,
+            CompressionErrorKind::DecodeFailed {
+                message: e.to_string(),
+            },
+        )
+    })?;
+    if output.len() > max_len {
+        return Err(CompressionError::new(
+            codec,
+            CompressionErrorKind::DecompressedTooLarge { limit: max_len },
+        ));
+    }
+    Ok(output)
+}
+
 /// Kafka record-batch compression codec, encoded in bits 0–2 of the batch
 /// `attributes` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

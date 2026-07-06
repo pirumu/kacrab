@@ -67,7 +67,7 @@ impl DescribeUserScramCredentialsResponseData {
         error_message = read_compact_nullable_string(buf)?;
         results = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(DescribeUserScramCredentialsResult::read(buf, version)?);
             }
@@ -174,7 +174,7 @@ impl DescribeUserScramCredentialsResult {
         error_message = read_compact_nullable_string(buf)?;
         credential_infos = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(CredentialInfo::read(buf, version)?);
             }

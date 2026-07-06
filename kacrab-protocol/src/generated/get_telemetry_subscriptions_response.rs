@@ -111,7 +111,7 @@ impl GetTelemetrySubscriptionsResponseData {
         subscription_id = read_i32(buf)?;
         accepted_compression_types = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_i8(buf)?);
             }
@@ -122,7 +122,7 @@ impl GetTelemetrySubscriptionsResponseData {
         delta_temporality = read_bool(buf)?;
         requested_metrics = {
             let len = read_compact_array_length(buf)?;
-            let mut arr = Vec::with_capacity(len.max(0) as usize);
+            let mut arr = Vec::with_capacity(array_read_capacity(len, (buf).len()));
             for _ in 0..len {
                 arr.push(read_compact_string(buf)?);
             }

@@ -117,5 +117,29 @@ pub enum WireError {
     },
 }
 
+impl WireError {
+    /// Whether this is a terminal connection-setup failure — TLS or SASL
+    /// handshake/authentication — that reconnecting cannot fix. Callers should
+    /// fail fast with the real cause instead of looping under reconnect
+    /// backoff until they time out, matching Java's non-retriable
+    /// `SaslAuthenticationException` / `SslAuthenticationException` /
+    /// `IllegalSaslStateException` semantics.
+    #[must_use]
+    pub(crate) const fn is_fatal_setup(&self) -> bool {
+        matches!(
+            self,
+            Self::UnsupportedTlsOption(_)
+                | Self::InvalidTlsConfig(_)
+                | Self::TlsHandshake(_)
+                | Self::GssapiBackendUnavailable
+                | Self::InvalidSaslConfig(_)
+                | Self::UnsupportedSaslMechanism(_)
+                | Self::SaslHandshake(_)
+                | Self::SaslAuthentication(_)
+                | Self::SaslServerSignatureMismatch
+        )
+    }
+}
+
 /// Result alias for wire operations.
 pub type Result<T> = std::result::Result<T, WireError>;
