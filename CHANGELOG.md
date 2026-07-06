@@ -7,6 +7,31 @@ This project is pre-1.0; minor releases may still change public APIs.
 The format is based on human-readable release notes. Each entry includes the
 release date and links to relevant pull requests or issues.
 
+## 0.1.2 — 2026-07-07
+
+Wire-pipeline correctness fix
+([#43](https://github.com/pirumu/kacrab/pull/43)).
+
+### Fixed
+
+- A stray response frame — one whose correlation id parsed but matched no
+  in-flight request, typically a late arrival for a request already failed
+  by its timeout — no longer fails an unrelated request. It previously
+  completed the oldest in-flight slot with `CorrelationIdMismatch`, and the
+  misfire cascaded: each subsequent in-order response found its own slot
+  consumed and landed one slot off its target until the connection drained.
+  Such frames are now dropped; frames too short to carry a correlation id
+  still fail the oldest waiter so a garbled stream surfaces a decode error
+  instead of waiting out the request timeout.
+
+### Changed
+
+- Request-pipeline slot lookup resolves with one modular add instead of
+  walking the ring, making correlation scans and failure sweeps linear in
+  the number of in-flight requests instead of quadratic. Only noticeable
+  when `max.in.flight.requests.per.connection` is raised well above the
+  default of 5.
+
 ## 0.1.1 — 2026-07-06
 
 Hardening release: every finding from an external review of 0.1.0, fixed and

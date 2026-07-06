@@ -17,6 +17,13 @@ pub(crate) struct ResponseEnvelope {
 pub(crate) struct RequestPipeline {
     slots: Vec<Option<InFlightRequest>>,
     head: usize,
+    // `len` is the ring-window length `[head, head+len)` and counts holes
+    // punched mid-window by out-of-order completion or `fail_correlation`/
+    // `fail_expired`. It must NOT shrink when a middle slot is taken:
+    // `reserve` appends at `head+len`, so a shorter window would overwrite
+    // the in-flight tail and hide it from the `fail_*` sweeps. Holes are
+    // reclaimed by `trim_empty_head` once `head` reaches them, which every
+    // slot guarantees via its deadline.
     len: usize,
     next_correlation_id: i32,
     request_timeout: Duration,
@@ -95,10 +102,20 @@ impl RequestPipeline {
             return;
         }
 
-        let response_correlation_id = response_correlation_id(&bytes);
-        let index = response_correlation_id
-            .and_then(|correlation_id| self.slot_index_for_correlation(correlation_id))
-            .unwrap_or(self.head);
+        let index = match response_correlation_id(&bytes) {
+            // A parseable id that matches no in-flight slot is a stray
+            // response — typically a late arrival for a request already
+            // removed by `fail_expired`/`fail_correlation`. Drop it; charging
+            // it to `head` would fail an unrelated waiter and knock every
+            // subsequent in-order response one slot off its target.
+            Some(correlation_id) => match self.slot_index_for_correlation(correlation_id) {
+                Some(index) => index,
+                None => return,
+            },
+            // Frame too short to carry a correlation id: fail the oldest
+            // waiter so the decode error surfaces instead of a silent timeout.
+            None => self.head,
+        };
         let Some(in_flight) = self.slots.get_mut(index).and_then(Option::take) else {
             self.trim_empty_head();
             return;
@@ -176,11 +193,10 @@ impl RequestPipeline {
     }
 
     fn slot_index(&self, offset: usize) -> usize {
-        let mut index = self.head;
-        for _ in 0..offset {
-            index = self.next_index(index);
-        }
-        index
+        self.head
+            .checked_add(offset)
+            .and_then(|index| index.checked_rem(self.slots.len()))
+            .unwrap_or_default()
     }
 
     fn slot_index_for_correlation(&self, correlation_id: i32) -> Option<usize> {
@@ -307,9 +323,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_reports_correlation_mismatch() {
+    async fn pipeline_drops_stray_response_without_failing_in_flight_request() {
         let mut pipeline = RequestPipeline::new(1, Duration::from_secs(1));
-        let (tx, rx) = channel();
+        let (tx, mut rx) = channel();
         let correlation_id = pipeline
             .reserve(ApiKey::ApiVersions, 3, tx)
             .expect("reserve");
@@ -320,10 +336,38 @@ mod tests {
             correlation_id.saturating_add(1),
         ));
 
+        assert!(!pipeline.has_capacity());
+        assert!(rx.try_recv().is_err());
+
+        pipeline.complete_response(response_frame(ApiKey::ApiVersions, 3, correlation_id));
+        assert!(rx.await.expect("sender").is_ok());
+        assert!(pipeline.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pipeline_drops_late_response_for_failed_slot_and_completes_head() {
+        let mut pipeline = RequestPipeline::new(2, Duration::from_secs(1));
+        let (first_tx, first_rx) = channel();
+        let (second_tx, second_rx) = channel();
+        let first = pipeline
+            .reserve(ApiKey::ApiVersions, 3, first_tx)
+            .expect("first reserve");
+        let second = pipeline
+            .reserve(ApiKey::Metadata, 12, second_tx)
+            .expect("second reserve");
+
+        pipeline.fail_correlation(second, WireError::Backpressure);
         assert!(matches!(
-            rx.await.expect("sender"),
-            Err(WireError::CorrelationIdMismatch { .. })
+            second_rx.await.expect("second sender"),
+            Err(WireError::Backpressure)
         ));
+
+        // Late duplicate for the failed slot must not be charged to `head`.
+        pipeline.complete_response(response_frame(ApiKey::Metadata, 12, second));
+
+        pipeline.complete_response(response_frame(ApiKey::ApiVersions, 3, first));
+        assert!(first_rx.await.expect("first sender").is_ok());
+        assert!(pipeline.is_empty());
     }
 
     #[tokio::test]
@@ -421,7 +465,7 @@ mod tests {
 
         pipeline.len = 1;
         pipeline.slots.clear();
-        pipeline.complete_response(response_frame(ApiKey::ApiVersions, 3, 1));
+        pipeline.complete_response(bytes::Bytes::from_static(b"\0"));
 
         assert_eq!(pipeline.len, 1);
     }
