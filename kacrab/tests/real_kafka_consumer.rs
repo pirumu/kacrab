@@ -536,6 +536,71 @@ async fn real_kafka_async_commits_apply_in_order() {
     println!("real Kafka async-commit-order smoke: ALL OK");
 }
 
+/// A synchronous commit issued after `commit_async` must not overtake the
+/// queued async commit at the coordinator: `commit_sync_offsets` drains the
+/// async queue first, so the final committed offset is the last one *called*
+/// (the sync one), even when it is numerically smaller.
+#[tokio::test]
+#[ignore = "requires local Kafka from docker-compose.kafka.yml"]
+async fn real_kafka_sync_commit_never_overtakes_queued_async_commits() {
+    let bootstrap = bootstrap();
+    let topic = topic();
+    create_topic(&bootstrap, &topic, 1).await;
+
+    let mut consumer = Consumer::from_map([
+        ("bootstrap.servers", bootstrap.as_str()),
+        ("group.id", format!("group-syncbarrier-{topic}").as_str()),
+        ("auto.offset.reset", "earliest"),
+        ("enable.auto.commit", "false"),
+    ])
+    .await
+    .expect("consumer should connect");
+    let partition = TopicPartition::new(topic.clone(), 0);
+    consumer.assign([partition.clone()]);
+
+    // Queue an async commit at offset 7...
+    let async_applied = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&async_applied);
+    let mut offsets = std::collections::HashMap::new();
+    let _prev = offsets.insert(partition.clone(), OffsetAndMetadata::new(7));
+    consumer
+        .commit_async_offsets(
+            offsets,
+            Box::new(move |result| {
+                result.expect("async commit should succeed");
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }),
+        )
+        .await
+        .expect("enqueue");
+
+    // ...then immediately commit offset 3 synchronously. Call order makes the
+    // sync commit newer, so 3 must win — without the flush barrier the sync
+    // commit could land first and be overwritten by the queued 7.
+    let mut offsets = std::collections::HashMap::new();
+    let _prev = offsets.insert(partition.clone(), OffsetAndMetadata::new(3));
+    consumer
+        .commit_sync_offsets(offsets)
+        .await
+        .expect("sync commit");
+    assert!(
+        async_applied.load(std::sync::atomic::Ordering::SeqCst),
+        "the queued async commit is applied (callback fired) before the sync commit is sent"
+    );
+
+    let committed = consumer
+        .committed(std::slice::from_ref(&partition))
+        .await
+        .expect("committed");
+    assert_eq!(
+        committed.get(&partition).map(|meta| meta.offset),
+        Some(3),
+        "the sync commit (last call) wins over the earlier queued async commit"
+    );
+    consumer.close().await;
+    println!("real Kafka sync-after-async barrier smoke: ALL OK");
+}
+
 /// Seeking past the log end makes the broker answer `OFFSET_OUT_OF_RANGE`; the
 /// consumer must reset via `auto.offset.reset` and recover, not error forever.
 /// Verifies the per-partition fetch error handling (B1) end to end.
