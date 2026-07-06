@@ -30,12 +30,12 @@ services:
     image: ${KAFKA_IMAGE:-apache/kafka:4.3.0}
     container_name: kacrab-kafka1
     ports:
-      - "9092:9092"
+      - "${KAFKA1_HOST_PORT:-9092}:9092"
     environment:
       <<: *broker-env
       KAFKA_NODE_ID: 1
       KAFKA_LISTENERS: PLAINTEXT://:9092,INTERNAL://:29092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://kafka1:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:${KAFKA1_HOST_PORT:-9092},INTERNAL://kafka1:29092
     volumes:
       - kafka1-data:/var/lib/kafka/data
     healthcheck:
@@ -49,12 +49,12 @@ services:
     image: ${KAFKA_IMAGE:-apache/kafka:4.3.0}
     container_name: kacrab-kafka2
     ports:
-      - "9094:9092"
+      - "${KAFKA2_HOST_PORT:-9094}:9092"
     environment:
       <<: *broker-env
       KAFKA_NODE_ID: 2
       KAFKA_LISTENERS: PLAINTEXT://:9092,INTERNAL://:29092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9094,INTERNAL://kafka2:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:${KAFKA2_HOST_PORT:-9094},INTERNAL://kafka2:29092
     volumes:
       - kafka2-data:/var/lib/kafka/data
     healthcheck:
@@ -68,12 +68,12 @@ services:
     image: ${KAFKA_IMAGE:-apache/kafka:4.3.0}
     container_name: kacrab-kafka3
     ports:
-      - "9096:9092"
+      - "${KAFKA3_HOST_PORT:-9096}:9092"
     environment:
       <<: *broker-env
       KAFKA_NODE_ID: 3
       KAFKA_LISTENERS: PLAINTEXT://:9092,INTERNAL://:29092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9096,INTERNAL://kafka3:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:${KAFKA3_HOST_PORT:-9096},INTERNAL://kafka3:29092
     volumes:
       - kafka3-data:/var/lib/kafka/data
     healthcheck:
