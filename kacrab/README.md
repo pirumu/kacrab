@@ -3,6 +3,12 @@
 A Rust-native Apache Kafka client — producer, consumer, and admin — built from
 the Kafka protocol up. Not a `librdkafka` wrapper.
 
+[![CI](https://github.com/pirumu/kacrab/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/pirumu/kacrab/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/kacrab.svg)](https://crates.io/crates/kacrab)
+[![docs.rs](https://docs.rs/kacrab/badge.svg)](https://docs.rs/kacrab)
+[![MSRV](https://img.shields.io/crates/msrv/kacrab.svg)](https://crates.io/crates/kacrab)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/pirumu/kacrab#license)
+
 [Repository](https://github.com/pirumu/kacrab) ·
 [Design & Internals book](https://pirumu.github.io/kacrab/) ·
 [API reference](https://docs.rs/kacrab)
