@@ -23,12 +23,12 @@ provider (`rustls` + `aws-lc-rs`) is C/assembly, and the optional `zstd`,
 
 ```toml
 [dependencies]
-kacrab = { version = "0.1", features = ["producer", "consumer", "admin"] }
+kacrab = { version = "0.2", features = ["producer", "consumer", "admin"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
 The crate compiles almost nothing by default (`default = []`) — a bare
-`kacrab = "0.1"` gives you no producer, consumer, or admin API. Opt into the
+`kacrab = "0.2"` gives you no producer, consumer, or admin API. Opt into the
 surfaces you use:
 
 - `producer` — the producer API.
