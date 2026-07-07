@@ -93,3 +93,52 @@ wedge watchdog plus per-run fresh topics are likewise load-bearing.
 The production-readiness bar set in the README ("measurement under load")
 now has data: steady-state and single-fault behavior are strong; the
 recovery paths after prolonged outages are where the remaining work lives.
+
+## Resolution — 2026-07-07 (post-run fixes)
+
+The outage-recovery findings were addressed across PR #47 (merged) and
+PR #48. Two of the cascade-phase diagnoses above turned out to be wrong —
+they were forensic guesses from `lsof`/`sample`, not confirmed mechanisms —
+and were corrected by instrumenting the actual runtime state.
+
+| # | status | resolution |
+|---|---|---|
+| F1 | fixed (code) | PR #47 (C1/C2): `is_coordinator_moved` clears the cached coordinator on `Wire(Timeout)`/`ConnectionClosed`/`Io`, and JoinGroup/SyncGroup use a bounded rebalance timeout. Unit-tested; a fresh compound soak is the remaining confirmation. |
+| F2 | open | Still under investigation — likely an at-least-once artifact (the tracker now uses gap-refill semantics), not a delivery loss; needs a targeted look at the consumer commit/seed-position race around eager rebalance. |
+| F3 | **fixed + verified** | PR #48 (core) + PR #47 (requeue-park / pump-swallow, partial). Corrected root cause and validation below. |
+| F4 | fixed (code) | PR #47 (W2): `AbortOnDrop` on the broker reader task + `Consumer::drop` aborts the in-flight fetch, so sockets close on teardown instead of lingering ESTABLISHED. Unit-tested; a fresh soak is the remaining confirmation. |
+
+**F3 — corrected root cause.** The finding guessed "`delivery.timeout.ms`
+(120 s) not enforced on that path." That was wrong: the dispatch tasks *do*
+enforce the delivery timeout. The real bug — found with a `KACRAB_WEDGE_TRACE`
+instrument — is that the background sender loop treated **any** error from a
+drive pass as fatal and **parked** the loop. During a total outage the
+*synchronous* metadata fetch raises a wire `Timeout`, which parked it; a
+parked loop only wakes on an append or a dispatch completion, and once the
+producer's appends dry up (buffer full / bounded in-flight window) with no
+in-flight dispatch, nothing ever wakes it again — even after the cluster
+recovers, with ready batches still buffered:
+
+```
+wait=Err(Wire(Timeout)) inflight=0 acc_buffered=1179648 next_ready=true   ← then silence
+```
+
+The fix makes the loop **retry on the retry backoff** instead of parking
+(mirroring Kafka `Sender.runOnce`, which swallows a per-iteration failure and
+loops), plus swallows an already-surfaced per-batch `Delivered(Err)` in the
+loop's reap. No expiry sweep was needed — that hypothesis carried over from
+the cascade forensics and was a red herring; the fix adds no hot-path scan
+(mock bench unchanged at 5.31M msg/s).
+
+**F3 — validation.** Reproduced deterministically with new `soak_bench` knobs
+(total 3-broker `docker stop` > `delivery.timeout.ms` under buffer pressure):
+the baseline froze at produced 17,251 / acked 15,200 **forever**; after the
+fix the producer drains the backlog and resumes — produced climbs to 105,250,
+acked to 103,104, with 2,146 batches correctly expired (103,104 + 2,146 =
+105,250; every record resolved).
+
+**Updated verdict.** The producer wedge under a prolonged total outage (F3) is
+fixed and verified. F1/F4 are fixed in code (PR #47) pending a fresh
+multi-hour compound soak for confirmation. F2 remains open. Re-run the
+compound drill (a broker lost for tens of minutes, then restored) with the
+VM at ≥6 GB to close out F1/F4.
