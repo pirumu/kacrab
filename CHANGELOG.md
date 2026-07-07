@@ -9,21 +9,56 @@ release date and links to relevant pull requests or issues.
 
 ## Unreleased
 
+## 0.2.0 — 2026-07-07
+
+Outage-resilience release. The producer and consumer now recover from
+prolonged and total broker outages instead of wedging permanently. Includes
+one breaking consumer API change (subscription-mode exclusivity), so this is a
+minor version bump under the pre-1.0 convention.
+
 ### Added
 
 - `Consumer::close_timeout(Duration)` — close with a caller-chosen bound on
   the final commit-and-leave work, the analogue of Java's `close(Duration)`.
   `close()` keeps its `request.timeout.ms` bound.
+  ([#45](https://github.com/pirumu/kacrab/pull/45))
+- Soak test harness (`benches/src/bin/soak_bench.rs`): sustained load with
+  broker-kill and consumer-bounce chaos and a per-partition continuity verdict,
+  for measuring resilience under fault injection.
+  ([#46](https://github.com/pirumu/kacrab/pull/46))
 
 ### Changed
 
-- Subscription modes are now mutually exclusive, matching Java's
-  `SubscriptionState`: mixing a manual `assign` with `subscribe` /
-  `subscribe_pattern` (in either order, or switching between topic and
-  pattern subscriptions) returns `ConsumerError::InvalidState` instead of
-  silently replacing the previous mode. Call `unsubscribe` to switch modes.
-  `Consumer::assign` accordingly now returns `Result`, and an empty `assign`
-  is treated as `unsubscribe` (Java parity).
+- **Breaking:** `Consumer::assign` now returns `Result`. Subscription modes are
+  mutually exclusive, matching Java's `SubscriptionState`: mixing a manual
+  `assign` with `subscribe` / `subscribe_pattern` (in either order, or switching
+  between topic and pattern subscriptions) returns `ConsumerError::InvalidState`
+  instead of silently replacing the previous mode. Call `unsubscribe` to switch
+  modes. An empty `assign` is treated as `unsubscribe` (Java parity).
+  ([#45](https://github.com/pirumu/kacrab/pull/45))
+
+### Fixed
+
+- The producer no longer wedges permanently on a total-cluster outage longer
+  than `delivery.timeout.ms`. The background sender loop treated a transient
+  error from its drive pass (a metadata/wire `Timeout` while every broker was
+  down) as fatal and parked; once the producer's appends dried up nothing woke
+  it again, even after the cluster recovered with ready batches still buffered.
+  It now retries on the retry backoff instead of parking, mirroring Kafka
+  `Sender.runOnce`. ([#48](https://github.com/pirumu/kacrab/pull/48))
+- The producer recovers from prolonged broker outages instead of wedging:
+  requeued batches retry on a timer rather than waiting for new traffic, and the
+  background sender pump no longer wedges on a single expired batch.
+  ([#47](https://github.com/pirumu/kacrab/pull/47))
+- The consumer recovers from a coordinator-broker outage instead of
+  livelocking: it clears a stale cached coordinator on `Wire(Timeout)` /
+  `ConnectionClosed` / `Io`, and JoinGroup/SyncGroup are bounded by the
+  rebalance timeout. ([#47](https://github.com/pirumu/kacrab/pull/47))
+- Wire: a fenced-broker handshake is bounded by `request.timeout.ms` (a
+  restarted-but-fenced broker that accepts TCP but answers nothing no longer
+  parks the broker task forever), and the broker reader task is aborted on drop
+  and on consumer close so sockets do not linger `ESTABLISHED`.
+  ([#47](https://github.com/pirumu/kacrab/pull/47))
 
 ## 0.1.2 — 2026-07-07
 
