@@ -93,3 +93,79 @@ wedge watchdog plus per-run fresh topics are likewise load-bearing.
 The production-readiness bar set in the README ("measurement under load")
 now has data: steady-state and single-fault behavior are strong; the
 recovery paths after prolonged outages are where the remaining work lives.
+
+## Resolution — 2026-07-07 (post-run investigation + fixes)
+
+The findings were run down across PR #47 (merged) and PR #48 (merged). Two of
+the cascade-phase diagnoses turned out to be wrong — they were forensic
+guesses from `lsof`/`sample`, not confirmed mechanisms — and were corrected by
+instrumenting the actual runtime state and by an isolation experiment.
+
+| # | status | resolution |
+|---|---|---|
+| F1 | fixed (code) | PR #47 (C1/C2): `is_coordinator_moved` clears the cached coordinator on `Wire(Timeout)`/`ConnectionClosed`/`Io`, and JoinGroup/SyncGroup use a bounded rebalance timeout. Unit-tested; a fresh compound soak is the remaining confirmation. |
+| F2 | **not a defect — verified** | Traced + isolation-tested. The consumer keeps `committed ≤ delivered` on every path, so it can only re-read, never skip. The overnight "gaps" were a harness accounting artifact, not consumer loss. Details below. |
+| F3 | **fixed + verified** | PR #48. Corrected root cause and validation below. |
+| F4 | fixed (code) | PR #47 (W2): `AbortOnDrop` on the broker reader task + `Consumer::drop` aborts the in-flight fetch, so sockets close on teardown instead of lingering ESTABLISHED. Unit-tested; a fresh soak is the remaining confirmation. |
+
+**F3 — corrected root cause.** The finding guessed "`delivery.timeout.ms`
+(120 s) not enforced on that path." That was wrong: the dispatch tasks *do*
+enforce the delivery timeout. The real bug — found with a `KACRAB_WEDGE_TRACE`
+instrument — is that the background sender loop treated **any** error from a
+drive pass as fatal and **parked** the loop. During a total outage the
+*synchronous* metadata fetch raises a wire `Timeout`, which parked it; a parked
+loop only wakes on an append or a dispatch completion, and once the producer's
+appends dry up (buffer full / bounded in-flight window) with no in-flight
+dispatch, nothing ever wakes it again — even after the cluster recovers, with
+ready batches still buffered:
+
+```
+wait=Err(Wire(Timeout)) inflight=0 acc_buffered=1179648 next_ready=true   ← then silence
+```
+
+The fix makes the loop **retry on the retry backoff** instead of parking
+(mirroring Kafka `Sender.runOnce`, which swallows a per-iteration failure and
+loops), plus swallows an already-surfaced per-batch `Delivered(Err)` in the
+loop's reap. No expiry sweep was needed — that hypothesis carried over from the
+cascade forensics and was a red herring; the fix adds no hot-path scan (mock
+bench unchanged at 5.31M msg/s). Reproduced deterministically (total 3-broker
+`docker stop` > `delivery.timeout.ms` under buffer pressure): the baseline
+froze at produced 17,251 / acked 15,200 **forever**; after the fix the producer
+drains and resumes — produced 105,250 / acked 103,104 with 2,146 correctly
+expired (every record resolved).
+
+**F2 — not a consumer defect (verified two ways).**
+
+1. *Code trace.* The consumer advances a partition's `position` **only at
+   delivery** (`deliver` → `advance_position`), and auto-commit commits exactly
+   that position — so `committed ≤ delivered` holds on every path: rebalance
+   seeds newly-assigned partitions from the committed offset (≤ delivered, so a
+   rewind → duplicates, never a forward skip); the classic path commits before
+   revoke; the prefetch buffer is validated against the live position on drain
+   and stale entries are dropped from *behind* (re-fetched, not skipped);
+   `OFFSET_OUT_OF_RANGE` honors `auto.offset.reset=earliest` (re-reads). The
+   only forward-skip paths are `auto.offset.reset=latest`, an app interceptor
+   that filters records, and (dupes-not-loss) the KIP-848 revoke — none apply to
+   this run's config.
+
+2. *Isolation experiment.* A soak with **aggressive consumer bouncing (every
+   3 s, ~25 rebalances) and NO broker chaos** — so the producer never fails a
+   delivery and the broker log has no holes — produced 75,000 records and
+   observed: **losses (gaps never refilled) = 0, unconsumed tail = 0**, with
+   154,625 duplicates and 15,571 reordered-then-refilled. Every record was
+   delivered at least once despite the churn.
+
+So the overnight "2,400 gaps" were **not** consumer loss. They were (a)
+mid-flight tracker snapshots of transient gaps that later refill (the sampler
+caught them before the racing 2-consumer handover streams filled in), and (b)
+in the chaos run specifically, records whose **producer** delivery failed — the
+harness reserves a sequence number before send and does not rewind it on a
+delivery failure, so those never reach the broker log and the continuity
+tracker miscounts the hole as consumer loss. A follow-up can teach the tracker
+to reconcile producer-failed sequences; the client itself is at-least-once
+safe.
+
+**Updated verdict.** The producer wedge (F3) is fixed and verified. F2 is not a
+client defect (verified). F1/F4 are fixed in code (PR #47) pending a fresh
+multi-hour compound soak — re-run the compound drill (a broker lost for tens of
+minutes, then restored) with the VM at ≥6 GB to close them out.
