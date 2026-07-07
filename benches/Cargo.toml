@@ -9,11 +9,11 @@ publish = false
 readme = "README.md"
 
 [dependencies]
-kacrab = { workspace = true, features = ["producer", "consumer"] }
+kacrab = { workspace = true, features = ["admin", "producer", "consumer"] }
 kacrab-protocol = { workspace = true }
 bytes = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
-tokio = { workspace = true, features = ["io-util", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 
 [[bench]]
 name = "producer_accumulator"
