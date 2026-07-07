@@ -240,17 +240,24 @@ async fn run(config: Config) -> bool {
 
     create_topic(&config).await;
 
-    let producer = Arc::new(
-        Producer::builder()
-            .set("bootstrap.servers", config.bootstrap.clone())
-            .set("client.id", "kacrab-soak-producer")
-            .set("enable.idempotence", "true")
-            .set("acks", "all")
-            .set("linger.ms", "5")
-            .build()
-            .await
-            .expect("producer connects"),
-    );
+    let mut producer_builder = Producer::builder()
+        .set("bootstrap.servers", config.bootstrap.clone())
+        .set("client.id", "kacrab-soak-producer")
+        .set("enable.idempotence", var("KACRAB_SOAK_IDEMPOTENCE", "true"))
+        .set("acks", "all")
+        .set("linger.ms", "5");
+    // Fast-repro knobs: shrink the delivery/request deadlines so a total-cluster
+    // outage can exceed `delivery.timeout.ms` in seconds instead of minutes.
+    if let Ok(request_timeout) = env::var("KACRAB_SOAK_REQUEST_TIMEOUT_MS") {
+        producer_builder = producer_builder.set("request.timeout.ms", request_timeout);
+    }
+    if let Ok(delivery_timeout) = env::var("KACRAB_SOAK_DELIVERY_TIMEOUT_MS") {
+        producer_builder = producer_builder.set("delivery.timeout.ms", delivery_timeout);
+    }
+    if let Ok(buffer_memory) = env::var("KACRAB_SOAK_BUFFER_MEMORY") {
+        producer_builder = producer_builder.set("buffer.memory", buffer_memory);
+    }
+    let producer = Arc::new(producer_builder.build().await.expect("producer connects"));
 
     let bounce_flags: Arc<[AtomicBool]> = (0..config.consumers)
         .map(|_i| AtomicBool::new(false))
@@ -340,6 +347,9 @@ async fn produce_until_deadline(
 ) {
     const TICK_MS: u64 = 50;
     let per_tick = (config.rate * TICK_MS / 1000).max(1) as usize;
+    let in_flight_cap: usize = var("KACRAB_SOAK_INFLIGHT_CAP", "20000")
+        .parse()
+        .expect("inflight cap");
     let mut in_flight: JoinSet<()> = JoinSet::new();
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
     let deadline = Instant::now() + config.duration;
@@ -407,8 +417,10 @@ async fn produce_until_deadline(
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 },
             }
-            // Bound the in-flight delivery futures.
-            while in_flight.len() > 20_000 {
+            // Bound the in-flight delivery futures. A low cap makes the produce
+            // loop block quickly once deliveries stall (outage), so appends dry
+            // up — the condition under which a parked sender loop can wedge.
+            while in_flight.len() > in_flight_cap {
                 let _done = in_flight.join_next().await;
             }
         }

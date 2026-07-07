@@ -392,6 +392,72 @@ async fn strict_drive_surfaces_per_batch_delivery_error() {
 }
 
 #[tokio::test]
+async fn background_loop_reap_swallows_per_batch_delivery_error() {
+    // Regression for the permanent post-outage wedge (P1). The sender loop's
+    // per-iteration reap in `drive_wake_until_waiting` must not surface a
+    // per-batch `Delivered(Err)` (e.g. a `DeliveryTimeout` after an outage
+    // longer than `delivery.timeout.ms`). If it did, the error would propagate
+    // to `background_loop`, which treats it as fatal and parks the sender; once
+    // appends dry up during a total outage nothing wakes it again and the
+    // producer wedges forever. The dispatch task already failed the futures.
+    let now = std::time::Instant::now();
+    let mut sender = ProducerSender::new(AccumulatorConfig::default(), 2);
+    let _in_flight = sender
+        .state
+        .spawn_in_flight(async move { delivered_delivery_timeout_dispatch() });
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    let wait = sender
+        .drive_wake_until_waiting(
+            now,
+            ReadyDispatchObservers::new(|_| {}, || {}, |_: &[crate::producer::ReadyBatch]| {}),
+        )
+        .await;
+
+    assert!(
+        wait.is_ok(),
+        "background loop reap must swallow a per-batch delivery timeout, got {wait:?}"
+    );
+    // The expired dispatch was reaped (slot freed); with nothing buffered or in
+    // flight the loop parks cleanly instead of propagating a fatal error.
+    assert_eq!(wait.unwrap(), SenderLoopWait::Parked);
+    assert_eq!(sender.state.in_flight_len(), 0);
+}
+
+#[test]
+fn background_loop_retries_on_transient_drive_error_instead_of_parking() {
+    // Regression for the permanent post-outage wedge (P1): a transient error
+    // from the drive — e.g. a metadata/wire `Timeout` from the synchronous
+    // pre-dispatch step while every broker is down — must schedule a backoff
+    // retry, NOT park the loop. A parked loop never wakes once appends dry up
+    // during a total outage, so the producer stays wedged even after recovery
+    // with ready batches still buffered.
+    let now = std::time::Instant::now();
+    let backoff = Duration::from_millis(100);
+
+    let wait = ProducerSender::resolve_background_loop_wait(
+        Err(ProducerError::Wire(crate::wire::WireError::Timeout)),
+        now,
+        backoff,
+    );
+    assert_eq!(
+        wait,
+        SenderLoopWait::SleepUntil(now + backoff),
+        "a transient drive error must schedule a retry, not park the loop"
+    );
+
+    // A successful drive keeps its own wait state unchanged.
+    let ok = ProducerSender::resolve_background_loop_wait(
+        Ok(SenderLoopWait::DispatchCompletion),
+        now,
+        backoff,
+    );
+    assert_eq!(ok, SenderLoopWait::DispatchCompletion);
+}
+
+#[tokio::test]
 async fn drive_flush_until_complete_drains_in_flight_completion_after_empty_step() {
     let mut state = ProducerSenderState::new(1);
     let accumulator = SharedAccumulator::with_config(AccumulatorConfig::default());

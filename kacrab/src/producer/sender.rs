@@ -423,11 +423,12 @@ impl ProducerSender {
     ) {
         loop {
             let (wait, notify) = {
+                let now = std::time::Instant::now();
                 let mut sender = sender.lock().await;
                 let notify = sender.sender_loop_notifier();
                 let wait = sender
                     .drive_wake_until_waiting(
-                        std::time::Instant::now(),
+                        now,
                         ReadyDispatchObservers::new(
                             |_| {},
                             || {
@@ -439,16 +440,15 @@ impl ProducerSender {
                         ),
                     )
                     .await;
-                drop(sender);
-                match wait {
-                    Ok(wait) => (wait, notify),
-                    Err(_error) => {
-                        if metrics_enabled.load(Ordering::Relaxed) {
-                            metrics.record_error();
-                        }
-                        (SenderLoopWait::Parked, notify)
-                    },
+                if wait.is_err() && metrics_enabled.load(Ordering::Relaxed) {
+                    metrics.record_error();
                 }
+                let retry_backoff = sender.dispatcher.retry_backoff_initial();
+                drop(sender);
+                (
+                    Self::resolve_background_loop_wait(wait, now, retry_backoff),
+                    notify,
+                )
             };
             match wait {
                 SenderLoopWait::SleepUntil(ready_at) => {
@@ -461,6 +461,33 @@ impl ProducerSender {
                     notify.notified().await;
                 },
             }
+        }
+    }
+
+    /// Decide how the background loop waits after one drive pass.
+    ///
+    /// On success the drive's own wait state is used. On a transient error —
+    /// e.g. a metadata/wire `Timeout` raised by the synchronous pre-dispatch
+    /// step while every broker is down — the loop must NOT park: a parked loop
+    /// only wakes on an append or a dispatch completion, and during a total
+    /// outage the producer's appends dry up (buffer full / bounded in-flight
+    /// window) with no in-flight dispatch, so nothing ever wakes it again and
+    /// the producer wedges permanently — even after the cluster recovers, with
+    /// ready batches still buffered. Retry on the retry backoff instead (Kafka
+    /// `Sender.runOnce` swallows a per-iteration failure and loops): the next
+    /// pass re-attempts metadata + dispatch, so a restored cluster drains the
+    /// buffered batches without waiting for traffic.
+    fn resolve_background_loop_wait(
+        wait: Result<SenderLoopWait, ProducerError>,
+        now: std::time::Instant,
+        retry_backoff: std::time::Duration,
+    ) -> SenderLoopWait {
+        match wait {
+            Ok(wait) => wait,
+            Err(_error) => {
+                let retry_at = now.checked_add(retry_backoff).unwrap_or(now);
+                SenderLoopWait::SleepUntil(retry_at)
+            },
         }
     }
 
@@ -818,9 +845,20 @@ impl ProducerSender {
         } = observers;
         loop {
             let mut requeued = false;
-            self.state.handle_finished_dispatches(
+            // Reap with the pump policy that SWALLOWS a per-batch `Delivered(Err)`
+            // (the dispatch task already resolved every record's future). Using the
+            // strict `handle_finished_dispatches` here would propagate an expected
+            // per-record failure — e.g. a `DeliveryTimeout` after an outage longer
+            // than `delivery.timeout.ms` — out of this reap; `background_loop`
+            // then treats it as a fatal loop error and PARKS the sender. Once
+            // appends dry up (buffer full / bounded in-flight window during the
+            // outage) nothing wakes it again and the producer wedges permanently.
+            // It also processed only up to the first error, dropping any later
+            // `Requeue` results in the same batch so their records were lost. The
+            // pump reap frees slot accounting for every completion, re-accumulates
+            // requeues, and only propagates structural failures (join panic).
+            self.state.reap_finished_dispatches_for_pump(
                 &self.accumulator,
-                false,
                 &mut observe_latency,
                 || {
                     requeued = true;
