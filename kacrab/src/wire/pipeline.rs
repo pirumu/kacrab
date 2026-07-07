@@ -51,6 +51,10 @@ impl RequestPipeline {
         }
     }
 
+    /// Reserve a slot with the connection's default `request.timeout.ms`
+    /// deadline. Only the tests reserve without an explicit timeout; the wire
+    /// write path always goes through [`reserve_with_timeout`](Self::reserve_with_timeout).
+    #[cfg(test)]
     pub(crate) fn reserve(
         &mut self,
         api_key: ApiKey,

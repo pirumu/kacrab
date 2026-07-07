@@ -844,9 +844,10 @@ impl ProducerSender {
                 // and a restored cluster resumes without waiting for traffic.
                 self.background_dispatch_paused
                     .store(false, Ordering::Relaxed);
-                return Ok(SenderLoopWait::SleepUntil(
-                    now + self.dispatcher.retry_backoff_initial(),
-                ));
+                let retry_at = now
+                    .checked_add(self.dispatcher.retry_backoff_initial())
+                    .unwrap_or(now);
+                return Ok(SenderLoopWait::SleepUntil(retry_at));
             }
             match self.next_wake_action(now) {
                 SenderWakeAction::WaitForDispatch => {
