@@ -694,12 +694,16 @@ async fn real_kafka_cooperative_sticky_incremental() {
 
     let group_id = format!("group-coop-{topic}");
     let expected = per_partition * 2;
-    let total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Deduplicate by (partition, offset): a partition handed over before its
+    // records were committed is legitimately re-read by the new owner
+    // (at-least-once), so a raw count over-counts on slow hosts where the
+    // second member joins after the first has already consumed everything.
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     let run = |client: &'static str| {
         let bootstrap = bootstrap.clone();
         let group_id = group_id.clone();
         let topic = topic.clone();
-        let total = std::sync::Arc::clone(&total);
+        let seen = std::sync::Arc::clone(&seen);
         tokio::spawn(async move {
             let mut consumer = Consumer::from_map([
                 ("bootstrap.servers", bootstrap.as_str()),
@@ -713,18 +717,28 @@ async fn real_kafka_cooperative_sticky_incremental() {
             .await
             .expect("consumer should connect");
             consumer.subscribe([topic]).expect("subscribe");
+            // Keep polling until every record is accounted for AND this member
+            // has settled at exactly one partition — i.e. it has observed the
+            // incremental handover complete. Snapshotting only then keeps the
+            // final asserts race-free: exiting as soon as the count is reached
+            // lets one member leave before the other ever saw the 1/1 split
+            // (the survivor then rebalances to own both partitions).
             let deadline = std::time::Instant::now() + Duration::from_secs(50);
-            while total.load(std::sync::atomic::Ordering::SeqCst) < expected
-                && std::time::Instant::now() < deadline
-            {
-                let count = consumer
-                    .poll(Duration::from_secs(1))
-                    .await
-                    .expect("poll")
-                    .count();
-                let _prev = total.fetch_add(count, std::sync::atomic::Ordering::SeqCst);
+            let mut assignment = consumer.assignment();
+            while std::time::Instant::now() < deadline {
+                let records = consumer.poll(Duration::from_secs(1)).await.expect("poll");
+                let all_seen = {
+                    let mut seen = seen.lock().expect("seen lock");
+                    for record in &records {
+                        let _new = seen.insert((record.partition, record.offset));
+                    }
+                    seen.len() >= expected
+                };
+                assignment = consumer.assignment();
+                if all_seen && assignment.len() == 1 {
+                    break;
+                }
             }
-            let assignment = consumer.assignment();
             consumer.close().await;
             assignment
         })
@@ -735,7 +749,7 @@ async fn real_kafka_cooperative_sticky_incremental() {
     let a_assign = task_a.await.expect("task a");
     let b_assign = task_b.await.expect("task b");
 
-    let consumed = total.load(std::sync::atomic::Ordering::SeqCst);
+    let consumed = seen.lock().expect("seen lock").len();
     println!("  a={a_assign:?} b={b_assign:?} consumed={consumed}");
     assert_eq!(consumed, expected, "the pair should consume every record");
     assert_eq!(a_assign.len(), 1, "consumer a owns one partition");

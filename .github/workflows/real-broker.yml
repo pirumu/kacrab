@@ -1,0 +1,188 @@
+name: real-broker
+
+# Runs the ignored `real_kafka_*` integration suites against live Apache Kafka
+# 4.3.0 containers from the repo's docker-compose files. These suites are the
+# only coverage for the consumer's broker-I/O path (client/coordinator/
+# next_gen are excluded from the unit-coverage gate because they cannot be
+# driven against a dead broker), so without this workflow a green CI says
+# nothing about that path.
+#
+# Each job gets its own runner VM, so the composes' host-port choices never
+# collide across jobs. The broker is started before the Rust toolchain/build
+# steps so image pull + KRaft format overlap with the cargo build, then a
+# second `up -d --wait <service>` acts as the health gate. `--wait` is scoped
+# to the broker services on purpose: the one-shot `kafka-init` topic-seeding
+# containers exit after finishing, and gating on them via `--wait` is
+# version-sensitive; `docker wait <container>` handles them instead.
+#
+# The auth-listener suites (SASL / TLS / GSSAPI) live in
+# real-broker-auth.yml on a weekly schedule — they exercise handshake code
+# that rarely changes and need heavier fixtures (KDC, cert generation).
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - "docs-book/**"
+      - "**/*.md"
+      - "LICENSE-*"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths-ignore:
+      - "docs-book/**"
+      - "**/*.md"
+      - "LICENSE-*"
+      - ".github/workflows/docs.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-broker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  base:
+    name: base broker (producer · consumer · compression · admin smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Boot the broker in the background; image pull + KRaft format run
+      # while the toolchain installs and the tests compile.
+      - name: Start Kafka (background)
+        run: docker compose -f docker-compose.kafka.yml up -d
+
+      # gssapi (libgssapi) needs libkrb5; --all-features pulls it in.
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev
+
+      - name: Pinned Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build real-broker test binaries
+        run: cargo test -p kacrab --all-features --no-run
+
+      - name: Wait for broker health
+        run: |
+          docker compose -f docker-compose.kafka.yml up -d --wait kafka
+          docker wait kacrab-kafka-init
+
+      # The first consumer-group operation on a fresh broker creates the
+      # 50-partition __consumer_offsets topic, which is slow enough to flake
+      # the first group test of the run (observed locally: first run after
+      # boot 13/14, every later run 14/14). Join a throwaway group once so
+      # the suites never pay that cost.
+      - name: Warm up internal topics
+        run: |
+          docker exec kacrab-kafka sh -c \
+            "/opt/kafka/bin/kafka-console-consumer.sh \
+               --bootstrap-server kafka:29092 --topic kacrab-bench \
+               --group kacrab-ci-warmup --timeout-ms 10000 --max-messages 1 \
+               >/dev/null 2>&1 || true"
+
+      # Suites share one broker and name topics with millisecond nonces, so
+      # they must run single-threaded (parallel runs collide with
+      # TopicAlreadyExists).
+      - name: Producer suite
+        run: cargo test -p kacrab --all-features --test real_kafka_producer -- --ignored --test-threads=1 --nocapture
+
+      - name: Consumer suite
+        run: cargo test -p kacrab --all-features --test real_kafka_consumer -- --ignored --test-threads=1 --nocapture
+
+      - name: Compression round-trip suite
+        run: cargo test -p kacrab --all-features --test real_kafka_compression -- --ignored --test-threads=1 --nocapture
+
+      # Only the smoke half runs here; real_kafka_admin_extended needs the
+      # authorizer broker from docker-compose.kafka-admin.yml (admin-extended
+      # job below).
+      - name: Admin smoke suite
+        run: cargo test -p kacrab --all-features --test real_kafka_admin -- --ignored --test-threads=1 --nocapture real_kafka_admin_smoke
+
+      - name: Broker logs on failure
+        if: failure()
+        run: docker logs kacrab-kafka --tail 300
+
+  admin-extended:
+    name: admin broker (ACLs · quotas · SCRAM · txn)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Kafka with authorizer (background)
+        run: docker compose -f docker-compose.kafka-admin.yml up -d
+
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev
+
+      - name: Pinned Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build real-broker test binaries
+        run: cargo test -p kacrab --all-features --no-run
+
+      - name: Wait for broker health
+        run: docker compose -f docker-compose.kafka-admin.yml up -d --wait kafka
+
+      - name: Admin extended suite
+        run: cargo test -p kacrab --all-features --test real_kafka_admin -- --ignored --test-threads=1 --nocapture real_kafka_admin_extended
+
+      - name: Broker logs on failure
+        if: failure()
+        run: docker logs kacrab-kafka-admin --tail 300
+
+  cluster:
+    name: 3-broker cluster (dispatch · leader failover)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start 3-broker cluster (background)
+        run: docker compose -f docker-compose.cluster.yml up -d
+
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev
+
+      - name: Pinned Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build real-broker test binaries
+        run: cargo test -p kacrab --all-features --no-run
+
+      - name: Wait for cluster health
+        run: |
+          docker compose -f docker-compose.cluster.yml up -d --wait kafka1 kafka2 kafka3
+          docker wait kacrab-kafka-cluster-init
+
+      # Fresh topic creation spreads preferred leaders, but run the election
+      # anyway (the failover test's leadership map assumes it — see the test's
+      # module docs).
+      - name: Preferred leader election
+        run: |
+          docker exec kacrab-kafka1 /opt/kafka/bin/kafka-leader-election.sh \
+            --bootstrap-server kafka1:29092 --election-type PREFERRED \
+            --all-topic-partitions
+
+      - name: Cluster suite
+        run: cargo test -p kacrab --all-features --test real_kafka_cluster -- --ignored --test-threads=1 --nocapture
+
+      - name: Broker logs on failure
+        if: failure()
+        run: |
+          for broker in kacrab-kafka1 kacrab-kafka2 kacrab-kafka3; do
+            echo "===== $broker ====="
+            docker logs "$broker" --tail 150
+          done
