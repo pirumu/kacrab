@@ -59,6 +59,10 @@ minor version bump under the pre-1.0 convention.
   parks the broker task forever), and the broker reader task is aborted on drop
   and on consumer close so sockets do not linger `ESTABLISHED`.
   ([#47](https://github.com/pirumu/kacrab/pull/47))
+- `init_transactions` retries a still-loading transaction coordinator
+  (`COORDINATOR_LOAD_IN_PROGRESS` on a freshly-started broker) for the full
+  `max.block.ms`, matching Java's blocking `initTransactions`, instead of
+  giving up after the produce `retries` count. ([#51](https://github.com/pirumu/kacrab/pull/51))
 
 ## 0.1.2 — 2026-07-07
 
