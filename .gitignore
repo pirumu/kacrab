@@ -38,3 +38,6 @@ cobertura.xml
 docs-book/book/
 docs-book/mermaid.min.js
 docs-book/mermaid-init.js
+
+# Soak harness output (benches/src/bin/soak_bench.rs)
+benches/soak-out/

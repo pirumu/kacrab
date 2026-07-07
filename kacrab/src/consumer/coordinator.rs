@@ -307,6 +307,17 @@ pub(super) struct JoinRequest<'a> {
 /// adopts the coordinator-assigned member id on `MEMBER_ID_REQUIRED`, and resets
 /// to a fresh member id on `UNKNOWN_MEMBER_ID`/`ILLEGAL_GENERATION`, looping until
 /// the broker accepts the join or returns another error.
+/// Bound for `JoinGroup`/`SyncGroup`: the coordinator legitimately holds
+/// these responses until the rebalance settles (up to the rebalance timeout),
+/// so the plain `request.timeout.ms` (30s) would expire mid-join, and the
+/// timed-out member's fresh `JoinGroup` restarts the round — with several
+/// members doing the same, the group never completes a generation (livelock).
+/// Java uses `rebalance timeout + 5s`; mirror it.
+fn rebalance_rpc_timeout(rebalance_timeout_ms: i32) -> std::time::Duration {
+    let clamped = u64::try_from(rebalance_timeout_ms).unwrap_or(0);
+    std::time::Duration::from_millis(clamped.saturating_add(5_000))
+}
+
 pub(super) async fn join_group(
     context: &GroupContext<'_>,
     join: &JoinRequest<'_>,
@@ -337,7 +348,13 @@ pub(super) async fn join_group(
         };
         let response: JoinGroupResponseData = context
             .wire
-            .send_to_broker(context.coordinator_id, ApiKey::JoinGroup, version, &request)
+            .send_to_broker_with_timeout(
+                context.coordinator_id,
+                ApiKey::JoinGroup,
+                version,
+                &request,
+                rebalance_rpc_timeout(join.rebalance_timeout_ms),
+            )
             .await?;
         let error = ErrorCode::from(response.error_code);
         if error == ErrorCode::MemberIdRequired {
@@ -389,12 +406,17 @@ pub(super) async fn join_group(
 
 /// Send `SyncGroup` (with the leader's computed assignments, or empty for a
 /// follower) and return this member's assigned partitions.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Mirrors the SyncGroup wire request's own field count."
+)]
 pub(super) async fn sync_group(
     context: &GroupContext<'_>,
     generation_id: i32,
     member_id: &str,
     protocol_name: &str,
     assignments: Vec<(String, Bytes)>,
+    rebalance_timeout_ms: i32,
 ) -> Result<Vec<TopicPartition>> {
     let request = SyncGroupRequestData {
         group_id: context.group_id.to_owned().into(),
@@ -416,7 +438,13 @@ pub(super) async fn sync_group(
     let version = client_api_info(ApiKey::SyncGroup).max_version;
     let response: SyncGroupResponseData = context
         .wire
-        .send_to_broker(context.coordinator_id, ApiKey::SyncGroup, version, &request)
+        .send_to_broker_with_timeout(
+            context.coordinator_id,
+            ApiKey::SyncGroup,
+            version,
+            &request,
+            rebalance_rpc_timeout(rebalance_timeout_ms),
+        )
         .await?;
     let error = ErrorCode::from(response.error_code);
     if error.is_error() {
