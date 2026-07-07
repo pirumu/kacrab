@@ -152,6 +152,10 @@ struct RequestCommand {
     request: Box<dyn EncodableRequest>,
     enqueued_at: Instant,
     completion: RequestCompletion,
+    /// Per-request timeout override; `None` uses the connection's
+    /// `request.timeout.ms`. JoinGroup/SyncGroup need a rebalance-scaled
+    /// bound because the coordinator legitimately holds their responses.
+    timeout: Option<Duration>,
 }
 
 impl RequestCommand {
@@ -278,6 +282,39 @@ impl BrokerHandle {
         Req: RequestMessage + Clone + Send + Sync + 'static,
         Resp: ResponseMessage,
     {
+        self.enqueue_with_timeout(api_key, api_version, request, None)
+    }
+
+    /// Like [`send`](Self::send) but bounding this request by `timeout`
+    /// instead of the connection's `request.timeout.ms`.
+    #[cfg(feature = "consumer")]
+    pub(crate) async fn send_with_timeout<Req, Resp>(
+        &self,
+        api_key: ApiKey,
+        api_version: i16,
+        request: &Req,
+        timeout: Duration,
+    ) -> Result<Resp>
+    where
+        Req: RequestMessage + Clone + Send + Sync + 'static,
+        Resp: ResponseMessage,
+    {
+        self.enqueue_with_timeout(api_key, api_version, request, Some(timeout))?
+            .wait()
+            .await
+    }
+
+    fn enqueue_with_timeout<Req, Resp>(
+        &self,
+        api_key: ApiKey,
+        api_version: i16,
+        request: &Req,
+        timeout: Option<Duration>,
+    ) -> Result<PendingBrokerResponse<Resp>>
+    where
+        Req: RequestMessage + Clone + Send + Sync + 'static,
+        Resp: ResponseMessage,
+    {
         let (tx, rx) = oneshot::channel();
         let command = RequestCommand {
             api_key,
@@ -287,6 +324,7 @@ impl BrokerHandle {
             }),
             enqueued_at: Instant::now(),
             completion: RequestCompletion::Response(tx),
+            timeout,
         };
         self.tx.try_send(command).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => WireError::Backpressure,
@@ -316,6 +354,7 @@ impl BrokerHandle {
             }),
             enqueued_at: Instant::now(),
             completion: RequestCompletion::NoResponse(tx),
+            timeout: None,
         };
         self.tx.try_send(command).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => WireError::Backpressure,
@@ -323,6 +362,17 @@ impl BrokerHandle {
         })?;
 
         rx.await.map_err(|_| WireError::ConnectionClosed)?
+    }
+}
+
+/// Aborts the wrapped task when dropped — ties the per-connection reader's
+/// lifetime to `serve_connection`'s scope so the socket's read half is
+/// released promptly on every exit path.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -359,7 +409,19 @@ impl BrokerTask {
                 return;
             }
 
-            match self.connect_and_negotiate().await {
+            // The negotiate must be bounded: a freshly restarted (still
+            // fenced) KRaft broker accepts TCP but answers nothing, so an
+            // unbounded ApiVersions read would park this task forever — no
+            // reconnect, no `expire_pending_commands`, queued requests
+            // unfailable, and the handle is never replaced. TCP connect is
+            // already capped by `socket_connection_setup_timeout`; the whole
+            // TLS + ApiVersions + SASL sequence is capped here by
+            // `request_timeout`, and an elapse retries like any setup error.
+            let negotiated =
+                tokio::time::timeout(self.config.request_timeout, self.connect_and_negotiate())
+                    .await
+                    .unwrap_or(Err(WireError::Timeout));
+            match negotiated {
                 Ok((stream, capabilities)) => {
                     backoff.reset();
                     *self
@@ -432,13 +494,19 @@ impl BrokerTask {
             self.config.request_timeout,
         )));
         let disconnect = Arc::new(Notify::new());
-        let _reader_task = tokio::spawn(read_response_frames(
+        let reader_task = tokio::spawn(read_response_frames(
             reader,
             Arc::clone(&pipeline),
             Arc::clone(&disconnect),
             self.config.read_buffer_capacity,
             Arc::clone(&self.buffers),
         ));
+        // Tear the reader down on every exit path: the generic `io::split`
+        // keeps the socket alive while the read half exists, so an abandoned
+        // reader blocked in `read_frame` would hold the TCP connection
+        // ESTABLISHED (no FIN) until the broker idle-closes it (~10 min) — a
+        // socket leak across client teardown and idle disconnects.
+        let _reader_guard = AbortOnDrop(reader_task);
 
         let mut timeout_tick = tokio::time::interval(timeout_tick_duration(&self.config));
 
@@ -522,6 +590,7 @@ impl BrokerTask {
             max_api_version,
             request,
             completion,
+            timeout,
             ..
         } = command;
         let Some(api_version) = capabilities.version_for_limit(api_key, max_api_version) else {
@@ -565,7 +634,8 @@ impl BrokerTask {
         };
         // Bind before the match so the pipeline lock is released before the arms
         // run (don't hold it across `tx.send`).
-        let reserved = lock_pipeline(pipeline).reserve(api_key, api_version, tx);
+        let reserved =
+            lock_pipeline(pipeline).reserve_with_timeout(api_key, api_version, tx, timeout);
         let correlation_id = match reserved {
             Ok(correlation_id) => correlation_id,
             Err(tx) => {
@@ -968,7 +1038,8 @@ fn expire_pending_commands(pending: &mut VecDeque<RequestCommand>, request_timeo
     let now = Instant::now();
     let mut retained = VecDeque::with_capacity(pending.len());
     while let Some(command) = pending.pop_front() {
-        if now.duration_since(command.enqueued_at) >= request_timeout {
+        let effective_timeout = command.timeout.unwrap_or(request_timeout);
+        if now.duration_since(command.enqueued_at) >= effective_timeout {
             command.completion.send_error(WireError::Timeout);
         } else {
             retained.push_back(command);
@@ -1192,6 +1263,14 @@ mod tests {
         tx: oneshot::Sender<WireResult<ResponseEnvelope>>,
         enqueued_at: Instant,
     ) -> RequestCommand {
+        request_command_with_timeout(tx, enqueued_at, None)
+    }
+
+    fn request_command_with_timeout(
+        tx: oneshot::Sender<WireResult<ResponseEnvelope>>,
+        enqueued_at: Instant,
+        timeout: Option<Duration>,
+    ) -> RequestCommand {
         RequestCommand {
             api_key: ApiKey::ApiVersions,
             max_api_version: 3,
@@ -1200,7 +1279,82 @@ mod tests {
             }),
             enqueued_at,
             completion: RequestCompletion::Response(tx),
+            timeout,
         }
+    }
+
+    #[tokio::test]
+    async fn negotiate_timeout_fails_requests_against_a_silent_broker() {
+        // A freshly restarted (still fenced) KRaft broker accepts TCP but
+        // answers nothing. The handshake must be bounded so the run loop keeps
+        // cycling and queued requests expire — instead of the task parking
+        // forever on the ApiVersions read with unfailable requests behind it.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let _server = tokio::spawn(async move {
+            let mut held: Vec<tokio::net::TcpStream> = Vec::new();
+            loop {
+                let Ok((socket, _peer)) = listener.accept().await else {
+                    drop(held);
+                    return;
+                };
+                // Hold the sockets open so the client sees ESTABLISHED-but-
+                // silent connections, never a close.
+                held.push(socket);
+            }
+        });
+
+        let config = ConnectionConfig::default()
+            .request_timeout(Duration::from_millis(200))
+            .reconnect_backoff_initial(Duration::from_millis(10))
+            .reconnect_backoff_max(Duration::from_millis(20));
+        let handle = BrokerHandle::spawn(
+            BrokerEndpoint::new(7, addr),
+            "client-silent".to_owned(),
+            config,
+            Arc::new(BufferPools::new(1)),
+            Arc::new(tokio::sync::Mutex::new(OAuthTokenCache::default())),
+        );
+
+        for attempt in 0..2 {
+            let request = api_versions_request();
+            let send = handle.send::<_, ApiVersionsResponseData>(ApiKey::ApiVersions, 3, &request);
+            let result = tokio::time::timeout(Duration::from_secs(5), send)
+                .await
+                .unwrap_or_else(|_elapsed| {
+                    panic!("attempt {attempt}: request must fail, not hang")
+                });
+            assert!(
+                matches!(result, Err(WireError::Timeout)),
+                "attempt {attempt}: expected Timeout, got {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn expire_pending_commands_honors_per_command_timeout() {
+        // A rebalance-scaled JoinGroup outlives the connection default, and a
+        // short-fused command expires before it.
+        let (patient_tx, patient_rx) = oneshot::channel();
+        let (hasty_tx, hasty_rx) = oneshot::channel();
+        let now = Instant::now();
+        let aged = now.checked_sub(Duration::from_secs(31)).unwrap_or(now);
+        let mut pending = VecDeque::from([
+            request_command_with_timeout(patient_tx, aged, Some(Duration::from_mins(5))),
+            request_command_with_timeout(hasty_tx, now, Some(Duration::ZERO)),
+        ]);
+
+        expire_pending_commands(&mut pending, Duration::from_secs(30));
+
+        assert_eq!(pending.len(), 1, "the extended-timeout command survives");
+        assert!(matches!(
+            hasty_rx.await.expect("hasty sender"),
+            Err(WireError::Timeout)
+        ));
+        drop(pending);
+        assert!(patient_rx.await.is_err(), "survivor dropped un-erred");
     }
 
     fn api_versions_capabilities() -> BrokerCapabilities {

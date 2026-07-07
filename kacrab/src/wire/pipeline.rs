@@ -51,11 +51,27 @@ impl RequestPipeline {
         }
     }
 
+    /// Reserve a slot with the connection's default `request.timeout.ms`
+    /// deadline. Only the tests reserve without an explicit timeout; the wire
+    /// write path always goes through [`reserve_with_timeout`](Self::reserve_with_timeout).
+    #[cfg(test)]
     pub(crate) fn reserve(
         &mut self,
         api_key: ApiKey,
         api_version: i16,
         tx: oneshot::Sender<Result<ResponseEnvelope>>,
+    ) -> std::result::Result<i32, oneshot::Sender<Result<ResponseEnvelope>>> {
+        self.reserve_with_timeout(api_key, api_version, tx, None)
+    }
+
+    /// [`reserve`](Self::reserve) with a per-request deadline override;
+    /// `None` uses the connection's `request.timeout.ms`.
+    pub(crate) fn reserve_with_timeout(
+        &mut self,
+        api_key: ApiKey,
+        api_version: i16,
+        tx: oneshot::Sender<Result<ResponseEnvelope>>,
+        timeout: Option<Duration>,
     ) -> std::result::Result<i32, oneshot::Sender<Result<ResponseEnvelope>>> {
         self.trim_empty_head();
         if self.len == self.slots.len() {
@@ -69,7 +85,7 @@ impl RequestPipeline {
             return Err(tx);
         };
         let deadline = Instant::now()
-            .checked_add(self.request_timeout)
+            .checked_add(timeout.unwrap_or(self.request_timeout))
             .unwrap_or_else(Instant::now);
         *slot = Some(InFlightRequest {
             api_key,
@@ -407,6 +423,33 @@ mod tests {
         pipeline.complete_response(response_frame(ApiKey::ApiVersions, 3, correlation_id));
 
         assert!(rx.await.expect("sender").is_ok());
+    }
+
+    #[tokio::test]
+    async fn pipeline_reserve_with_timeout_overrides_connection_deadline() {
+        // Pipeline default is generous; the per-request override must win so
+        // a rebalance-scaled JoinGroup can outlive request.timeout.ms and a
+        // zero-timeout request expires immediately.
+        let mut pipeline = RequestPipeline::new(2, Duration::from_mins(1));
+        let (hasty_tx, hasty_rx) = channel();
+        let (patient_tx, mut patient_rx) = channel();
+        let _hasty = pipeline
+            .reserve_with_timeout(ApiKey::ApiVersions, 3, hasty_tx, Some(Duration::ZERO))
+            .expect("hasty reserve");
+        let _patient = pipeline
+            .reserve_with_timeout(ApiKey::Metadata, 12, patient_tx, None)
+            .expect("patient reserve");
+
+        pipeline.fail_expired();
+
+        assert!(matches!(
+            hasty_rx.await.expect("hasty sender"),
+            Err(WireError::Timeout)
+        ));
+        assert!(
+            patient_rx.try_recv().is_err(),
+            "the default-deadline request is untouched"
+        );
     }
 
     #[tokio::test]

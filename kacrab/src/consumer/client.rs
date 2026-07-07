@@ -178,6 +178,10 @@ const fn is_rebalance_in_progress(error: &ConsumerError) -> bool {
 
 /// Whether an error means the group coordinator moved or is unavailable, so the
 /// cached coordinator must be dropped and re-discovered (`FindCoordinator`).
+/// Wire-level timeouts and connection failures count: a dead coordinator can
+/// never send `NOT_COORDINATOR` — it just times out — so treating only Kafka
+/// codes as "moved" pins a dead incarnation forever (Java marks the
+/// coordinator unknown on any coordinator request failure).
 const fn is_coordinator_moved(error: &ConsumerError) -> bool {
     matches!(
         error,
@@ -186,7 +190,9 @@ const fn is_coordinator_moved(error: &ConsumerError) -> bool {
                 | ErrorCode::CoordinatorNotAvailable
                 | ErrorCode::CoordinatorLoadInProgress,
             ..
-        }
+        } | ConsumerError::Wire(
+            WireError::Timeout | WireError::ConnectionClosed | WireError::Io(_)
+        )
     )
 }
 
@@ -217,6 +223,12 @@ impl Drop for Consumer {
     fn drop(&mut self) {
         self.heartbeat_task.abort();
         self.async_commit_task.abort();
+        // A drop without close() must not detach an airborne fetch: the task
+        // holds a WireClient clone, which would keep every broker connection
+        // alive until the fetch resolves.
+        if let Some(fetch_task) = &self.in_flight_fetch {
+            fetch_task.abort();
+        }
     }
 }
 
@@ -1293,6 +1305,7 @@ impl Consumer {
                 &self.member_id,
                 &join.protocol_name,
                 assignments,
+                clamp_ms(self.config.rebalance_timeout),
             )
             .await
             {
@@ -2154,6 +2167,14 @@ mod tests {
             consumer.coordinator_id = Some(7);
             let moved = ConsumerError::broker("commit", code, "moved");
             assert!(consumer.note_coordinator_error(&moved));
+            assert_eq!(consumer.coordinator_id, None);
+        }
+        // A dead coordinator can only time out — it will never send
+        // NOT_COORDINATOR — so wire-level failures must clear the cache too.
+        for wire_error in [WireError::Timeout, WireError::ConnectionClosed] {
+            consumer.coordinator_id = Some(7);
+            let dead = ConsumerError::Wire(wire_error);
+            assert!(consumer.note_coordinator_error(&dead));
             assert_eq!(consumer.coordinator_id, None);
         }
     }

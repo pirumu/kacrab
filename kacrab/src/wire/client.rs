@@ -147,6 +147,32 @@ impl WireClient {
         handle.send(api_key, api_version, request).await
     }
 
+    /// Send to a specific broker with a per-request timeout instead of the
+    /// connection's `request.timeout.ms` — for RPCs the broker legitimately
+    /// holds longer (JoinGroup/SyncGroup during a rebalance).
+    #[cfg(feature = "consumer")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "send_to_broker plus the per-request timeout; splitting hurts call-site clarity."
+    )]
+    pub(crate) async fn send_to_broker_with_timeout<Req, Resp>(
+        &self,
+        broker_id: i32,
+        api_key: ApiKey,
+        api_version: i16,
+        request: &Req,
+        timeout: std::time::Duration,
+    ) -> Result<Resp>
+    where
+        Req: RequestMessage + Clone + Send + Sync + 'static,
+        Resp: ResponseMessage,
+    {
+        let handle = self.handle_for(broker_id)?;
+        handle
+            .send_with_timeout(api_key, api_version, request, timeout)
+            .await
+    }
+
     #[cfg(feature = "producer")]
     pub(crate) fn enqueue_to_broker<Req, Resp>(
         &self,
