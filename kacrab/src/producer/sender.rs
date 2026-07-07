@@ -830,7 +830,22 @@ impl ProducerSender {
                 self.pause_background_dispatch_after_requeue();
             }
             if self.background_dispatch_paused.load(Ordering::Relaxed) {
-                return Ok(SenderLoopWait::Parked);
+                // A requeue means the batches' leaders were unroutable
+                // (metadata refresh failed — e.g. every broker down). Parking
+                // until the next append would deadlock any caller applying
+                // backpressure (flush, close, a bounded in-flight window): no
+                // append ever comes, the requeued batches are never
+                // re-drained, and the drain-time delivery-timeout check never
+                // runs — their delivery futures would hang forever. Retry on
+                // the retry backoff instead: each pass re-attempts metadata +
+                // dispatch, and the drain expires batches past
+                // `delivery.timeout.ms` so a sustained outage fails loudly
+                // and a restored cluster resumes without waiting for traffic.
+                self.background_dispatch_paused
+                    .store(false, Ordering::Relaxed);
+                return Ok(SenderLoopWait::SleepUntil(
+                    now + self.dispatcher.retry_backoff_initial(),
+                ));
             }
             match self.next_wake_action(now) {
                 SenderWakeAction::WaitForDispatch => {

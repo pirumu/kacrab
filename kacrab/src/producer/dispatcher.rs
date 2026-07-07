@@ -186,6 +186,12 @@ impl ProducerDispatcher {
         self.metrics.snapshot(ProducerQueueMetrics::default())
     }
 
+    /// The configured `retry.backoff.ms` — the sender loop's re-drive cadence
+    /// after a requeue (batches whose leaders were unroutable).
+    pub(crate) const fn retry_backoff_initial(&self) -> Duration {
+        self.retry_backoff
+    }
+
     pub(crate) fn metrics_handle(&self) -> ProducerMetrics {
         self.metrics.clone()
     }
