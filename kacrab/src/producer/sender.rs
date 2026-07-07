@@ -783,9 +783,10 @@ impl ProducerSender {
             SenderWakeAction::DispatchReady => {
                 let _dispatched = self
                     .state
-                    .drive_ready_dispatch_until_blocked(
+                    .drive_ready_dispatch_until_blocked_with_policy(
                         &self.dispatcher,
                         &self.accumulator,
+                        false,
                         ReadyDispatchObservers::new(
                             &mut observe_latency,
                             &mut observe_requeue,
@@ -854,9 +855,10 @@ impl ProducerSender {
                 SenderWakeAction::DispatchReady => {
                     let dispatched_any = self
                         .state
-                        .drive_ready_dispatch_until_blocked(
+                        .drive_ready_dispatch_until_blocked_with_policy(
                             &self.dispatcher,
                             &self.accumulator,
+                            false,
                             ReadyDispatchObservers::new(
                                 &mut observe_latency,
                                 &mut observe_requeue,
@@ -2948,6 +2950,51 @@ impl ProducerSenderState {
         Ok(())
     }
 
+    /// Reap finished dispatches for the background sender pump. Unlike the
+    /// flush / append paths, a per-batch `Delivered(Err)` is swallowed: the
+    /// dispatch task already resolved every record's delivery future (success,
+    /// or failure via `fail_deliveries`), so surfacing it here would abort the
+    /// pump before it drains the other partitions — the permanent wedge one
+    /// expired batch caused after an outage, where every buffered batch had
+    /// aged past `delivery.timeout.ms` and each drained dispatch tripped the
+    /// error again. Slot accounting already happened in
+    /// `collect_completed_dispatches`; structural failures (requeue accounting,
+    /// join panic) still propagate.
+    fn reap_finished_dispatches_for_pump<LatencyObserver, RequeueObserver>(
+        &mut self,
+        accumulator: &SharedAccumulator,
+        mut observe_latency: LatencyObserver,
+        mut observe_requeue: RequeueObserver,
+    ) -> Result<(), ProducerError>
+    where
+        LatencyObserver: FnMut(std::time::Duration),
+        RequeueObserver: FnMut(),
+    {
+        for result in self.collect_completed_dispatches() {
+            let delivered_error = matches!(
+                &result,
+                Ok(TimedDispatchOutcome {
+                    outcome: DispatchOutcome::Delivered(Err(_)),
+                    ..
+                })
+            );
+            if delivered_error {
+                if let Ok(TimedDispatchOutcome { latency, .. }) = result {
+                    observe_latency(latency);
+                }
+                self.complete_pending_accumulator_batches(accumulator);
+            } else {
+                self.handle_completed_dispatch_with_lifecycle(
+                    accumulator,
+                    CompletedDispatch::new(result, false),
+                    &mut observe_latency,
+                    &mut observe_requeue,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn wait_for_handled_dispatch<LatencyObserver, RequeueObserver>(
         &mut self,
         accumulator: &SharedAccumulator,
@@ -3097,6 +3144,37 @@ impl ProducerSenderState {
         RequeueObserver: FnMut(),
         BatchObserver: FnMut(&[ReadyBatch]),
     {
+        self.drive_ready_dispatch_until_blocked_with_policy(
+            dispatcher,
+            accumulator,
+            true,
+            observers,
+        )
+        .await
+    }
+
+    /// [`drive_ready_dispatch_until_blocked`](Self::drive_ready_dispatch_until_blocked)
+    /// with control over whether a per-batch `Delivered(Err)` aborts the drive.
+    /// The background sender pump passes `surface_delivered_errors = false` so a
+    /// single expired batch cannot starve every other partition; the flush and
+    /// append-capacity callers pass `true` so the awaiting caller still sees the
+    /// failure.
+    pub(crate) async fn drive_ready_dispatch_until_blocked_with_policy<
+        LatencyObserver,
+        RequeueObserver,
+        BatchObserver,
+    >(
+        &mut self,
+        dispatcher: &ProducerDispatcher,
+        accumulator: &SharedAccumulator,
+        surface_delivered_errors: bool,
+        observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
+    ) -> Result<bool, ProducerError>
+    where
+        LatencyObserver: FnMut(std::time::Duration),
+        RequeueObserver: FnMut(),
+        BatchObserver: FnMut(&[ReadyBatch]),
+    {
         let ReadyDispatchObservers {
             latency: mut observe_latency,
             requeue: mut observe_requeue,
@@ -3104,12 +3182,20 @@ impl ProducerSenderState {
         } = observers;
         let mut dispatched_any = false;
         loop {
-            self.handle_finished_dispatches(
-                accumulator,
-                false,
-                &mut observe_latency,
-                &mut observe_requeue,
-            )?;
+            if surface_delivered_errors {
+                self.handle_finished_dispatches(
+                    accumulator,
+                    false,
+                    &mut observe_latency,
+                    &mut observe_requeue,
+                )?;
+            } else {
+                self.reap_finished_dispatches_for_pump(
+                    accumulator,
+                    &mut observe_latency,
+                    &mut observe_requeue,
+                )?;
+            }
             let progress = self
                 .drive_ready_dispatch_progress(
                     dispatcher,

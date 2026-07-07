@@ -313,6 +313,84 @@ async fn producer_sender_waits_for_abort_completion_until_empty() {
     );
 }
 
+fn delivered_delivery_timeout_dispatch() -> TimedDispatchOutcome {
+    TimedDispatchOutcome {
+        // The dispatch task already failed this batch's delivery futures via
+        // `fail_deliveries` before returning; the outcome only reports it.
+        outcome: DispatchOutcome::Delivered(Err(ProducerError::DeliveryTimeout {
+            topic: "orders".to_owned(),
+            partition: 0,
+        })),
+        latency: Duration::from_millis(1),
+        partitions: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn background_pump_swallows_per_batch_delivery_error() {
+    // The permanent post-outage wedge: a single expired batch's `Delivered(Err)`
+    // must not abort the background drive, or every other partition's buffered
+    // records starve. The pump keeps going; the error is already on the futures.
+    let mut sender = ProducerSender::new(AccumulatorConfig::default(), 2);
+    let _in_flight = sender
+        .state
+        .spawn_in_flight(async move { delivered_delivery_timeout_dispatch() });
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    let mut observed_latency = None;
+    let result = sender
+        .state
+        .drive_ready_dispatch_until_blocked_with_policy(
+            &sender.dispatcher,
+            &sender.accumulator,
+            false,
+            ReadyDispatchObservers::new(
+                |latency| observed_latency = Some(latency),
+                || {},
+                |_: &[crate::producer::ReadyBatch]| {},
+            ),
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "background pump must swallow a per-batch delivery error, got {result:?}"
+    );
+    assert_eq!(observed_latency, Some(Duration::from_millis(1)));
+}
+
+#[tokio::test]
+async fn strict_drive_surfaces_per_batch_delivery_error() {
+    // The flush / append-capacity path still surfaces the failure to its caller.
+    let mut sender = ProducerSender::new(AccumulatorConfig::default(), 2);
+    let _in_flight = sender
+        .state
+        .spawn_in_flight(async move { delivered_delivery_timeout_dispatch() });
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    let result = sender
+        .state
+        .drive_ready_dispatch_until_blocked_with_policy(
+            &sender.dispatcher,
+            &sender.accumulator,
+            true,
+            ReadyDispatchObservers::new(|_| {}, || {}, |_: &[crate::producer::ReadyBatch]| {}),
+        )
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(ProducerError::DeliveryTimeout { partition: 0, .. })
+        ),
+        "strict drive must surface the delivery timeout, got {result:?}"
+    );
+}
+
 #[tokio::test]
 async fn drive_flush_until_complete_drains_in_flight_completion_after_empty_step() {
     let mut state = ProducerSenderState::new(1);
