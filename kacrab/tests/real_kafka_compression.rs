@@ -152,7 +152,9 @@ async fn real_kafka_consumer_decompresses_cli_produced_batches() {
         ])
         .await
         .expect("consumer should connect");
-        consumer.assign([kacrab::common::TopicPartition::new(topic.clone(), 0)]);
+        consumer
+            .assign([kacrab::common::TopicPartition::new(topic.clone(), 0)])
+            .expect("assign");
 
         let mut received: Vec<String> = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);

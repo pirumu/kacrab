@@ -160,6 +160,11 @@ const MAX_REJOIN_ATTEMPTS: u32 = 10;
 /// topic list, so newly created (or deleted) topics are picked up.
 const PATTERN_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Java's `SubscriptionState` message when a call would mix manual assignment
+/// with a topic or pattern subscription.
+const SUBSCRIPTION_EXCLUSIVE: &str =
+    "Subscription to topics, partitions and pattern are mutually exclusive";
+
 /// Whether an error is the coordinator's `REBALANCE_IN_PROGRESS` signal.
 const fn is_rebalance_in_progress(error: &ConsumerError) -> bool {
     matches!(
@@ -324,10 +329,24 @@ impl Consumer {
     }
 
     /// Manually assign a set of partitions to this consumer, replacing any prior
-    /// assignment. Manual assignment bypasses group coordination.
-    pub fn assign(&mut self, partitions: impl IntoIterator<Item = TopicPartition>) {
+    /// manual assignment. Manual assignment bypasses group coordination. An empty
+    /// set is treated as [`unsubscribe`](Consumer::unsubscribe), matching Java.
+    ///
+    /// # Errors
+    /// Returns [`ConsumerError::InvalidState`] if the consumer is subscribed to
+    /// topics or a pattern — subscription modes are mutually exclusive; call
+    /// [`unsubscribe`](Consumer::unsubscribe) first to switch.
+    pub fn assign(&mut self, partitions: impl IntoIterator<Item = TopicPartition>) -> Result<()> {
         let partitions: Vec<TopicPartition> = partitions.into_iter().collect();
+        if partitions.is_empty() {
+            self.unsubscribe();
+            return Ok(());
+        }
+        if !self.subscribed_topics.is_empty() || self.subscription_pattern.is_some() {
+            return Err(ConsumerError::InvalidState(SUBSCRIPTION_EXCLUSIVE));
+        }
         self.subscription.assign(&partitions);
+        Ok(())
     }
 
     /// The partitions currently assigned to this consumer.
@@ -337,16 +356,21 @@ impl Consumer {
     }
 
     /// Subscribe to a set of topics, joining the consumer group on the next
-    /// [`poll`](Consumer::poll). Replaces any prior subscription and clears a
-    /// manual assignment.
+    /// [`poll`](Consumer::poll). Replaces any prior topic subscription.
     ///
     /// # Errors
-    /// Returns [`ConsumerError::InvalidState`] if `group.id` is unset.
+    /// Returns [`ConsumerError::InvalidState`] if `group.id` is unset, or if the
+    /// consumer holds a manual assignment or a pattern subscription — the modes
+    /// are mutually exclusive (Java parity); call
+    /// [`unsubscribe`](Consumer::unsubscribe) first to switch.
     pub fn subscribe(&mut self, topics: impl IntoIterator<Item = impl Into<String>>) -> Result<()> {
         if self.config.group_id.is_empty() {
             return Err(ConsumerError::InvalidState(
                 "group.id must be set to subscribe to topics",
             ));
+        }
+        if self.subscription.is_user_assigned() || self.subscription_pattern.is_some() {
+            return Err(ConsumerError::InvalidState(SUBSCRIPTION_EXCLUSIVE));
         }
         let mut topics: Vec<String> = topics.into_iter().map(Into::into).collect();
         topics.sort();
@@ -367,13 +391,18 @@ impl Consumer {
     /// unless `exclude.internal.topics=false`.
     ///
     /// # Errors
-    /// Returns [`ConsumerError::InvalidState`] if `group.id` is unset, or
+    /// Returns [`ConsumerError::InvalidState`] if `group.id` is unset or if the
+    /// consumer holds a manual assignment or a plain topic subscription (the
+    /// modes are mutually exclusive — Java parity), or
     /// [`ConsumerError::InvalidArgument`] if `pattern` is not a valid regex.
     pub fn subscribe_pattern(&mut self, pattern: &str) -> Result<()> {
         if self.config.group_id.is_empty() {
             return Err(ConsumerError::InvalidState(
                 "group.id must be set to subscribe to a pattern",
             ));
+        }
+        if self.subscription.is_user_assigned() || !self.subscribed_topics.is_empty() {
+            return Err(ConsumerError::InvalidState(SUBSCRIPTION_EXCLUSIVE));
         }
         let regex = Regex::new(pattern).map_err(|error| ConsumerError::InvalidArgument {
             field: "subscribe pattern",
@@ -995,13 +1024,20 @@ impl Consumer {
     /// and release its broker connections. Bounded by `request.timeout.ms` so a
     /// hung coordinator cannot hang close (Java's `default.api.timeout.ms`). The
     /// wire client shuts its broker tasks down on drop.
-    pub async fn close(mut self) {
+    pub async fn close(self) {
+        let timeout = self.config.request_timeout;
+        self.close_timeout(timeout).await;
+    }
+
+    /// [`close`](Consumer::close) with a caller-chosen bound on the final
+    /// commit-and-leave work — the analogue of Java's `close(Duration)`. A zero
+    /// timeout skips the commit/leave and just releases resources.
+    pub async fn close_timeout(mut self, timeout: Duration) {
         self.heartbeat_task.abort();
         if let Some(fetch_task) = self.in_flight_fetch.take() {
             fetch_task.abort();
         }
-        let close_timeout = self.config.request_timeout;
-        let _timed_out = tokio::time::timeout(close_timeout, self.commit_and_leave()).await;
+        let _timed_out = tokio::time::timeout(timeout, self.commit_and_leave()).await;
         // Aborted only after `commit_and_leave` has drained it (bounded by the
         // timeout above), so queued async commits are applied and their
         // callbacks fired rather than silently dropped, matching Java's close.
@@ -1977,7 +2013,7 @@ mod tests {
         let mut consumer = consumer_no_group().await;
         let p0 = TopicPartition::new("t", 0);
         let p1 = TopicPartition::new("t", 1);
-        consumer.assign([p0.clone(), p1.clone()]);
+        consumer.assign([p0.clone(), p1.clone()]).expect("assign");
         assert_eq!(consumer.assignment().len(), 2);
 
         // Seek sets a position on an assigned partition; unassigned seeks error.
@@ -2015,7 +2051,14 @@ mod tests {
             consumer.subscription(),
             vec!["a".to_owned(), "b".to_owned()]
         );
-        // A pattern subscription clears the explicit topic list until the first poll.
+        // Switching straight to a pattern is rejected (modes are mutually
+        // exclusive, Java parity); after unsubscribe it goes through, and the
+        // explicit topic list stays empty until the first poll resolves it.
+        assert!(matches!(
+            consumer.subscribe_pattern("^prefix-.*$"),
+            Err(ConsumerError::InvalidState(_))
+        ));
+        consumer.unsubscribe();
         consumer
             .subscribe_pattern("^prefix-.*$")
             .expect("valid regex");
@@ -2026,6 +2069,72 @@ mod tests {
         ));
         consumer.unsubscribe();
         assert!(consumer.subscription().is_empty());
+    }
+
+    #[tokio::test]
+    async fn subscription_modes_are_mutually_exclusive() {
+        // Manual assignment blocks both subscription flavors until unsubscribe.
+        let mut consumer = consumer_with_group().await;
+        consumer
+            .assign([TopicPartition::new("t", 0)])
+            .expect("assign");
+        assert!(matches!(
+            consumer.subscribe(["t"]),
+            Err(ConsumerError::InvalidState(_))
+        ));
+        assert!(matches!(
+            consumer.subscribe_pattern("t.*"),
+            Err(ConsumerError::InvalidState(_))
+        ));
+        consumer.unsubscribe();
+        consumer
+            .subscribe(["t"])
+            .expect("subscribe after unsubscribe");
+
+        // A topic subscription blocks manual assign; re-subscribing the same
+        // mode stays allowed.
+        assert!(matches!(
+            consumer.assign([TopicPartition::new("t", 0)]),
+            Err(ConsumerError::InvalidState(_))
+        ));
+        consumer.subscribe(["t", "u"]).expect("re-subscribe topics");
+
+        // Pattern mode blocks manual assign and plain topic subscribe.
+        consumer.unsubscribe();
+        consumer
+            .subscribe_pattern("t.*")
+            .expect("pattern after unsubscribe");
+        assert!(matches!(
+            consumer.assign([TopicPartition::new("t", 0)]),
+            Err(ConsumerError::InvalidState(_))
+        ));
+        assert!(matches!(
+            consumer.subscribe(["t"]),
+            Err(ConsumerError::InvalidState(_))
+        ));
+
+        // An empty assign is unsubscribe (Java parity): it exits pattern mode
+        // and any mode is reachable again.
+        consumer
+            .assign(std::iter::empty())
+            .expect("empty assign unsubscribes");
+        assert!(consumer.assignment().is_empty());
+        consumer
+            .assign([TopicPartition::new("t", 0)])
+            .expect("assign after empty assign");
+    }
+
+    #[tokio::test]
+    async fn close_timeout_bounds_shutdown() {
+        let consumer = consumer_with_group().await;
+        // The commit-and-leave work is bounded by the caller's timeout, so
+        // close returns promptly even when no broker is reachable.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            consumer.close_timeout(Duration::from_millis(50)),
+        )
+        .await
+        .expect("close_timeout returns within its bound");
     }
 
     #[tokio::test]
@@ -2099,7 +2208,9 @@ mod tests {
         let mut consumer = consumer_no_group().await;
         let fetched = TopicPartition::new("t", 0);
         let reset = TopicPartition::new("t", 1);
-        consumer.assign([fetched.clone(), reset.clone()]);
+        consumer
+            .assign([fetched.clone(), reset.clone()])
+            .expect("assign");
         consumer.seek(&reset, 42).expect("seek assigned partition");
 
         let progress = fetch::FetchProgress {

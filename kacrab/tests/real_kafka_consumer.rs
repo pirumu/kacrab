@@ -84,7 +84,7 @@ async fn real_kafka_consumes_produced_records() {
     assert_eq!(consumer.group_metadata().group_id, group_id);
 
     let partition = TopicPartition::new(topic.clone(), 0);
-    consumer.assign([partition.clone()]);
+    consumer.assign([partition.clone()]).expect("assign");
     assert_eq!(consumer.assignment(), vec![partition.clone()]);
 
     let mut collected: Vec<(Option<String>, Option<String>, i64)> = Vec::new();
@@ -435,7 +435,9 @@ async fn real_kafka_poll_respects_short_timeout() {
     ])
     .await
     .expect("consumer should connect");
-    consumer.assign([TopicPartition::new(topic.clone(), 0)]);
+    consumer
+        .assign([TopicPartition::new(topic.clone(), 0)])
+        .expect("assign");
 
     // Drain the existing records so the next poll finds no new data.
     let mut drained = 0;
@@ -486,7 +488,7 @@ async fn real_kafka_async_commits_apply_in_order() {
     .await
     .expect("consumer should connect");
     let partition = TopicPartition::new(topic.clone(), 0);
-    consumer.assign([partition.clone()]);
+    consumer.assign([partition.clone()]).expect("assign");
 
     let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
     let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -556,7 +558,7 @@ async fn real_kafka_sync_commit_never_overtakes_queued_async_commits() {
     .await
     .expect("consumer should connect");
     let partition = TopicPartition::new(topic.clone(), 0);
-    consumer.assign([partition.clone()]);
+    consumer.assign([partition.clone()]).expect("assign");
 
     // Queue an async commit at offset 7...
     let async_applied = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -622,7 +624,7 @@ async fn real_kafka_out_of_range_resets_and_recovers() {
     .await
     .expect("consumer should connect");
     let partition = TopicPartition::new(topic.clone(), 0);
-    consumer.assign([partition.clone()]);
+    consumer.assign([partition.clone()]).expect("assign");
     // Position the fetch well past the log end → OFFSET_OUT_OF_RANGE on fetch.
     consumer.seek(&partition, 9_999).expect("seek");
 
@@ -812,7 +814,7 @@ async fn real_kafka_offset_queries() {
     assert_eq!(times.get(&partition).map(|o| o.offset), Some(0));
 
     // current_lag: assign + seek to 0 → lag == count.
-    consumer.assign([partition.clone()]);
+    consumer.assign([partition.clone()]).expect("assign");
     consumer.seek(&partition, 0).expect("seek");
     let lag = consumer.current_lag(&partition).await.expect("current_lag");
     println!("  current_lag={lag:?}");
@@ -845,7 +847,7 @@ async fn real_kafka_auto_and_async_commit() {
     ])
     .await
     .expect("consumer");
-    consumer.assign([partition.clone()]);
+    consumer.assign([partition.clone()]).expect("assign");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let mut total = 0;
     while total < count && std::time::Instant::now() < deadline {
@@ -884,7 +886,7 @@ async fn real_kafka_auto_and_async_commit() {
     );
 
     // --- commit_async ---
-    checker.assign([partition.clone()]);
+    checker.assign([partition.clone()]).expect("assign");
     checker.seek(&partition, 3).expect("seek");
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = std::sync::Arc::clone(&done);
@@ -1026,7 +1028,9 @@ async fn real_kafka_interceptor_observes_records_and_commits() {
         "configure delivers the group.id"
     );
 
-    consumer.assign([TopicPartition::new(topic.clone(), 0)]);
+    consumer
+        .assign([TopicPartition::new(topic.clone(), 0)])
+        .expect("assign");
     let mut total = 0;
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while total < count && std::time::Instant::now() < deadline {
