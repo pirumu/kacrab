@@ -2472,6 +2472,89 @@ async fn kafka_producer_commits_transactional_send() {
 }
 
 #[tokio::test]
+async fn kafka_producer_init_transactions_retries_coordinator_load_in_progress_past_retries() {
+    // Regression: the transactional `InitProducerId` bootstrap must survive a
+    // transient `CoordinatorLoadInProgress` (a `__transaction_state` log still
+    // loading on a freshly-started broker) for `max.block.ms`. The produce
+    // `retries` count (here 0) must NOT cap it — matching Java's blocking
+    // `initTransactions`. Before the fix, `retries=0` failed on the first load
+    // error and flaked the real-broker transactional test against a fresh broker.
+    let coordinator = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::InitProducerId as i16);
+            init_producer_id_error_response_frame(
+                header.correlation_id,
+                ErrorCode::CoordinatorLoadInProgress,
+            )
+        }),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::InitProducerId as i16);
+            init_producer_id_response_frame(header.correlation_id, 77, 0)
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let coordinator = coordinator.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::FindCoordinator as i16);
+                find_coordinator_response_frame(header.correlation_id, 9, coordinator)
+            }
+        }),
+    ])
+    .await;
+
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_backoff: Duration::from_millis(50),
+            retry_backoff_max: Duration::from_millis(50),
+            delivery_timeout: Duration::from_mins(2),
+            max_block: Duration::from_secs(10),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 5,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: Some("txn-orders".to_owned()),
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+
+    producer
+        .init_transactions()
+        .await
+        .expect("init_transactions should retry the loading coordinator and succeed");
+    assert_eq!(producer.metrics().transaction_init_count, 1);
+    // The coordinator served ApiVersions + BOTH InitProducerId attempts (the
+    // load error then success) — proof the bootstrap retried past `retries=0`.
+    assert_eq!(coordinator.join().await, 3);
+    assert_eq!(bootstrap.join().await, 2);
+}
+
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "Transaction timeout retry fixture keeps ordered broker handlers inline."

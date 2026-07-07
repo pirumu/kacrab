@@ -32,6 +32,10 @@ pub(super) const DEFAULT_RETRY_BACKOFF_MAX: Duration = Duration::from_secs(1);
 pub(super) const IDEMPOTENT_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION: i32 = 5;
 /// Kafka default `max.request.size`: 1 MiB.
 pub(super) const DEFAULT_MAX_REQUEST_SIZE: usize = 1_048_576;
+/// Kafka default `max.block.ms`: how long `send` blocks on a full buffer and how
+/// long `init_transactions` blocks retrying a not-yet-available / still-loading
+/// transaction coordinator.
+pub(super) const DEFAULT_MAX_BLOCK: Duration = Duration::from_mins(1);
 /// Default transaction timeout sent to `InitProducerId`; matches Kafka's
 /// `transaction.timeout.ms` default.
 pub(super) const DEFAULT_TRANSACTION_TIMEOUT_MS: i32 = 60_000;
@@ -125,7 +129,7 @@ impl Default for ProducerRuntimeConfig {
             retry_backoff: DEFAULT_RETRY_BACKOFF,
             retry_backoff_max: DEFAULT_RETRY_BACKOFF_MAX,
             delivery_timeout: DEFAULT_DELIVERY_TIMEOUT,
-            max_block: Duration::from_mins(1),
+            max_block: DEFAULT_MAX_BLOCK,
             max_in_flight_requests_per_connection:
                 crate::wire::DEFAULT_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
             max_request_size: DEFAULT_MAX_REQUEST_SIZE,

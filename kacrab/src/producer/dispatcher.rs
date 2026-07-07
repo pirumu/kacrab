@@ -42,9 +42,9 @@ use super::{
     },
     compression_ratio::CompressionRatioEstimator,
     config::{
-        ACKS_NONE, DEFAULT_DELIVERY_TIMEOUT, DEFAULT_RETRY_BACKOFF, DEFAULT_RETRY_BACKOFF_MAX,
-        DEFAULT_TIMEOUT_MS, DEFAULT_TRANSACTION_TIMEOUT_MS, ProducerCompression,
-        ProducerIdempotenceConfig, ProducerRuntimeConfig,
+        ACKS_NONE, DEFAULT_DELIVERY_TIMEOUT, DEFAULT_MAX_BLOCK, DEFAULT_RETRY_BACKOFF,
+        DEFAULT_RETRY_BACKOFF_MAX, DEFAULT_TIMEOUT_MS, DEFAULT_TRANSACTION_TIMEOUT_MS,
+        ProducerCompression, ProducerIdempotenceConfig, ProducerRuntimeConfig,
     },
     error::{ProducerError, Result},
     metrics::{ProducerMetrics, ProducerMetricsSnapshot, ProducerQueueMetrics},
@@ -94,6 +94,11 @@ pub struct ProducerDispatcher {
     retry_backoff: Duration,
     retry_backoff_max: Duration,
     delivery_timeout: Duration,
+    /// `max.block.ms` — how long the transactional `InitProducerId` bootstrap
+    /// keeps retrying a transient coordinator error (a still-loading
+    /// `__transaction_state` log on a fresh broker), matching Java's
+    /// `initTransactions` blocking bound rather than the produce `retries` count.
+    transaction_init_timeout: Duration,
     compression: ProducerCompression,
     max_request_size: usize,
     max_in_flight_requests_per_connection: usize,
@@ -123,6 +128,7 @@ impl ProducerDispatcher {
             retry_backoff: DEFAULT_RETRY_BACKOFF,
             retry_backoff_max: DEFAULT_RETRY_BACKOFF_MAX,
             delivery_timeout: DEFAULT_DELIVERY_TIMEOUT,
+            transaction_init_timeout: DEFAULT_MAX_BLOCK,
             compression: ProducerCompression {
                 codec: Compression::None,
                 level: None,
@@ -161,6 +167,7 @@ impl ProducerDispatcher {
             retry_backoff: config.retry_backoff,
             retry_backoff_max: config.retry_backoff_max,
             delivery_timeout: config.delivery_timeout,
+            transaction_init_timeout: config.max_block,
             compression: config.compression,
             max_request_size: config.max_request_size,
             max_in_flight_requests_per_connection: config.max_in_flight_requests_per_connection,
@@ -3368,6 +3375,21 @@ impl ProducerDispatcher {
         } else {
             TransactionRequestKind::InitProducerId
         };
+        // The transactional `InitProducerId` bootstrap (current == None) must
+        // survive a transient coordinator error — a `__transaction_state` log
+        // still loading on a freshly-started broker (COORDINATOR_LOAD_IN_PROGRESS)
+        // or a not-yet-available coordinator — for the full `max.block.ms`, like
+        // Java's blocking `initTransactions`. The produce `retries` count must NOT
+        // cap it (a user setting a low `retries` to bound produce retries would
+        // otherwise flake `init_transactions` right after cluster startup). The
+        // epoch-bump path (current == Some) keeps the retry-count bound.
+        let init_deadline = current
+            .is_none()
+            .then(|| Instant::now().checked_add(self.transaction_init_timeout))
+            .flatten();
+        let has_retry_budget = |attempts: usize| {
+            init_deadline.map_or(attempts > 0, |deadline| Instant::now() < deadline)
+        };
         let mut request_guard = self.track_transaction_request(request_kind).await;
         loop {
             let response: InitProducerIdResponseData = self
@@ -3380,7 +3402,7 @@ impl ProducerDispatcher {
                 request_guard.clear().await;
                 return Ok(response);
             }
-            if attempts_remaining > 0
+            if has_retry_budget(attempts_remaining)
                 && is_transaction_coordinator_error(error)
                 && let Some(transactional_id) = transactional_id.as_deref()
             {
@@ -3389,7 +3411,7 @@ impl ProducerDispatcher {
                 self.sleep_retry_backoff(&mut retry_backoff).await?;
                 continue;
             }
-            if attempts_remaining == 0 || !error.is_retriable() {
+            if !has_retry_budget(attempts_remaining) || !error.is_retriable() {
                 let transaction_error = transaction_control_error_for_client(error);
                 self.record_init_producer_error(transaction_error).await;
                 return Err(ProducerError::Transaction {
