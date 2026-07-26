@@ -248,6 +248,32 @@ fn benchmark_producer_overrides() -> Vec<(&'static str, String)> {
 /// The pure half of [`benchmark_producer_overrides`]: the env-var -> producer-setting
 /// mapping with the lookup injected, so tests pin the mapping without mutating
 /// process-global env (which would race every other test in this binary).
+/// Target offered load in records/sec from `KACRAB_BENCH_THROUGHPUT`, or `None` for
+/// unthrottled (the default).
+///
+/// Java's `kafka-producer-perf-test` takes `--throughput`; kacrab's bench had no equivalent,
+/// which made every published latency comparison suspect: both clients ran flat out, so each
+/// sat at its OWN saturation point and the two latency columns described different offered
+/// loads. Pinning both sides to the same rate is the only way to attribute a latency
+/// difference to the client rather than to how hard it happened to be pushing.
+fn throughput_target_records_per_sec() -> Option<f64> {
+    env::var("KACRAB_BENCH_THROUGHPUT")
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|target| target.is_finite() && *target > 0.0)
+}
+
+/// Pace the send loop to `target` records/sec, mirroring Java's `ThroughputThrottler`:
+/// sleep only when the loop is running ahead of the schedule implied by the target.
+async fn throttle_to_target(target: f64, sent: usize, started: Instant) {
+    let expected_elapsed = f64_from_usize(sent) / target;
+    let actual_elapsed = started.elapsed().as_secs_f64();
+    let ahead_by = expected_elapsed - actual_elapsed;
+    if ahead_by > 0.0 {
+        tokio::time::sleep(Duration::from_secs_f64(ahead_by)).await;
+    }
+}
+
 fn benchmark_producer_overrides_from(
     split_probe: Option<&SplitProbeConfig>,
     lookup: impl Fn(&str) -> Option<String>,
@@ -289,6 +315,12 @@ fn benchmark_producer_overrides_from(
     // throughput is linger-bound (1 record/batch waits the full linger).
     if let Some(linger) = lookup("KACRAB_BENCH_LINGER_MS") {
         overrides.push(("linger.ms", linger));
+    }
+    // KACRAB_BENCH_MAX_IN_FLIGHT overrides max.in.flight.requests.per.connection. Pipeline
+    // depth trades latency for throughput, and benches/README.md claims depth 1 brings p99 to
+    // ~2 ms at unchanged throughput -- a claim no knob could test until now.
+    if let Some(max_in_flight) = lookup("KACRAB_BENCH_MAX_IN_FLIGHT") {
+        overrides.push(("max.in.flight.requests.per.connection", max_in_flight));
     }
     // KACRAB_BENCH_BUFFER_MEMORY isolates the buffer-full append spin: a huge buffer
     // lets every record enqueue without backpressure, so the run measures pure drain.
@@ -370,6 +402,11 @@ async fn run_per_record_tracked_send_loop(
     // partition is assigned by the REAL sticky partitioner via try_assign_partition_now
     // (sync, non-blocking); the ~1-in-900 rotation records fall back to the async path.
     let sync_send = env::var("KACRAB_BENCH_SYNC_SEND").is_ok();
+    // Resolved ONCE, never inside the loop: a per-record `env::var` costs ~28% of
+    // small-record throughput on macOS because `getenv` takes a global libc lock
+    // (benches/README.md records that regression). `None` is the default and adds no
+    // per-record work beyond one already-hot `Option` check.
+    let throughput_target = throughput_target_records_per_sec();
     let mut sent = 0usize;
     while sent < run.scenario.messages {
         // Java parity, and the reason this timestamp lives OUTSIDE the retry loop
@@ -428,6 +465,9 @@ async fn run_per_record_tracked_send_loop(
                 },
                 Err(error) => panic!("benchmark send failed: {error:?}"),
             }
+        }
+        if let Some(target) = throughput_target {
+            throttle_to_target(target, sent, started).await;
         }
     }
     if sync_send {
