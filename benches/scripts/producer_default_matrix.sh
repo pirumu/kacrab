@@ -29,18 +29,47 @@ if [[ "${KACRAB_BENCH_SPLIT_PROBE:-0}" == "1" ]]; then
   SPLIT_PROBE=1
 fi
 
-# Probe sizing, mirrored from producer_kafka_bench.rs: 4 KiB records are far below the
-# topic limit (a single oversize record is unsplittable), a 256 KiB batch overflows the
-# 64 KiB topic limit 4x, and 256 KiB stays under the 1 MiB max.request.size so the broker
-# limit binds before the client one. Both sides run against the same low-limit topic.
 SPLIT_PROBE_TOPIC="${KACRAB_SPLIT_PROBE_TOPIC:-kacrab-bench-split-probe}"
-SPLIT_PROBE_MAX_MESSAGE_BYTES="${KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES:-65536}"
-SPLIT_PROBE_RECORDS="${KACRAB_SPLIT_PROBE_RECORDS:-20000}"
 SPLIT_PROBE_PARTITIONS="${KACRAB_SPLIT_PROBE_PARTITIONS:-1}"
 SPLIT_PROBE_REPLICATION_FACTOR="${KACRAB_SPLIT_PROBE_REPLICATION_FACTOR:-1}"
-SPLIT_PROBE_RECORD_SIZE=4096
-SPLIT_PROBE_BATCH_SIZE=262144
-SPLIT_PROBE_MAX_REQUEST_SIZE=1048576
+
+# The probe sizing is owned by producer_kafka_bench.rs and read back from it, so the kacrab
+# pass, the Java pass and the probe topic cannot drift apart. The binary also validates
+# KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES against the probe invariants and fails the run rather
+# than letting an override silently stop the probe from probing.
+SPLIT_PROBE_CONFIG_KEYS=(
+  SPLIT_PROBE_MESSAGES
+  SPLIT_PROBE_RECORD_SIZE
+  SPLIT_PROBE_BATCH_SIZE
+  SPLIT_PROBE_MAX_REQUEST_SIZE
+  SPLIT_PROBE_MAX_MESSAGE_BYTES
+)
+
+load_split_probe_config() {
+  local dump
+  if ! dump="$(KACRAB_BENCH_PRINT_SPLIT_PROBE_CONFIG=1 \
+    cargo run --quiet -p kacrab-benches --bin producer_kafka_bench --release)"; then
+    echo "producer_kafka_bench rejected the split probe sizing" >&2
+    exit 1
+  fi
+
+  local key value known
+  while IFS='=' read -r key value; do
+    for known in "${SPLIT_PROBE_CONFIG_KEYS[@]}"; do
+      if [[ "$key" == "$known" ]]; then
+        printf -v "$key" '%s' "$value"
+        break
+      fi
+    done
+  done <<<"$dump"
+
+  for key in "${SPLIT_PROBE_CONFIG_KEYS[@]}"; do
+    if [[ -z "${!key:-}" ]]; then
+      echo "missing $key in the split probe config dump" >&2
+      exit 1
+    fi
+  done
+}
 
 if [[ ! -x "$KAFKA_PRODUCER_PERF" ]]; then
   echo "missing kafka-producer-perf-test.sh at $KAFKA_PRODUCER_PERF" >&2
@@ -217,6 +246,8 @@ run_split_probe() {
     exit 1
   fi
 
+  load_split_probe_config
+
   echo
   echo "===== split probe: $SPLIT_PROBE_TOPIC with max.message.bytes=$SPLIT_PROBE_MAX_MESSAGE_BYTES ====="
   "$KAFKA_TOPICS" \
@@ -248,13 +279,13 @@ run_split_probe() {
   echo
   echo "----- java split probe pass -----"
   local client_id="java-split-probe"
-  echo "java run: records=$SPLIT_PROBE_RECORDS, record_size=$SPLIT_PROBE_RECORD_SIZE, throughput=-1, batch.size=$SPLIT_PROBE_BATCH_SIZE, max.request.size=$SPLIT_PROBE_MAX_REQUEST_SIZE, client.id=$client_id"
+  echo "java run: records=$SPLIT_PROBE_MESSAGES, record_size=$SPLIT_PROBE_RECORD_SIZE, throughput=-1, batch.size=$SPLIT_PROBE_BATCH_SIZE, max.request.size=$SPLIT_PROBE_MAX_REQUEST_SIZE, client.id=$client_id"
 
   local java_output
   java_output="$("$KAFKA_PRODUCER_PERF" \
     --bootstrap-server "$BOOTSTRAP" \
     --topic "$SPLIT_PROBE_TOPIC" \
-    --num-records "$SPLIT_PROBE_RECORDS" \
+    --num-records "$SPLIT_PROBE_MESSAGES" \
     --record-size "$SPLIT_PROBE_RECORD_SIZE" \
     --throughput -1 \
     --command-property "client.id=$client_id" \

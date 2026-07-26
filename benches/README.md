@@ -167,10 +167,16 @@ Knobs (all read from the environment, so set them inline before `cargo run`):
   10 KiB scenario.
 - `KACRAB_BENCH_RUNS=N` — number of runs per scenario (default 5).
 - `KACRAB_BENCH_SPLIT_PROBE=1` — opt-in `MESSAGE_TOO_LARGE` split probe: replaces
-  both default scenarios with a single 20,000 x 4 KiB run and forces
-  `batch.size=262144`, so every full batch overflows a topic created with
-  `max.message.bytes=65536` (see the probe section below). Off by default; the
-  default `cargo run` pass and the default 5-run matrix are unchanged.
+  both default scenarios with a single 20,000 x 4 KiB run and sets
+  `batch.size=262144` plus `max.request.size` (kacrab's own default, 1 MiB), so
+  every full batch overflows a topic created with `max.message.bytes=65536` (see
+  the probe section below). Off by default; the default `cargo run` pass and the
+  default 5-run matrix are unchanged.
+- `KACRAB_BENCH_PRINT_SPLIT_PROBE_CONFIG=1` — print the resolved probe sizing as
+  `KEY=VALUE` lines and exit without running anything. This is how
+  `producer_default_matrix.sh` learns the sizing, so the Java pass and the probe
+  topic cannot drift from the kacrab pass; the same call also rejects an override
+  that would stop the probe from probing.
 - `KACRAB_BENCH_SYNC_SEND=1` — legacy flag: the per-record path is always the
   synchronous Java-style send now; the flag only prints the sync-now
   buffer-spin counter after the run.
@@ -197,8 +203,22 @@ It creates `kacrab-bench-split-probe` with
 counter lines together. Pointing the Java pass at the normal bench topic instead
 would make the two `batch_splits` values incomparable, so the script always
 overrides the topic for both sides. Overridable: `KACRAB_SPLIT_PROBE_TOPIC`,
-`KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES`, `KACRAB_SPLIT_PROBE_RECORDS`,
 `KACRAB_SPLIT_PROBE_PARTITIONS`, `KACRAB_SPLIT_PROBE_REPLICATION_FACTOR`.
+
+The record count, record size, `batch.size`, `max.request.size` and the probe
+topic's `max.message.bytes` are **not** declared by the script: it reads them from
+`KACRAB_BENCH_PRINT_SPLIT_PROBE_CONFIG=1 cargo run --bin producer_kafka_bench`, so
+the kacrab pass, the Java pass and the topic are configured from one source. The
+sizing knobs that remain are read by the binary, must be `export`ed so the script's
+`cargo run` inherits them, and are validated against the constraints below —
+`export KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES=1024` fails the run with an explicit
+error instead of silently leaving nothing to split:
+
+- `KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES` — the probe topic's `max.message.bytes`;
+  must stay above the record size and below `batch.size`.
+- `KACRAB_BENCH_BATCH_SIZE` — must stay above the topic limit, hold more than one
+  record, and stay below `max.request.size`.
+- `KACRAB_BENCH_MAX_REQUEST_SIZE` — must stay above `batch.size`.
 
 The sizing is the probe, and all three constraints have to hold at once:
 
@@ -208,14 +228,16 @@ The sizing is the probe, and all three constraints have to hold at once:
   Java's `batch.recordCount > 1` guard, and the send fails terminally instead of
   splitting. The probe must build multi-record oversize batches.
 - **`batch.size=262144`**, 4x the topic limit, so every full batch is rejected.
-- **`max.request.size` left at its 1 MiB default**, comfortably above the 256 KiB
-  batch, so the *broker* limit binds first. If the client limit bound first the
-  producer would fail locally with `RecordTooLarge` and the broker would never
-  see the batch.
+- **`max.request.size` at kacrab's own 1 MiB default**, comfortably above the
+  256 KiB batch, so the *broker* limit binds first. If the client limit bound first
+  the producer would fail locally with `RecordTooLarge` and the broker would never
+  see the batch. The probe reads that default out of the effective producer config
+  and sets it explicitly, so the value the invariant is checked against is the one
+  the producer runs with.
 
-Both sides are configured identically (the Rust bench sets `batch.size` from
-`KACRAB_BENCH_SPLIT_PROBE`; the Java pass gets `batch.size` and
-`max.request.size` via `--command-property`).
+Both sides are configured identically: the Rust bench sets `batch.size` and
+`max.request.size` from the resolved probe config, and the Java pass gets the same
+two values via `--command-property` after reading them back from the binary.
 
 A passing comparison is **both sides reporting the same non-zero
 `batch_splits`**. Exact equality is only expected for the first split of each

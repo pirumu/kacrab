@@ -41,15 +41,26 @@ const BENCH_RUNS: usize = 5;
 // whole point of the scenario: 4 KiB records stay far below the probe topic's
 // max.message.bytes so no record is oversize on its own (a one-record batch is
 // unsplittable), 256 KiB batches overflow that topic limit by 4x so the broker rejects
-// them, and 256 KiB also stays under the 1 MiB max.request.size default so the broker
-// limit binds before the client-side one.
+// them, and 256 KiB also stays under kacrab's own max.request.size so the broker limit
+// binds before the client-side one. These defaults plus kacrab's max.request.size are the
+// single source of truth for the probe: the run configures the producer from them and
+// KACRAB_BENCH_PRINT_SPLIT_PROBE_CONFIG=1 dumps them for producer_default_matrix.sh, so
+// the Java pass and the probe topic cannot drift away from the kacrab pass.
 const SPLIT_PROBE_MESSAGES: usize = 20_000;
 const SPLIT_PROBE_VALUE_SIZE: usize = 4 * 1024;
 const SPLIT_PROBE_BATCH_SIZE: usize = 256 * 1024;
 const SPLIT_PROBE_TOPIC_MAX_MESSAGE_BYTES: usize = 64 * 1024;
-const SPLIT_PROBE_MAX_REQUEST_SIZE: usize = 1024 * 1024;
 
 fn main() {
+    // KACRAB_BENCH_PRINT_SPLIT_PROBE_CONFIG=1 prints the resolved probe sizing as KEY=VALUE
+    // lines and exits, so the matrix script consumes these values instead of mirroring them.
+    if env::var("KACRAB_BENCH_PRINT_SPLIT_PROBE_CONFIG").is_ok() {
+        print!(
+            "{}",
+            split_probe_config_dump(&resolved_split_probe_config())
+        );
+        return;
+    }
     // Default to a multi-thread runtime so the background sender + in-flight
     // produce tasks can run concurrently with the send loop (better pipelining).
     // Set KACRAB_BENCH_CURRENT_THREAD=1 to force the old single-thread runtime.
@@ -87,12 +98,14 @@ fn main() {
             reporting_interval.as_millis()
         );
         if split_probe_enabled() {
+            let probe = resolved_split_probe_config();
             println!(
-                "split probe enabled: batch.size={SPLIT_PROBE_BATCH_SIZE}, \
-                 record_size={SPLIT_PROBE_VALUE_SIZE}, \
-                 max.request.size={SPLIT_PROBE_MAX_REQUEST_SIZE} (default, must not bind first), \
-                 topic must be created with \
-                 max.message.bytes={SPLIT_PROBE_TOPIC_MAX_MESSAGE_BYTES}"
+                "split probe enabled: batch.size={}, record_size={}, max.request.size={} (must \
+                 not bind first), topic must be created with max.message.bytes={}",
+                probe.batch_size,
+                probe.value_size,
+                probe.max_request_size,
+                probe.topic_max_message_bytes
             );
         }
         let runs = bench_runs();
@@ -199,22 +212,27 @@ async fn build_producer(config: &ProducerConfig) -> Producer {
             config.bootstrap_servers.as_slice().join(","),
         )
         .set("client.id", config.client_id.as_str());
-    // The split probe needs batch.size several times the probe topic's max.message.bytes
-    // so every full batch is rejected with MESSAGE_TOO_LARGE; an explicit
-    // KACRAB_BENCH_BATCH_SIZE below still wins.
     if split_probe_enabled() {
-        let batch_size = SPLIT_PROBE_BATCH_SIZE.to_string();
-        builder = builder.set("batch.size", batch_size.as_str());
-    }
-    // KACRAB_BENCH_BATCH_SIZE overrides batch.size to confirm whether throughput is
-    // round-trip/pipelining bound (more records per request -> higher rate if so).
-    if let Ok(batch_size) = env::var("KACRAB_BENCH_BATCH_SIZE") {
-        builder = builder.set("batch.size", batch_size.as_str());
-    }
-    // KACRAB_BENCH_MAX_REQUEST_SIZE lifts the 1 MiB default so large-record runs
-    // with a bigger batch.size do not trip RecordTooLarge on coalesced requests.
-    if let Ok(max_request_size) = env::var("KACRAB_BENCH_MAX_REQUEST_SIZE") {
-        builder = builder.set("max.request.size", max_request_size.as_str());
+        // The probe owns both sizing knobs that bind: batch.size several times the probe
+        // topic's max.message.bytes so every full batch is rejected with MESSAGE_TOO_LARGE,
+        // and max.request.size high enough that the broker limit binds before the client
+        // one. KACRAB_BENCH_BATCH_SIZE / KACRAB_BENCH_MAX_REQUEST_SIZE are folded into the
+        // probe config, so an override that would defeat the probe is rejected there
+        // instead of being applied here.
+        for (key, value) in split_probe_producer_settings(&resolved_split_probe_config()) {
+            builder = builder.set(key, value.as_str());
+        }
+    } else {
+        // KACRAB_BENCH_BATCH_SIZE overrides batch.size to confirm whether throughput is
+        // round-trip/pipelining bound (more records per request -> higher rate if so).
+        if let Ok(batch_size) = env::var("KACRAB_BENCH_BATCH_SIZE") {
+            builder = builder.set("batch.size", batch_size.as_str());
+        }
+        // KACRAB_BENCH_MAX_REQUEST_SIZE lifts the 1 MiB default so large-record runs
+        // with a bigger batch.size do not trip RecordTooLarge on coalesced requests.
+        if let Ok(max_request_size) = env::var("KACRAB_BENCH_MAX_REQUEST_SIZE") {
+            builder = builder.set("max.request.size", max_request_size.as_str());
+        }
     }
     if env::var("KACRAB_BENCH_ACKS1").is_ok() {
         builder = builder.set("acks", "1").set("enable.idempotence", "false");
@@ -605,6 +623,141 @@ fn large_payload_scenario() -> Scenario {
 fn split_probe_enabled() -> bool {
     env::var("KACRAB_BENCH_SPLIT_PROBE")
         .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+/// Every sizing value the split probe binds: what the producer is configured with, what the
+/// Java pass is configured with, and what the probe topic is created with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SplitProbeConfig {
+    messages: usize,
+    value_size: usize,
+    batch_size: usize,
+    max_request_size: usize,
+    topic_max_message_bytes: usize,
+}
+
+/// Operator overrides for the values the probe binds. Each one replaces a value that
+/// configures the run, so each one is validated against the probe invariants.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SplitProbeOverrides {
+    batch_size: Option<usize>,
+    max_request_size: Option<usize>,
+    topic_max_message_bytes: Option<usize>,
+}
+
+fn split_probe_overrides() -> Result<SplitProbeOverrides, String> {
+    Ok(SplitProbeOverrides {
+        batch_size: env_byte_count("KACRAB_BENCH_BATCH_SIZE")?,
+        max_request_size: env_byte_count("KACRAB_BENCH_MAX_REQUEST_SIZE")?,
+        topic_max_message_bytes: env_byte_count("KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES")?,
+    })
+}
+
+fn env_byte_count(key: &str) -> Result<Option<usize>, String> {
+    match env::var(key) {
+        Err(_error) => Ok(None),
+        Ok(value) => value
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|_error| format!("{key}={value} is not a byte count")),
+    }
+}
+
+/// Resolves the probe sizing from the values that actually bind and rejects any override
+/// that would stop the probe from probing.
+fn split_probe_config(
+    kafka_max_request_size: usize,
+    overrides: SplitProbeOverrides,
+) -> Result<SplitProbeConfig, String> {
+    let config = SplitProbeConfig {
+        messages: SPLIT_PROBE_MESSAGES,
+        value_size: SPLIT_PROBE_VALUE_SIZE,
+        batch_size: overrides.batch_size.unwrap_or(SPLIT_PROBE_BATCH_SIZE),
+        max_request_size: overrides.max_request_size.unwrap_or(kafka_max_request_size),
+        topic_max_message_bytes: overrides
+            .topic_max_message_bytes
+            .unwrap_or(SPLIT_PROBE_TOPIC_MAX_MESSAGE_BYTES),
+    };
+    config.validate()?;
+    Ok(config)
+}
+
+impl SplitProbeConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.value_size >= self.topic_max_message_bytes {
+            return Err(format!(
+                "split probe: record size {} must stay below the probe topic's max.message.bytes \
+                 {}, otherwise a record is oversize on its own and the batch is unsplittable \
+                 (KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES)",
+                self.value_size, self.topic_max_message_bytes
+            ));
+        }
+        if self.topic_max_message_bytes >= self.batch_size {
+            return Err(format!(
+                "split probe: the probe topic's max.message.bytes {} must stay below batch.size \
+                 {}, otherwise no batch overflows the broker limit and nothing splits \
+                 (KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES, KACRAB_BENCH_BATCH_SIZE)",
+                self.topic_max_message_bytes, self.batch_size
+            ));
+        }
+        if self.batch_size / self.value_size <= 1 {
+            return Err(format!(
+                "split probe: batch.size {} must hold more than one {}-byte record, otherwise the \
+                 oversize batch cannot be split (KACRAB_BENCH_BATCH_SIZE)",
+                self.batch_size, self.value_size
+            ));
+        }
+        if self.batch_size >= self.max_request_size {
+            return Err(format!(
+                "split probe: batch.size {} must stay below max.request.size {}, otherwise the \
+                 client rejects the batch with RecordTooLarge before the broker sees it \
+                 (KACRAB_BENCH_BATCH_SIZE, KACRAB_BENCH_MAX_REQUEST_SIZE)",
+                self.batch_size, self.max_request_size
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The producer settings the probe applies — the values the sizing invariants are about.
+fn split_probe_producer_settings(config: &SplitProbeConfig) -> [(&'static str, String); 2] {
+    [
+        ("batch.size", config.batch_size.to_string()),
+        ("max.request.size", config.max_request_size.to_string()),
+    ]
+}
+
+/// KEY=VALUE dump consumed by `producer_default_matrix.sh` so the Java pass and the probe
+/// topic are configured from the same values as the kacrab pass.
+fn split_probe_config_dump(config: &SplitProbeConfig) -> String {
+    let mut dump = String::new();
+    for (key, value) in [
+        ("SPLIT_PROBE_MESSAGES", config.messages),
+        ("SPLIT_PROBE_RECORD_SIZE", config.value_size),
+        ("SPLIT_PROBE_BATCH_SIZE", config.batch_size),
+        ("SPLIT_PROBE_MAX_REQUEST_SIZE", config.max_request_size),
+        (
+            "SPLIT_PROBE_MAX_MESSAGE_BYTES",
+            config.topic_max_message_bytes,
+        ),
+    ] {
+        writeln!(dump, "{key}={value}").expect("writing to a String cannot fail");
+    }
+    dump
+}
+
+fn resolved_split_probe_config() -> SplitProbeConfig {
+    // The client limit that binds is kacrab's own effective max.request.size, read through
+    // the public producer config rather than copied into this file.
+    let kafka_max_request_size = kafka_max_request_size(bootstrap_addr());
+    split_probe_overrides()
+        .and_then(|overrides| split_probe_config(kafka_max_request_size, overrides))
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn kafka_max_request_size(bootstrap: SocketAddr) -> usize {
+    usize::try_from(benchmark_producer_config(bootstrap).max_request_size.get())
+        .expect("max.request.size should fit in usize")
 }
 
 fn split_probe_scenario() -> Scenario {
@@ -1285,6 +1438,7 @@ fn average_counter(total: u64, count: u64) -> f64 {
 #[cfg(test)]
 mod tests {
     use std::{
+        net::SocketAddr,
         sync::Arc,
         time::{Duration, Instant},
     };
@@ -1293,11 +1447,12 @@ mod tests {
 
     use super::{
         BENCH_RUNS, BenchmarkResult, DeliveryMode, LatencySummary, ProducerMetricsSnapshot,
-        ProducerPerformanceStats, ProducerPerformanceStatsHandle, SPLIT_PROBE_BATCH_SIZE,
-        SPLIT_PROBE_MAX_REQUEST_SIZE, SPLIT_PROBE_MESSAGES, SPLIT_PROBE_TOPIC_MAX_MESSAGE_BYTES,
-        Scenario, TrackedCompletionStart, benchmark_api_for, benchmark_producer_config,
+        ProducerPerformanceStats, ProducerPerformanceStatsHandle, Scenario, SplitProbeOverrides,
+        TrackedCompletionStart, benchmark_api_for, benchmark_producer_config,
         format_average_counter_line, format_effective_config_snapshot, format_result_line,
-        latency_summary, record_tracked_callback_completion, scenarios, split_probe_scenario,
+        kafka_max_request_size, latency_summary, record_tracked_callback_completion, scenarios,
+        split_probe_config, split_probe_config_dump, split_probe_producer_settings,
+        split_probe_scenario,
     };
 
     #[test]
@@ -1495,19 +1650,118 @@ mod tests {
         assert!(!line.contains("dispatch_latency"));
     }
 
+    fn probe_bootstrap() -> SocketAddr {
+        "127.0.0.1:9092".parse().expect("bootstrap address")
+    }
+
+    fn numeric_setting(settings: &[(&str, String)], key: &str) -> usize {
+        settings
+            .iter()
+            .find(|(name, _value)| *name == key)
+            .unwrap_or_else(|| panic!("the split probe should configure {key}"))
+            .1
+            .parse()
+            .expect("split probe producer settings should be byte counts")
+    }
+
     #[test]
     fn split_probe_scenario_sizes_multi_record_batches_over_only_the_broker_limit() {
+        let kafka_limit = kafka_max_request_size(probe_bootstrap());
+        let config = split_probe_config(kafka_limit, SplitProbeOverrides::default())
+            .expect("the default split probe sizing should satisfy the probe invariants");
         let scenario = split_probe_scenario();
+        let settings = split_probe_producer_settings(&config);
+        let batch_size = numeric_setting(&settings, "batch.size");
+        let max_request_size = numeric_setting(&settings, "max.request.size");
 
+        assert_eq!(scenario.messages, config.messages);
+        assert_eq!(scenario.value_size, config.value_size);
         // A record that is oversize on its own cannot be split (records.len() <= 1), so the
-        // probe payload must stay below the topic limit.
-        assert!(scenario.value_size < SPLIT_PROBE_TOPIC_MAX_MESSAGE_BYTES);
-        // The full batch must overflow the topic limit, and must hold more than one record.
-        const { assert!(SPLIT_PROBE_TOPIC_MAX_MESSAGE_BYTES < SPLIT_PROBE_BATCH_SIZE) }
-        assert!(SPLIT_PROBE_BATCH_SIZE / scenario.value_size > 1);
-        // The client-side max.request.size must not bind before the broker limit.
-        const { assert!(SPLIT_PROBE_BATCH_SIZE < SPLIT_PROBE_MAX_REQUEST_SIZE) }
-        assert_eq!(scenario.messages, SPLIT_PROBE_MESSAGES);
+        // payload must stay below the limit the probe topic is actually created with.
+        assert!(scenario.value_size < config.topic_max_message_bytes);
+        // The batch.size the producer is actually configured with must overflow that topic
+        // limit and must hold more than one record.
+        assert!(config.topic_max_message_bytes < batch_size);
+        assert!(batch_size / scenario.value_size > 1);
+        // The max.request.size the producer actually uses must not bind before the broker
+        // limit, and it is kacrab's own effective default rather than a copy kept here.
+        assert!(batch_size < max_request_size);
+        assert_eq!(max_request_size, kafka_limit);
+    }
+
+    #[test]
+    fn split_probe_rejects_a_broker_limit_below_the_record_size() {
+        let error = split_probe_config(
+            kafka_max_request_size(probe_bootstrap()),
+            SplitProbeOverrides {
+                topic_max_message_bytes: Some(1024),
+                ..SplitProbeOverrides::default()
+            },
+        )
+        .expect_err("a max.message.bytes below the record size must be rejected");
+
+        assert!(
+            error.contains("KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES"),
+            "{error}"
+        );
+        assert!(error.contains("unsplittable"), "{error}");
+    }
+
+    #[test]
+    fn split_probe_rejects_a_broker_limit_no_batch_can_overflow() {
+        let error = split_probe_config(
+            kafka_max_request_size(probe_bootstrap()),
+            SplitProbeOverrides {
+                topic_max_message_bytes: Some(512 * 1024),
+                ..SplitProbeOverrides::default()
+            },
+        )
+        .expect_err("a max.message.bytes above batch.size must be rejected");
+
+        assert!(
+            error.contains("no batch overflows the broker limit"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn split_probe_rejects_a_client_limit_that_binds_before_the_broker() {
+        let error = split_probe_config(64 * 1024, SplitProbeOverrides::default())
+            .expect_err("a max.request.size below batch.size must be rejected");
+
+        assert!(error.contains("RecordTooLarge"), "{error}");
+    }
+
+    #[test]
+    fn split_probe_config_dump_carries_every_value_the_matrix_script_reads() {
+        let config = split_probe_config(
+            kafka_max_request_size(probe_bootstrap()),
+            SplitProbeOverrides::default(),
+        )
+        .expect("the default split probe sizing should satisfy the probe invariants");
+
+        let dump = split_probe_config_dump(&config);
+        let entries: Vec<(&str, usize)> = dump
+            .lines()
+            .map(|line| {
+                let (key, value) = line.split_once('=').expect("dump lines are KEY=VALUE");
+                (key, value.parse().expect("dump values are byte counts"))
+            })
+            .collect();
+
+        assert_eq!(
+            entries,
+            vec![
+                ("SPLIT_PROBE_MESSAGES", config.messages),
+                ("SPLIT_PROBE_RECORD_SIZE", config.value_size),
+                ("SPLIT_PROBE_BATCH_SIZE", config.batch_size),
+                ("SPLIT_PROBE_MAX_REQUEST_SIZE", config.max_request_size),
+                (
+                    "SPLIT_PROBE_MAX_MESSAGE_BYTES",
+                    config.topic_max_message_bytes
+                ),
+            ]
+        );
     }
 
     #[test]
