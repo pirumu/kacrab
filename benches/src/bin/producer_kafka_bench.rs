@@ -1494,7 +1494,7 @@ mod tests {
                 max_ms: 5.0,
             }),
             java_perf: None,
-            metrics: empty_metrics(),
+            metrics: ProducerMetricsSnapshot::ZERO,
             metrics_enabled: false,
             delivery_mode: DeliveryMode::PerRecord,
             elapsed: Duration::from_secs(1),
@@ -1524,7 +1524,7 @@ mod tests {
             outer_chunks: 1_000,
             latency: None,
             java_perf: Some(stats.summary(Duration::from_secs(1))),
-            metrics: empty_metrics(),
+            metrics: ProducerMetricsSnapshot::ZERO,
             metrics_enabled: false,
             delivery_mode: DeliveryMode::PerRecord,
             elapsed: Duration::from_secs(1),
@@ -1551,7 +1551,7 @@ mod tests {
         let stats = ProducerPerformanceStats::new(1_000, Duration::from_secs(5), false);
         let started = Instant::now();
         let _report = stats.record_completion(started, started + Duration::from_millis(5), 10);
-        let mut metrics = empty_metrics();
+        let mut metrics = ProducerMetricsSnapshot::ZERO;
         metrics.produce_request_count = 2;
         metrics.produce_request_bytes = 2_000;
         metrics.produce_batch_count = 4;
@@ -1595,7 +1595,7 @@ mod tests {
 
     #[test]
     fn average_counter_line_reports_run_averaged_parity_schema() {
-        let mut first = empty_metrics();
+        let mut first = ProducerMetricsSnapshot::ZERO;
         first.produce_request_count = 2;
         first.produce_request_bytes = 2_000;
         first.produce_batch_count = 4;
@@ -1610,7 +1610,7 @@ mod tests {
         first.average_batch_fill_ratio = 0.5;
         first.average_compression_ratio = 0.5;
 
-        let mut second = empty_metrics();
+        let mut second = ProducerMetricsSnapshot::ZERO;
         second.produce_request_count = 4;
         second.produce_request_bytes = 4_400;
         second.produce_batch_count = 6;
@@ -1647,7 +1647,7 @@ mod tests {
 
     #[test]
     fn average_counter_line_does_not_saturate_large_request_bytes() {
-        let mut metrics = empty_metrics();
+        let mut metrics = ProducerMetricsSnapshot::ZERO;
         metrics.produce_request_count = 200_000;
         metrics.produce_request_bytes = 6_000_000_000;
         metrics.produce_request_payload_bytes = 5_800_000_000;
@@ -1658,10 +1658,6 @@ mod tests {
 
         assert!(line.contains("request_size_avg=30000.000"));
         assert!(line.contains("record_batch_payload_bytes_per_request_avg=29000.000"));
-    }
-
-    const fn empty_metrics() -> ProducerMetricsSnapshot {
-        ProducerMetricsSnapshot::ZERO
     }
 
     fn assert_float_eq(actual: f64, expected: f64) {
