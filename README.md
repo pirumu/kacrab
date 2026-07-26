@@ -282,17 +282,20 @@ Read the numbers with the caveats in mind:
 - Single-node, RF=1, broker co-located with the client: this is a
   client-efficiency signal, not a production throughput claim. 10-byte rows
   inflate records/sec; the byte-rate columns are the more useful comparison.
-- Latency is closed-loop saturation latency, not open-loop SLA latency. Java
-  keeps a lower typical producer latency on the 16-partition workload. That is
-  a pipeline-depth tradeoff (`max.in.flight=1` brings kacrab's p99 to ~2 ms at
-  the same throughput). At 1-3 partitions, kacrab latency is at or below Java's.
-- **The producer latency figures are pending a re-measurement.** They were taken
-  while a backpressure retry in the bench reset the per-record latency clock, so
-  buffer-wait time was excluded on kacrab's side while Java's blocking `send()`
-  counts it. The bias favoured kacrab, so the real latency gap is wider than the
-  numbers above, not narrower. The bench has been corrected; the figures have not
-  yet been re-run. Throughput, byte-rate, CPU and RSS are unaffected. See
-  [`benches/README.md`](benches/README.md).
+- **The producer latency figures are withdrawn pending re-measurement, and no
+  conclusion should be drawn from them.** They were taken while a backpressure
+  retry in the bench reset the per-record latency clock, so time spent waiting for
+  buffer memory was dropped on kacrab's side while Java's blocking `send()` counts
+  it in full. The distortion is not uniform: it scales with how much a run hits
+  backpressure, so the 10 KiB runs — where large records fill the 32 MiB buffer
+  far faster than the drain empties it — are affected most, and the 10 B runs
+  least. That is the opposite of convenient, because the 10 KiB runs are the ones
+  where kacrab looked better on latency. Earlier claims here that the gap was a
+  pipeline-depth tradeoff, or that kacrab was at or below Java's latency at 1-3
+  partitions, rested on those numbers and are retracted until a re-run settles
+  them. Latency is also closed-loop saturation latency, not open-loop SLA latency.
+  Throughput, byte-rate, CPU and RSS never depended on the per-record start
+  timestamp and are unaffected. See [`benches/README.md`](benches/README.md).
 - Every kacrab run above had zero retries/errors, with fully correct
   idempotence.
 

@@ -53,7 +53,21 @@ that amortizes over a long-lived producer; the peak-RSS gap is steady-state.
 
 ## The latency tradeoff
 
-Java keeps a lower typical latency; kacrab trades it for pipeline depth.
+> **The latency rows above are withdrawn pending a re-run, and this section is
+> hypothesis rather than finding.** They were measured while a backpressure retry
+> in the harness reset the per-record latency clock, so time spent waiting for
+> producer buffer memory was dropped on kacrab's side, while Java's `send()`
+> blocks inside its own measured window and counts that wait in full. The
+> distortion scales with how hard a run hits backpressure, so it is worst on the
+> 100K × 10 KiB rows — which are precisely the rows where kacrab appears to win —
+> and mildest on the 5M × 10B rows. Reading the tables pessimistically does not
+> correct for it, because the bias is uneven. The harness is fixed; the numbers
+> are not yet re-measured. Throughput, byte-rate, CPU and RSS never depended on
+> that timestamp and stand.
+
+Java keeps a lower typical latency on the 10B workload; the explanation below was
+written against the stale accounting and is retained as a hypothesis to re-test,
+not as an established cause.
 
 - At `max.in.flight=5` kacrab fills the per-partition pipeline (higher p99 on a
   single low-RTT broker, where the extra depth only adds queue latency). At

@@ -123,12 +123,16 @@ includes buffer-wait time, and kacrab's must too. Restarting the clock per attem
 would discard the most time from exactly the records that waited longest, hiding
 the p99/p99.9/max tail where congestion is worst.
 
-> **The producer latency rows below predate this correction.** They were measured
-> while a backpressure retry reset the per-record clock, so they *understate*
-> kacrab's latency — the bias ran in kacrab's favour and kacrab still lost the
-> latency comparison. Throughput, byte-rate, CPU and RSS numbers are unaffected
-> (they never depended on the per-record start timestamp). The latency rows need a
-> re-run against a real broker before they can be quoted again.
+> **The producer latency rows below predate this correction and are withdrawn.**
+> They were measured while a backpressure retry reset the per-record clock, so
+> they understate kacrab's latency by however much buffer wait each run incurred.
+> The distortion is *not* uniform, so it cannot be corrected by reading the rows
+> pessimistically: it scales with how hard a run hits backpressure, which makes
+> the 100K x 10 KiB rows the least trustworthy and the 5M x 10 B rows the most —
+> and 10 KiB is exactly where kacrab appears to win on latency. Any comparative
+> latency conclusion drawn from these tables is unsupported until they are re-run
+> on the corrected bench against a real broker. Throughput, byte-rate, CPU and RSS
+> never depended on the per-record start timestamp and are unaffected.
 
 By default the binary sets only `bootstrap.servers` and `client.id` and relies
 on the producer's normal Kafka-compatible defaults (`acks=all`,
@@ -372,8 +376,12 @@ kafka-producer-perf-test.sh --topic kacrab-16p --num-records 5000000 \
 
 kacrab wins throughput (about +25% over Java) while staying fully
 idempotent-correct, but Java has lower typical latency on this 16-partition
-workload. The gap is a tunable tradeoff plus a shared broker artifact, not a
-client cost:
+workload. The two explanations below were written against the stale latency
+accounting and are **hypotheses, not findings** — the "not a client cost"
+conclusion in particular is not established, and a re-run may not support it.
+This 10 B workload is the least distorted of the set (10-byte records barely
+pressure the 32 MiB buffer, so few records took the backpressure retry that reset
+the clock), which is why the numbers are kept here at all:
 
 - **Pipeline depth.** kacrab's synchronous send fills the per-partition pipeline
   toward `max.in.flight=5`. At `max.in.flight=1` kacrab's p99 drops to ~2 ms at
@@ -386,18 +394,27 @@ client cost:
   (kacrab p99.9 ~10 ms); at depth 1 the single slot blocks and p99.9 jumps to
   ~100 ms.
 
-On a single partition (`kacrab-1p`) kacrab latency is ~0.08 ms avg — below
-Java's. Lower `max.in.flight.requests.per.connection` / `linger.ms` for lower
-single-broker latency; the gap shrinks in production (broker off the client
-machine, real network RTT).
+On a single partition (`kacrab-1p`) kacrab measured ~0.08 ms avg — below Java's,
+though that comparison carries the same stale-accounting caveat. Lower
+`max.in.flight.requests.per.connection` / `linger.ms` for lower single-broker
+latency; the gap shrinks in production (broker off the client machine, real
+network RTT).
 
 ### Throughput + latency (100K x 10 KiB, 3 partitions, default `batch.size`)
 
 | Metric | kacrab | Java `kafka-producer-perf-test` |
 | --- | ---: | ---: |
 | Throughput | ~55.5-58.4K rec/sec (~542-570 MB/sec) | 42.7-46.4K rec/sec (417-453 MB/sec) |
-| Latency avg / p99 | ~36 ms / ~78 ms | ~43 ms / ~92 ms |
+| Latency avg / p99 | ~36 ms / ~78 ms ⚠️ | ~43 ms / ~92 ms |
 | retries / errors | 0 / 0 | 0 / 0 |
+
+⚠️ **This latency row is the most distorted of the whole set — do not read it as
+kacrab beating Java.** At ~570 MB/sec of 10 KiB records the 32 MiB producer
+buffer refills far faster than the drain empties it, so this scenario is
+backpressure-saturated: a large share of these records went through the retry
+path that used to reset the per-record clock, and their buffer wait is missing
+from the ~36 ms / ~78 ms. Java's ~43 ms / ~92 ms includes its full blocking wait.
+The apparent kacrab win here may not survive a re-run on the corrected bench.
 
 A 10 KiB record exceeds half of the default 16 KiB `batch.size`, so every batch
 holds one record; throughput stays high because each `acks=all` produce request
