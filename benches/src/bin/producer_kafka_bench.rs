@@ -316,42 +316,62 @@ async fn run_per_record_tracked_send_loop(
     let sync_send = env::var("KACRAB_BENCH_SYNC_SEND").is_ok();
     let mut sent = 0usize;
     while sent < run.scenario.messages {
+        // Java parity, and the reason this timestamp lives OUTSIDE the retry loop
+        // below. `ProducerPerformance` captures `sendStartMs` once per record
+        // (ProducerPerformance.java:102) and calls `producer.send(...)` exactly once
+        // — its loop at :91 has no retry. `KafkaProducer.send` then BLOCKS inside
+        // that measured window whenever the accumulator is full
+        // (KafkaProducer.java:1029 -> RecordAccumulator.append -> BufferPool.allocate
+        // -> BufferPool.java:149 `moreMemory.await(...)`, bounded by `max.block.ms`),
+        // so Java's per-record latency INCLUDES time spent waiting for buffer memory.
+        //
+        // kacrab's `send_with_callback` returns `Backpressure` instead of blocking, so
+        // that same wait happens in the retry loop below. Taking the timestamp per
+        // ATTEMPT would discard it — and discard the most from exactly the records that
+        // waited longest, truncating the p99/p99.9/max tail where congestion is worst.
+        // One `Instant::now()` per record, never per attempt: this is also strictly
+        // fewer clock reads than a per-attempt timestamp under backpressure.
         let send_started = Instant::now();
-        let stats = java_perf.clone();
-        let value_size = value.len();
-        let callback = move |result: kacrab::producer::Result<RecordMetadata>| {
-            let completed = Instant::now();
-            if let Some(line) = record_tracked_callback_completion(
-                &result,
-                TrackedCompletionStart::Single(send_started),
-                &stats,
-                completed,
-                value_size,
-            ) {
-                println!("{line}");
+        loop {
+            let stats = java_perf.clone();
+            let value_size = value.len();
+            let callback = move |result: kacrab::producer::Result<RecordMetadata>| {
+                let completed = Instant::now();
+                if let Some(line) = record_tracked_callback_completion(
+                    &result,
+                    TrackedCompletionStart::Single(send_started),
+                    &stats,
+                    completed,
+                    value_size,
+                ) {
+                    println!("{line}");
+                }
+                if result.is_err() {
+                    eprintln!("producer callback reported delivery error: {result:?}");
+                }
+            };
+            // `send_with_callback` is now synchronous (Java-style): it appends inline
+            // when the partition resolves synchronously and only hands the rare record
+            // (cold metadata / buffer-full) to the internal FIFO drain. No per-record
+            // `.await`, no manual partition assignment.
+            let record = benchmark_record(Arc::clone(&topic), sent).value(value.clone());
+            match producer.send_with_callback(record, callback) {
+                Ok(_delivery) => {
+                    sent = sent.saturating_add(1);
+                    break;
+                },
+                // Closed-loop backpressure. The producer buffer (Backpressure) or a
+                // broker connection's in-flight queue (Wire(Backpressure)) is full —
+                // common with large records, which fill the 32 MiB buffer long before
+                // the drain catches up. Wait for the drain to free space and retry the
+                // same record instead of flooding open-loop and panicking. This caps
+                // the send rate at the real drain rate; the wait stays inside
+                // `send_started`, matching what Java's blocking `send()` accrues.
+                Err(ProducerError::Backpressure | ProducerError::Wire(WireError::Backpressure)) => {
+                    tokio::time::sleep(Duration::from_micros(50)).await;
+                },
+                Err(error) => panic!("benchmark send failed: {error:?}"),
             }
-            if result.is_err() {
-                eprintln!("producer callback reported delivery error: {result:?}");
-            }
-        };
-        // `send_with_callback` is now synchronous (Java-style): it appends inline
-        // when the partition resolves synchronously and only hands the rare record
-        // (cold metadata / buffer-full) to the internal FIFO drain. No per-record
-        // `.await`, no manual partition assignment.
-        let record = benchmark_record(Arc::clone(&topic), sent).value(value.clone());
-        match producer.send_with_callback(record, callback) {
-            Ok(_delivery) => sent = sent.saturating_add(1),
-            // Closed-loop backpressure. The producer buffer (Backpressure) or a
-            // broker connection's in-flight queue (Wire(Backpressure)) is full —
-            // common with large records, which fill the 32 MiB buffer long before
-            // the drain catches up. Wait for the drain to free space and retry the
-            // same record instead of flooding open-loop and panicking. This caps
-            // the send rate at the real drain rate and keeps `send_started`
-            // measuring service time, not an unbounded enqueue backlog.
-            Err(ProducerError::Backpressure | ProducerError::Wire(WireError::Backpressure)) => {
-                tokio::time::sleep(Duration::from_micros(50)).await;
-            },
-            Err(error) => panic!("benchmark send failed: {error:?}"),
         }
     }
     if sync_send {

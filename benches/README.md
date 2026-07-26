@@ -108,9 +108,27 @@ session, and one outer API chunk outside the measured window, then sends
 records through the Java-style public producer path: one synchronous
 `send_with_callback` call per record (the send API is a plain `fn`, appending
 inline when the partition resolves synchronously), while the accumulator/sender
-groups records into Produce requests internally. On `Backpressure` the loop waits for the drain and retries the
-same record (closed-loop), so latency measures service time rather than an
-unbounded enqueue backlog.
+groups records into Produce requests internally. On `Backpressure` the loop waits
+for the drain and retries the same record (closed-loop), which caps the send rate
+at the real drain rate instead of flooding open-loop.
+
+The per-record latency timestamp is taken **once per record, before the first
+attempt** — it is not reset by a backpressure retry. That is what makes the
+comparison honest: Java never returns "buffer full" to the caller at all. Its
+`send()` blocks inside the measured window (`KafkaProducer.java:1029` →
+`BufferPool.allocate` → `BufferPool.java:149`, bounded by `max.block.ms`), and
+`ProducerPerformance` captures `sendStartMs` once (`ProducerPerformance.java:102`)
+and sends each record exactly once (`:91`, no retry loop). So Java's latency
+includes buffer-wait time, and kacrab's must too. Restarting the clock per attempt
+would discard the most time from exactly the records that waited longest, hiding
+the p99/p99.9/max tail where congestion is worst.
+
+> **The producer latency rows below predate this correction.** They were measured
+> while a backpressure retry reset the per-record clock, so they *understate*
+> kacrab's latency — the bias ran in kacrab's favour and kacrab still lost the
+> latency comparison. Throughput, byte-rate, CPU and RSS numbers are unaffected
+> (they never depended on the per-record start timestamp). The latency rows need a
+> re-run against a real broker before they can be quoted again.
 
 By default the binary sets only `bootstrap.servers` and `client.id` and relies
 on the producer's normal Kafka-compatible defaults (`acks=all`,
@@ -305,6 +323,11 @@ same machine (`127.0.0.1:9092`), through the public producer API at the
 compression. Client and broker share the host (no CPU pinning or page-cache
 isolation), so treat these as local checkpoints, not production acceptance
 numbers.
+
+> **Latency rows in this section are stale.** They were measured before the
+> per-record latency clock was fixed to survive backpressure retries (see the
+> Producer Benchmark section above), so kacrab's latency is understated. Every
+> other column — throughput, byte rate, retries/errors, CPU, RSS — is unaffected.
 
 Benchmark host:
 
