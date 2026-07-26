@@ -2000,9 +2000,6 @@ mod tests {
             record_batch_split_count: 1,
             produce_record_count: 3,
             produce_retry_count: 1,
-            produce_error_count: 0,
-            requeue_count: 0,
-            in_flight_stall_count: 0,
             queue_depth_bytes: 128,
             queue_depth_records: 4,
             buffer_available_bytes: 512,
@@ -2013,18 +2010,7 @@ mod tests {
             average_compression_ratio: 1.0,
             flush_count: 1,
             flush_total_latency: Duration::from_millis(2),
-            metadata_wait_count: 0,
-            metadata_wait_total_latency: Duration::ZERO,
-            transaction_init_count: 0,
-            transaction_init_total_latency: Duration::ZERO,
-            transaction_begin_count: 0,
-            transaction_begin_total_latency: Duration::ZERO,
-            send_offsets_to_transaction_count: 0,
-            send_offsets_to_transaction_total_latency: Duration::ZERO,
-            transaction_commit_count: 0,
-            transaction_commit_total_latency: Duration::ZERO,
-            transaction_abort_count: 0,
-            transaction_abort_total_latency: Duration::ZERO,
+            ..ProducerMetricsSnapshot::ZERO
         };
 
         let payload = snapshot.to_otlp_metrics_data(42);
