@@ -157,7 +157,9 @@ struct BenchmarkRunSummary {
 async fn run_scenario(run: BenchmarkRun<'_>) -> BenchmarkRunSummary {
     let value = payload_value(run.scenario.value_size);
     let value_size = value.len();
-    let producer_config = benchmark_producer_config(run.bootstrap);
+    // Print the config that actually binds — defaults plus every benchmark override,
+    // including the split probe's batch.size. Once per run, before the measured window.
+    let producer_config = effective_producer_config(run.bootstrap);
     println!("{}", format_effective_config_snapshot(&producer_config));
     let mut producer = build_producer(&producer_config).await;
     if env::var("KACRAB_BENCH_NO_METRICS").is_err() {
@@ -199,10 +201,101 @@ fn benchmark_client_config(bootstrap: SocketAddr) -> ClientConfig {
         .set("client.id", "kacrab-producer-kafka-bench")
 }
 
+/// kacrab's parsed defaults for this bootstrap, with no benchmark override applied.
+///
+/// Deliberately override-free: `kafka_max_request_size` reads kacrab's *own* effective
+/// `max.request.size` out of this to validate the probe invariants, so folding
+/// `KACRAB_BENCH_MAX_REQUEST_SIZE` in here would make the probe validate an override
+/// against itself. Use [`effective_producer_config`] for the config the run binds.
 fn benchmark_producer_config(bootstrap: SocketAddr) -> ProducerConfig {
     benchmark_client_config(bootstrap)
         .producer_config()
         .expect("benchmark producer config should parse")
+}
+
+/// The config the run actually binds: kacrab's defaults plus every benchmark override.
+///
+/// This is what the `effective producer config:` line reports. It is built from the same
+/// override list `build_producer` applies, so the log cannot claim a `batch.size` the
+/// producer does not run with (the split probe raises it to 256 KiB).
+fn effective_producer_config(bootstrap: SocketAddr) -> ProducerConfig {
+    producer_config_with_overrides(bootstrap, &benchmark_producer_overrides())
+}
+
+fn producer_config_with_overrides(
+    bootstrap: SocketAddr,
+    overrides: &[(&'static str, String)],
+) -> ProducerConfig {
+    let mut config = benchmark_client_config(bootstrap);
+    for (key, value) in overrides {
+        config = config.set(*key, value.as_str());
+    }
+    config
+        .producer_config()
+        .expect("benchmark producer config should parse")
+}
+
+/// Every producer setting the benchmark overrides on top of kacrab's defaults.
+///
+/// Resolved once per run, outside the measured send loop. `build_producer` applies exactly
+/// this list and `effective_producer_config` parses exactly this list, which is what keeps
+/// the printed config and the built producer from drifting apart.
+fn benchmark_producer_overrides() -> Vec<(&'static str, String)> {
+    let split_probe = split_probe_enabled().then(resolved_split_probe_config);
+    benchmark_producer_overrides_from(split_probe.as_ref(), |key| env::var(key).ok())
+}
+
+/// The pure half of [`benchmark_producer_overrides`]: the env-var -> producer-setting
+/// mapping with the lookup injected, so tests pin the mapping without mutating
+/// process-global env (which would race every other test in this binary).
+fn benchmark_producer_overrides_from(
+    split_probe: Option<&SplitProbeConfig>,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Vec<(&'static str, String)> {
+    let mut overrides = Vec::new();
+    if let Some(probe) = split_probe {
+        // The probe owns both sizing knobs that bind: batch.size several times the probe
+        // topic's max.message.bytes so every full batch is rejected with MESSAGE_TOO_LARGE,
+        // and max.request.size high enough that the broker limit binds before the client
+        // one. KACRAB_BENCH_BATCH_SIZE / KACRAB_BENCH_MAX_REQUEST_SIZE are folded into the
+        // probe config, so an override that would defeat the probe is rejected there
+        // instead of being applied here.
+        overrides.extend(split_probe_producer_settings(probe));
+    } else {
+        // KACRAB_BENCH_BATCH_SIZE overrides batch.size to confirm whether throughput is
+        // round-trip/pipelining bound (more records per request -> higher rate if so).
+        if let Some(batch_size) = lookup("KACRAB_BENCH_BATCH_SIZE") {
+            overrides.push(("batch.size", batch_size));
+        }
+        // KACRAB_BENCH_MAX_REQUEST_SIZE lifts the 1 MiB default so large-record runs
+        // with a bigger batch.size do not trip RecordTooLarge on coalesced requests.
+        if let Some(max_request_size) = lookup("KACRAB_BENCH_MAX_REQUEST_SIZE") {
+            overrides.push(("max.request.size", max_request_size));
+        }
+    }
+    if lookup("KACRAB_BENCH_ACKS1").is_some() {
+        overrides.push(("acks", "1".to_owned()));
+        overrides.push(("enable.idempotence", "false".to_owned()));
+    }
+    // KACRAB_BENCH_NO_ADAPTIVE disables adaptive partitioning to test uniform
+    // round-robin sticky spread across all partitions.
+    if lookup("KACRAB_BENCH_NO_ADAPTIVE").is_some() {
+        overrides.push((
+            "partitioner.adaptive.partitioning.enable",
+            "false".to_owned(),
+        ));
+    }
+    // KACRAB_BENCH_LINGER_MS overrides linger.ms to isolate whether large-record
+    // throughput is linger-bound (1 record/batch waits the full linger).
+    if let Some(linger) = lookup("KACRAB_BENCH_LINGER_MS") {
+        overrides.push(("linger.ms", linger));
+    }
+    // KACRAB_BENCH_BUFFER_MEMORY isolates the buffer-full append spin: a huge buffer
+    // lets every record enqueue without backpressure, so the run measures pure drain.
+    if let Some(buffer) = lookup("KACRAB_BENCH_BUFFER_MEMORY") {
+        overrides.push(("buffer.memory", buffer));
+    }
+    overrides
 }
 
 async fn build_producer(config: &ProducerConfig) -> Producer {
@@ -212,45 +305,8 @@ async fn build_producer(config: &ProducerConfig) -> Producer {
             config.bootstrap_servers.as_slice().join(","),
         )
         .set("client.id", config.client_id.as_str());
-    if split_probe_enabled() {
-        // The probe owns both sizing knobs that bind: batch.size several times the probe
-        // topic's max.message.bytes so every full batch is rejected with MESSAGE_TOO_LARGE,
-        // and max.request.size high enough that the broker limit binds before the client
-        // one. KACRAB_BENCH_BATCH_SIZE / KACRAB_BENCH_MAX_REQUEST_SIZE are folded into the
-        // probe config, so an override that would defeat the probe is rejected there
-        // instead of being applied here.
-        for (key, value) in split_probe_producer_settings(&resolved_split_probe_config()) {
-            builder = builder.set(key, value.as_str());
-        }
-    } else {
-        // KACRAB_BENCH_BATCH_SIZE overrides batch.size to confirm whether throughput is
-        // round-trip/pipelining bound (more records per request -> higher rate if so).
-        if let Ok(batch_size) = env::var("KACRAB_BENCH_BATCH_SIZE") {
-            builder = builder.set("batch.size", batch_size.as_str());
-        }
-        // KACRAB_BENCH_MAX_REQUEST_SIZE lifts the 1 MiB default so large-record runs
-        // with a bigger batch.size do not trip RecordTooLarge on coalesced requests.
-        if let Ok(max_request_size) = env::var("KACRAB_BENCH_MAX_REQUEST_SIZE") {
-            builder = builder.set("max.request.size", max_request_size.as_str());
-        }
-    }
-    if env::var("KACRAB_BENCH_ACKS1").is_ok() {
-        builder = builder.set("acks", "1").set("enable.idempotence", "false");
-    }
-    // KACRAB_BENCH_NO_ADAPTIVE disables adaptive partitioning to test uniform
-    // round-robin sticky spread across all partitions.
-    if env::var("KACRAB_BENCH_NO_ADAPTIVE").is_ok() {
-        builder = builder.set("partitioner.adaptive.partitioning.enable", "false");
-    }
-    // KACRAB_BENCH_LINGER_MS overrides linger.ms to isolate whether large-record
-    // throughput is linger-bound (1 record/batch waits the full linger).
-    if let Ok(linger) = env::var("KACRAB_BENCH_LINGER_MS") {
-        builder = builder.set("linger.ms", linger.as_str());
-    }
-    // KACRAB_BENCH_BUFFER_MEMORY isolates the buffer-full append spin: a huge buffer
-    // lets every record enqueue without backpressure, so the run measures pure drain.
-    if let Ok(buffer) = env::var("KACRAB_BENCH_BUFFER_MEMORY") {
-        builder = builder.set("buffer.memory", buffer.as_str());
+    for (key, value) in benchmark_producer_overrides() {
+        builder = builder.set(key, value.as_str());
     }
     builder
         .build()
@@ -666,21 +722,35 @@ struct SplitProbeOverrides {
 }
 
 fn split_probe_overrides() -> Result<SplitProbeOverrides, String> {
+    split_probe_overrides_from(|key| env::var(key).ok())
+}
+
+/// The pure half of [`split_probe_overrides`]: the env-var -> field mapping with the lookup
+/// injected, so tests pin which variable feeds which field (and the parse-error branch)
+/// without mutating process-global env, which would race every other test in this binary.
+fn split_probe_overrides_from(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<SplitProbeOverrides, String> {
     Ok(SplitProbeOverrides {
-        batch_size: env_byte_count("KACRAB_BENCH_BATCH_SIZE")?,
-        max_request_size: env_byte_count("KACRAB_BENCH_MAX_REQUEST_SIZE")?,
-        topic_max_message_bytes: env_byte_count("KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES")?,
+        batch_size: byte_count_override("KACRAB_BENCH_BATCH_SIZE", &lookup)?,
+        max_request_size: byte_count_override("KACRAB_BENCH_MAX_REQUEST_SIZE", &lookup)?,
+        topic_max_message_bytes: byte_count_override(
+            "KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES",
+            &lookup,
+        )?,
     })
 }
 
-fn env_byte_count(key: &str) -> Result<Option<usize>, String> {
-    match env::var(key) {
-        Err(_error) => Ok(None),
-        Ok(value) => value
+fn byte_count_override(
+    key: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Option<usize>, String> {
+    lookup(key).map_or(Ok(None), |value| {
+        value
             .parse::<usize>()
             .map(Some)
-            .map_err(|_error| format!("{key}={value} is not a byte count")),
-    }
+            .map_err(|_error| format!("{key}={value} is not a byte count"))
+    })
 }
 
 /// Resolves the probe sizing from the values that actually bind and rejects any override
@@ -1469,11 +1539,23 @@ mod tests {
         BENCH_RUNS, BenchmarkResult, DeliveryMode, LatencySummary, ProducerMetricsSnapshot,
         ProducerPerformanceStats, ProducerPerformanceStatsHandle, Scenario, SplitProbeOverrides,
         TrackedCompletionStart, benchmark_api_for, benchmark_producer_config,
-        format_average_counter_line, format_effective_config_snapshot, format_result_line,
-        kafka_max_request_size, latency_summary, record_tracked_callback_completion, scenarios,
-        split_probe_config, split_probe_config_dump, split_probe_producer_settings,
-        split_probe_scenario,
+        benchmark_producer_overrides_from, format_average_counter_line,
+        format_effective_config_snapshot, format_result_line, kafka_max_request_size,
+        latency_summary, producer_config_with_overrides, record_tracked_callback_completion,
+        scenarios, split_probe_config, split_probe_config_dump, split_probe_overrides_from,
+        split_probe_producer_settings, split_probe_scenario,
     };
+
+    /// A stand-in for `env::var` over a fixed table, so the env-var -> field/setting mappings
+    /// are tested without touching process-global env.
+    fn lookup_from(entries: Vec<(&'static str, &'static str)>) -> impl Fn(&str) -> Option<String> {
+        move |key| {
+            entries
+                .iter()
+                .find(|(name, _value)| *name == key)
+                .map(|(_name, value)| (*value).to_owned())
+        }
+    }
 
     #[test]
     fn scenarios_are_fixed_five_million_record_payloads() {
@@ -1782,6 +1864,134 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn split_probe_overrides_map_each_env_var_to_its_own_field() {
+        let overrides = split_probe_overrides_from(lookup_from(vec![
+            ("KACRAB_BENCH_BATCH_SIZE", "111"),
+            ("KACRAB_BENCH_MAX_REQUEST_SIZE", "222"),
+            ("KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES", "333"),
+        ]))
+        .expect("byte counts should parse");
+
+        // Distinct values on purpose: swapping any two lookups fails this assertion.
+        assert_eq!(
+            overrides,
+            SplitProbeOverrides {
+                batch_size: Some(111),
+                max_request_size: Some(222),
+                topic_max_message_bytes: Some(333),
+            }
+        );
+    }
+
+    #[test]
+    fn split_probe_overrides_are_absent_when_no_variable_is_set() {
+        let overrides =
+            split_probe_overrides_from(lookup_from(vec![])).expect("no override is not an error");
+
+        assert_eq!(overrides, SplitProbeOverrides::default());
+    }
+
+    #[test]
+    fn split_probe_overrides_reject_a_value_that_is_not_a_byte_count() {
+        for key in [
+            "KACRAB_BENCH_BATCH_SIZE",
+            "KACRAB_BENCH_MAX_REQUEST_SIZE",
+            "KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES",
+        ] {
+            let error = split_probe_overrides_from(lookup_from(vec![(key, "256k")]))
+                .expect_err("a non-numeric override must be rejected, not silently ignored");
+
+            assert_eq!(error, format!("{key}=256k is not a byte count"));
+        }
+    }
+
+    #[test]
+    fn producer_overrides_map_each_env_var_to_the_setting_it_binds() {
+        let overrides = benchmark_producer_overrides_from(
+            None,
+            lookup_from(vec![
+                ("KACRAB_BENCH_BATCH_SIZE", "111"),
+                ("KACRAB_BENCH_MAX_REQUEST_SIZE", "222"),
+                ("KACRAB_BENCH_ACKS1", "1"),
+                ("KACRAB_BENCH_NO_ADAPTIVE", "1"),
+                ("KACRAB_BENCH_LINGER_MS", "33"),
+                ("KACRAB_BENCH_BUFFER_MEMORY", "444"),
+            ]),
+        );
+
+        assert_eq!(
+            overrides,
+            vec![
+                ("batch.size", "111".to_owned()),
+                ("max.request.size", "222".to_owned()),
+                ("acks", "1".to_owned()),
+                ("enable.idempotence", "false".to_owned()),
+                (
+                    "partitioner.adaptive.partitioning.enable",
+                    "false".to_owned()
+                ),
+                ("linger.ms", "33".to_owned()),
+                ("buffer.memory", "444".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn producer_overrides_are_empty_when_no_variable_is_set() {
+        assert!(benchmark_producer_overrides_from(None, lookup_from(vec![])).is_empty());
+    }
+
+    #[test]
+    fn effective_config_snapshot_reports_env_overrides_instead_of_the_defaults() {
+        let overrides = benchmark_producer_overrides_from(
+            None,
+            lookup_from(vec![
+                ("KACRAB_BENCH_BATCH_SIZE", "131072"),
+                ("KACRAB_BENCH_LINGER_MS", "0"),
+                ("KACRAB_BENCH_ACKS1", "1"),
+            ]),
+        );
+        let snapshot = format_effective_config_snapshot(&producer_config_with_overrides(
+            probe_bootstrap(),
+            &overrides,
+        ));
+
+        assert!(snapshot.contains("batch.size=131072"), "{snapshot}");
+        assert!(snapshot.contains("linger.ms=0"), "{snapshot}");
+        assert!(snapshot.contains("acks=1"), "{snapshot}");
+        assert!(snapshot.contains("enable.idempotence=false"), "{snapshot}");
+        assert!(!snapshot.contains("batch.size=16384"), "{snapshot}");
+    }
+
+    #[test]
+    fn effective_config_snapshot_reports_the_split_probe_sizing_that_binds() {
+        let bootstrap = probe_bootstrap();
+        let probe = split_probe_config(
+            kafka_max_request_size(bootstrap),
+            SplitProbeOverrides::default(),
+        )
+        .expect("the default split probe sizing should satisfy the probe invariants");
+        // The probe branch ignores the env lookup entirely: the sizing comes from the
+        // validated probe config, which is exactly what `build_producer` applies.
+        let overrides = benchmark_producer_overrides_from(Some(&probe), lookup_from(vec![]));
+        let snapshot = format_effective_config_snapshot(&producer_config_with_overrides(
+            bootstrap, &overrides,
+        ));
+
+        assert_eq!(overrides, split_probe_producer_settings(&probe).to_vec());
+        assert!(
+            snapshot.contains(&format!("batch.size={}", probe.batch_size)),
+            "{snapshot}"
+        );
+        assert!(
+            snapshot.contains(&format!("max.request.size={}", probe.max_request_size)),
+            "{snapshot}"
+        );
+        // The untouched default the log used to print under the probe.
+        assert!(!snapshot.contains("batch.size=16384"), "{snapshot}");
     }
 
     #[test]

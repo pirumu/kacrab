@@ -8,6 +8,7 @@ KAFKA_BIN="${KAFKA_BIN:-$HOME/.local/share/kacrab-kafka/current/bin}"
 KAFKA_ROOT="${KAFKA_ROOT:-$(cd "$KAFKA_BIN/../.." && pwd)}"
 KAFKA_PRODUCER_PERF="${KAFKA_PRODUCER_PERF:-$KAFKA_BIN/kafka-producer-perf-test.sh}"
 KAFKA_TOPICS="${KAFKA_TOPICS:-$KAFKA_BIN/kafka-topics.sh}"
+KAFKA_CONFIGS="${KAFKA_CONFIGS:-$KAFKA_BIN/kafka-configs.sh}"
 RUNS=5
 
 # Opt-in MESSAGE_TOO_LARGE split probe. Off unless --split-probe is passed or
@@ -240,16 +241,30 @@ run_java_scenario() {
   format_java_average_counter_line "${counter_files[@]}"
 }
 
-run_split_probe() {
-  if [[ ! -x "$KAFKA_TOPICS" ]]; then
-    echo "missing kafka-topics.sh at $KAFKA_TOPICS" >&2
-    exit 1
-  fi
+# The broker's *effective* max.message.bytes for the probe topic, or empty if it cannot be
+# read. `--describe --all` resolves defaults too, so an existing topic with no topic-level
+# override reports the cluster default rather than nothing. The first `max.message.bytes=<n>`
+# in the output is the effective value; the later ones sit inside `synonyms={...}` and are
+# the sources it was resolved from, hence `head -n 1`.
+split_probe_topic_max_message_bytes() {
+  local described
+  described="$("$KAFKA_CONFIGS" \
+    --bootstrap-server "$BOOTSTRAP" \
+    --entity-type topics \
+    --entity-name "$SPLIT_PROBE_TOPIC" \
+    --describe --all 2>/dev/null)" || return 0
+  printf '%s\n' "$described" \
+    | grep -oE 'max\.message\.bytes=[0-9]+' \
+    | head -n 1 \
+    | cut -d= -f2 || true
+}
 
-  load_split_probe_config
-
-  echo
-  echo "===== split probe: $SPLIT_PROBE_TOPIC with max.message.bytes=$SPLIT_PROBE_MAX_MESSAGE_BYTES ====="
+# `--create --if-not-exists` is a silent no-op when the topic survived an earlier run, so a
+# topic created with a different max.message.bytes keeps its OLD limit and the sizing the
+# binary validated and dumped never binds — the probe would then measure a limit nobody
+# declared. Reconcile the surviving topic in place (never delete operator data) and refuse
+# to run if the value still does not bind afterwards.
+ensure_split_probe_topic() {
   "$KAFKA_TOPICS" \
     --bootstrap-server "$BOOTSTRAP" \
     --create --if-not-exists \
@@ -257,7 +272,45 @@ run_split_probe() {
     --partitions "$SPLIT_PROBE_PARTITIONS" \
     --replication-factor "$SPLIT_PROBE_REPLICATION_FACTOR" \
     --config "max.message.bytes=$SPLIT_PROBE_MAX_MESSAGE_BYTES"
+
+  local actual
+  actual="$(split_probe_topic_max_message_bytes)"
+  if [[ "$actual" != "$SPLIT_PROBE_MAX_MESSAGE_BYTES" ]]; then
+    echo "split probe topic $SPLIT_PROBE_TOPIC reports max.message.bytes=${actual:-<unreadable>}, expected $SPLIT_PROBE_MAX_MESSAGE_BYTES" >&2
+    echo "altering the existing topic in place (no data is deleted): max.message.bytes=$SPLIT_PROBE_MAX_MESSAGE_BYTES" >&2
+    "$KAFKA_CONFIGS" \
+      --bootstrap-server "$BOOTSTRAP" \
+      --entity-type topics \
+      --entity-name "$SPLIT_PROBE_TOPIC" \
+      --alter \
+      --add-config "max.message.bytes=$SPLIT_PROBE_MAX_MESSAGE_BYTES"
+    actual="$(split_probe_topic_max_message_bytes)"
+  fi
+  if [[ "$actual" != "$SPLIT_PROBE_MAX_MESSAGE_BYTES" ]]; then
+    echo "split probe topic $SPLIT_PROBE_TOPIC still reports max.message.bytes=${actual:-<unreadable>} after --alter, expected $SPLIT_PROBE_MAX_MESSAGE_BYTES" >&2
+    echo "refusing to run a probe whose broker limit does not bind; delete $SPLIT_PROBE_TOPIC yourself and rerun" >&2
+    exit 1
+  fi
+
   "$KAFKA_TOPICS" --bootstrap-server "$BOOTSTRAP" --describe --topic "$SPLIT_PROBE_TOPIC"
+  echo "verified: $SPLIT_PROBE_TOPIC binds max.message.bytes=$actual"
+}
+
+run_split_probe() {
+  if [[ ! -x "$KAFKA_TOPICS" ]]; then
+    echo "missing kafka-topics.sh at $KAFKA_TOPICS" >&2
+    exit 1
+  fi
+  if [[ ! -x "$KAFKA_CONFIGS" ]]; then
+    echo "missing kafka-configs.sh at $KAFKA_CONFIGS (needed to verify and reconcile the probe topic's max.message.bytes)" >&2
+    exit 1
+  fi
+
+  load_split_probe_config
+
+  echo
+  echo "===== split probe: $SPLIT_PROBE_TOPIC with max.message.bytes=$SPLIT_PROBE_MAX_MESSAGE_BYTES ====="
+  ensure_split_probe_topic
 
   echo
   echo "----- rust split probe pass -----"

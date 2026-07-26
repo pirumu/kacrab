@@ -215,13 +215,21 @@ make bench-kafka-split-probe
 That target runs `benches/scripts/producer_default_matrix.sh --split-probe`
 (also reachable as `KACRAB_BENCH_SPLIT_PROBE=1 benches/scripts/producer_default_matrix.sh`).
 It creates `kacrab-bench-split-probe` with
-`kafka-topics.sh --config max.message.bytes=65536`, runs one kacrab pass
+`kafka-topics.sh --config max.message.bytes=65536`, then **verifies that the value
+actually binds**: `--create --if-not-exists` is a silent no-op on a topic that
+survived an earlier run, so a topic created with a different limit would keep the
+old one and the probe would measure a limit nobody declared. The script reads the
+effective value back with `kafka-configs.sh --describe --all`; on a mismatch it
+reconciles the surviving topic in place with `kafka-configs.sh --alter --add-config`
+(it never deletes your data), re-reads, and aborts with an explicit error if the
+value still does not bind. It then runs one kacrab pass
 (`KACRAB_BENCH_SPLIT_PROBE=1`, `KACRAB_BENCH_RUNS=1`) and one
 `kafka-producer-perf-test.sh` pass **against that same topic**, and prints both
 counter lines together. Pointing the Java pass at the normal bench topic instead
 would make the two `batch_splits` values incomparable, so the script always
 overrides the topic for both sides. Overridable: `KACRAB_SPLIT_PROBE_TOPIC`,
-`KACRAB_SPLIT_PROBE_PARTITIONS`, `KACRAB_SPLIT_PROBE_REPLICATION_FACTOR`.
+`KACRAB_SPLIT_PROBE_PARTITIONS`, `KACRAB_SPLIT_PROBE_REPLICATION_FACTOR`, and
+`KAFKA_CONFIGS` (path to `kafka-configs.sh`, defaulted next to `kafka-topics.sh`).
 
 The record count, record size, `batch.size`, `max.request.size` and the probe
 topic's `max.message.bytes` are **not** declared by the script: it reads them from
@@ -256,6 +264,12 @@ The sizing is the probe, and all three constraints have to hold at once:
 Both sides are configured identically: the Rust bench sets `batch.size` and
 `max.request.size` from the resolved probe config, and the Java pass gets the same
 two values via `--command-property` after reading them back from the binary.
+
+The `effective producer config:` line the Rust pass prints once per run reports the
+config that actually binds — kacrab's defaults with every benchmark override already
+applied — so under the probe it shows `batch.size=262144`, not the `16384` default.
+It is formatted from the same override list `build_producer` applies, so the two
+cannot drift; it is printed before the send loop starts and adds no per-record work.
 
 A passing comparison is **both sides reporting the same non-zero
 `batch_splits`**. Exact equality is only expected for the first split of each
