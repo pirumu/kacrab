@@ -230,6 +230,24 @@ struct TopicPartition {
     partition: i32,
 }
 
+/// A partition that currently holds at least one buffered batch.
+///
+/// Opaque newtype over the accumulator's internal key so the dispatcher can name a
+/// partition to sweep without the accumulator leaking its key type (and without
+/// clashing with the public `producer::TopicPartition`).
+#[derive(Debug, Clone)]
+pub(crate) struct BufferedPartition(TopicPartition);
+
+impl BufferedPartition {
+    pub(crate) fn topic(&self) -> &str {
+        &self.0.topic
+    }
+
+    pub(crate) const fn partition(&self) -> i32 {
+        self.0.partition
+    }
+}
+
 #[derive(Debug)]
 struct PartitionQueue {
     batches: VecDeque<PartitionBatch>,
@@ -668,6 +686,57 @@ impl RecordAccumulator {
         ready
     }
 
+    /// Topic-partitions that currently hold at least one buffered batch.
+    ///
+    /// Kafka's `RecordAccumulator.drainBatchesForOneNode` walks *every* partition a
+    /// ready node leads, not only the partitions that are ready on their own. This
+    /// is the candidate set the dispatcher filters by leader before sweeping.
+    pub(crate) fn buffered_partitions(&self) -> Vec<BufferedPartition> {
+        self.partitions
+            .iter()
+            .filter(|(_, queue)| !queue.batches.is_empty())
+            .map(|(key, _)| BufferedPartition(key.clone()))
+            .collect()
+    }
+
+    /// Pop the head batch of each supplied partition regardless of size or linger.
+    ///
+    /// Java parity: once a node has any sendable batch it is added to `readyNodes`,
+    /// and `RecordAccumulator.drainBatchesForOneNode` then takes the head batch of
+    /// every partition that node leads with no readiness check at all — half-full
+    /// batches whose linger has not expired ride along on the request that is going
+    /// out anyway. The bookkeeping here mirrors [`Self::drain_ready`] exactly;
+    /// diverging would leak buffer memory and wedge the producer.
+    pub(crate) fn drain_front_unconditional(
+        &mut self,
+        partitions: &[BufferedPartition],
+    ) -> Vec<ReadyBatch> {
+        let mut ready = Vec::with_capacity(partitions.len());
+        for BufferedPartition(key) in partitions {
+            let Some(queue) = self.partitions.get_mut(key) else {
+                continue;
+            };
+            let Some(batch) = queue.batches.pop_front() else {
+                continue;
+            };
+            let bytes = ready_batch_bytes(&batch);
+            let _removed = self.buffered_batch_identities.remove(&batch.identity);
+            self.buffered_bytes = self.buffered_bytes.saturating_sub(batch.buffer_bytes);
+            ready.push(ReadyBatch {
+                identity: batch.identity,
+                topic: key.topic.to_string(),
+                partition: key.partition,
+                records: batch.records,
+                delivery: batch.delivery,
+                bytes,
+                pooled_buffer_bytes: batch.buffer_bytes,
+                first_append_at: batch.first_append_at,
+                producer_state: batch.producer_state,
+            });
+        }
+        ready
+    }
+
     /// Return the next time any buffered batch should be considered ready.
     pub fn next_ready_at(&self, now: Instant) -> Option<Instant> {
         let batch_size = self.config.batch_size;
@@ -939,6 +1008,17 @@ impl SharedAccumulator {
     /// Drain at most one ready front batch per partition (re-dispatch hot path).
     pub fn drain_front_ready(&self, now: Instant) -> Vec<ReadyBatch> {
         self.lock().drain_front_ready(now)
+    }
+
+    pub(crate) fn buffered_partitions(&self) -> Vec<BufferedPartition> {
+        self.lock().buffered_partitions()
+    }
+
+    pub(crate) fn drain_front_unconditional(
+        &self,
+        partitions: &[BufferedPartition],
+    ) -> Vec<ReadyBatch> {
+        self.lock().drain_front_unconditional(partitions)
     }
 
     pub(crate) fn has_available_memory_for_reserved_with_compression_ratio(
@@ -1482,6 +1562,90 @@ mod tests {
             estimate_ready_batch_encoded_bytes(&drained[0].records)
         );
         assert_eq!(accumulator.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn drain_front_unconditional_takes_head_batch_without_readiness_check() {
+        let now = Instant::now();
+        let mut accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(TEST_LARGE_BATCH_SIZE)
+                .linger(Duration::from_secs(30))
+                .buffer_memory(TEST_LARGE_BATCH_SIZE * 8),
+        );
+        for partition in 0..2 {
+            accumulator
+                .append_at(
+                    ProducerRecord::new("orders", partition).value(Bytes::from_static(b"value")),
+                    now,
+                )
+                .expect("append record");
+        }
+        let buffered_bytes = accumulator.buffered_bytes();
+        assert_eq!(buffered_bytes, TEST_LARGE_BATCH_SIZE * 2);
+        // Neither batch is full, neither has lingered, and neither is sealed.
+        assert!(accumulator.drain_ready(now).is_empty());
+
+        let partitions = accumulator.buffered_partitions();
+        assert_eq!(partitions.len(), 2);
+        let swept = accumulator.drain_front_unconditional(&partitions);
+
+        assert_eq!(swept.len(), 2);
+        for batch in &swept {
+            assert_eq!(batch.topic, "orders");
+            assert_eq!(batch.records.len(), 1);
+            assert_eq!(batch.pooled_buffer_bytes(), TEST_LARGE_BATCH_SIZE);
+            assert!(
+                !accumulator
+                    .buffered_batch_identities
+                    .contains(&batch.identity())
+            );
+            assert!(
+                accumulator
+                    .incomplete_batch_identities
+                    .contains(&batch.identity())
+            );
+        }
+        assert_eq!(accumulator.buffered_bytes(), 0);
+        assert_eq!(accumulator.buffered_batches(), 0);
+        assert!(accumulator.buffered_partitions().is_empty());
+        assert!(
+            accumulator
+                .drain_front_unconditional(&partitions)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn drain_front_unconditional_leaves_the_rest_of_the_queue_buffered() {
+        let now = Instant::now();
+        let mut accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(1)
+                .linger(Duration::from_secs(30))
+                .buffer_memory(64 * 1024),
+        );
+        for value in [b"a", b"b"] {
+            accumulator
+                .append_at(
+                    ProducerRecord::new("orders", 0).value(Bytes::copy_from_slice(value)),
+                    now,
+                )
+                .expect("append record");
+        }
+        assert_eq!(accumulator.buffered_batches(), 2);
+        let buffered_bytes = accumulator.buffered_bytes();
+
+        let partitions = accumulator.buffered_partitions();
+        let swept = accumulator.drain_front_unconditional(&partitions);
+
+        assert_eq!(swept.len(), 1);
+        assert_eq!(swept[0].records[0].value, Some(Bytes::from_static(b"a")));
+        assert_eq!(accumulator.buffered_batches(), 1);
+        assert_eq!(
+            accumulator.buffered_bytes(),
+            buffered_bytes - swept[0].pooled_buffer_bytes()
+        );
     }
 
     #[test]

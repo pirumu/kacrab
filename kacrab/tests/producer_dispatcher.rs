@@ -6245,6 +6245,107 @@ async fn dispatcher_drains_ready_batches_by_leader_broker() {
 }
 
 #[tokio::test]
+async fn dispatcher_sweeps_unready_partitions_of_a_dispatching_broker_like_java() {
+    const BATCH_SIZE: usize = 512;
+
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            // Answer exactly the partitions this request carried, so a receipt can
+            // only exist for a batch that really went on the wire.
+            let partitions: Vec<(i32, i64)> = produce
+                .topic_data
+                .iter()
+                .flat_map(|topic| topic.partition_data.iter())
+                .map(|partition| (partition.index, i64::from(partition.index) * 40))
+                .collect();
+            produce_response_frame_for_partitions(&header, &partitions)
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response_same_leader(7, leader_7);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+
+    let now = Instant::now();
+    let config = AccumulatorConfig::default()
+        .batch_size(BATCH_SIZE)
+        .linger(Duration::from_secs(30))
+        .buffer_memory(64 * 1024);
+    // Partition 0 fills its batch; partition 1 keeps a lone half-full batch that is
+    // not full, has not lingered, and is not sealed (nothing was queued behind it).
+    let fill = |accumulator: &SharedAccumulator| {
+        accumulator
+            .append_at(
+                ProducerRecord::new("orders", 0).value(Bytes::from(vec![b'a'; BATCH_SIZE])),
+                now,
+            )
+            .unwrap();
+        accumulator
+            .append_at(
+                ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")),
+                now,
+            )
+            .unwrap();
+    };
+
+    // Guard the premise: on its own, only partition 0 is ready at `now`.
+    let ready_only = SharedAccumulator::with_config(config);
+    fill(&ready_only);
+    let ready_on_their_own = ready_only.drain_ready(now);
+    assert_eq!(
+        ready_on_their_own.len(),
+        1,
+        "only partition 0 should be ready by size or linger"
+    );
+    assert_eq!(ready_on_their_own[0].partition, 0);
+
+    let accumulator = SharedAccumulator::with_config(config);
+    fill(&accumulator);
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let dispatcher = ProducerDispatcher::new(wire);
+
+    let mut receipts = dispatcher.dispatch_ready(&accumulator, now).await.unwrap();
+    receipts.sort_by_key(|receipt| receipt.partition);
+
+    assert_eq!(
+        receipts.len(),
+        2,
+        "partition 1 is led by the broker already receiving partition 0, so its head batch should \
+         ride along (Kafka drainBatchesForOneNode); receipts: {receipts:?}"
+    );
+    assert_eq!(receipts[0].partition, 0);
+    assert_eq!(receipts[0].offset, 0);
+    assert_eq!(receipts[1].partition, 1);
+    assert_eq!(receipts[1].offset, 40);
+    assert_eq!(
+        accumulator.buffered_bytes(),
+        0,
+        "the swept batch should have left the accumulator"
+    );
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 2);
+}
+
+#[tokio::test]
 async fn dispatcher_pipelines_owned_batches_to_same_broker() {
     let leader_7 = MockBroker::serve_pipelined_produce(2).await;
     let bootstrap = MockBroker::serve_many(vec![

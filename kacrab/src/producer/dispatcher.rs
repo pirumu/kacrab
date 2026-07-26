@@ -33,7 +33,8 @@ use tokio::{
 use super::batch::encode_record_batch_with_producer_state_at_offset_into;
 use super::{
     accumulator::{
-        RECORD_BATCH_OVERHEAD_BYTES, ReadyBatch, SharedAccumulator, estimate_record_batch_bytes,
+        BufferedPartition, RECORD_BATCH_OVERHEAD_BYTES, ReadyBatch, SharedAccumulator,
+        estimate_record_batch_bytes,
     },
     api::{ConsumerGroupMetadata, OffsetAndMetadata, TopicPartition},
     batch::{
@@ -1244,6 +1245,8 @@ impl ProducerDispatcher {
         if batches.is_empty() {
             return Ok(Vec::new());
         }
+        self.sweep_colocated_head_batches(accumulator, &mut batches)
+            .await;
         if let Some(batch) = self.expired_batch(&batches, now) {
             return Err(ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
@@ -1426,6 +1429,57 @@ impl ProducerDispatcher {
                 },
             }
         }
+    }
+
+    /// Sweep the head batch of every other buffered partition led by a broker that
+    /// is already receiving this dispatch.
+    ///
+    /// Java splits dispatch in two: `RecordAccumulator.ready` picks the *nodes* that
+    /// have at least one sendable batch, then `drainBatchesForOneNode` takes the head
+    /// batch of **every** partition that node leads, with no per-partition readiness
+    /// check. A half-full batch whose linger has not expired therefore rides along on
+    /// a request that was going out anyway — one fewer linger wait per record, at no
+    /// extra round trip. Draining only the individually ready partitions (as
+    /// `drain_ready` does) is the missing half of that.
+    ///
+    /// Deliberately conservative: partitions whose leader cannot be resolved from the
+    /// metadata this dispatch already needs are left buffered, and a topic with an
+    /// unassigned-partition batch in the drain is skipped entirely, because
+    /// `route_for_batch` only picks that batch's partition later — sweeping could
+    /// otherwise put two batches for one partition into a single request and break
+    /// idempotent sequence ordering. Oversized requests stay
+    /// `broker_request_placement_for_batch`'s job: it splits a broker's batches
+    /// across as many requests as `max.request.size` requires, so a swept batch can
+    /// only add a request, never overflow one.
+    ///
+    /// Called before the dispatch's delivery-timeout check on purpose, so a swept
+    /// batch is held to the same deadline as a drained one instead of slipping past
+    /// the gate.
+    async fn sweep_colocated_head_batches(
+        &self,
+        accumulator: &SharedAccumulator,
+        batches: &mut Vec<ReadyBatch>,
+    ) {
+        let candidates = accumulator.buffered_partitions();
+        if candidates.is_empty() {
+            return;
+        }
+        // Exactly the metadata `dispatch_batches` is about to ask for, so this is a
+        // cache hit on the hot path. A miss (or an error) simply skips the sweep and
+        // leaves this dispatch identical to what it would have been.
+        let topics = unique_topics(batches);
+        let Ok(metadata) = self
+            .wire
+            .metadata_for_topics(topics.iter().map(String::as_str))
+            .await
+        else {
+            return;
+        };
+        let sweep = colocated_sweep_partitions(&metadata, batches, candidates);
+        if sweep.is_empty() {
+            return;
+        }
+        batches.extend(accumulator.drain_front_unconditional(&sweep));
     }
 
     /// Dispatch already-drained ready batches.
@@ -4534,6 +4588,48 @@ fn unique_topics(batches: &[ReadyBatch]) -> Vec<String> {
         }
     }
     topics
+}
+
+/// Pick the buffered partitions whose head batch should ride along with `batches`.
+///
+/// A candidate qualifies when its leader is a broker that is already receiving a
+/// batch from this dispatch (Kafka's "node is ready" gate) and it contributes no
+/// batch of its own yet, so each partition still carries at most one *extra* batch
+/// into the request.
+fn colocated_sweep_partitions(
+    metadata: &crate::wire::ClusterMetadata,
+    batches: &[ReadyBatch],
+    candidates: Vec<BufferedPartition>,
+) -> Vec<BufferedPartition> {
+    let mut drained: AHashSet<(&str, i32)> = AHashSet::new();
+    let mut unassigned_topics: AHashSet<&str> = AHashSet::new();
+    let mut leaders: AHashSet<i32> = AHashSet::new();
+    for batch in batches {
+        // Partition still unassigned: `route_for_batch` runs the partitioner later,
+        // so any partition of this topic could turn out to be the one it picks.
+        if batch.partition < 0 {
+            let _inserted = unassigned_topics.insert(batch.topic.as_str());
+            continue;
+        }
+        let _inserted = drained.insert((batch.topic.as_str(), batch.partition));
+        if let Some(leader) = metadata.leader_for(&batch.topic, batch.partition) {
+            let _inserted = leaders.insert(leader.node_id);
+        }
+    }
+    if leaders.is_empty() {
+        return Vec::new();
+    }
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate.partition() >= 0
+                && !unassigned_topics.contains(candidate.topic())
+                && !drained.contains(&(candidate.topic(), candidate.partition()))
+                && metadata
+                    .leader_for(candidate.topic(), candidate.partition())
+                    .is_some_and(|leader| leaders.contains(&leader.node_id))
+        })
+        .collect()
 }
 
 fn split_message_too_large_batches(
