@@ -9,6 +9,30 @@ release date and links to relevant pull requests or issues.
 
 ## Unreleased
 
+### Added
+
+- `ProducerMetricsSnapshot::record_batch_split_count` — record-batch splits
+  forced by a broker `MESSAGE_TOO_LARGE` response, counted one per split event
+  the way Java's `Sender.completeBatch` does. The producer parity bench prints
+  it as the `batch_splits` column, so that column is now a real both-sides
+  comparison against `kafka-producer-perf-test.sh --print-metrics`.
+
+### Changed
+
+- **Breaking:** `ProducerMetricsSnapshot` is now `#[non_exhaustive]`.
+  Downstream crates can no longer build one with a struct expression
+  (including functional-update `..base` syntax); start from the new
+  `ProducerMetricsSnapshot::ZERO` associated constant — it is usable in const
+  context — and assign the fields you need. Reading fields is unaffected.
+- **Behaviour change:** `producer-metrics:batch-split-rate` and
+  `producer-metrics:batch-split-total` now count `MESSAGE_TOO_LARGE`
+  record-batch splits, matching Java's semantics. They were previously fed by
+  the `max.request.size` Produce-request grouping split, a kacrab-specific
+  event with no Java equivalent. That grouping count is unchanged and remains
+  available as `ProducerMetricsSnapshot::produce_request_split_count`, now
+  without a Java-named meter. Workloads that only hit request-grouping splits
+  will see the Java-named `batch-split-*` metrics drop toward zero.
+
 ## 0.2.0 — 2026-07-07
 
 Outage-resilience release. The producer and consumer now recover from

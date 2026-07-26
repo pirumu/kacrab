@@ -120,12 +120,17 @@ The default parity pass runs two fixed scenarios (5M x 10 B and 100K x 10 KiB),
 5 runs per scenario, printing effective config snapshots before each measured
 run plus a five-run `rust average counters` line in the same compact counter
 schema as the per-run output. The Java wrapper parses
-`kafka-producer-perf-test.sh --print-metrics` into the same per-run and
-five-run average counter lines. Known schema gaps: Rust reports
-`batch_splits=not_tracked` (grouping splits are exposed separately as
-`request_splits`), and Java producer-perf does not expose exact record-batch
-counts, so those fields are labeled `not_exposed_by_producer_perf` — do not
-treat them as parity proof.
+`kafka-producer-perf-test.sh --print-metrics` into per-run and five-run average
+counter lines of the same shape. The two sides do not emit the same field set:
+Rust prints 14 fields, the Java wrapper 10, so only the fields present on both
+lines can be compared. `batch_splits` is one of them — it is a real both-sides
+comparison, sourced from Java's `producer-metrics:batch-split-total` and from
+kacrab's matching `MESSAGE_TOO_LARGE` record-batch split counter (the
+`max.request.size` request-grouping splits are a separate, kacrab-only
+`request_splits` column). Java producer-perf does not expose exact record-batch
+counts, so `record_batches`, `records_per_batch_avg`, `in_flight_stalls` and
+`request_splits` are labeled `not_exposed_by_producer_perf` — do not treat those
+fields as parity proof.
 
 Knobs (all read from the environment, so set them inline before `cargo run`):
 

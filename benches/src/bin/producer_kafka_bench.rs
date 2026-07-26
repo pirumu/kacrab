@@ -924,90 +924,93 @@ const fn metrics_delta(
     current: &ProducerMetricsSnapshot,
     baseline: &ProducerMetricsSnapshot,
 ) -> ProducerMetricsSnapshot {
-    ProducerMetricsSnapshot {
-        records_appended: current
-            .records_appended
-            .saturating_sub(baseline.records_appended),
-        produce_request_count: current
-            .produce_request_count
-            .saturating_sub(baseline.produce_request_count),
-        produce_request_bytes: current
-            .produce_request_bytes
-            .saturating_sub(baseline.produce_request_bytes),
-        produce_batch_count: current
-            .produce_batch_count
-            .saturating_sub(baseline.produce_batch_count),
-        produce_batch_bytes: current
-            .produce_batch_bytes
-            .saturating_sub(baseline.produce_batch_bytes),
-        produce_request_payload_bytes: current
-            .produce_request_payload_bytes
-            .saturating_sub(baseline.produce_request_payload_bytes),
-        produce_request_split_count: current
-            .produce_request_split_count
-            .saturating_sub(baseline.produce_request_split_count),
-        produce_record_count: current
-            .produce_record_count
-            .saturating_sub(baseline.produce_record_count),
-        produce_retry_count: current
-            .produce_retry_count
-            .saturating_sub(baseline.produce_retry_count),
-        produce_error_count: current
-            .produce_error_count
-            .saturating_sub(baseline.produce_error_count),
-        requeue_count: current.requeue_count.saturating_sub(baseline.requeue_count),
-        in_flight_stall_count: current
-            .in_flight_stall_count
-            .saturating_sub(baseline.in_flight_stall_count),
-        queue_depth_bytes: current.queue_depth_bytes,
-        queue_depth_records: current.queue_depth_records,
-        buffer_available_bytes: current.buffer_available_bytes,
-        waiting_threads: current.waiting_threads,
-        incomplete_batches: current.incomplete_batches,
-        in_flight_dispatches: current.in_flight_dispatches,
-        average_batch_fill_ratio: current.average_batch_fill_ratio,
-        average_compression_ratio: current.average_compression_ratio,
-        flush_count: current.flush_count.saturating_sub(baseline.flush_count),
-        flush_total_latency: current
-            .flush_total_latency
-            .saturating_sub(baseline.flush_total_latency),
-        metadata_wait_count: current
-            .metadata_wait_count
-            .saturating_sub(baseline.metadata_wait_count),
-        metadata_wait_total_latency: current
-            .metadata_wait_total_latency
-            .saturating_sub(baseline.metadata_wait_total_latency),
-        transaction_init_count: current
-            .transaction_init_count
-            .saturating_sub(baseline.transaction_init_count),
-        transaction_init_total_latency: current
-            .transaction_init_total_latency
-            .saturating_sub(baseline.transaction_init_total_latency),
-        transaction_begin_count: current
-            .transaction_begin_count
-            .saturating_sub(baseline.transaction_begin_count),
-        transaction_begin_total_latency: current
-            .transaction_begin_total_latency
-            .saturating_sub(baseline.transaction_begin_total_latency),
-        send_offsets_to_transaction_count: current
-            .send_offsets_to_transaction_count
-            .saturating_sub(baseline.send_offsets_to_transaction_count),
-        send_offsets_to_transaction_total_latency: current
-            .send_offsets_to_transaction_total_latency
-            .saturating_sub(baseline.send_offsets_to_transaction_total_latency),
-        transaction_commit_count: current
-            .transaction_commit_count
-            .saturating_sub(baseline.transaction_commit_count),
-        transaction_commit_total_latency: current
-            .transaction_commit_total_latency
-            .saturating_sub(baseline.transaction_commit_total_latency),
-        transaction_abort_count: current
-            .transaction_abort_count
-            .saturating_sub(baseline.transaction_abort_count),
-        transaction_abort_total_latency: current
-            .transaction_abort_total_latency
-            .saturating_sub(baseline.transaction_abort_total_latency),
-    }
+    let mut out = ProducerMetricsSnapshot::ZERO;
+    out.records_appended = current
+        .records_appended
+        .saturating_sub(baseline.records_appended);
+    out.produce_request_count = current
+        .produce_request_count
+        .saturating_sub(baseline.produce_request_count);
+    out.produce_request_bytes = current
+        .produce_request_bytes
+        .saturating_sub(baseline.produce_request_bytes);
+    out.produce_batch_count = current
+        .produce_batch_count
+        .saturating_sub(baseline.produce_batch_count);
+    out.produce_batch_bytes = current
+        .produce_batch_bytes
+        .saturating_sub(baseline.produce_batch_bytes);
+    out.produce_request_payload_bytes = current
+        .produce_request_payload_bytes
+        .saturating_sub(baseline.produce_request_payload_bytes);
+    out.produce_request_split_count = current
+        .produce_request_split_count
+        .saturating_sub(baseline.produce_request_split_count);
+    out.record_batch_split_count = current
+        .record_batch_split_count
+        .saturating_sub(baseline.record_batch_split_count);
+    out.produce_record_count = current
+        .produce_record_count
+        .saturating_sub(baseline.produce_record_count);
+    out.produce_retry_count = current
+        .produce_retry_count
+        .saturating_sub(baseline.produce_retry_count);
+    out.produce_error_count = current
+        .produce_error_count
+        .saturating_sub(baseline.produce_error_count);
+    out.requeue_count = current.requeue_count.saturating_sub(baseline.requeue_count);
+    out.in_flight_stall_count = current
+        .in_flight_stall_count
+        .saturating_sub(baseline.in_flight_stall_count);
+    out.queue_depth_bytes = current.queue_depth_bytes;
+    out.queue_depth_records = current.queue_depth_records;
+    out.buffer_available_bytes = current.buffer_available_bytes;
+    out.waiting_threads = current.waiting_threads;
+    out.incomplete_batches = current.incomplete_batches;
+    out.in_flight_dispatches = current.in_flight_dispatches;
+    out.average_batch_fill_ratio = current.average_batch_fill_ratio;
+    out.average_compression_ratio = current.average_compression_ratio;
+    out.flush_count = current.flush_count.saturating_sub(baseline.flush_count);
+    out.flush_total_latency = current
+        .flush_total_latency
+        .saturating_sub(baseline.flush_total_latency);
+    out.metadata_wait_count = current
+        .metadata_wait_count
+        .saturating_sub(baseline.metadata_wait_count);
+    out.metadata_wait_total_latency = current
+        .metadata_wait_total_latency
+        .saturating_sub(baseline.metadata_wait_total_latency);
+    out.transaction_init_count = current
+        .transaction_init_count
+        .saturating_sub(baseline.transaction_init_count);
+    out.transaction_init_total_latency = current
+        .transaction_init_total_latency
+        .saturating_sub(baseline.transaction_init_total_latency);
+    out.transaction_begin_count = current
+        .transaction_begin_count
+        .saturating_sub(baseline.transaction_begin_count);
+    out.transaction_begin_total_latency = current
+        .transaction_begin_total_latency
+        .saturating_sub(baseline.transaction_begin_total_latency);
+    out.send_offsets_to_transaction_count = current
+        .send_offsets_to_transaction_count
+        .saturating_sub(baseline.send_offsets_to_transaction_count);
+    out.send_offsets_to_transaction_total_latency = current
+        .send_offsets_to_transaction_total_latency
+        .saturating_sub(baseline.send_offsets_to_transaction_total_latency);
+    out.transaction_commit_count = current
+        .transaction_commit_count
+        .saturating_sub(baseline.transaction_commit_count);
+    out.transaction_commit_total_latency = current
+        .transaction_commit_total_latency
+        .saturating_sub(baseline.transaction_commit_total_latency);
+    out.transaction_abort_count = current
+        .transaction_abort_count
+        .saturating_sub(baseline.transaction_abort_count);
+    out.transaction_abort_total_latency = current
+        .transaction_abort_total_latency
+        .saturating_sub(baseline.transaction_abort_total_latency);
+    out
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1217,8 +1220,8 @@ fn append_metrics(line: &mut String, metrics: &ProducerMetricsSnapshot) {
         "produce_requests={}, record_batches={}, records_per_batch_avg={:.3}, \
          records_per_request_avg={:.3}, request_size_avg={:.3}, \
          record_batch_payload_bytes_per_request_avg={:.3}, retries={}, errors={}, \
-         in_flight_stalls={}, batch_splits=not_tracked, request_splits={}, requeues={}, \
-         batch_fill={:.3}, compression_ratio={:.3}",
+         in_flight_stalls={}, batch_splits={}, request_splits={}, requeues={}, batch_fill={:.3}, \
+         compression_ratio={:.3}",
         metrics.produce_request_count,
         metrics.produce_batch_count,
         records_per_batch_avg,
@@ -1228,6 +1231,7 @@ fn append_metrics(line: &mut String, metrics: &ProducerMetricsSnapshot) {
         metrics.produce_retry_count,
         metrics.produce_error_count,
         metrics.in_flight_stall_count,
+        metrics.record_batch_split_count,
         metrics.produce_request_split_count,
         metrics.requeue_count,
         metrics.average_batch_fill_ratio,
@@ -1269,6 +1273,10 @@ fn append_average_metrics(line: &mut String, metrics: &[ProducerMetricsSnapshot]
         .iter()
         .map(|snapshot| snapshot.in_flight_stall_count)
         .sum::<u64>();
+    let batch_splits = metrics
+        .iter()
+        .map(|snapshot| snapshot.record_batch_split_count)
+        .sum::<u64>();
     let request_splits = metrics
         .iter()
         .map(|snapshot| snapshot.produce_request_split_count)
@@ -1293,7 +1301,7 @@ fn append_average_metrics(line: &mut String, metrics: &[ProducerMetricsSnapshot]
         "produce_requests={:.3}, record_batches={:.3}, records_per_batch_avg={:.3}, \
          records_per_request_avg={:.3}, request_size_avg={:.3}, \
          record_batch_payload_bytes_per_request_avg={:.3}, retries={:.3}, errors={:.3}, \
-         in_flight_stalls={:.3}, batch_splits=not_tracked, request_splits={:.3}, requeues={:.3}, \
+         in_flight_stalls={:.3}, batch_splits={:.3}, request_splits={:.3}, requeues={:.3}, \
          batch_fill={:.3}, compression_ratio={:.3}",
         f64_from_u64(produce_requests) / runs,
         f64_from_u64(record_batches) / runs,
@@ -1304,6 +1312,7 @@ fn append_average_metrics(line: &mut String, metrics: &[ProducerMetricsSnapshot]
         f64_from_u64(retries) / runs,
         f64_from_u64(errors) / runs,
         f64_from_u64(in_flight_stalls) / runs,
+        f64_from_u64(batch_splits) / runs,
         f64_from_u64(request_splits) / runs,
         f64_from_u64(requeues) / runs,
         batch_fill,
@@ -1552,6 +1561,7 @@ mod tests {
         metrics.produce_retry_count = 1;
         metrics.produce_error_count = 0;
         metrics.in_flight_stall_count = 3;
+        metrics.record_batch_split_count = 2;
         metrics.requeue_count = 1;
         metrics.average_batch_fill_ratio = 0.5;
         metrics.average_compression_ratio = 0.75;
@@ -1577,8 +1587,9 @@ mod tests {
         assert!(line.contains("retries=1"));
         assert!(line.contains("errors=0"));
         assert!(line.contains("in_flight_stalls=3"));
-        assert!(line.contains("batch_splits=not_tracked"));
+        assert!(line.contains("batch_splits=2"));
         assert!(line.contains("request_splits=0"));
+        assert!(line.contains("in_flight_stalls=3, batch_splits=2, request_splits=0"));
         assert!(line.contains("compression_ratio=0.750"));
     }
 
@@ -1593,6 +1604,7 @@ mod tests {
         first.produce_retry_count = 1;
         first.produce_error_count = 0;
         first.in_flight_stall_count = 2;
+        first.record_batch_split_count = 1;
         first.produce_request_split_count = 0;
         first.requeue_count = 1;
         first.average_batch_fill_ratio = 0.5;
@@ -1607,6 +1619,7 @@ mod tests {
         second.produce_retry_count = 3;
         second.produce_error_count = 2;
         second.in_flight_stall_count = 4;
+        second.record_batch_split_count = 4;
         second.produce_request_split_count = 2;
         second.requeue_count = 3;
         second.average_batch_fill_ratio = 0.7;
@@ -1624,8 +1637,9 @@ mod tests {
         assert!(line.contains("retries=2.000"));
         assert!(line.contains("errors=1.000"));
         assert!(line.contains("in_flight_stalls=3.000"));
-        assert!(line.contains("batch_splits=not_tracked"));
+        assert!(line.contains("batch_splits=2.500"));
         assert!(line.contains("request_splits=1.000"));
+        assert!(line.contains("in_flight_stalls=3.000, batch_splits=2.500, request_splits=1.000"));
         assert!(line.contains("requeues=2.000"));
         assert!(line.contains("batch_fill=0.600"));
         assert!(line.contains("compression_ratio=0.700"));
@@ -1647,42 +1661,7 @@ mod tests {
     }
 
     const fn empty_metrics() -> ProducerMetricsSnapshot {
-        ProducerMetricsSnapshot {
-            records_appended: 0,
-            produce_request_count: 0,
-            produce_request_bytes: 0,
-            produce_batch_count: 0,
-            produce_batch_bytes: 0,
-            produce_request_payload_bytes: 0,
-            produce_request_split_count: 0,
-            produce_record_count: 0,
-            produce_retry_count: 0,
-            produce_error_count: 0,
-            requeue_count: 0,
-            in_flight_stall_count: 0,
-            queue_depth_bytes: 0,
-            queue_depth_records: 0,
-            buffer_available_bytes: 0,
-            waiting_threads: 0,
-            incomplete_batches: 0,
-            in_flight_dispatches: 0,
-            average_batch_fill_ratio: 0.0,
-            average_compression_ratio: 0.0,
-            flush_count: 0,
-            flush_total_latency: Duration::ZERO,
-            metadata_wait_count: 0,
-            metadata_wait_total_latency: Duration::ZERO,
-            transaction_init_count: 0,
-            transaction_init_total_latency: Duration::ZERO,
-            transaction_begin_count: 0,
-            transaction_begin_total_latency: Duration::ZERO,
-            send_offsets_to_transaction_count: 0,
-            send_offsets_to_transaction_total_latency: Duration::ZERO,
-            transaction_commit_count: 0,
-            transaction_commit_total_latency: Duration::ZERO,
-            transaction_abort_count: 0,
-            transaction_abort_total_latency: Duration::ZERO,
-        }
+        ProducerMetricsSnapshot::ZERO
     }
 
     fn assert_float_eq(actual: f64, expected: f64) {
