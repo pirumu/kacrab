@@ -6736,6 +6736,7 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_lik
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
     let dispatcher = ProducerDispatcher::new(wire);
+    dispatcher.enable_metrics();
     let now = Instant::now();
     let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
@@ -6759,6 +6760,12 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_lik
     assert_eq!(second.len(), 2);
     assert_eq!(second[0].offset, 40);
     assert_eq!(second[1].offset, 41);
+    // The split was performed by the `dispatch_ready` MESSAGE_TOO_LARGE arm, which records
+    // exactly one batch split per event; `produce_request_split_count` stays at zero because
+    // no Produce request was split across brokers.
+    let metrics = dispatcher.metrics();
+    assert_eq!(metrics.record_batch_split_count, 1);
+    assert_eq!(metrics.produce_request_split_count, 0);
     assert_eq!(bootstrap.join().await, 2);
     assert_eq!(leader_7.join().await, 3);
 }
