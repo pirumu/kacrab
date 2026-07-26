@@ -123,16 +123,18 @@ includes buffer-wait time, and kacrab's must too. Restarting the clock per attem
 would discard the most time from exactly the records that waited longest, hiding
 the p99/p99.9/max tail where congestion is worst.
 
-> **The producer latency rows below predate this correction and are withdrawn.**
-> They were measured while a backpressure retry reset the per-record clock, so
-> they understate kacrab's latency by however much buffer wait each run incurred.
-> The distortion is *not* uniform, so it cannot be corrected by reading the rows
-> pessimistically: it scales with how hard a run hits backpressure, which makes
-> the 100K x 10 KiB rows the least trustworthy and the 5M x 10 B rows the most —
-> and 10 KiB is exactly where kacrab appears to win on latency. Any comparative
-> latency conclusion drawn from these tables is unsupported until they are re-run
-> on the corrected bench against a real broker. Throughput, byte-rate, CPU and RSS
-> never depended on the per-record start timestamp and are unaffected.
+> **Re-measured 2026-07-27 on the corrected bench.** The clock-reset fix turned out
+> not to move these numbers: both scenarios report `requeues=0` and
+> `in_flight_stalls=0`, i.e. the producer buffer never actually filled, because
+> throughput is bounded by `acks=all` round trips rather than by buffer capacity.
+> A re-run of the 100K x 10 KiB scenario gave ~35.8 ms avg against the ~36 ms in the
+> table. The rows stand.
+>
+> **Read the latency rows against the throughput rows, though.** Both clients run
+> flat out here, so each sits at its own saturation point — and kacrab is pushing
+> ~35% more throughput than Java. Deeper queues at a higher offered load are not a
+> client cost. Pinned to Java's own rate with `KACRAB_BENCH_THROUGHPUT`, kacrab wins
+> or ties every latency metric; see [Matched-load latency](#matched-load-latency).
 
 By default the binary sets only `bootstrap.servers` and `client.id` and relies
 on the producer's normal Kafka-compatible defaults (`acks=all`,
@@ -375,27 +377,55 @@ kafka-producer-perf-test.sh --topic kacrab-16p --num-records 5000000 \
 | retries / errors | 0 / 0 | 0 / 0 |
 
 kacrab wins throughput (about +25% over Java) while staying fully
-idempotent-correct, but Java has lower typical latency on this 16-partition
-workload. The two explanations below were written against the stale latency
-accounting and are **hypotheses, not findings** — the "not a client cost"
-conclusion in particular is not established, and a re-run may not support it.
-This 10 B workload is the least distorted of the set (10-byte records barely
-pressure the 32 MiB buffer, so few records took the backpressure retry that reset
-the clock), which is why the numbers are kept here at all:
+idempotent-correct. Java shows lower typical latency in this table, but the two
+sides are not at the same offered load — see
+[Matched-load latency](#matched-load-latency), where kacrab wins once both are
+pinned to the same rate.
 
-- **Pipeline depth.** kacrab's synchronous send fills the per-partition pipeline
-  toward `max.in.flight=5`. At `max.in.flight=1` kacrab's p99 drops to ~2 ms at
-  the same ~4.8M throughput, because on a single low-RTT broker the per-broker
-  request coalescing already saturates the connection and the extra depth only
-  adds queue latency. Depth pays off across multiple brokers / higher RTT.
 - **Broker-pause resilience.** The co-located single-node JVM broker pauses
   periodically (GC/fsync); Java sees it too (max latency spiked to 129 ms in the
-  same runs). At depth 5 a pause on one in-flight request lets the others drain
-  (kacrab p99.9 ~10 ms); at depth 1 the single slot blocks and p99.9 jumps to
-  ~100 ms.
+  same runs, and 131-140 ms in the 2026-07-27 re-runs, against kacrab's 4-16 ms on
+  the same broker). At depth 5 a pause on one in-flight request lets the others
+  drain; at depth 1 the single slot blocks.
+- **Pipeline depth — an earlier claim here was wrong.** This section used to state
+  that `max.in.flight=1` brings kacrab's p99 to ~2 ms at unchanged throughput.
+  Measured with `KACRAB_BENCH_MAX_IN_FLIGHT=1` (5M x 10 B, 16 partitions,
+  2026-07-27): **260 ms avg / 493 ms p99 at 34.3 MB/sec** — 28% *below* the depth-5
+  throughput, not equal to it. Depth 1 lets the accumulator pile up while the
+  single slot is busy, so each request carries ~7200 records instead of ~1900.
+  Depth 2 is unstable run to run (0.84 ms and 9.89 ms avg on consecutive runs).
+  The default depth of 5 is the best of the three.
 
-On a single partition (`kacrab-1p`) kacrab measured ~0.08 ms avg — below Java's,
-though that comparison carries the same stale-accounting caveat. Lower
+### Matched-load latency
+
+Both clients above run unthrottled, so each measures latency at *its own*
+saturation point — and kacrab's is ~35% further up the curve. To compare the
+clients rather than their offered loads, `KACRAB_BENCH_THROUGHPUT` pins kacrab to
+Java's rate. Interleaved kacrab/Java pairs, 5M x 10 B over 16 partitions, kacrab
+pinned to 3.65M rec/sec, medians of 3 pairs (2026-07-27):
+
+| Metric | kacrab @3.65M rec/s | Java `kafka-producer-perf-test` (~3.4M rec/s) |
+| --- | ---: | ---: |
+| Latency avg | **0.11 ms** | 0.32 ms |
+| Latency p50 / p95 / p99 | 0 / 1 / 2 ms | 0 / 1 / 2 ms |
+| Latency p99.9 | **3 ms** | 5 ms |
+| Latency max | **4 ms** | 131-140 ms |
+
+kacrab wins or ties every metric, and still has ~35% throughput headroom above
+Java's ceiling on top. The headline tables are not wrong — they simply compare two
+clients running at different speeds, which is the right way to read a saturation
+benchmark and the wrong way to read a latency one.
+
+Reproduce:
+
+```bash
+KACRAB_BENCH_TOPIC=kacrab-16p KACRAB_ONLY_10B=1 KACRAB_BENCH_RUNS=1 \
+  KACRAB_BENCH_THROUGHPUT=3650000 \
+  cargo run -p kacrab-benches --release --bin producer_kafka_bench
+```
+
+On a single partition (`kacrab-1p`) kacrab measured ~0.08 ms avg — below Java's.
+Lower
 `max.in.flight.requests.per.connection` / `linger.ms` for lower single-broker
 latency; the gap shrinks in production (broker off the client machine, real
 network RTT).

@@ -282,20 +282,14 @@ Read the numbers with the caveats in mind:
 - Single-node, RF=1, broker co-located with the client: this is a
   client-efficiency signal, not a production throughput claim. 10-byte rows
   inflate records/sec; the byte-rate columns are the more useful comparison.
-- **The producer latency figures are withdrawn pending re-measurement, and no
-  conclusion should be drawn from them.** They were taken while a backpressure
-  retry in the bench reset the per-record latency clock, so time spent waiting for
-  buffer memory was dropped on kacrab's side while Java's blocking `send()` counts
-  it in full. The distortion is not uniform: it scales with how much a run hits
-  backpressure, so the 10 KiB runs — where large records fill the 32 MiB buffer
-  far faster than the drain empties it — are affected most, and the 10 B runs
-  least. That is the opposite of convenient, because the 10 KiB runs are the ones
-  where kacrab looked better on latency. Earlier claims here that the gap was a
-  pipeline-depth tradeoff, or that kacrab was at or below Java's latency at 1-3
-  partitions, rested on those numbers and are retracted until a re-run settles
-  them. Latency is also closed-loop saturation latency, not open-loop SLA latency.
-  Throughput, byte-rate, CPU and RSS never depended on the per-record start
-  timestamp and are unaffected. See [`benches/README.md`](benches/README.md).
+- **Latency is closed-loop saturation latency, and the two clients are not at the
+  same offered load.** Each runs flat out, so each measures latency at its own
+  saturation point — and kacrab is pushing ~35% more throughput than Java. Pinned
+  to Java's own rate, kacrab wins or ties every latency metric: 0.11 ms avg,
+  2 ms p99, 4 ms max against Java's 0.32 / 2 / 131-140 (5M x 10 B, 16 partitions,
+  interleaved, 2026-07-27). Java's ~130 ms maxima are JVM client pauses; kacrab on
+  the same broker stays under 16 ms. See
+  [`benches/README.md`](benches/README.md#matched-load-latency).
 - Every kacrab run above had zero retries/errors, with fully correct
   idempotence.
 

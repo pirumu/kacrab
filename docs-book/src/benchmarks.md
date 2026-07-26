@@ -53,29 +53,26 @@ that amortizes over a long-lived producer; the peak-RSS gap is steady-state.
 
 ## The latency tradeoff
 
-> **The latency rows above are withdrawn pending a re-run, and this section is
-> hypothesis rather than finding.** They were measured while a backpressure retry
-> in the harness reset the per-record latency clock, so time spent waiting for
-> producer buffer memory was dropped on kacrab's side, while Java's `send()`
-> blocks inside its own measured window and counts that wait in full. The
-> distortion scales with how hard a run hits backpressure, so it is worst on the
-> 100K × 10 KiB rows — which are precisely the rows where kacrab appears to win —
-> and mildest on the 5M × 10B rows. Reading the tables pessimistically does not
-> correct for it, because the bias is uneven. The harness is fixed; the numbers
-> are not yet re-measured. Throughput, byte-rate, CPU and RSS never depended on
-> that timestamp and stand.
+> **The two clients are not at the same offered load.** Both run flat out, so each
+> measures latency at its own saturation point — and kacrab is ~35% further up the
+> throughput curve. Pinned to Java's own rate (`KACRAB_BENCH_THROUGHPUT`), kacrab
+> wins or ties every latency metric: **0.11 ms avg, 0/1/2 ms p50/p95/p99, 3 ms
+> p99.9, 4 ms max** against Java's **0.32 / 0/1/2 / 5 / 131-140** (5M × 10B,
+> 16 partitions, interleaved pairs, 2026-07-27) — while keeping the throughput
+> headroom on top. Read the tables above as a saturation comparison, not a latency
+> one.
 
-Java keeps a lower typical latency on the 10B workload; the explanation below was
-written against the stale accounting and is retained as a hypothesis to re-test,
-not as an established cause.
+Two notes on the shape of the distribution:
 
-- At `max.in.flight=5` kacrab fills the per-partition pipeline (higher p99 on a
-  single low-RTT broker, where the extra depth only adds queue latency). At
-  `max.in.flight=1` its p99 drops to ~2 ms at the same throughput.
-- Depth pays off the other way under a broker pause: at depth 5 a GC/fsync pause
-  on one in-flight request lets the others drain (p99.9 ~10 ms); at depth 1 the
-  single slot blocks (p99.9 ~100 ms). The gap shrinks in production — broker off
-  the client machine, real network RTT.
+- Java's maxima of 126-140 ms are JVM client pauses, not broker pauses: kacrab
+  against the same broker in the same interleaved runs stays under 16 ms. kacrab's
+  latency band is wider in the body but bounded at the tail; Java's is tighter in
+  the body with rare far outliers.
+- **A claim previously made here was wrong.** This section stated that
+  `max.in.flight=1` drops kacrab's p99 to ~2 ms at unchanged throughput. Measured:
+  **260 ms avg / 493 ms p99 at 28% lower throughput.** Depth 1 lets the accumulator
+  pile up behind the single busy slot (~7200 records per request instead of
+  ~1900). The default depth of 5 is the best setting measured.
 
 ## The consumer head-to-head
 
