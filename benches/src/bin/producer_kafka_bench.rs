@@ -162,7 +162,7 @@ async fn run_scenario(run: BenchmarkRun<'_>) -> BenchmarkRunSummary {
         run_per_record_tracked_send_loop(&mut producer, &run, value).await
     };
     let current_metrics = producer.metrics();
-    let metrics = metrics_delta(&current_metrics, &warmup_metrics);
+    let metrics = current_metrics.delta_since(&warmup_metrics);
     let java_perf = send
         .java_perf
         .expect("tracked benchmark should produce Java-style stats");
@@ -965,99 +965,6 @@ fn f64_from_i64(value: i64) -> f64 {
             i32::MAX
         }
     }))
-}
-
-const fn metrics_delta(
-    current: &ProducerMetricsSnapshot,
-    baseline: &ProducerMetricsSnapshot,
-) -> ProducerMetricsSnapshot {
-    let mut out = ProducerMetricsSnapshot::ZERO;
-    out.records_appended = current
-        .records_appended
-        .saturating_sub(baseline.records_appended);
-    out.produce_request_count = current
-        .produce_request_count
-        .saturating_sub(baseline.produce_request_count);
-    out.produce_request_bytes = current
-        .produce_request_bytes
-        .saturating_sub(baseline.produce_request_bytes);
-    out.produce_batch_count = current
-        .produce_batch_count
-        .saturating_sub(baseline.produce_batch_count);
-    out.produce_batch_bytes = current
-        .produce_batch_bytes
-        .saturating_sub(baseline.produce_batch_bytes);
-    out.produce_request_payload_bytes = current
-        .produce_request_payload_bytes
-        .saturating_sub(baseline.produce_request_payload_bytes);
-    out.produce_request_split_count = current
-        .produce_request_split_count
-        .saturating_sub(baseline.produce_request_split_count);
-    out.record_batch_split_count = current
-        .record_batch_split_count
-        .saturating_sub(baseline.record_batch_split_count);
-    out.produce_record_count = current
-        .produce_record_count
-        .saturating_sub(baseline.produce_record_count);
-    out.produce_retry_count = current
-        .produce_retry_count
-        .saturating_sub(baseline.produce_retry_count);
-    out.produce_error_count = current
-        .produce_error_count
-        .saturating_sub(baseline.produce_error_count);
-    out.requeue_count = current.requeue_count.saturating_sub(baseline.requeue_count);
-    out.in_flight_stall_count = current
-        .in_flight_stall_count
-        .saturating_sub(baseline.in_flight_stall_count);
-    out.queue_depth_bytes = current.queue_depth_bytes;
-    out.queue_depth_records = current.queue_depth_records;
-    out.buffer_available_bytes = current.buffer_available_bytes;
-    out.waiting_threads = current.waiting_threads;
-    out.incomplete_batches = current.incomplete_batches;
-    out.in_flight_dispatches = current.in_flight_dispatches;
-    out.average_batch_fill_ratio = current.average_batch_fill_ratio;
-    out.average_compression_ratio = current.average_compression_ratio;
-    out.flush_count = current.flush_count.saturating_sub(baseline.flush_count);
-    out.flush_total_latency = current
-        .flush_total_latency
-        .saturating_sub(baseline.flush_total_latency);
-    out.metadata_wait_count = current
-        .metadata_wait_count
-        .saturating_sub(baseline.metadata_wait_count);
-    out.metadata_wait_total_latency = current
-        .metadata_wait_total_latency
-        .saturating_sub(baseline.metadata_wait_total_latency);
-    out.transaction_init_count = current
-        .transaction_init_count
-        .saturating_sub(baseline.transaction_init_count);
-    out.transaction_init_total_latency = current
-        .transaction_init_total_latency
-        .saturating_sub(baseline.transaction_init_total_latency);
-    out.transaction_begin_count = current
-        .transaction_begin_count
-        .saturating_sub(baseline.transaction_begin_count);
-    out.transaction_begin_total_latency = current
-        .transaction_begin_total_latency
-        .saturating_sub(baseline.transaction_begin_total_latency);
-    out.send_offsets_to_transaction_count = current
-        .send_offsets_to_transaction_count
-        .saturating_sub(baseline.send_offsets_to_transaction_count);
-    out.send_offsets_to_transaction_total_latency = current
-        .send_offsets_to_transaction_total_latency
-        .saturating_sub(baseline.send_offsets_to_transaction_total_latency);
-    out.transaction_commit_count = current
-        .transaction_commit_count
-        .saturating_sub(baseline.transaction_commit_count);
-    out.transaction_commit_total_latency = current
-        .transaction_commit_total_latency
-        .saturating_sub(baseline.transaction_commit_total_latency);
-    out.transaction_abort_count = current
-        .transaction_abort_count
-        .saturating_sub(baseline.transaction_abort_count);
-    out.transaction_abort_total_latency = current
-        .transaction_abort_total_latency
-        .saturating_sub(baseline.transaction_abort_total_latency);
-    out
 }
 
 #[derive(Debug, Clone, Copy)]

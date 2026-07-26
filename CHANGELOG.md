@@ -16,6 +16,14 @@ release date and links to relevant pull requests or issues.
   the way Java's `Sender.completeBatch` does. The producer parity bench prints
   it as the `batch_splits` column, so that column is now a real both-sides
   comparison against `kafka-producer-perf-test.sh --print-metrics`.
+- `ProducerMetricsSnapshot::delta_since` — the difference between two snapshots,
+  the companion to the `#[non_exhaustive]` change below. Monotonic counters (and
+  the `*_total_latency` durations) are subtracted with saturation; gauges
+  (`queue_depth_*`, `buffer_available_bytes`, `waiting_threads`,
+  `incomplete_batches`, `in_flight_dispatches`, and the `average_*` ratios) are
+  point-in-time readings and keep the current value. Downstream crates that used
+  to compute this with a struct expression should call it instead of assigning
+  fields one by one, so a metric added later cannot be silently left at zero.
 
 ### Changed
 
