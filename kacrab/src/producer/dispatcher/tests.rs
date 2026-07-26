@@ -1,11 +1,12 @@
 #![allow(
     clippy::expect_used,
     clippy::field_reassign_with_default,
+    clippy::float_cmp,
     clippy::missing_assert_message,
     clippy::significant_drop_tightening,
     clippy::unwrap_used,
     reason = "Unit test fixtures fail fastest with contextual unwrap/expect and direct state \
-              setup."
+              setup, and metric totals are exact integer sums."
 )]
 
 use std::{
@@ -1009,6 +1010,163 @@ fn message_too_large_split_uses_compression_ratio_estimation_for_split_groups() 
 
     assert_eq!(split.len(), 3);
     assert!(split.iter().all(|batch| batch.records.len() == 1));
+}
+
+fn message_too_large_dispatcher(sticky_batch_size: usize) -> ProducerDispatcher {
+    ProducerDispatcher::with_config(
+        test_wire(),
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(sticky_batch_size)
+                .buffer_memory(TEST_LARGE_BATCH_SIZE * 4)
+                .linger(Duration::from_secs(1)),
+            compression: ProducerCompression {
+                codec: Compression::None,
+                level: None,
+            },
+            ..ProducerRuntimeConfig::default()
+        },
+    )
+}
+
+fn multi_record_batches(topic: &str, partition: i32, records: usize) -> Vec<super::ReadyBatch> {
+    let now = Instant::now();
+    let accumulator = SharedAccumulator::with_config(
+        AccumulatorConfig::default()
+            .batch_size(TEST_LARGE_BATCH_SIZE)
+            .buffer_memory(TEST_LARGE_BATCH_SIZE * 4)
+            .linger(Duration::from_secs(1)),
+    );
+    for index in 0..records {
+        accumulator
+            .append_at(
+                ProducerRecord::new(topic, partition).value(Bytes::from(format!("v{index}"))),
+                now,
+            )
+            .expect("append record");
+    }
+    accumulator.drain_all()
+}
+
+fn batch_split_total(dispatcher: &ProducerDispatcher) -> f64 {
+    dispatcher
+        .metrics
+        .kafka_metrics()
+        .get("producer-metrics:batch-split-total")
+        .copied()
+        .expect("batch-split-total is registered")
+}
+
+#[tokio::test]
+async fn message_too_large_split_counts_one_batch_split_per_event() {
+    // Java's Sender.completeBatch records a constant 1.0 per split, independent of how
+    // many sub-batches splitAndReenqueue produced.
+    let dispatcher = message_too_large_dispatcher(1);
+    dispatcher.enable_metrics();
+
+    let outcome = dispatcher
+        .message_too_large_split_outcome(
+            multi_record_batches("orders", 0, 3),
+            "orders".to_owned(),
+            0,
+        )
+        .await;
+
+    let super::DispatchOutcome::Requeue(split) = outcome else {
+        panic!("expected a requeue of the split batches");
+    };
+    assert!(
+        split.len() >= 3,
+        "expected at least 3 child batches, got {}",
+        split.len()
+    );
+    let metrics = dispatcher.metrics();
+    assert_eq!(metrics.record_batch_split_count, 1);
+    assert_eq!(metrics.produce_request_split_count, 0);
+    assert_eq!(batch_split_total(&dispatcher), 1.0);
+}
+
+#[tokio::test]
+async fn cascading_message_too_large_split_counts_each_split_event() {
+    let dispatcher = message_too_large_dispatcher(90);
+    dispatcher.enable_metrics();
+
+    let outcome = dispatcher
+        .message_too_large_split_outcome(
+            multi_record_batches("orders", 0, 4),
+            "orders".to_owned(),
+            0,
+        )
+        .await;
+    let super::DispatchOutcome::Requeue(split) = outcome else {
+        panic!("expected a requeue of the split batches");
+    };
+    let child = split
+        .into_iter()
+        .find(|batch| batch.records.len() > 1)
+        .expect("a splittable child batch");
+
+    let outcome = dispatcher
+        .message_too_large_split_outcome(vec![child], "orders".to_owned(), 0)
+        .await;
+
+    assert!(matches!(outcome, super::DispatchOutcome::Requeue(_)));
+    assert_eq!(dispatcher.metrics().record_batch_split_count, 2);
+    assert_eq!(batch_split_total(&dispatcher), 2.0);
+}
+
+#[tokio::test]
+async fn unsplittable_message_too_large_batch_records_no_batch_split() {
+    let dispatcher = message_too_large_dispatcher(1);
+    dispatcher.enable_metrics();
+
+    let outcome = dispatcher
+        .message_too_large_split_outcome(vec![ready_batch("orders", 0)], "orders".to_owned(), 0)
+        .await;
+
+    assert!(matches!(
+        outcome,
+        super::DispatchOutcome::Delivered(Err(ProducerError::Broker {
+            topic,
+            partition: 0,
+            error: ErrorCode::MessageTooLarge,
+        })) if topic == "orders"
+    ));
+    assert_eq!(dispatcher.metrics().record_batch_split_count, 0);
+    assert_eq!(batch_split_total(&dispatcher), 0.0);
+}
+
+#[tokio::test]
+async fn message_too_large_split_without_metrics_still_requeues_split_batches() {
+    let dispatcher = message_too_large_dispatcher(1);
+
+    let outcome = dispatcher
+        .message_too_large_split_outcome(
+            multi_record_batches("orders", 0, 3),
+            "orders".to_owned(),
+            0,
+        )
+        .await;
+
+    let super::DispatchOutcome::Requeue(split) = outcome else {
+        panic!("expected a requeue of the split batches");
+    };
+    assert!(split.len() >= 3);
+    assert_eq!(dispatcher.metrics().record_batch_split_count, 0);
+    assert_eq!(batch_split_total(&dispatcher), 0.0);
+}
+
+#[test]
+fn request_grouping_split_leaves_the_java_named_batch_split_meter_untouched() {
+    let dispatcher = message_too_large_dispatcher(1);
+    dispatcher.enable_metrics();
+
+    dispatcher.metrics.record_request_split();
+
+    let metrics = dispatcher.metrics();
+    assert_eq!(metrics.produce_request_split_count, 1);
+    assert_eq!(metrics.record_batch_split_count, 0);
+    assert_eq!(batch_split_total(&dispatcher), 0.0);
 }
 
 fn assert_ratio_close(actual: f32, expected: f32) {

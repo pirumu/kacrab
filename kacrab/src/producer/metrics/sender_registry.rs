@@ -469,7 +469,10 @@ impl SenderMetricsRegistry {
         }
     }
 
-    /// Record a batch split.
+    /// Record a record batch split forced by a broker `MESSAGE_TOO_LARGE` response.
+    ///
+    /// Fed only by `ProducerMetrics::record_batch_split`, matching Kafka's
+    /// `Sender.completeBatch` — one recorded `1.0` per split event.
     pub(crate) fn record_split(&self) {
         self.record(|client| client.batch_split, 1.0);
     }
@@ -619,6 +622,8 @@ mod tests {
         registry.record_batch("orders", 2, 200, 0.5);
         registry.record_error(Some("orders"));
         registry.record_retry(Some("orders"));
+        // The MESSAGE_TOO_LARGE record-batch split feed (ProducerMetrics::record_batch_split),
+        // not the max.request.size request-grouping split.
         registry.record_split();
         registry.record_buffer_exhausted(4.0);
         registry.record_buffer_exhausted(6.0);
@@ -664,6 +669,7 @@ mod tests {
             metrics.get("producer-metrics:batch-split-total"),
             Some(&1.0)
         );
+        assert!(metrics.contains_key("producer-metrics:batch-split-rate"));
         assert_eq!(
             metrics.get("producer-metrics:compression-rate-avg"),
             Some(&0.5)

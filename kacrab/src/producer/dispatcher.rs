@@ -1286,6 +1286,10 @@ impl ProducerDispatcher {
                     };
                     if self.metrics_are_enabled() {
                         self.metrics.record_requeue();
+                        // One increment per split event, never `split.len()`: Kafka
+                        // Sender.completeBatch discards the int returned by
+                        // RecordAccumulator.splitAndReenqueue and records the constant 1.0.
+                        self.metrics.record_batch_split();
                     }
                     accumulator.requeue_front(split)?;
                     return Ok(Vec::new());
@@ -1706,6 +1710,10 @@ impl ProducerDispatcher {
         };
         if self.metrics_are_enabled() {
             self.metrics.record_requeue();
+            // One increment per split event, never `split.len()`: Kafka
+            // Sender.completeBatch discards the int returned by
+            // RecordAccumulator.splitAndReenqueue and records the constant 1.0.
+            self.metrics.record_batch_split();
         }
         DispatchOutcome::Requeue(split)
     }

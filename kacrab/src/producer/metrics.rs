@@ -34,6 +34,7 @@ pub enum ProducerMetricValue {
 
 /// Point-in-time producer metrics for operational diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct ProducerMetricsSnapshot {
     /// Records accepted into the producer accumulator.
     pub records_appended: u64,
@@ -49,6 +50,8 @@ pub struct ProducerMetricsSnapshot {
     pub produce_request_payload_bytes: u64,
     /// Produce request grouping splits forced by the max request size limit.
     pub produce_request_split_count: u64,
+    /// Record batch splits forced by a broker `MESSAGE_TOO_LARGE` response.
+    pub record_batch_split_count: u64,
     /// Records included in produce requests sent to brokers.
     pub produce_record_count: u64,
     /// Retry attempts after retryable produce failures.
@@ -115,6 +118,48 @@ pub(crate) struct ProducerQueueMetrics {
 }
 
 impl ProducerMetricsSnapshot {
+    /// An all-zero snapshot.
+    ///
+    /// This type is `#[non_exhaustive]`, so downstream crates cannot build one with a
+    /// struct expression. `ZERO` is usable in const context as their baseline value.
+    pub const ZERO: Self = Self {
+        records_appended: 0,
+        produce_request_count: 0,
+        produce_request_bytes: 0,
+        produce_batch_count: 0,
+        produce_batch_bytes: 0,
+        produce_request_payload_bytes: 0,
+        produce_request_split_count: 0,
+        record_batch_split_count: 0,
+        produce_record_count: 0,
+        produce_retry_count: 0,
+        produce_error_count: 0,
+        requeue_count: 0,
+        in_flight_stall_count: 0,
+        queue_depth_bytes: 0,
+        queue_depth_records: 0,
+        buffer_available_bytes: 0,
+        waiting_threads: 0,
+        incomplete_batches: 0,
+        in_flight_dispatches: 0,
+        average_batch_fill_ratio: 0.0,
+        average_compression_ratio: 0.0,
+        flush_count: 0,
+        flush_total_latency: Duration::ZERO,
+        metadata_wait_count: 0,
+        metadata_wait_total_latency: Duration::ZERO,
+        transaction_init_count: 0,
+        transaction_init_total_latency: Duration::ZERO,
+        transaction_begin_count: 0,
+        transaction_begin_total_latency: Duration::ZERO,
+        send_offsets_to_transaction_count: 0,
+        send_offsets_to_transaction_total_latency: Duration::ZERO,
+        transaction_commit_count: 0,
+        transaction_commit_total_latency: Duration::ZERO,
+        transaction_abort_count: 0,
+        transaction_abort_total_latency: Duration::ZERO,
+    };
+
     /// Return one named metric value from this snapshot.
     #[must_use]
     pub fn metric(&self, name: &str) -> Option<ProducerMetricValue> {
@@ -129,6 +174,9 @@ impl ProducerMetricsSnapshot {
             )),
             "produce_request_split_count" => {
                 Some(ProducerMetricValue::Count(self.produce_request_split_count))
+            },
+            "record_batch_split_count" => {
+                Some(ProducerMetricValue::Count(self.record_batch_split_count))
             },
             "produce_record_count" => Some(ProducerMetricValue::Count(self.produce_record_count)),
             "produce_retry_count" => Some(ProducerMetricValue::Count(self.produce_retry_count)),
@@ -200,6 +248,7 @@ impl ProducerMetricsSnapshot {
             "produce_batch_bytes",
             "produce_request_payload_bytes",
             "produce_request_split_count",
+            "record_batch_split_count",
             "produce_record_count",
             "produce_retry_count",
             "produce_error_count",
@@ -243,6 +292,7 @@ impl ProducerMetricsSnapshot {
                 | "produce_batch_bytes"
                 | "produce_request_payload_bytes"
                 | "produce_request_split_count"
+                | "record_batch_split_count"
                 | "produce_record_count"
                 | "produce_retry_count"
                 | "produce_error_count"
@@ -389,6 +439,9 @@ fn producer_metric_description(name: &str) -> &'static str {
         },
         "produce_request_split_count" => {
             "produce request grouping splits forced by max request size"
+        },
+        "record_batch_split_count" => {
+            "record batch splits forced by a broker MESSAGE_TOO_LARGE response"
         },
         "produce_record_count" => "records included in produce requests",
         "produce_retry_count" => "retry attempts after retryable produce failures",
@@ -567,6 +620,7 @@ struct ProducerMetricsInner {
     produce_batch_bytes: AtomicU64,
     produce_request_payload_bytes: AtomicU64,
     produce_request_split_count: AtomicU64,
+    record_batch_split_count: AtomicU64,
     produce_record_count: AtomicU64,
     produce_retry_count: AtomicU64,
     produce_error_count: AtomicU64,
@@ -796,10 +850,23 @@ impl ProducerMetrics {
         }
     }
 
+    /// Record a produce request grouping split forced by `max.request.size`.
+    ///
+    /// This is a kacrab-only local packing decision; Java has no metric for it, so it
+    /// deliberately does not feed the Java-named `batch-split` meter.
     pub(crate) fn record_request_split(&self) {
         let _previous = self
             .inner
             .produce_request_split_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a record batch split forced by a broker `MESSAGE_TOO_LARGE` response —
+    /// the sole feed of the Java-named `producer-metrics:batch-split-*` meter.
+    pub(crate) fn record_batch_split(&self) {
+        let _previous = self
+            .inner
+            .record_batch_split_count
             .fetch_add(1, Ordering::Relaxed);
         self.inner.sender_registry.record_split();
     }
@@ -948,6 +1015,7 @@ impl ProducerMetrics {
                 .inner
                 .produce_request_split_count
                 .load(Ordering::Relaxed),
+            record_batch_split_count: self.inner.record_batch_split_count.load(Ordering::Relaxed),
             produce_record_count,
             produce_retry_count: self.inner.produce_retry_count.load(Ordering::Relaxed),
             produce_error_count: self.inner.produce_error_count.load(Ordering::Relaxed),
@@ -1929,6 +1997,7 @@ mod tests {
             produce_batch_bytes: 256,
             produce_request_payload_bytes: 256,
             produce_request_split_count: 1,
+            record_batch_split_count: 1,
             produce_record_count: 3,
             produce_retry_count: 1,
             produce_error_count: 0,
