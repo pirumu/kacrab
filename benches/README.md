@@ -166,11 +166,72 @@ Knobs (all read from the environment, so set them inline before `cargo run`):
   scenario with N records; combined with `KACRAB_ONLY_10KIB=1` it caps the
   10 KiB scenario.
 - `KACRAB_BENCH_RUNS=N` — number of runs per scenario (default 5).
+- `KACRAB_BENCH_SPLIT_PROBE=1` — opt-in `MESSAGE_TOO_LARGE` split probe: replaces
+  both default scenarios with a single 20,000 x 4 KiB run and forces
+  `batch.size=262144`, so every full batch overflows a topic created with
+  `max.message.bytes=65536` (see the probe section below). Off by default; the
+  default `cargo run` pass and the default 5-run matrix are unchanged.
 - `KACRAB_BENCH_SYNC_SEND=1` — legacy flag: the per-record path is always the
   synchronous Java-style send now; the flag only prints the sync-now
   buffer-spin counter after the run.
 - `KACRAB_BENCH_API` — accepted for old scripts but a no-op; every value
   resolves to the Java-style per-record public API.
+
+### Batch-split probe
+
+The two default parity scenarios (10 B and 10 KiB records) never come near any
+broker limit, so no batch is ever rejected with `MESSAGE_TOO_LARGE` and both
+sides print `batch_splits=0` — two zeros agreeing, which proves nothing. The
+opt-in probe drives the split path for real:
+
+```bash
+make bench-kafka-split-probe
+```
+
+That target runs `benches/scripts/producer_default_matrix.sh --split-probe`
+(also reachable as `KACRAB_BENCH_SPLIT_PROBE=1 benches/scripts/producer_default_matrix.sh`).
+It creates `kacrab-bench-split-probe` with
+`kafka-topics.sh --config max.message.bytes=65536`, runs one kacrab pass
+(`KACRAB_BENCH_SPLIT_PROBE=1`, `KACRAB_BENCH_RUNS=1`) and one
+`kafka-producer-perf-test.sh` pass **against that same topic**, and prints both
+counter lines together. Pointing the Java pass at the normal bench topic instead
+would make the two `batch_splits` values incomparable, so the script always
+overrides the topic for both sides. Overridable: `KACRAB_SPLIT_PROBE_TOPIC`,
+`KACRAB_SPLIT_PROBE_MAX_MESSAGE_BYTES`, `KACRAB_SPLIT_PROBE_RECORDS`,
+`KACRAB_SPLIT_PROBE_PARTITIONS`, `KACRAB_SPLIT_PROBE_REPLICATION_FACTOR`.
+
+The sizing is the probe, and all three constraints have to hold at once:
+
+- **4 KiB records**, far below the 64 KiB topic limit. A record that exceeds the
+  limit on its own is *unsplittable* — kacrab returns `None` from
+  `split_for_retry_with_compression_ratio` when `records.len() <= 1`, mirroring
+  Java's `batch.recordCount > 1` guard, and the send fails terminally instead of
+  splitting. The probe must build multi-record oversize batches.
+- **`batch.size=262144`**, 4x the topic limit, so every full batch is rejected.
+- **`max.request.size` left at its 1 MiB default**, comfortably above the 256 KiB
+  batch, so the *broker* limit binds first. If the client limit bound first the
+  producer would fail locally with `RecordTooLarge` and the broker would never
+  see the batch.
+
+Both sides are configured identically (the Rust bench sets `batch.size` from
+`KACRAB_BENCH_SPLIT_PROBE`; the Java pass gets `batch.size` and
+`max.request.size` via `--command-property`).
+
+A passing comparison is **both sides reporting the same non-zero
+`batch_splits`**. Exact equality is only expected for the first split of each
+batch: kacrab always splits against `batch.size`
+(`partition_sticky_batch_size`), while Java 4.2.0+ re-splits an
+already-split batch against `max(bigBatch.maxRecordSize, estimatedSizeInBytes() / 2)`
+(`RecordAccumulator.java:507-540`). Once splits cascade the two split geometries
+differ, so the counts can diverge; treat a small divergence as expected and only
+a `0` on one side as a failure. Note that `batch.size` is also the cap the
+accumulator packs a batch to, so a kacrab split whose target is still `batch.size`
+can hand back a single child of the same size and cascade further than Java does
+— if the probe shows kacrab's count running away while Java's converges, that
+missing halving branch is the reason, not a counting bug.
+
+Like every other real-broker path in this repo the probe is run manually; it is
+not wired into `make test`.
 
 The public API hot path is allocation-conscious rather than magically
 wire-zero-copy: payloads are cloned as `Bytes` handles and topics shared as

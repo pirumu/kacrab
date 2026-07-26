@@ -37,6 +37,17 @@ const SMALL_VALUE_SIZE: usize = 10;
 const LARGE_VALUE_SIZE: usize = 10 * 1024;
 const TRACKED_API_CHUNK_RECORDS: usize = 16_384;
 const BENCH_RUNS: usize = 5;
+// Opt-in MESSAGE_TOO_LARGE split probe (KACRAB_BENCH_SPLIT_PROBE=1). The sizing is the
+// whole point of the scenario: 4 KiB records stay far below the probe topic's
+// max.message.bytes so no record is oversize on its own (a one-record batch is
+// unsplittable), 256 KiB batches overflow that topic limit by 4x so the broker rejects
+// them, and 256 KiB also stays under the 1 MiB max.request.size default so the broker
+// limit binds before the client-side one.
+const SPLIT_PROBE_MESSAGES: usize = 20_000;
+const SPLIT_PROBE_VALUE_SIZE: usize = 4 * 1024;
+const SPLIT_PROBE_BATCH_SIZE: usize = 256 * 1024;
+const SPLIT_PROBE_TOPIC_MAX_MESSAGE_BYTES: usize = 64 * 1024;
+const SPLIT_PROBE_MAX_REQUEST_SIZE: usize = 1024 * 1024;
 
 fn main() {
     // Default to a multi-thread runtime so the background sender + in-flight
@@ -75,6 +86,15 @@ fn main() {
              reporting_interval_ms={}",
             reporting_interval.as_millis()
         );
+        if split_probe_enabled() {
+            println!(
+                "split probe enabled: batch.size={SPLIT_PROBE_BATCH_SIZE}, \
+                 record_size={SPLIT_PROBE_VALUE_SIZE}, \
+                 max.request.size={SPLIT_PROBE_MAX_REQUEST_SIZE} (default, must not bind first), \
+                 topic must be created with \
+                 max.message.bytes={SPLIT_PROBE_TOPIC_MAX_MESSAGE_BYTES}"
+            );
+        }
         let runs = bench_runs();
         for scenario in scenarios {
             let mut summaries = Vec::with_capacity(runs);
@@ -179,6 +199,13 @@ async fn build_producer(config: &ProducerConfig) -> Producer {
             config.bootstrap_servers.as_slice().join(","),
         )
         .set("client.id", config.client_id.as_str());
+    // The split probe needs batch.size several times the probe topic's max.message.bytes
+    // so every full batch is rejected with MESSAGE_TOO_LARGE; an explicit
+    // KACRAB_BENCH_BATCH_SIZE below still wins.
+    if split_probe_enabled() {
+        let batch_size = SPLIT_PROBE_BATCH_SIZE.to_string();
+        builder = builder.set("batch.size", batch_size.as_str());
+    }
     // KACRAB_BENCH_BATCH_SIZE overrides batch.size to confirm whether throughput is
     // round-trip/pipelining bound (more records per request -> higher rate if so).
     if let Ok(batch_size) = env::var("KACRAB_BENCH_BATCH_SIZE") {
@@ -512,6 +539,12 @@ fn benchmark_record(topic: Arc<str>, index: usize) -> ProducerRecord {
 }
 
 fn scenarios() -> Vec<Scenario> {
+    // KACRAB_BENCH_SPLIT_PROBE=1 replaces the default parity scenarios with the opt-in
+    // oversize probe, the only scenario that drives the broker into MESSAGE_TOO_LARGE so
+    // the `batch_splits` column is non-zero on both sides of the comparison.
+    if split_probe_enabled() {
+        return vec![split_probe_scenario()];
+    }
     // KACRAB_BENCH_MESSAGES bounds the small-payload run to a fixed record count and
     // skips the large-payload scenario — used to profile a single hot partition without
     // the default 5,000,000-record flood overrunning delivery.timeout.ms.
@@ -566,6 +599,20 @@ fn large_payload_scenario() -> Scenario {
         messages: LARGE_BENCH_MESSAGES,
         value_size: LARGE_VALUE_SIZE,
         batch_messages: TRACKED_API_CHUNK_RECORDS.min(96),
+    }
+}
+
+fn split_probe_enabled() -> bool {
+    env::var("KACRAB_BENCH_SPLIT_PROBE")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn split_probe_scenario() -> Scenario {
+    Scenario {
+        name: "split probe: 20,000 messages x 4 KiB".to_owned(),
+        messages: SPLIT_PROBE_MESSAGES,
+        value_size: SPLIT_PROBE_VALUE_SIZE,
+        batch_messages: TRACKED_API_CHUNK_RECORDS.min(256),
     }
 }
 
@@ -1339,10 +1386,11 @@ mod tests {
 
     use super::{
         BENCH_RUNS, BenchmarkResult, DeliveryMode, LatencySummary, ProducerMetricsSnapshot,
-        ProducerPerformanceStats, ProducerPerformanceStatsHandle, Scenario, TrackedCompletionStart,
-        benchmark_api_for, benchmark_producer_config, format_average_counter_line,
-        format_effective_config_snapshot, format_result_line, latency_summary,
-        record_tracked_callback_completion, scenarios,
+        ProducerPerformanceStats, ProducerPerformanceStatsHandle, SPLIT_PROBE_BATCH_SIZE,
+        SPLIT_PROBE_MAX_REQUEST_SIZE, SPLIT_PROBE_MESSAGES, SPLIT_PROBE_TOPIC_MAX_MESSAGE_BYTES,
+        Scenario, TrackedCompletionStart, benchmark_api_for, benchmark_producer_config,
+        format_average_counter_line, format_effective_config_snapshot, format_result_line,
+        latency_summary, record_tracked_callback_completion, scenarios, split_probe_scenario,
     };
 
     #[test]
@@ -1538,6 +1586,21 @@ mod tests {
         assert!(line.contains("5 ms 99th"));
         assert!(line.contains("5 ms 99.9th."));
         assert!(!line.contains("dispatch_latency"));
+    }
+
+    #[test]
+    fn split_probe_scenario_sizes_multi_record_batches_over_only_the_broker_limit() {
+        let scenario = split_probe_scenario();
+
+        // A record that is oversize on its own cannot be split (records.len() <= 1), so the
+        // probe payload must stay below the topic limit.
+        assert!(scenario.value_size < SPLIT_PROBE_TOPIC_MAX_MESSAGE_BYTES);
+        // The full batch must overflow the topic limit, and must hold more than one record.
+        const { assert!(SPLIT_PROBE_TOPIC_MAX_MESSAGE_BYTES < SPLIT_PROBE_BATCH_SIZE) }
+        assert!(SPLIT_PROBE_BATCH_SIZE / scenario.value_size > 1);
+        // The client-side max.request.size must not bind before the broker limit.
+        const { assert!(SPLIT_PROBE_BATCH_SIZE < SPLIT_PROBE_MAX_REQUEST_SIZE) }
+        assert_eq!(scenario.messages, SPLIT_PROBE_MESSAGES);
     }
 
     #[test]
