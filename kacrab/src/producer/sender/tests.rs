@@ -3048,6 +3048,48 @@ async fn drain_ready_dispatch_batches_drains_accumulator_before_preparing() {
 }
 
 #[tokio::test]
+async fn drain_ready_dispatch_batches_keeps_unroutable_colocated_partitions_buffered() {
+    let state = ProducerSenderState::new_with_idempotent_ordering(5, true);
+    // No brokers, so the co-located sweep cannot resolve a leader for the unready
+    // partition. It must leave that batch buffered rather than drain one it cannot
+    // route — dropping it here would lose records and leak the buffer reservation.
+    let dispatcher = crate::producer::dispatcher::ProducerDispatcher::new(
+        WireClient::connect_with_brokers(ConnectionConfig::default(), "producer-test", []),
+    );
+    let now = std::time::Instant::now();
+    let accumulator = SharedAccumulator::with_config(
+        AccumulatorConfig::default()
+            .batch_size(512)
+            .linger(Duration::from_secs(30))
+            .buffer_memory(64 * 1024),
+    );
+    accumulator
+        .append_at(
+            ProducerRecord::new("orders", 0).value(Bytes::from(vec![b'a'; 512])),
+            now,
+        )
+        .expect("append full record");
+    accumulator
+        .append_at(
+            ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")),
+            now,
+        )
+        .expect("append half-full record");
+
+    let selection = state
+        .drain_ready_dispatch_batches(&dispatcher, &accumulator, now)
+        .await
+        .expect("ready batches should prepare")
+        .expect("ready batch should produce a selection");
+
+    assert_eq!(selection.dispatchable.len(), 1);
+    assert_eq!(selection.dispatchable[0].partition, 0);
+    assert!(selection.deferred.is_empty());
+    assert_eq!(accumulator.buffered_records(), 1);
+    assert_eq!(accumulator.buffered_bytes(), 512);
+}
+
+#[tokio::test]
 async fn sender_state_waits_for_dispatch_slot_only_when_limit_is_reached() {
     let mut state = ProducerSenderState::new(2);
     let _abort = state.spawn_in_flight(async {

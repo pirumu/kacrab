@@ -3705,7 +3705,7 @@ impl ProducerSenderState {
         // ready backlog would requeue all but one per partition every cycle — O(N)
         // churn under the accumulator lock per dispatch. Non-idempotent dispatch
         // coalesces every ready batch into one request, so it drains them all.
-        let batches = if self.idempotent_ordering {
+        let mut batches = if self.idempotent_ordering {
             accumulator.drain_front_ready(now)
         } else {
             accumulator.drain_ready(now)
@@ -3713,6 +3713,16 @@ impl ProducerSenderState {
         if batches.is_empty() {
             return Ok(None);
         }
+        // Both branches drain by per-partition readiness, which is only Kafka's
+        // `RecordAccumulator.ready` half. Now that at least one broker is receiving a
+        // request, take the head batch of every other partition it leads as
+        // `drainBatchesForOneNode` does — a half-full batch whose linger has not
+        // expired rides along instead of waiting out its own linger for a request it
+        // could have shared. Swept before `select_dispatchable_batches` on purpose:
+        // they then pass through the same per-partition reservation, in-flight
+        // registration and stop-drain gates as every other drained batch, and a
+        // partition already at its in-flight cap simply defers and is re-enqueued.
+        dispatcher.sweep_colocated_head_batches(accumulator, &mut batches);
         self.prepare_dispatch_batches(dispatcher, batches)
             .await
             .map(Some)

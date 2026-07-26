@@ -1245,8 +1245,7 @@ impl ProducerDispatcher {
         if batches.is_empty() {
             return Ok(Vec::new());
         }
-        self.sweep_colocated_head_batches(accumulator, &mut batches)
-            .await;
+        self.sweep_colocated_head_batches(accumulator, &mut batches);
         if let Some(batch) = self.expired_batch(&batches, now) {
             return Err(ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
@@ -1452,10 +1451,12 @@ impl ProducerDispatcher {
     /// across as many requests as `max.request.size` requires, so a swept batch can
     /// only add a request, never overflow one.
     ///
-    /// Called before the dispatch's delivery-timeout check on purpose, so a swept
-    /// batch is held to the same deadline as a drained one instead of slipping past
-    /// the gate.
-    async fn sweep_colocated_head_batches(
+    /// Callers must invoke this *before* any per-partition selection or in-flight
+    /// bookkeeping, never after: swept batches have to pass through the same
+    /// reservation, stop-drain and delivery-timeout gates as drained ones. In
+    /// [`Self::dispatch_ready`] that means before the delivery-timeout check; in the
+    /// sender loop it means before `select_dispatchable_batches`.
+    pub(crate) fn sweep_colocated_head_batches(
         &self,
         accumulator: &SharedAccumulator,
         batches: &mut Vec<ReadyBatch>,
@@ -1464,15 +1465,14 @@ impl ProducerDispatcher {
         if candidates.is_empty() {
             return;
         }
-        // Exactly the metadata `dispatch_batches` is about to ask for, so this is a
-        // cache hit on the hot path. A miss (or an error) simply skips the sweep and
-        // leaves this dispatch identical to what it would have been.
+        // Cached metadata only, never `metadata_for_topics`: that would put a refresh
+        // wait and a network fetch in front of batches that are already ready to go —
+        // the opposite of what this is for. A steady-state producer has the snapshot
+        // cached (it needed it to partition and to route the previous request); a cold
+        // or stale cache just skips the sweep and leaves the dispatch untouched, and
+        // `dispatch_batches` still does the real, blocking resolution right after.
         let topics = unique_topics(batches);
-        let Ok(metadata) = self
-            .wire
-            .metadata_for_topics(topics.iter().map(String::as_str))
-            .await
-        else {
+        let Some(metadata) = self.wire.cached_metadata_for(&topics) else {
             return;
         };
         let sweep = colocated_sweep_partitions(&metadata, batches, candidates);

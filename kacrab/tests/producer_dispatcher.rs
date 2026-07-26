@@ -1605,6 +1605,147 @@ async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() 
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Proving the live sender path sweeps needs mock broker, metadata, idempotent \
+              producer config, and request capture in one integration scenario."
+)]
+async fn idempotent_kafka_producer_sweeps_unready_colocated_partition_on_the_live_sender_path() {
+    const BATCH_SIZE: usize = 512;
+
+    let observed_partitions = Arc::new(Mutex::new(Vec::<i32>::new()));
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::InitProducerId as i16);
+            init_producer_id_response_frame_for_request(&header, 42, 3)
+        }),
+        Box::new({
+            let observed_partitions = Arc::clone(&observed_partitions);
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                    .expect("produce request");
+                // Answer exactly the partitions this request carried, so a delivery can
+                // only resolve for a batch that really went on the wire.
+                let mut partitions = produce
+                    .topic_data
+                    .iter()
+                    .flat_map(|topic| topic.partition_data.iter())
+                    .map(|partition| partition.index)
+                    .collect::<Vec<_>>();
+                partitions.sort_unstable();
+                observed_partitions
+                    .lock()
+                    .expect("observed partitions lock")
+                    .clone_from(&partitions);
+                let offsets = partitions
+                    .iter()
+                    .map(|partition| (*partition, i64::from(*partition) * 40))
+                    .collect::<Vec<_>>();
+                produce_response_frame_for_partitions(&header, &offsets)
+            }
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response_same_leader(7, leader_7);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default().request_timeout(Duration::from_secs(1)),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            // A 30s linger means a batch that is not ready on its own cannot reach the
+            // broker within this test unless it is swept.
+            accumulator: AccumulatorConfig::default()
+                .batch_size(BATCH_SIZE)
+                .linger(Duration::from_secs(30))
+                .buffer_memory(64 * 1024),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
+            delivery_timeout: Duration::from_mins(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 5,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: None,
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+
+    // The sweep reads cached metadata only. A real producer has the snapshot by the
+    // time it dispatches (the partitioner needs it); these sends name their partition
+    // explicitly, so fetch it the way the first send otherwise would.
+    let partitions = producer.partitions_for("orders").await.unwrap();
+    assert_eq!(partitions.len(), 2);
+
+    // Both sends land before the background sender can run: `send` is synchronous and
+    // there is no await point between them on the current-thread test runtime.
+    // Partition 0 fills its batch; partition 1 keeps a lone half-full batch that is not
+    // full, has not lingered, and is not sealed (nothing was queued behind it).
+    let full_delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from(vec![b'a'; BATCH_SIZE])))
+        .unwrap();
+    let unready_delivery = producer
+        .send(ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")))
+        .unwrap();
+
+    let full_receipt = tokio::time::timeout(Duration::from_secs(2), full_delivery)
+        .await
+        .expect("background sender should dispatch the full batch without flush")
+        .expect("delivery should succeed");
+
+    assert_eq!(
+        *observed_partitions
+            .lock()
+            .expect("observed partitions lock"),
+        vec![0, 1],
+        "partition 1 is led by the broker already receiving partition 0, so its head batch should \
+         ride along on the same produce request (Kafka drainBatchesForOneNode)"
+    );
+    let unready_receipt = tokio::time::timeout(Duration::from_secs(2), unready_delivery)
+        .await
+        .expect("the swept batch should be delivered by the same request, not after linger")
+        .expect("delivery should succeed");
+
+    assert_eq!(full_receipt.partition, 0);
+    assert_eq!(full_receipt.offset, 0);
+    assert_eq!(unready_receipt.partition, 1);
+    assert_eq!(unready_receipt.offset, 40);
+    assert_eq!(producer.buffered_bytes(), 0);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 3);
+}
+
+#[tokio::test]
 async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correlation() {
     let leader_7 = MockBroker::serve_pipelined_idempotent_produce_reversed(vec![0, 1]).await;
     let bootstrap = MockBroker::serve_many(vec![
@@ -6321,7 +6462,10 @@ async fn dispatcher_sweeps_unready_partitions_of_a_dispatching_broker_like_java(
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let dispatcher = ProducerDispatcher::new(wire);
+    let dispatcher = ProducerDispatcher::new(wire.clone());
+    // The sweep reads cached metadata only, so give the client the snapshot a
+    // steady-state producer already holds by the time it dispatches.
+    let _metadata = wire.metadata_for_topics(["orders"]).await.unwrap();
 
     let mut receipts = dispatcher.dispatch_ready(&accumulator, now).await.unwrap();
     receipts.sort_by_key(|receipt| receipt.partition);
