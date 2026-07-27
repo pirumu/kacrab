@@ -1,4 +1,3 @@
-#![cfg(feature = "admin")]
 //! Real Kafka admin delegation-token integration test.
 //!
 //! Delegation tokens require a SASL-authenticated (non-token) principal and a

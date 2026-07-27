@@ -1,4 +1,3 @@
-#![cfg(feature = "producer")]
 //! Producer dispatcher integration tests.
 
 #![allow(

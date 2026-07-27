@@ -1,4 +1,3 @@
-#![cfg(feature = "producer")]
 //! Real Kafka producer integration tests.
 
 #![allow(

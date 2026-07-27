@@ -1,4 +1,3 @@
-#![cfg(all(feature = "producer", feature = "share-consumer", feature = "admin"))]
 //! Real Kafka share consumer integration test (KIP-932).
 //!
 //! Share groups are the one Kafka 4.x surface where nothing can be verified

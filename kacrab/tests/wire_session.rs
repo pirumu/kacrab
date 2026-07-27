@@ -22,11 +22,14 @@ use kacrab_protocol::{
     },
     version::{request_header_version, response_header_version},
 };
+#[cfg(feature = "aws-lc-rs-tls")]
 use pkcs8::{
     EncodePrivateKey, PrivateKeyInfoOwned, SecretDocument,
     der::{Decode, pem::LineEnding},
 };
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 use rcgen::{CertifiedKey, generate_simple_self_signed};
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 use rustls::{
     RootCertStore, ServerConfig,
     pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
@@ -37,6 +40,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 use tokio_rustls::TlsAcceptor;
 
 /// Pick a `rustls` crypto provider for the mock TLS broker.
@@ -2082,6 +2086,7 @@ impl MockTlsBroker {
     }
 }
 
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 fn write_temp_cert(contents: &[u8]) -> String {
     write_temp_file("ca", contents)
 }
@@ -2098,6 +2103,7 @@ fn write_temp_file(kind: &str, contents: &[u8]) -> String {
     path.to_string_lossy().into_owned()
 }
 
+#[cfg(feature = "aws-lc-rs-tls")]
 fn encrypted_pkcs8_pem(key_pem: &str, password: &str) -> String {
     let (_label, document) =
         SecretDocument::from_pem(key_pem).expect("plain PKCS#8 PEM should parse");

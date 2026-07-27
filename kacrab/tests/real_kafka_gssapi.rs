@@ -1,6 +1,5 @@
 //! Real Kafka GSSAPI integration smoke tests.
 
-#![cfg(feature = "gssapi")]
 #![allow(
     clippy::expect_used,
     clippy::print_stdout,

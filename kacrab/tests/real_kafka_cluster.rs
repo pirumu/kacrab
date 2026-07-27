@@ -1,4 +1,3 @@
-#![cfg(feature = "producer")]
 //! Real 3-broker cluster integration tests: multi-broker dispatch and
 //! leadership-change recovery against `docker-compose.cluster.yml`.
 //!
