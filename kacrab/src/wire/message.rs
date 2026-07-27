@@ -50,7 +50,9 @@ use kacrab_protocol::{
         ProduceRequestData, ProduceResponseData, PushTelemetryRequestData,
         PushTelemetryResponseData, RemoveRaftVoterRequestData, RemoveRaftVoterResponseData,
         RenewDelegationTokenRequestData, RenewDelegationTokenResponseData,
-        ShareGroupDescribeRequestData, ShareGroupDescribeResponseData,
+        ShareAcknowledgeRequestData, ShareAcknowledgeResponseData, ShareFetchRequestData,
+        ShareFetchResponseData, ShareGroupDescribeRequestData, ShareGroupDescribeResponseData,
+        ShareGroupHeartbeatRequestData, ShareGroupHeartbeatResponseData,
         StreamsGroupDescribeRequestData, StreamsGroupDescribeResponseData, SyncGroupRequestData,
         SyncGroupResponseData, TxnOffsetCommitRequestData, TxnOffsetCommitResponseData,
         UnregisterBrokerRequestData, UnregisterBrokerResponseData, UpdateFeaturesRequestData,
@@ -199,6 +201,14 @@ impl_passthrough_message! {
     HeartbeatRequestData => HeartbeatResponseData,
     OffsetForLeaderEpochRequestData => OffsetForLeaderEpochResponseData,
     ConsumerGroupHeartbeatRequestData => ConsumerGroupHeartbeatResponseData,
+}
+
+// Share consumer request/response pairs (KIP-932): membership, acquire-and-fetch,
+// and acknowledgement. Also pure pass-through codecs.
+impl_passthrough_message! {
+    ShareGroupHeartbeatRequestData => ShareGroupHeartbeatResponseData,
+    ShareFetchRequestData => ShareFetchResponseData,
+    ShareAcknowledgeRequestData => ShareAcknowledgeResponseData,
 }
 
 /// Clear the topic key that the negotiated `version` does not put on the wire so

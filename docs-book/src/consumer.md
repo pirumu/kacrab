@@ -140,6 +140,39 @@ the chain is panic-isolated. `metrics()` returns a typed snapshot
 (poll/records/fetch/commit/heartbeat/rebalance totals plus the wire buffer pool),
 and `client_instance_id()` returns the broker-assigned telemetry id.
 
+## The other consuming surface: share groups
+
+Kafka 4.x has a second way to consume, and it is not a variation on the first.
+A share group (KIP-932) hands out *acquired* records under a broker-held lock
+instead of assigning partitions and advancing a position. `ShareConsumer`
+(feature `share-consumer`) is therefore a separate type, not a mode on
+`Consumer`: `assign`, `seek`, `position`, `pause`, and `commit_sync` have no
+meaning when there is no position to hold and no exclusive ownership to defend.
+
+What changes, concretely:
+
+- **Assignment is not exclusive.** Several members can hold the same partition,
+  each acquiring a disjoint set of its records — so a share group can run more
+  consumers than partitions. Nothing is revoked and nothing is reconciled; the
+  coordinator's target assignment is simply adopted.
+- **Disposition is per record.** `Accept` retires a record, `Release` returns it
+  for another attempt, `Reject` archives it without redelivery. There is no
+  offset commit; `commit()` flushes acknowledgements.
+- **Redelivery is a first-class outcome.** `ShareRecord::delivery_count` says how
+  many times the group has tried to deliver this record, which is what makes
+  "reject after N attempts" expressible. A consumer that dies mid-processing
+  loses nothing: its acquisitions come back when their locks expire.
+
+Three RPCs carry it — `ShareGroupHeartbeat` (v1) for membership,
+`ShareFetch` (v1–2) for acquire-and-fetch, `ShareAcknowledge` (v1–2) for
+standalone acknowledgement and session close. Acknowledgements ride along on the
+next `ShareFetch` rather than costing a round trip each, batched as contiguous
+offset ranges. Two details are easy to get wrong and are worth naming: a
+session-opening request (epoch `0`) must not carry acknowledgements at all, and
+an acquired offset with no deliverable record behind it — compacted away, or a
+control record — still owes the broker a `Gap` acknowledgement, or it stays
+locked until it times out.
+
 ## Verification
 
 The consumer is exercised end-to-end against a real Apache Kafka 4.3.0 broker
@@ -159,6 +192,19 @@ The consumer is exercised end-to-end against a real Apache Kafka 4.3.0 broker
 - interceptors: `on_consume`/`on_commit` observe every record and commit;
 - KIP-848: a `group.protocol=consumer` subscriber joins via
   `ConsumerGroupHeartbeat`, is assigned both partitions, consumes, and commits.
+
+The share consumer gets its own suite
+(`kacrab/tests/real_kafka_share_consumer.rs`), because almost nothing about it
+can be checked without a broker — the acquisition lock, the delivery count, and
+redelivery are all broker-side machinery. It covers both acknowledgement modes,
+all three dispositions (a `Release`d record comes back, a `Reject`ed one does
+not), delivery counts climbing to the broker's archive limit, three consumers
+consuming a one-partition topic exactly once between them, lock expiry
+redelivering an abandoned consumer's records, and admin interop against the live
+group. One fixture change was needed: the share coordinator auto-creates its
+internal `__share_group_state` topic at replication factor 3, which a
+single-broker compose cannot satisfy, and the resulting failure is silent at the
+client — a share consumer simply acquires nothing.
 
 Truncation detection (KIP-320) and the fetch-session state machine are covered by
 unit tests, since a real truncation / leader change cannot be staged on the

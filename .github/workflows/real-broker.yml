@@ -47,7 +47,7 @@ env:
 
 jobs:
   base:
-    name: base broker (producer · consumer · compression · admin smoke)
+    name: base broker (producer · consumer · share consumer · compression · admin smoke)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -96,6 +96,12 @@ jobs:
 
       - name: Consumer suite
         run: cargo test -p kacrab --all-features --test real_kafka_consumer -- --ignored --test-threads=1 --nocapture
+
+      # Share groups (KIP-932) are broker-side machinery — acquisition locks,
+      # delivery counts, redelivery — so this suite is the only coverage of the
+      # share consumer's behaviour, not just its wire encoding.
+      - name: Share consumer suite
+        run: cargo test -p kacrab --all-features --test real_kafka_share_consumer -- --ignored --test-threads=1 --nocapture
 
       - name: Compression round-trip suite
         run: cargo test -p kacrab --all-features --test real_kafka_compression -- --ignored --test-threads=1 --nocapture

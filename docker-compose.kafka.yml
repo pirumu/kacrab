@@ -22,6 +22,14 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Share groups (KIP-932) keep their state in the internal
+      # `__share_group_state` topic, which the share coordinator auto-creates at
+      # replication factor 3 by default. On this single-broker fixture that
+      # creation fails with INVALID_REPLICATION_FACTOR and every share-partition
+      # initialization then times out, so a share consumer silently acquires
+      # nothing. Scale it to the fixture like the offsets and transaction logs.
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_LOG_RETENTION_HOURS: 1
       KAFKA_LOG_SEGMENT_BYTES: 1073741824

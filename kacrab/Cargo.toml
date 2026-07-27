@@ -19,7 +19,7 @@ exclude = ["tests/**"]
 # producer/consumer/admin API. `gssapi` stays off: it links system Kerberos,
 # which the docs.rs sandbox does not provide.
 [package.metadata.docs.rs]
-features = ["producer", "consumer", "admin", "compression", "macros"]
+features = ["producer", "consumer", "share-consumer", "admin", "compression", "macros"]
 
 [features]
 default = []
@@ -39,6 +39,11 @@ lz4 = ["kacrab-protocol/lz4"]
 lz4-hc = ["kacrab-protocol/lz4-hc"]
 macros = []
 producer = []
+# The KIP-932 share consumer (`ShareGroupHeartbeat`/`ShareFetch`/`ShareAcknowledge`).
+# Off by default like every other surface. It builds on the consumer's record
+# decoding, deserializers, and record types, so it implies `consumer` rather than
+# duplicating them.
+share-consumer = ["consumer"]
 # Internal, unstable, and not part of the public API: re-exports the crate's
 # untrusted-input parsers so `fuzz/` can reach them. The SASL handshake parsers
 # run against bytes from a peer that is not yet authenticated, which makes them

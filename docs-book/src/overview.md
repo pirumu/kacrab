@@ -62,10 +62,11 @@ flowchart TB
 
 ## The parts left blank
 
-Kafka Streams and share groups (queues) are deliberately outside this map —
-they are separate products built *on* clients, not client surfaces. Everything
-a Kafka 4.3 *client* does — produce, consume, administer, authenticate —
-is implemented.
+Kafka Streams is deliberately outside this map — it is a separate product built
+*on* clients, not a client surface. Everything a Kafka 4.3 *client* does —
+produce, consume, administer, authenticate — is implemented, including the
+KIP-932 share consumer (share groups, the queue-shaped consuming surface) behind
+the `share-consumer` feature.
 
 ## Choosing your provisions
 

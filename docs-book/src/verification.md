@@ -60,6 +60,20 @@ recovering; and a KIP-848 (`group.protocol=consumer`) member joining,
 consuming, and committing through `ConsumerGroupHeartbeat`. See
 [the consumer chapters](./consumer.md) for what each proves.
 
+## Share consumer — acquisition, acknowledgement & redelivery
+
+`kacrab/tests/real_kafka_share_consumer.rs` runs on the same
+`docker-compose.kafka.yml` broker, whose `share.version` feature finalizes at
+`1`, so KIP-932 share groups are on without a special fixture. Share groups are
+almost entirely broker-side behaviour, so this suite — not a unit test — is what
+proves the surface works: implicit and explicit acknowledgement end to end;
+`Accept`/`Release`/`Reject` (the `Release`d record returns, the `Reject`ed one
+does not); delivery counts climbing to the broker's archive limit; three
+consumers on a one-partition topic consuming every record exactly once, the case
+a consumer group cannot serve; acquisition-lock expiry redelivering the records
+of a consumer that went away without acknowledging; and the admin share-group
+operations reading back the live group.
+
 ## Multi-broker — dispatch & leadership-change
 
 `docker-compose.cluster.yml` runs a 3-broker KRaft cluster. The tests confirm
