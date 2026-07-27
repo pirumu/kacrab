@@ -121,6 +121,20 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **`UnknownKeyPolicy::Report` could never actually return a report.** The
+  `kafka_config!`-generated `from_properties` ran an unconditional
+  "every key must have a typed field" loop *after* `validate_properties`, with no
+  branch on the policy. Lenient parsing therefore collected its warnings and then
+  hard-errored with `ConfigError::UnsupportedKey` on the first key without a typed
+  field — so `ClientConfig::producer_config_with_warnings(Report)` and the whole
+  `WarningReport` plumbing behind it were dead code, and lenient mode was in
+  practice stricter than strict mode's own contract.
+
+  The loop now branches: `Deny` errors exactly as before, and `Report` records a
+  `push_unsupported_key` warning and keeps parsing the typed keys. Keys absent from
+  the catalog are left alone there — `validate_properties` has already warned them
+  as unknown, and warning them twice would be its own regression.
+
 - **Strict property validation silently accepted feature-gated security keys.**
   `validate_properties` matched `UnknownKeyPolicy` with the arms inverted for
   `ConfigStatus::FeatureGated`/`Future`: lenient (`Report`) mode returned

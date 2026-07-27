@@ -61,6 +61,17 @@ impl WarningReport {
         });
     }
 
+    /// Adds a warning for a cataloged key without a typed config field.
+    pub fn push_unsupported_key(&mut self, client: ClientKind, key: impl Into<String>) {
+        let key = key.into();
+        self.warnings.push(ConfigWarning {
+            severity: WarningSeverity::Warning,
+            client,
+            message: format!("Kafka config key `{key}` is not supported by the typed config yet"),
+            key,
+        });
+    }
+
     /// Adds a warning for a key gated behind a disabled feature.
     pub fn push_unsupported_feature(
         &mut self,

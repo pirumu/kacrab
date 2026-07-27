@@ -1,9 +1,20 @@
 //! Public config catalog behavior.
 
 use kacrab::config::{
-    CONFIG_CATALOG, ClientKind, ConfigError, ConfigOrigin, ConfigStatus, KAFKA_CONFIG_SOURCE_REF,
-    Properties, UnknownKeyPolicy, WarningReport, WarningSeverity, catalog_for, validate_properties,
+    AdminConfig, CONFIG_CATALOG, ClientConfig, ClientKind, ConfigError, ConfigOrigin, ConfigStatus,
+    KAFKA_CONFIG_SOURCE_REF, ProducerConfig, Properties, UnknownKeyPolicy, WarningReport,
+    WarningSeverity, catalog_for, validate_properties,
 };
+
+/// Producer key that is cataloged but has no typed `ProducerConfig` field.
+///
+/// Chosen from the three producer catalog entries whose status is `Native` or
+/// `NativeReview` and whose `rust_field` has no matching typed field
+/// (`metrics.sample.window.ms`, `metrics.num.samples`,
+/// `metrics.recording.level`). It carries `feature: None`, so — unlike the
+/// `ssl.*`/`sasl.*` gates — it behaves identically under every feature set and
+/// reaches the generated unmatched-key loop in both policies.
+const UNTYPED_PRODUCER_KEY: &str = "metrics.sample.window.ms";
 
 #[test]
 fn catalog_covers_official_kafka_43_config_pages() {
@@ -77,8 +88,9 @@ fn warning_report_keeps_lenient_parse_feedback_structured() {
         "ssl.truststore.location",
         "tls-rustls",
     );
+    report.push_unsupported_key(ClientKind::Producer, UNTYPED_PRODUCER_KEY);
 
-    assert_eq!(report.warnings().len(), 2);
+    assert_eq!(report.warnings().len(), 3);
     assert_eq!(report.warnings()[0].severity, WarningSeverity::Warning);
     assert_eq!(report.warnings()[0].client, ClientKind::Producer);
     assert_eq!(report.warnings()[0].key, "unknown.kafka.key");
@@ -86,6 +98,16 @@ fn warning_report_keeps_lenient_parse_feedback_structured() {
 
     assert_eq!(report.warnings()[1].key, "ssl.truststore.location");
     assert!(report.warnings()[1].message.contains("tls-rustls"));
+
+    assert_eq!(report.warnings()[2].severity, WarningSeverity::Warning);
+    assert_eq!(report.warnings()[2].client, ClientKind::Producer);
+    assert_eq!(report.warnings()[2].key, UNTYPED_PRODUCER_KEY);
+    assert_eq!(
+        report.warnings()[2].message,
+        format!(
+            "Kafka config key `{UNTYPED_PRODUCER_KEY}` is not supported by the typed config yet"
+        )
+    );
 }
 
 #[test]
@@ -189,6 +211,92 @@ fn sasl_gated_keys_are_accepted_under_every_policy() {
             "supported SASL keys must not warn under {policy:?}"
         );
     }
+}
+
+#[test]
+fn lenient_producer_parsing_reports_catalogued_but_untyped_keys() {
+    let properties = Properties::from_iter([
+        ("bootstrap.servers", "localhost:9092"),
+        (UNTYPED_PRODUCER_KEY, "30000"),
+    ]);
+
+    let (config, report) = ProducerConfig::from_properties(&properties, UnknownKeyPolicy::Report)
+        .expect("lenient parsing must report untyped keys instead of erroring");
+
+    assert_eq!(config.bootstrap_servers.as_slice(), ["localhost:9092"]);
+    assert_eq!(report.warnings().len(), 1);
+    assert_eq!(report.warnings()[0].severity, WarningSeverity::Warning);
+    assert_eq!(report.warnings()[0].client, ClientKind::Producer);
+    assert_eq!(report.warnings()[0].key, UNTYPED_PRODUCER_KEY);
+    assert!(report.warnings()[0].message.contains("not supported"));
+}
+
+#[test]
+fn lenient_producer_parsing_warns_unknown_keys_exactly_once() {
+    let properties = Properties::from_iter([
+        ("bootstrap.servers", "localhost:9092"),
+        ("unknown.kafka.key", "value"),
+    ]);
+
+    let (_config, report) = ProducerConfig::from_properties(&properties, UnknownKeyPolicy::Report)
+        .expect("lenient parsing must report unknown keys instead of erroring");
+
+    assert_eq!(
+        report.warnings().len(),
+        1,
+        "an unknown key is warned by validate_properties only, never again by the typed parser"
+    );
+    assert_eq!(report.warnings()[0].key, "unknown.kafka.key");
+    assert!(report.warnings()[0].message.contains("unknown"));
+}
+
+#[test]
+fn strict_producer_parsing_still_rejects_catalogued_but_untyped_keys() {
+    let properties = Properties::from_iter([
+        ("bootstrap.servers", "localhost:9092"),
+        (UNTYPED_PRODUCER_KEY, "30000"),
+    ]);
+
+    let error = ProducerConfig::from_properties(&properties, UnknownKeyPolicy::Deny)
+        .expect_err("strict parsing must reject keys without a typed field");
+
+    assert_eq!(
+        error,
+        ConfigError::UnsupportedKey {
+            client: ClientKind::Producer,
+            key: UNTYPED_PRODUCER_KEY.into(),
+        }
+    );
+}
+
+#[test]
+fn client_config_producer_with_warnings_surfaces_the_report() {
+    let client = ClientConfig::new()
+        .set("bootstrap.servers", "localhost:9092")
+        .set(UNTYPED_PRODUCER_KEY, "30000");
+
+    let (_config, report) = client
+        .producer_config_with_warnings(UnknownKeyPolicy::Report)
+        .expect("the lenient facade must surface warnings rather than erroring");
+
+    assert_eq!(report.warnings().len(), 1);
+    assert_eq!(report.warnings()[0].key, UNTYPED_PRODUCER_KEY);
+}
+
+#[test]
+fn lenient_admin_parsing_warns_unknown_keys_exactly_once() {
+    let properties = Properties::from_iter([
+        ("bootstrap.servers", "localhost:9092"),
+        ("unknown.kafka.key", "value"),
+    ]);
+
+    let (_config, report) = AdminConfig::from_properties(&properties, UnknownKeyPolicy::Report)
+        .expect("the macro fix must cover every generated client, not just the producer");
+
+    assert_eq!(report.warnings().len(), 1);
+    assert_eq!(report.warnings()[0].client, ClientKind::Admin);
+    assert_eq!(report.warnings()[0].key, "unknown.kafka.key");
+    assert!(report.warnings()[0].message.contains("unknown"));
 }
 
 #[test]
