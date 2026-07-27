@@ -110,3 +110,54 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"
 
 [lints]
 workspace = true
+
+# Feature-dependent integration tests declare `required-features` so Cargo skips
+# the whole target when a feature is off. The previous whole-file `#![cfg]`
+# gating compiled each of these into an EMPTY crate instead, and an empty crate
+# has no `//!` docs — so every feature-scoped build (rust-analyzer with a
+# feature subset, `--no-default-features` checks) drowned in `missing_docs`
+# warnings that `make clippy` (`--all-features`) never showed.
+
+[[test]]
+name = "config_macro"
+required-features = ["macros"]
+
+[[test]]
+name = "producer_accumulator"
+required-features = ["producer"]
+
+[[test]]
+name = "producer_dispatcher"
+required-features = ["producer"]
+
+[[test]]
+name = "real_kafka_admin"
+required-features = ["admin"]
+
+[[test]]
+name = "real_kafka_admin_token"
+required-features = ["admin"]
+
+[[test]]
+name = "real_kafka_cluster"
+required-features = ["producer"]
+
+[[test]]
+name = "real_kafka_compression"
+required-features = ["producer", "gzip", "snappy", "lz4", "zstd"]
+
+[[test]]
+name = "real_kafka_consumer"
+required-features = ["producer", "consumer", "admin"]
+
+[[test]]
+name = "real_kafka_gssapi"
+required-features = ["gssapi"]
+
+[[test]]
+name = "real_kafka_producer"
+required-features = ["producer"]
+
+[[test]]
+name = "real_kafka_share_consumer"
+required-features = ["producer", "share-consumer", "admin"]

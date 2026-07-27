@@ -1,4 +1,3 @@
-#![cfg(feature = "admin")]
 //! Real Kafka admin integration tests.
 //!
 //! - `real_kafka_admin_smoke` — core ops over `docker-compose.kafka.yml`.

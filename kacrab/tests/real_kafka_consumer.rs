@@ -1,4 +1,3 @@
-#![cfg(all(feature = "producer", feature = "consumer", feature = "admin"))]
 //! Real Kafka consumer integration test (manual assignment + fetch + commit).
 //!
 //! Creates a topic (admin), produces a known set of records with the kacrab

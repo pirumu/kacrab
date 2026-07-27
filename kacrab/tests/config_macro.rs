@@ -1,7 +1,5 @@
 //! `kacrab::kafka_config!` re-export behavior.
 
-#![cfg(feature = "macros")]
-
 use std::string::String;
 
 use kacrab::{

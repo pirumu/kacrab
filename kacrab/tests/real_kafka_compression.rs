@@ -1,10 +1,3 @@
-#![cfg(all(
-    feature = "producer",
-    feature = "gzip",
-    feature = "snappy",
-    feature = "lz4",
-    feature = "zstd"
-))]
 //! Real Kafka compression round-trip.
 //!
 //! Produces records with each codec (gzip, snappy, lz4, zstd) to a real broker
