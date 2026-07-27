@@ -3807,7 +3807,12 @@ impl ProducerSenderState {
         dispatcher: &ProducerDispatcher,
         accumulator: &SharedAccumulator,
     ) -> Result<PreparedAllDispatch, DispatchPrepareError> {
-        if accumulator.buffered_bytes() == 0 {
+        // Records, not bytes. `buffered_bytes` counts pooled buffer reservations, and a
+        // `MESSAGE_TOO_LARGE` split child is requeued holding none — the parent's
+        // reservation was released when it drained. So after a split this can read zero
+        // while thousands of records are still queued, and flush would report itself
+        // complete and let the producer drop them on close.
+        if accumulator.buffered_records() == 0 {
             return Ok(PreparedAllDispatch::Empty);
         }
         if let Some(result) = self.wait_for_completed_dispatch_slot().await {
