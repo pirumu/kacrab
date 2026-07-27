@@ -69,16 +69,36 @@ It is **not** a fully C-free dependency tree, and it is honest to say so:
 | Kafka protocol / wire / producer logic | pure Rust |
 | `gzip` / `snappy` / `lz4` codecs | pure Rust (`flate2` / `snap` / `lz4_flex`) |
 | CRC32C, murmur2, varint | pure Rust |
-| **TLS crypto** (`rustls` → `aws-lc-rs`) | **C / assembly — pulled in every build** |
+| **TLS crypto** — `aws-lc-rs-tls` (optional) | C / assembly (AWS-LC) |
+| **TLS crypto** — `pure-rust-tls` (optional) | Rust + some vendored BoringSSL C (`ring`) |
 | `zstd` (optional) | C (`zstd-sys` / libzstd) |
 | `lz4-hc` (optional) | C (liblz4) |
 | `gssapi` (optional) | C (libgssapi) |
 
-The always-present C piece is the TLS crypto provider: `rustls` defaults to
-`aws-lc-rs` (AWS-LC, C + assembly). A genuinely C-free build would swap in a
-pure-Rust `rustls` crypto provider (e.g. `rustls-rustcrypto`, less battle-tested)
-and enable only the `gzip`/`snappy`/`lz4` codecs — no `zstd`, `lz4-hc`, or
-`gssapi`.
+The TLS crypto provider used to be unavoidable — `rustls` defaulted to
+`aws-lc-rs`, so every build compiled `aws-lc-sys` even when it never opened a TLS
+connection. Since 0.4 the backend is an explicit feature and no longer implied:
+
+- `aws-lc-rs-tls` — the default provider, and what CI exercises.
+- `pure-rust-tls` — puts `rustls` on `ring`, which removes `aws-lc-sys` from the
+  tree entirely. `make check-pure-rust-tls` asserts the dependency is *gone*
+  rather than trusting that the feature compiles. Note that `ring` still vendors
+  some C from BoringSSL, so this is *no aws-lc*, not *zero C*.
+- neither — a `PLAINTEXT`-only build compiles no crypto provider, and a TLS
+  connection then fails at config validation with a message naming both features.
+
+`pure-rust-tls` deliberately leaves `jsonwebtoken` out, which means locally
+signing an `OAUTHBEARER` JWT assertion needs `aws-lc-rs-tls`. The reason is that
+`jsonwebtoken`'s pure-Rust backend depends on `rsa`, which carries
+[RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071) — key
+recovery through a timing sidechannel, with no fixed release. Trading a C
+dependency for an unpatched sidechannel is not what a "smaller trusted C surface"
+feature is for, so `rsa` is banned by the same CI check. The other three
+`OAUTHBEARER` token sources — JAAS option, token file, and HTTP token endpoint —
+work identically in both builds.
+
+So the smallest tree today is `pure-rust-tls` with only the
+`gzip`/`snappy`/`lz4` codecs — no `aws-lc-sys`, no `zstd`, `lz4-hc`, or `gssapi`.
 
 ## The boundary kacrab won't cross
 

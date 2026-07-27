@@ -75,11 +75,19 @@ what you use:
 
 ```toml
 [dependencies]
-kacrab = { version = "0.1", features = ["producer", "consumer", "admin"] }
+kacrab = { version = "0.3", features = ["producer", "consumer", "admin", "aws-lc-rs-tls"] }
 ```
 
 `consumer` pulls in the `compression` meta-feature (fetched batches must be
-decodable regardless of what the producer chose). `zstd` and `lz4-hc` compile
-C code; a pure-Rust build is possible — the trade-offs are in
+decodable regardless of what the producer chose).
+
+**TLS needs a crypto provider named explicitly.** `aws-lc-rs-tls` is the default
+provider and what CI exercises; `pure-rust-tls` puts `rustls` on `ring` and keeps
+`aws-lc-sys` out of the dependency tree entirely. You need one of them for `SSL`
+or `SASL_SSL`; a `PLAINTEXT`-only build can name neither and then compiles no
+crypto backend at all. Enabling both is well defined — `aws-lc-rs` wins.
+
+`zstd` and `lz4-hc` compile C code; a pure-Rust build is possible — the
+trade-offs are in
 [Traveling light](./compression.md) and the
 [field guide](./field-guide/foundations.md#start-with-the-features).
