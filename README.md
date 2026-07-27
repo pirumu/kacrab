@@ -36,64 +36,44 @@ built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
 
 ## Highlights
 
-- **Designed to feel familiar if you know the Java client**: auth, producer,
-  admin, and consumer follow Kafka property names, defaults, protocol flow, and
-  wire semantics. The config keys you already know from the Java client work
-  here too.
-- **Producer**: batching, linger, bounded memory, compression
+- **Familiar from the Java client**: auth, producer, consumer, and admin follow
+  Kafka property names, defaults, and wire semantics — the config keys you
+  already know work here too.
+- **Producer**: batching, bounded memory, compression
   (`gzip`/`snappy`/`lz4`/`zstd`), murmur2 + sticky/adaptive partitioning,
-  multi-broker dispatch with failover on leadership changes, transactions, and
-  a Kafka-faithful idempotent path (per-partition multi-in-flight, ordered
-  retry, deferred epoch bump, sequence wraparound). Interceptors and
-  Kafka-named metrics are included.
-- **Consumer**: full Apache Kafka 4.3.0 feature parity: manual assignment,
-  topic and pattern (regex) subscription, classic groups
-  (`range`/`roundrobin`/`sticky` eager + incremental `cooperative-sticky`,
-  KIP-429) and the KIP-848 server-side protocol; topic-id-keyed fetch
-  (KIP-516, up to v18), incremental fetch sessions (KIP-227), truncation
-  detection (KIP-320), `commit_sync`/`commit_async`/auto-commit, background
-  heartbeat, static membership, typed deserializers, interceptors, and
-  `metrics()`.
-- **Share consumer (KIP-932)**: the queue-shaped consuming surface, behind the
-  `share-consumer` feature. `ShareGroupHeartbeat`/`ShareFetch`/`ShareAcknowledge`
-  with per-record `Accept`/`Release`/`Reject` acknowledgement, delivery-count
-  tracking for poison messages, implicit and explicit acknowledgement modes, and
-  more consumers than partitions in one group. See [Share consumer](#share-consumer).
-- **Admin**: the full Apache Kafka 4.3.0 `Admin` surface (62 operations):
-  topics, configs (incremental), ACLs, groups & offsets, transactions,
-  delegation tokens, quotas, SCRAM, reassignments, KRaft quorum, and the 4.x
-  share/streams group families.
+  multi-broker dispatch with failover, transactions, and a Kafka-faithful
+  idempotent path. Interceptors and Kafka-named metrics included.
+- **Consumer**: full Apache Kafka 4.3.0 feature parity — manual assignment,
+  topic and regex subscription, classic groups (eager + `cooperative-sticky`)
+  and the KIP-848 server-side protocol, incremental fetch sessions, truncation
+  detection, sync/async/auto commit, static membership, typed deserializers,
+  interceptors, and `metrics()`.
+- **Share consumer (KIP-932)**: the queue-shaped consuming surface — per-record
+  `Accept`/`Release`/`Reject`, delivery-count tracking for poison messages, and
+  more consumers than partitions. See [Share consumer](#share-consumer).
+- **Admin**: the full 4.3.0 `Admin` surface (62 operations) — topics, configs,
+  ACLs, groups & offsets, transactions, delegation tokens, quotas, SCRAM,
+  reassignments, KRaft quorum, and the 4.x share/streams group families.
 - **Auth**: `PLAINTEXT`/`SSL`/`SASL_PLAINTEXT`/`SASL_SSL`; SASL `PLAIN`,
   `SCRAM-SHA-256/512`, `OAUTHBEARER`, feature-gated `GSSAPI`; PEM/JKS/PKCS12
-  stores and mutual TLS; native Rust custom-authenticator hooks. Handshake and
-  auth failures fail fast with the broker's reason, matching Java.
-- **Fast and lean**: on the same broker and defaults, producer throughput is
-  **+35%** over Java on small records (**+15%** on 10 KiB, **2.2x** when broker
-  `max.message.bytes` forces batch splitting) with about 4x less memory, and at
-  Java's own offered load kacrab's latency is lower or tied at every percentile,
-  with a ~30x lower maximum; consumer
-  throughput is **1.9-4x** higher with about 16x less memory. See
+  stores and mutual TLS; custom-authenticator hooks. Failures fail fast with
+  the broker's reason, matching Java.
+- **Fast and lean**: producer throughput **+35%** over Java on small records at
+  ~4x less memory; consumer throughput **1.9-4x** higher at ~16x less memory;
+  at Java's own offered load, latency is lower or tied at every percentile. See
   [Benchmarks](#benchmarks).
-- **Native Rust**: protocol, wire, and client logic are pure Rust, and the
-  workspace forbids `unsafe_code`. Caveat: the default TLS provider
-  (`aws-lc-rs-tls`, i.e. `rustls` + `aws-lc-rs`) is C/assembly, and the optional
-  `zstd`, `lz4-hc`, and `gssapi` features add C. The `pure-rust-tls` feature puts
-  `rustls` on `ring`, which removes `aws-lc-sys` from the tree entirely — CI
-  asserts the dependency is gone, not just that the feature compiles. `ring` still
-  vendors some C from BoringSSL, so that is *no aws-lc*, not *zero C*. A
-  `PLAINTEXT`-only build with the `gzip`/`snappy`/`lz4` codecs compiles no crypto
-  provider at all.
+- **Native Rust**: protocol, wire, and client logic are pure Rust with
+  `unsafe_code` forbidden workspace-wide; the TLS provider and optional codecs
+  are the only C in the tree — see [Install](#install) for the
+  `pure-rust-tls` option.
 - **Generated protocol**: request/response structs are generated from Apache
   Kafka schemas and checked byte-for-byte against the Kafka Java client oracle.
-- **Verified with real brokers, in CI**: every client surface (producer,
-  consumer, admin, every SASL mechanism and TLS mode, every compression codec,
-  3-broker failover) runs end-to-end against real Apache Kafka 4.3.0 containers
-  as a merge gate. The producer, consumer, compression, admin, and cluster-
-  failover suites run on
-  [every pull request and every push to `master`][real-broker-url]; the
-  authenticated-listener suites (SASL, TLS, GSSAPI against a real MIT KDC) run
-  [weekly and on any PR touching the auth stack][real-broker-auth-url], because
-  they need a KDC and generated certificates.
+- **Verified with real brokers, in CI**: every surface — producer, consumer,
+  admin, every SASL mechanism and TLS mode, every codec, 3-broker failover —
+  runs end-to-end against real Kafka 4.3.0 containers as a merge gate:
+  [every PR and push][real-broker-url], with the authenticated-listener suites
+  (SASL, TLS, GSSAPI against a real KDC)
+  [weekly and on auth-stack PRs][real-broker-auth-url].
 
 ## How this compares to the other Rust Kafka clients
 
@@ -138,40 +118,15 @@ behaviour that follows from that, and
 ### Why generate the protocol instead of using `kafka-protocol`
 
 [`kafka-protocol`](https://crates.io/crates/kafka-protocol) is the established
-Rust implementation of the Kafka wire format — well over 7M downloads, generated
-from the same upstream JSON schemas kacrab reads. Reaching for it would have been
-the default choice, so the reason not to should be stated rather than assumed.
-
-It is a *types and codecs* crate by design, and kacrab needs the generator itself,
-not only its output:
-
-- **The generated code is the oracle harness.** `kacrab-protocol` emits, for every
-  message at every schema version, a fixture plus the Java class name that decodes
-  it. `java_client_preserves_all_rust_generated_protocol_fixtures`
-  ([`tests/java_interop.rs`](kacrab-protocol/tests/java_interop.rs)) compiles
-  against `org.apache.kafka:kafka-clients:4.3.0` and asserts every fixture
-  round-trips **byte-for-byte** through the real Java client, in both directions.
-  That check is only exhaustive because the generator produces the cases along with
-  the structs — bolting it onto a dependency's output means hand-maintaining the
-  matrix, and a hand-maintained matrix stops being exhaustive the first time a
-  schema version is added.
-- **The fuzz seeds come from the same fixtures.** `generate_fuzz_corpus` in that
-  same harness emits [`fuzz/seeds/`](fuzz/seeds/) from the exact bytes the oracle
-  validated. The seeded-versus-unseeded edge counts in [Testing](#testing) are the
-  measure of what that buys; the corpus exists because the fixtures already did.
-- **The client needs metadata the wire types do not carry.** Version negotiation
-  resolves through generated `client_api_info`
-  ([`version.rs`](kacrab-protocol/src/version.rs)), and the producer hot path
-  preallocates from generated `encoded_len` rather than encoding into a growing
-  buffer ([`producer/batch.rs:169`](kacrab/src/producer/batch.rs)). Both are
-  generator outputs shaped by how the client uses them.
-- **The Kafka version is a pinned input, not a dependency's release cadence.**
-  kacrab targets 4.3.0 and regenerates from `apache/kafka@4.3.0` on demand; the
-  same resolver also generates the config catalog, so protocol and config never
-  drift to different upstream revisions.
-
-None of this is a defect in `kafka-protocol` — it is a different job. If you want
-Kafka wire types in your own project and not a client, use it.
+Rust implementation of the Kafka wire format, generated from the same upstream
+schemas kacrab reads — but it is a *types and codecs* crate, and kacrab needs
+the generator itself, not only its output: the generated fixtures double as the
+byte-for-byte Java oracle harness and the fuzz seed corpus, version negotiation
+and the producer's buffer preallocation are generator outputs, and the Kafka
+version stays a pinned input (`apache/kafka@4.3.0`) shared with the config
+catalog so protocol and config never drift apart. Full rationale in the book's
+[codegen chapter](https://pirumu.github.io/kacrab/codegen.html). If you want
+Kafka wire types in your own project and not a client, use `kafka-protocol`.
 
 ## Documentation
 
@@ -206,16 +161,12 @@ stops there.
 
 Test coverage (`cargo llvm-cov`): **~87% maintained-source** line coverage
 (generated protocol excluded), with the producer module at about 92%. The raw
-whole-workspace number is lower because codegen covers the entire Kafka message
-set — all 93 API keys — so the Java oracle check stays exhaustive, while the
-client wires the 70 a client actually issues. Of the 23 unwired, 21 are
-broker-internal or KRaft controller RPCs no client ever sends (`LeaderAndIsr`,
-`StopReplica`, `UpdateMetadata`, the broker-registration and Raft-quorum
-families, the share-coordinator state RPCs); the other 2 are client-facing
-surfaces kacrab does not implement — `DescribeTopicPartitions` and the Streams
-member protocol (`StreamsGroupHeartbeat`), which is out of scope per above. The
-admin-side share and streams group operations *are* wired, and so is the share
-consumer itself (`ShareGroupHeartbeat`/`ShareFetch`/`ShareAcknowledge`).
+whole-workspace number is lower because codegen covers all 93 Kafka API keys so
+the Java oracle check stays exhaustive, while the client wires the 70 a client
+actually issues — the unwired rest are broker-internal RPCs no client sends,
+plus `DescribeTopicPartitions` and the Streams member protocol, which kacrab
+does not implement. Details in the book's
+[coverage section](https://pirumu.github.io/kacrab/testing-and-ci.html).
 
 ## Install
 
@@ -233,11 +184,12 @@ example below names the one it needs); compression codecs `gzip`, `lz4`,
 `gssapi`; config macro helpers via `macros`.
 
 **TLS needs a crypto provider chosen explicitly**: `aws-lc-rs-tls` (the default
-provider, what CI exercises) or `pure-rust-tls` (`ring`-backed, drops
-`aws-lc-sys`). You need one for `SSL` or `SASL_SSL`; a `PLAINTEXT`-only build can
-skip both and compiles no crypto backend at all. With neither, a TLS connection
-fails at config validation with a message naming the two features. Enabling both
-is well defined — `aws-lc-rs` wins.
+provider, what CI exercises) or `pure-rust-tls` (`ring`-backed, removes
+`aws-lc-sys` from the tree — though `ring` still vendors some BoringSSL C, so
+that is *no aws-lc*, not *zero C*). You need one for `SSL` or `SASL_SSL`; a
+`PLAINTEXT`-only build can skip both and compiles no crypto backend at all.
+With neither, a TLS connection fails at config validation with a message naming
+the two features. Enabling both is well defined — `aws-lc-rs` wins.
 
 One capability differs between them: signing an **`OAUTHBEARER` JWT assertion
 locally** (`sasl.oauthbearer.assertion.private.key.file`) needs `aws-lc-rs-tls`.
@@ -306,30 +258,20 @@ for _ in 0..workers {
 }
 ```
 
-`send`, `send_with_callback`, `flush`, `init_transactions`, `begin_transaction`,
-`commit_transaction`, `abort_transaction`, and `send_offsets_to_transaction` all
-take `&self`. Only two groups need exclusive access, and both are one-time setup
-or teardown rather than steady-state calls:
-
-- `&mut self` — `set_partitioner`, `add_interceptor`, `add_metric_reporter`,
-  `enable_metrics`, and the `register_*`/`unregister_*` metric hooks. Configure
-  these before wrapping the producer in an `Arc`.
-- `self` — `close`, `close_now`, `close_timeout`. Use `Arc::try_unwrap` on the
-  last handle, or just drop the `Arc`: every incomplete delivery then resolves as
-  `Err(ProducerError::DeliveryDropped)` rather than vanishing.
-
-Note that a **custom partitioner takes every record off the inline fast path**:
-`set_partitioner` may block or re-enter user code, so `send` routes each record
-through the FIFO drain instead of appending it with zero `.await`. Ordering and
-delivery are unchanged, but the [Benchmarks](#benchmarks) numbers are measured on
-the built-in murmur2 + sticky/adaptive partitioner and do not carry over.
+Only configuration hooks (`set_partitioner`, `add_interceptor`, metric setup)
+take `&mut self` — call them before wrapping the producer in an `Arc`. The
+`close` family takes `self`: use `Arc::try_unwrap` on the last handle, or just
+drop the `Arc` — every incomplete delivery then resolves as
+`Err(ProducerError::DeliveryDropped)` rather than vanishing. One caveat: a
+**custom partitioner takes every record off the inline fast path** (it may
+block or re-enter user code), so the [Benchmarks](#benchmarks) numbers —
+measured on the built-in partitioner — do not carry over.
 
 Transactions use the same producer (`transactional.id` +
-`init_transactions`/`begin_transaction`/`commit_transaction`). Interceptors
-(`add_interceptor`) and Kafka-named metrics (`kafka_metrics()`, for example
-`producer-metrics:record-send-rate`) mirror the Java surface. Serializers are a
-compile-time Rust trait (`ProducerSerializer<T>` via `build_with_serializers`),
-not `key.serializer` class names. See
+`init_transactions`/`begin_transaction`/`commit_transaction`). Interceptors and
+Kafka-named metrics (`kafka_metrics()`) mirror the Java surface. Serializers
+are a compile-time Rust trait (`ProducerSerializer<T>` via
+`build_with_serializers`), not `key.serializer` class names. See
 [`examples/typed_serializer.rs`](examples/typed_serializer.rs).
 
 ## Consumer
@@ -436,39 +378,14 @@ batch with `Accept` on the next `poll`/`commit` and makes `acknowledge` an error
 piggy-backed onto the next `ShareFetch`, so the acknowledgement path costs no
 extra round trip per record.
 
-The surface maps one-to-one onto Java's `ShareConsumer`:
-
-| Java | kacrab |
-| --- | --- |
-| `subscription()` / `subscribe` / `unsubscribe` | same names |
-| `poll(Duration)` | `poll(Duration)` |
-| `acknowledge(record)` | `accept(record)` |
-| `acknowledge(record, type)` | `acknowledge(record, type)` |
-| `acknowledge(topic, partition, offset, type)` | `acknowledge_offset(&partition, offset, type)` |
-| `commitSync()` / `commitSync(Duration)` | `commit()` / `commit_timeout(Duration)` |
-| `commitAsync()` | `commit_async()` |
-| `setAcknowledgementCommitCallback` | `set_acknowledgement_commit_callback` |
-| `acquisitionLockTimeoutMs()` | `acquisition_lock_timeout()` |
-| `clientInstanceId(Duration)` | `client_instance_id()` |
-| `metrics()` | `metrics()` |
-| `close()` / `close(Duration)` | `close()` / `close_timeout(Duration)` |
-| `wakeup()` | `wakeup()` |
-
-`commit_async` sends nothing by itself, and that is deliberate rather than a
-shortcut: a share session is a strictly ordered epoch sequence per broker, so a
-second request racing the poll loop would invalidate the session. Java does the
-same — the acknowledgements ride the next `ShareFetch` and the broker's verdict
-reaches the acknowledgement callback. Registering that callback also moves
-rejected acknowledgements off the `poll`/`commit` return value and into the
-callback, matching Java; without one they surface as an error, because dropping
-them would hide that those records are about to be redelivered.
-`registerMetricForSubscription` has no analogue here, the same way it has none on
-`Consumer`.
-
+The surface maps one-to-one onto Java's `ShareConsumer` (`poll`, `acknowledge`,
+`commit`/`commit_async`, callbacks, `wakeup`, `close`); the full method mapping
+— and why `commit_async` deliberately sends nothing by itself — is in the
+book's
+[share-group section](https://pirumu.github.io/kacrab/consumer.html#the-other-consuming-surface-share-groups).
 The admin-side view of the same groups (`describe_share_groups`,
-`list_share_group_offsets`, `alter_share_group_offsets`,
-`delete_share_group_offsets`, `delete_share_groups`) lives on `AdminClient` and
-needs only the `admin` feature.
+`list_share_group_offsets`, ...) lives on `AdminClient` and needs only the
+`admin` feature.
 
 ## Admin
 
@@ -533,11 +450,10 @@ idempotence; consumer at `max.poll.records=500`). Host: MacBook Pro M3 Pro
 reproduction commands, and caveats are in [`benches/README.md`](benches/README.md)
 and the book's [benchmarks chapter](docs-book/src/benchmarks.md).
 
-**Producer** (2026-07-27; medians of 5 interleaved kacrab/Java pairs. Both
-throughput columns come from the same `records sent, … MB/sec` summary line, which
-Java and kacrab compute identically — see the note below). The first two rows are
-the default parity scenarios; the third drives the `MESSAGE_TOO_LARGE` batch-split
-path, which kacrab clears in one broker round trip per batch fewer than Java:
+**Producer** (2026-07-27; medians of 5 interleaved kacrab/Java pairs). The
+first two rows are the default parity scenarios; the third drives the
+`MESSAGE_TOO_LARGE` batch-split path, which kacrab clears in one broker round
+trip per batch fewer than Java:
 
 | Scenario | kacrab | Java `kafka-producer-perf-test` |
 | --- | ---: | ---: |
@@ -559,20 +475,13 @@ Read the numbers with the caveats in mind:
 
 - Single-node, RF=1, broker co-located with the client: this is a
   client-efficiency signal, not a production throughput claim. 10-byte rows
-  inflate records/sec; the byte-rate columns are the more useful comparison.
-- Both byte-rate columns are mebibytes despite the `MB/sec` label — Java's
-  `ProducerPerformance` computes `bytes / elapsed / (1024 * 1024)` and prints it as
-  `MB/sec` (`ProducerPerformance.java:508`), and kacrab's port does the same. They
-  are directly comparable. An earlier revision of these tables quoted kacrab's own
-  separate `MiB/s` summary line against Java's, which mixed two different lines and
-  overstated the 10 KiB gap.
-- **Latency is closed-loop saturation latency, and the two clients are not at the
-  same offered load.** Each runs flat out, so each measures latency at its own
-  saturation point — and kacrab is pushing ~35% more throughput than Java. Pinned
-  to Java's own rate, kacrab wins or ties every latency metric: 0.11 ms avg,
-  2 ms p99, 4 ms max against Java's 0.32 / 2 / 131-140 (5M x 10 B, 16 partitions,
-  interleaved, 2026-07-27). Java's ~130 ms maxima are JVM client pauses; kacrab on
-  the same broker stays under 16 ms. See
+  inflate records/sec; the byte-rate columns are the more useful comparison
+  (both `MB/sec` columns are computed identically to Java's own perf tool —
+  see [`benches/README.md`](benches/README.md)).
+- **Latency is closed-loop saturation latency** — each client measures at its
+  own saturation point, and kacrab is pushing ~35% more throughput. Pinned to
+  Java's own rate, kacrab wins or ties every percentile; Java's ~130 ms maxima
+  are JVM client pauses. See
   [`benches/README.md`](benches/README.md#matched-load-latency).
 - Every kacrab run above had zero retries/errors, with fully correct
   idempotence.
@@ -680,122 +589,20 @@ Protocol compatibility is also gated by a byte-for-byte Java oracle matrix
 `cargo llvm-cov` with generated artifacts excluded. See [`Makefile`](Makefile)
 and [`benches/README.md`](benches/README.md).
 
-The Java oracle proves the decoders are correct on *well-formed* input. The
-decoders that parse untrusted broker bytes are separately fuzzed for the other
-half — garbage, truncation, hostile length prefixes — because `forbid(unsafe_code)`
-rules out memory corruption but not a panic, an unbounded allocation, or a
-non-terminating loop, and a panic on a client's decode path is a denial of
-service. Eleven [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
-cover every parser that reads untrusted bytes, from the socket inward: the
-length-prefixed frame, record-batch decoding, the generated response structs,
-consumer-group member metadata, every compression codec, the SASL handshake, and
-the OAUTHBEARER token endpoint:
-
-```bash
-cargo +nightly fuzz run record_batch_framed \
-  fuzz/corpus/record_batch_framed fuzz/seeds/record_batch_framed -- \
-  -dict=fuzz/kafka.dict -max_total_time=60
-```
-
-**The seeds and the dictionary do more work than the runtime does.** The Kafka
-wire format is length-prefixed and version-gated, so an unseeded run spends its
-budget rediscovering framing instead of exercising decoders. The committed seed
-corpus in [`fuzz/seeds/`](fuzz/seeds/) is generated from the *same fixtures the
-Java oracle uses* — every generated message, at every schema version, across six
-fixture shapes — then minimised with `cargo fuzz cmin` to the subset that
-carries the coverage. Regenerate it after adding a schema version:
-
-```bash
-cargo test -p kacrab-protocol --test java_interop -- \
-  --ignored --nocapture generate_fuzz_corpus
-```
-
-[`fuzz/kafka.dict`](fuzz/kafka.dict) supplies the tokens random mutation will
-never find, above all Kafka's `-1` length prefix: null is encoded as a negative
-length, so without that token the fuzzer only ever explores the non-null side of
-every nullable field. Measured effect, edges covered:
-
-| target | unseeded | seeded + dictionary |
-| --- | ---: | ---: |
-| `record_batch_decode` | 150 | **984** |
-| `record_batch_framed` | 774 | **1591** |
-| `response_decode` | — | **14740** |
-| `decompress` | — | **1230** |
-| `frame_decode` | — | **79** |
-| `consumer_protocol_metadata` | — | **386** |
-| `oauth_http_response` | — | **1013** |
-| `scram_server_first` | — | **245** |
-| `scram_server_first_nonced` | 199 | **743** |
-| `scram_server_final` | — | **322** |
-| `jaas_option` | — | **137** |
-
-The `—` cells are not omitted results: an unseeded baseline is only meaningful for
-a target whose framing a fuzzer can reach unaided. The other eight sit behind a
-length prefix, an API-version gate, or a text grammar, so an unseeded run stalls
-in front of the decoder and its edge count measures the gate rather than the
-parser. The three targets carrying both columns are the ones where the comparison
-says something — and they are why the seed corpus exists.
-
-`consumer_protocol_metadata` sits at a trust boundary none of the others do.
-Every other parser here reads bytes from the broker or the operator; this one
-reads bytes *another consumer wrote*. `ConsumerProtocolSubscription` is decoded
-by the group leader for every member, and `ConsumerProtocolAssignment` by every
-follower and by any admin client describing the group — so anyone authorised to
-join a group can feed the decoder of every other member. `response_decode` does
-not reach it: these travel as opaque `Bytes` inside `JoinGroupResponse` and
-`SyncGroupResponse`, with their own version prefix.
-
-Three libFuzzer flags are set deliberately rather than left to default, and the
-reasons are worth repeating because two of them bit this suite:
-
-- **`-max_len`** does *not* default to 4096 when a corpus is supplied — it
-  becomes the size of the largest file in it. The committed seeds are small, so
-  leaving it unset had silently capped `frame_decode` at **12 bytes**, making the
-  seeded target worse than an unseeded one.
-- **`-malloc_limit_mb`** bounds a single allocation and defaults to the rss
-  limit. At 4096 it could not see the ~120 MB preallocation a 49-byte record
-  batch can request. It is 64 MiB for every target that does not decompress, and
-  above `MAX_DECOMPRESSED_LEN` for those that do, since a 1 GiB expansion there
-  is by design.
-- **`-timeout`** catches CPU amplification, which surfaces as a hang, not a
-  crash. Tuned per target: the SCRAM targets legitimately run PBKDF2 up to
-  `MAX_SCRAM_ITERATIONS`.
-
-**The SASL targets are the ones that matter most.** SCRAM is mutual
-authentication, but the client only proves the *server* at server-final — so
-everything the server-first parser touches is reachable by anyone who can answer
-on the broker's address. Those parsers are `pub(crate)`, so `kacrab` exposes them
-to `fuzz/` as `fn(&[u8])` shims behind an internal `__fuzzing` feature that is
-`#[doc(hidden)]`, off by default, and exempt from semver.
-
-`scram_server_first` gets the same two-target treatment as record batches, for
-the same reason. `client_final` rejects any server-first whose nonce does not
-extend the client's own randomly generated nonce, which a fuzzer cannot guess, so
-raw bytes stall at 199 edges and never reach the salt decode or the PBKDF2
-derivation. `scram_server_first_nonced` satisfies that gate in the harness so
-mutations land on the fields behind it — which is how the unbounded iteration
-count below became reproducible.
-
-Record batches get two targets, and the reason is worth stating because it is
-the difference between fuzzing and the appearance of it. `decode_next_batch`
-validates CRC32C *before* it reads the magic byte, the record count, the varint
-record headers, or the compressed blob. Random bytes clear a CRC32C check with
-probability 2^-32, so raw bytes alone only ever exercise framing and rejection.
-`record_batch_framed` hands the fuzzer the CRC-covered region and builds correct
-framing around it, so every mutation lands inside the decoder — that is what
-found the header-count OOM fixed in `Record::decode`. Both targets are kept: the
-framed one constructs CRC and length prefixes correctly by definition, so it can
-never find a bug in them.
-
-None of this makes the decoders *proven* safe. It makes them survivors of
-~20M structured inputs per campaign, which is a different and weaker claim.
-
-They run [nightly in CI][fuzz-url] at 15 minutes per target, and as a 60-second
-smoke on any PR touching `kacrab-protocol/`. The fuzz crate lives outside the
-workspace ([`fuzz/`](fuzz/)) because cargo-fuzz needs nightly and a sanitizer,
-which the pinned stable toolchain cannot provide. Decompression is bounded by
-`MAX_DECOMPRESSED_LEN` in every codec, so a declared-size zip bomb is rejected
-rather than allocated; the `decompress` target asserts that bound holds.
+The Java oracle proves the decoders are correct on *well-formed* input; the
+decoders that parse untrusted bytes are fuzzed for the other half — garbage,
+truncation, hostile length prefixes — because `forbid(unsafe_code)` rules out
+memory corruption but not a panic or an unbounded allocation, and a panic on a
+client's decode path is a denial of service. Eleven
+[`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets cover every
+parser that reads untrusted bytes, from the socket inward — framing, record
+batches, the generated response structs, group metadata, every compression
+codec, the SASL handshake, and the OAUTHBEARER token endpoint — seeded from the
+same fixtures the Java oracle validates. They run [nightly in CI][fuzz-url] at
+15 minutes per target, and as a 60-second smoke on any PR touching
+`kacrab-protocol/`. Why the seeds and dictionary matter more than the runtime,
+and what each target guards, is in the book's
+[fuzzing section](https://pirumu.github.io/kacrab/testing-and-ci.html#fuzzing).
 
 ## Workspace
 

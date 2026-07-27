@@ -173,6 +173,35 @@ an acquired offset with no deliverable record behind it — compacted away, or a
 control record — still owes the broker a `Gap` acknowledgement, or it stays
 locked until it times out.
 
+The public surface maps one-to-one onto Java's `ShareConsumer`:
+
+| Java | kacrab |
+| --- | --- |
+| `subscription()` / `subscribe` / `unsubscribe` | same names |
+| `poll(Duration)` | `poll(Duration)` |
+| `acknowledge(record)` | `accept(record)` |
+| `acknowledge(record, type)` | `acknowledge(record, type)` |
+| `acknowledge(topic, partition, offset, type)` | `acknowledge_offset(&partition, offset, type)` |
+| `commitSync()` / `commitSync(Duration)` | `commit()` / `commit_timeout(Duration)` |
+| `commitAsync()` | `commit_async()` |
+| `setAcknowledgementCommitCallback` | `set_acknowledgement_commit_callback` |
+| `acquisitionLockTimeoutMs()` | `acquisition_lock_timeout()` |
+| `clientInstanceId(Duration)` | `client_instance_id()` |
+| `metrics()` | `metrics()` |
+| `close()` / `close(Duration)` | `close()` / `close_timeout(Duration)` |
+| `wakeup()` | `wakeup()` |
+
+`commit_async` sends nothing by itself, and that is deliberate rather than a
+shortcut: a share session is a strictly ordered epoch sequence per broker, so a
+second request racing the poll loop would invalidate the session. Java does the
+same — the acknowledgements ride the next `ShareFetch` and the broker's verdict
+reaches the acknowledgement callback. Registering that callback also moves
+rejected acknowledgements off the `poll`/`commit` return value and into the
+callback, matching Java; without one they surface as an error, because dropping
+them would hide that those records are about to be redelivered.
+`registerMetricForSubscription` has no analogue here, the same way it has none
+on `Consumer`.
+
 ## Verification
 
 The consumer is exercised end-to-end against a real Apache Kafka 4.3.0 broker
