@@ -1993,7 +1993,7 @@ async fn idempotent_kafka_producer_resends_multi_inflight_batches_in_sequence_or
             retry_backoff_max: Duration::from_millis(1),
             // Generous so the disconnect is a plain wire retry, not a delivery timeout
             // (which would bump the epoch and reset the sequences).
-            delivery_timeout: Duration::from_secs(30),
+            delivery_timeout: Duration::from_secs(600),
             max_block: Duration::from_mins(1),
             partitioner_ignore_keys: false,
             partitioner_adaptive_partitioning_enable: true,
