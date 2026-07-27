@@ -9,7 +9,9 @@ publish = false
 readme = "README.md"
 
 [dependencies]
-kacrab = { workspace = true, features = ["admin", "producer", "consumer"] }
+# `__bench` is kacrab's internal, semver-exempt diagnostics feature (dispatch-latency
+# sampler, sync-send spin counter). Benchmarks are its only intended consumer.
+kacrab = { workspace = true, features = ["admin", "producer", "consumer", "__bench"] }
 kacrab-protocol = { workspace = true }
 bytes = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }

@@ -60,9 +60,22 @@ pub(crate) struct ProducerSender {
     background_dispatch_paused: Arc<AtomicBool>,
 }
 
-/// SPIKE diagnostic: total spins waiting for buffer.memory in the sync `send_now`
-/// path (background loop draining on another worker). Tells the bench whether a
-/// slow sync run is loop-drain-bound.
+/// Total spins waiting for `buffer.memory` on the synchronous send path.
+///
+/// Incremented while [`Producer::send`](crate::producer::Producer::send) waits for
+/// the background loop to drain on another worker, so `benches/` can tell whether a
+/// slow synchronous run is loop-drain-bound.
+///
+/// Exposed publicly only under the internal `__bench` feature; it is a
+/// measurement hook, not part of the stable producer API.
+#[cfg_attr(
+    not(feature = "__bench"),
+    expect(
+        unreachable_pub,
+        reason = "re-exported from `producer` only under `__bench`; kept `pub` so the item and \
+                  its docs stay identical in both configurations"
+    )
+)]
 pub static SYNC_NOW_BUFFER_SPINS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 

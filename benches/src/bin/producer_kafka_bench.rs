@@ -165,7 +165,7 @@ async fn run_scenario(run: BenchmarkRun<'_>) -> BenchmarkRunSummary {
     if env::var("KACRAB_BENCH_NO_METRICS").is_err() {
         producer.enable_metrics();
     }
-    warm_up_producer(&mut producer, &run, value.clone()).await;
+    warm_up_producer(&producer, &run, value.clone()).await;
     let warmup_metrics = producer.metrics();
     let concurrency = send_concurrency();
     let send = if concurrency > 1 {
@@ -174,7 +174,7 @@ async fn run_scenario(run: BenchmarkRun<'_>) -> BenchmarkRunSummary {
         producer = recovered;
         result
     } else {
-        run_per_record_tracked_send_loop(&mut producer, &run, value).await
+        run_per_record_tracked_send_loop(&producer, &run, value).await
     };
     let current_metrics = producer.metrics();
     let metrics = current_metrics.delta_since(&warmup_metrics);
@@ -386,7 +386,7 @@ struct SendLoopResult {
 }
 
 async fn run_per_record_tracked_send_loop(
-    producer: &mut Producer,
+    producer: &Producer,
     run: &BenchmarkRun<'_>,
     value: Bytes,
 ) -> SendLoopResult {
@@ -561,7 +561,7 @@ async fn run_per_record_tracked_send_loop_concurrent(
             .await
             .expect("benchmark concurrent send task should finish");
     }
-    let mut producer =
+    let producer =
         Arc::into_inner(producer).expect("producer should be unique after concurrent send join");
     producer
         .flush()
@@ -606,7 +606,7 @@ fn record_tracked_callback_completion(
     performance_stats.record_completion(started, completed, value_size)
 }
 
-async fn warm_up_producer(producer: &mut Producer, run: &BenchmarkRun<'_>, value: Bytes) {
+async fn warm_up_producer(producer: &Producer, run: &BenchmarkRun<'_>, value: Bytes) {
     let topic = Arc::<str>::from(run.topic);
     let warmup_messages = warmup_record_count(run);
     for index in 0..warmup_messages {

@@ -694,7 +694,7 @@ where
     ///
     /// Returns serializer, backpressure, routing, or dispatch errors.
     pub fn send(
-        &mut self,
+        &self,
         mut record: ProducerRecord,
         key: Option<&K>,
         value: Option<&V>,
@@ -710,7 +710,7 @@ where
             .as_ref()
             .unwrap_or_else(abort_missing_state)
             .serialize(&topic, &mut record.headers, value)?;
-        self.producer_mut().send(record)
+        self.producer().send(record)
     }
 
     fn close_serializers(&mut self) {
@@ -1087,8 +1087,7 @@ mod tests {
             prefix: Bytes::from_static(b"v:"),
             seen: Arc::clone(&value_seen),
         };
-        let mut producer =
-            TypedProducer::from_parts(byte_producer(), key_serializer, value_serializer);
+        let producer = TypedProducer::from_parts(byte_producer(), key_serializer, value_serializer);
 
         let _delivery = producer
             .send(

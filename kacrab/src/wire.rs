@@ -7,6 +7,7 @@ mod buffer;
 mod capabilities;
 mod client;
 mod config;
+mod crypto;
 mod error;
 #[cfg(feature = "gssapi")]
 mod gssapi;

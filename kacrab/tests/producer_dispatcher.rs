@@ -371,7 +371,7 @@ async fn kafka_producer_send_with_callback_invokes_callback_and_returns_delivery
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -449,7 +449,7 @@ async fn kafka_producer_builder_accepts_java_style_config() {
     ])
     .await;
 
-    let mut producer = Producer::builder()
+    let producer = Producer::builder()
         .set("bootstrap.servers", bootstrap.addr().to_string())
         .set("enable.idempotence", "false")
         .set("batch.size", "1")
@@ -971,7 +971,7 @@ async fn kafka_producer_builder_uses_native_partitioner_instead_of_jvm_class_loa
     ])
     .await;
 
-    let mut producer = Producer::builder()
+    let producer = Producer::builder()
         .set("bootstrap.servers", bootstrap.addr().to_string())
         .set("enable.idempotence", "false")
         .set("batch.size", "1")
@@ -1055,7 +1055,7 @@ async fn kafka_producer_send_auto_batches_per_record_sends_until_flush() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -1163,7 +1163,7 @@ async fn kafka_producer_send_with_callback_auto_batches_until_flush() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -1242,7 +1242,7 @@ async fn kafka_producer_pipelines_ready_batches_until_flush() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -1549,7 +1549,7 @@ async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() 
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -1770,7 +1770,7 @@ async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correla
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -1841,7 +1841,7 @@ async fn idempotent_kafka_producer_retries_disconnected_in_flight_batch_with_sam
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -1903,7 +1903,7 @@ async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_t
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -1980,7 +1980,7 @@ async fn idempotent_kafka_producer_resends_multi_inflight_batches_in_sequence_or
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -2060,7 +2060,7 @@ async fn idempotent_kafka_producer_restamps_sibling_inflight_batch_after_single_
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -2169,7 +2169,7 @@ async fn idempotent_kafka_producer_retries_leadership_error_with_current_leader_
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -2557,7 +2557,7 @@ async fn kafka_producer_commits_transactional_send() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -2764,7 +2764,7 @@ async fn kafka_producer_commit_timeout_can_retry_same_operation_like_java() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -2897,7 +2897,7 @@ async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -3043,7 +3043,7 @@ async fn kafka_producer_abort_holds_end_txn_until_in_flight_batches_drain_like_j
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -3202,7 +3202,7 @@ async fn kafka_producer_transaction_v2_skips_add_partitions_to_txn_like_java() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transaction_v2_test_producer(wire);
+    let producer = transaction_v2_test_producer(wire);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -3317,7 +3317,7 @@ async fn kafka_producer_transaction_v2_installs_end_txn_epoch_like_java() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transaction_v2_test_producer(wire);
+    let producer = transaction_v2_test_producer(wire);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -3437,7 +3437,7 @@ async fn kafka_producer_transactional_unknown_producer_id_is_abortable_like_java
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer(wire);
+    let producer = transactional_test_producer(wire);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -3557,7 +3557,7 @@ async fn kafka_producer_transactional_unsupported_message_format_is_abortable_li
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer(wire);
+    let producer = transactional_test_producer(wire);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -3643,7 +3643,7 @@ async fn kafka_producer_add_partitions_fatal_error_blocks_abort() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer(wire);
+    let producer = transactional_test_producer(wire);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -3725,7 +3725,7 @@ async fn kafka_producer_fatal_transaction_error_blocks_later_send_like_java() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer_with_batch_size_and_linger(
+    let producer = transactional_test_producer_with_batch_size_and_linger(
         wire,
         16 * 1024,
         Duration::from_mins(1),
@@ -3817,7 +3817,7 @@ async fn kafka_producer_retries_retriable_add_partitions_error() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer_with_retries(wire, 1);
+    let producer = transactional_test_producer_with_retries(wire, 1);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -3891,7 +3891,7 @@ async fn kafka_producer_retries_concurrent_transactions_add_partitions_error_lik
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer_with_retries(wire, 1);
+    let producer = transactional_test_producer_with_retries(wire, 1);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -3977,7 +3977,7 @@ async fn kafka_producer_add_partitions_reloads_transaction_coordinator() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer_with_retries(wire, 1);
+    let producer = transactional_test_producer_with_retries(wire, 1);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -4101,7 +4101,7 @@ async fn kafka_producer_sends_offsets_to_transaction_before_commit() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -4247,7 +4247,7 @@ async fn kafka_producer_transaction_v2_skips_add_offsets_to_txn_like_java() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transaction_v2_test_producer(wire);
+    let producer = transaction_v2_test_producer(wire);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -4331,7 +4331,7 @@ async fn kafka_producer_send_offsets_to_transaction_reports_commit_error() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -4455,7 +4455,7 @@ async fn kafka_producer_send_offsets_timeout_can_retry_same_operation_like_java(
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -4613,7 +4613,7 @@ async fn kafka_producer_add_offsets_unknown_producer_id_bumps_epoch_after_abort_
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer(wire);
+    let producer = transactional_test_producer(wire);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -4698,7 +4698,7 @@ async fn kafka_producer_send_offsets_group_coordinator_auth_failure_is_abortable
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer(wire);
+    let producer = transactional_test_producer(wire);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -4785,7 +4785,7 @@ async fn kafka_producer_send_offsets_to_transaction_fatal_commit_error_blocks_ab
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer(wire);
+    let producer = transactional_test_producer(wire);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -4877,7 +4877,7 @@ async fn kafka_producer_txn_offset_commit_fenced_instance_id_allows_abort() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer(wire);
+    let producer = transactional_test_producer(wire);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -4950,7 +4950,7 @@ async fn kafka_producer_txn_offset_commit_invalid_epoch_is_producer_fenced_like_
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer(wire);
+    let producer = transactional_test_producer(wire);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -5047,7 +5047,7 @@ async fn kafka_producer_txn_offset_commit_fatal_partition_error_wins_over_reload
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer_with_retries(wire, 1);
+    let producer = transactional_test_producer_with_retries(wire, 1);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -5257,7 +5257,7 @@ async fn kafka_producer_txn_offset_commit_refresh_group_auth_failure_is_abortabl
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer_with_retries(wire, 1);
+    let producer = transactional_test_producer_with_retries(wire, 1);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -5336,7 +5336,7 @@ async fn kafka_producer_add_offsets_refresh_fatal_error_blocks_abort_like_java()
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer_with_retries(wire, 1);
+    let producer = transactional_test_producer_with_retries(wire, 1);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -5669,7 +5669,7 @@ async fn kafka_producer_commit_transaction_reports_end_txn_broker_error() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default(),
@@ -5771,7 +5771,7 @@ async fn kafka_producer_abort_transaction_abortable_error_becomes_fatal_like_jav
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default(),
@@ -5888,7 +5888,7 @@ async fn kafka_producer_commit_transaction_reloads_transaction_coordinator() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer_with_retries(wire, 1);
+    let producer = transactional_test_producer_with_retries(wire, 1);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -5954,7 +5954,7 @@ async fn kafka_producer_commit_transaction_retries_retriable_end_txn_error() {
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = transactional_test_producer_with_retries(wire, 1);
+    let producer = transactional_test_producer_with_retries(wire, 1);
 
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().unwrap();
@@ -7900,7 +7900,7 @@ async fn kafka_producer_delivery_future_receives_terminal_broker_error_like_java
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -7985,7 +7985,7 @@ async fn kafka_producer_send_with_callback_receives_terminal_broker_error_like_j
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()
@@ -8081,7 +8081,7 @@ async fn kafka_producer_delivery_future_preserves_terminal_wire_connection_close
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let mut producer = Producer::from_parts(
+    let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
             accumulator: AccumulatorConfig::default()

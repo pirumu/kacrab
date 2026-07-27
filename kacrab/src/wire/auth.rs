@@ -1,21 +1,27 @@
 //! SASL and security-protocol configuration for broker sessions.
 
+#[cfg(feature = "aws-lc-rs-tls")]
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     fmt::Write as _,
     fs,
     future::Future,
     str,
     string::String,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
     vec::Vec,
 };
 
 use base64::{Engine, engine::general_purpose};
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
+#[cfg(feature = "aws-lc-rs-tls")]
 use jsonwebtoken::{Algorithm, AlgorithmFamily, EncodingKey, Header};
+#[cfg(feature = "aws-lc-rs-tls")]
 use pkcs8::der::{Decode, pem::PemLabel};
-use serde_json::{Map, Value};
+#[cfg(feature = "aws-lc-rs-tls")]
+use serde_json::Map;
+use serde_json::Value;
 use sha2::{Sha256, Sha512};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -1070,6 +1076,11 @@ fn oauthbearer_form_body(config: &SaslConfig) -> Result<String, crate::wire::Wir
         }
         return Ok(body);
     }
+    // Signing an assertion locally needs `jsonwebtoken`, which only `aws-lc-rs-tls`
+    // pulls in: `pure-rust-tls` leaves it out rather than take on the unpatched
+    // timing sidechannel in `rsa` (RUSTSEC-2023-0071) that its pure-Rust backend
+    // depends on. Every other OAUTHBEARER token source works in both builds.
+    #[cfg(feature = "aws-lc-rs-tls")]
     if config.oauthbearer_assertion_private_key_file.is_some() {
         let assertion = build_oauthbearer_assertion(config)?;
         let mut body =
@@ -1081,6 +1092,15 @@ fn oauthbearer_form_body(config: &SaslConfig) -> Result<String, crate::wire::Wir
             body.push_str(&form_encode(&scope)?);
         }
         return Ok(body);
+    }
+    #[cfg(not(feature = "aws-lc-rs-tls"))]
+    if config.oauthbearer_assertion_private_key_file.is_some() {
+        return Err(crate::wire::WireError::InvalidSaslConfig(
+            "sasl.oauthbearer.assertion.private.key.file signs a JWT assertion locally, which \
+             needs the kacrab `aws-lc-rs-tls` feature - use sasl.oauthbearer.assertion.file, an \
+             OAuth token endpoint, or a JAAS token instead"
+                .to_owned(),
+        ));
     }
     let client_id = oauth_config_value(
         config,
@@ -1105,6 +1125,7 @@ fn oauthbearer_form_body(config: &SaslConfig) -> Result<String, crate::wire::Wir
     Ok(body)
 }
 
+#[cfg(feature = "aws-lc-rs-tls")]
 fn build_oauthbearer_assertion(config: &SaslConfig) -> Result<String, crate::wire::WireError> {
     let key_path = config
         .oauthbearer_assertion_private_key_file
@@ -1140,11 +1161,15 @@ fn build_oauthbearer_assertion(config: &SaslConfig) -> Result<String, crate::wir
     let (mut header, mut claims) = oauthbearer_assertion_template(config)?;
     header.alg = algorithm;
     merge_oauthbearer_config_claims(config, &mut claims)?;
+    // `jsonwebtoken` panics rather than erroring when its crate features name zero or
+    // two backends, so settle that before handing it the key.
+    crate::wire::crypto::ensure_jwt_provider();
     jsonwebtoken::encode(&header, &Value::Object(claims), &encoding_key).map_err(|error| {
         crate::wire::WireError::TokenRefresh(format!("cannot sign OAUTHBEARER assertion: {error}"))
     })
 }
 
+#[cfg(feature = "aws-lc-rs-tls")]
 fn oauthbearer_assertion_encoding_key(
     algorithm: Algorithm,
     key: &[u8],
@@ -1175,6 +1200,7 @@ fn oauthbearer_assertion_encoding_key(
     }
 }
 
+#[cfg(feature = "aws-lc-rs-tls")]
 fn oauthbearer_pem_or_encrypted_pkcs8_key(
     key: &[u8],
     passphrase: Option<&str>,
@@ -1199,6 +1225,7 @@ fn oauthbearer_pem_or_encrypted_pkcs8_key(
     }
 }
 
+#[cfg(feature = "aws-lc-rs-tls")]
 fn encrypted_pkcs8_der(pem: &[u8], passphrase: &str) -> Result<pkcs8::SecretDocument, String> {
     let pem = str::from_utf8(pem).map_err(|error| format!("private key is not UTF-8: {error}"))?;
     let (label, document) = pkcs8::SecretDocument::from_pem(pem)
@@ -1212,6 +1239,7 @@ fn encrypted_pkcs8_der(pem: &[u8], passphrase: &str) -> Result<pkcs8::SecretDocu
         .map_err(|error| format!("cannot decrypt private key: {error}"))
 }
 
+#[cfg(feature = "aws-lc-rs-tls")]
 fn oauthbearer_assertion_template(
     config: &SaslConfig,
 ) -> Result<(Header, Map<String, Value>), crate::wire::WireError> {
@@ -1248,6 +1276,7 @@ fn oauthbearer_assertion_template(
     Ok((header, claims))
 }
 
+#[cfg(feature = "aws-lc-rs-tls")]
 fn template_claims_object(value: &Value) -> Result<Map<String, Value>, crate::wire::WireError> {
     value.as_object().cloned().ok_or_else(|| {
         crate::wire::WireError::TokenRefresh(
@@ -1256,6 +1285,7 @@ fn template_claims_object(value: &Value) -> Result<Map<String, Value>, crate::wi
     })
 }
 
+#[cfg(feature = "aws-lc-rs-tls")]
 fn merge_oauthbearer_config_claims(
     config: &SaslConfig,
     claims: &mut Map<String, Value>,
@@ -1280,10 +1310,12 @@ fn merge_oauthbearer_config_claims(
     Ok(())
 }
 
+#[cfg(feature = "aws-lc-rs-tls")]
 fn set_claim(claims: &mut Map<String, Value>, key: &str, value: Value) {
     let _previous = claims.insert(key.to_owned(), value);
 }
 
+#[cfg(feature = "aws-lc-rs-tls")]
 fn now_unix_seconds() -> Result<u64, crate::wire::WireError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1295,6 +1327,7 @@ fn now_unix_seconds() -> Result<u64, crate::wire::WireError> {
         })
 }
 
+#[cfg(feature = "aws-lc-rs-tls")]
 fn generate_jti() -> Result<String, crate::wire::WireError> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|error| {

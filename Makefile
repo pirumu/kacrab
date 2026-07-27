@@ -7,7 +7,7 @@
         kafka-topic-delete kafka-topic-recreate bench-kafka-topic \
         bench-kafka bench-kafka-java-default bench-kafka-split-probe \
         bench-kafka-consumer bench-kafka-consumer-java-default \
-        check-features ci ci-strict tools
+        check-features check-pure-rust-tls ci ci-strict tools
 
 KAFKA_BIN ?= $(HOME)/.local/share/kacrab-kafka/current/bin
 KAFKA_TOPICS ?= $(KAFKA_BIN)/kafka-topics.sh
@@ -38,6 +38,7 @@ help:
 	@echo "  test-protocol-java-matrix - run ignored Java oracle matrix"
 	@echo "  clippy      - clippy with -D warnings"
 	@echo "  check-features - build every feature selection a user can make"
+	@echo "  check-pure-rust-tls - build the C-free-ish TLS provider and assert aws-lc-sys is gone"
 	@echo "  fmt         - cargo +nightly fmt --all"
 	@echo "  fmt-check   - cargo +nightly fmt --all -- --check"
 	@echo "  install-hooks - use tracked git hooks from .githooks"
@@ -121,7 +122,34 @@ KACRAB_FEATURE_SETS ?= none producer consumer admin share-consumer macros compre
                        gzip snappy lz4 zstd \
                        producer,consumer producer,admin consumer,admin \
                        producer,share-consumer share-consumer,admin \
-                       producer,consumer,admin producer,consumer,admin,share-consumer,macros
+                       producer,consumer,admin producer,consumer,admin,share-consumer,macros \
+                       aws-lc-rs-tls pure-rust-tls \
+                       producer,consumer,admin,aws-lc-rs-tls producer,consumer,admin,pure-rust-tls
+
+# The `pure-rust-tls` provider exists to keep `aws-lc-sys` — the large C/assembly
+# dependency — out of the tree. A feature that merely compiles proves nothing, so
+# assert the dependency is actually gone.
+#
+# `rsa` is banned here for a second reason: it is what `jsonwebtoken`'s pure-Rust
+# backend pulls in, and it carries RUSTSEC-2023-0071 (Marvin attack) with no fixed
+# release. Swapping a C dependency for an unpatched timing sidechannel is not what
+# this feature is for, so the obvious "just enable rust_crypto" regression is a
+# build failure rather than a review catch.
+KACRAB_PURE_RUST_TLS_FEATURES ?= producer,consumer,admin,pure-rust-tls
+KACRAB_PURE_RUST_TLS_BANNED ?= aws-lc-sys rsa
+
+check-pure-rust-tls:
+	cargo check -p kacrab --no-default-features \
+	  --features $(KACRAB_PURE_RUST_TLS_FEATURES) --all-targets
+	@set -e; for dep in $(KACRAB_PURE_RUST_TLS_BANNED); do \
+	  if cargo tree -p kacrab --no-default-features \
+	       --features $(KACRAB_PURE_RUST_TLS_FEATURES) -e normal -i "$$dep" \
+	       >/dev/null 2>&1; then \
+	    echo "error: $$dep is in the tree under pure-rust-tls" >&2; exit 1; \
+	  else \
+	    echo "==> pure-rust-tls: $$dep absent from the dependency tree"; \
+	  fi; \
+	done
 
 check-features:
 	@set -e; for features in $(KACRAB_FEATURE_SETS); do \

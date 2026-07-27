@@ -91,6 +91,9 @@ jobs:
       - name: Build every feature selection a user can make
         run: make check-features
 
+      - name: Assert pure-rust-tls really drops aws-lc-sys
+        run: make check-pure-rust-tls
+
   coverage:
     name: coverage (llvm-cov)
     runs-on: ubuntu-latest

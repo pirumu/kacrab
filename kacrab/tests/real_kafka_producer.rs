@@ -28,7 +28,7 @@ async fn real_kafka_commits_transactional_send() {
          transactional.id={transactional_id}"
     );
 
-    let mut producer = Producer::builder()
+    let producer = Producer::builder()
         .set("bootstrap.servers", bootstrap.to_string())
         .set("client.id", "kacrab-real-kafka-transaction-test")
         .set("transactional.id", transactional_id)

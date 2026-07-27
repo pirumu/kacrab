@@ -39,6 +39,20 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
+/// Pick a `rustls` crypto provider for the mock TLS broker.
+///
+/// The fixtures below build `rustls` server configs directly, and those resolve the
+/// provider from crate features. `--all-features` turns on both `aws-lc-rs` and
+/// `ring`, which rustls refuses to disambiguate, so install one explicitly using the
+/// same precedence kacrab itself applies in `wire::crypto`.
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
+fn install_test_crypto_provider() {
+    #[cfg(feature = "aws-lc-rs-tls")]
+    let _first_wins = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    #[cfg(all(feature = "pure-rust-tls", not(feature = "aws-lc-rs-tls")))]
+    let _first_wins = rustls::crypto::ring::default_provider().install_default();
+}
+
 #[tokio::test]
 async fn wire_client_routes_requests_by_broker_id() {
     let broker_7 = MockBroker::serve_many(vec![
@@ -875,6 +889,7 @@ async fn wire_client_exchanges_oauthbearer_assertion_file_for_token() {
     assert_eq!(oauth.join().await, 1);
 }
 
+#[cfg(feature = "aws-lc-rs-tls")]
 #[tokio::test]
 async fn wire_client_builds_oauthbearer_assertion_from_private_key_template_and_claims() {
     let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
@@ -1040,6 +1055,7 @@ async fn wire_client_rejects_java_sasl_callback_handler_classes() {
     assert_eq!(broker.join().await, 1);
 }
 
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 #[tokio::test]
 async fn wire_client_runs_tls_before_api_versions() {
     let tls = MockTlsBroker::serve_many(vec![
@@ -1084,6 +1100,7 @@ async fn wire_client_runs_tls_before_api_versions() {
     assert_eq!(tls.join().await, 2);
 }
 
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 #[tokio::test]
 async fn wire_client_allows_explicit_hostname_verification_disable() {
     let tls = MockTlsBroker::serve_many_for_subject(
@@ -1131,6 +1148,7 @@ async fn wire_client_allows_explicit_hostname_verification_disable() {
     assert_eq!(tls.join().await, 2);
 }
 
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 #[tokio::test]
 async fn wire_client_runs_tls_with_client_certificate_before_api_versions() {
     let tls = MockTlsBroker::serve_many_with_client_auth(vec![
@@ -1935,6 +1953,7 @@ fn http_content_length(head: &str) -> usize {
         .unwrap()
 }
 
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 struct MockTlsBroker {
     addr: std::net::SocketAddr,
     truststore_path: String,
@@ -1944,6 +1963,7 @@ struct MockTlsBroker {
     join: tokio::task::JoinHandle<usize>,
 }
 
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 struct MockTlsMaterial {
     truststore_path: String,
     truststore_pem: String,
@@ -1951,6 +1971,7 @@ struct MockTlsMaterial {
     client_key_pem: Option<String>,
 }
 
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 impl MockTlsBroker {
     async fn serve_many(handlers: Vec<Box<dyn FnOnce(Bytes) -> BytesMut + Send>>) -> Self {
         Self::serve_many_for_subject("127.0.0.1", handlers).await
@@ -1965,6 +1986,7 @@ impl MockTlsBroker {
         let truststore_pem = cert.pem();
         let truststore_path = write_temp_cert(truststore_pem.as_bytes());
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+        install_test_crypto_provider();
         let server_config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(vec![cert.der().clone()], key)
@@ -1999,6 +2021,7 @@ impl MockTlsBroker {
         client_roots
             .add(client_cert.der().clone())
             .expect("client trust anchor");
+        install_test_crypto_provider();
         let verifier = WebPkiClientVerifier::builder(client_roots.into())
             .build()
             .expect("client verifier");
