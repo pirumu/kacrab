@@ -24,26 +24,44 @@ The goal remains a high-performance, 100% pure Rust Kafka client with no
   linger, bounded memory, compression hooks, default/keyed partitioning,
   metadata routing, multi-broker dispatch, idempotent producer state,
   transactions, retries, delivery timeout, and delivery handles.
+- `consumer` owns the public `Consumer` API: manual assignment, topic and
+  regex subscription, classic groups (eager + incremental cooperative-sticky)
+  and the KIP-848 protocol, incremental fetch sessions, truncation detection,
+  sync/async/auto commit, static membership, typed deserializers,
+  interceptors, and metrics. `ShareConsumer` covers the KIP-932 queue-shaped
+  surface behind the `share-consumer` feature.
 - `admin` owns the `AdminClient` API — the full Apache Kafka 4.3.0 `Admin`
   operation surface (62 operations) with controller/coordinator/per-leader/
   broadcast routing, verified against a real broker.
 - `benches` contains accumulator, wire-pipeline, producer-dispatcher, mock
-  broker, and real Kafka benchmark hooks with local baselines.
+  broker, and real Kafka benchmark hooks with local baselines, plus the
+  soak/chaos harness (`soak_bench`).
+- Verification gates: a byte-for-byte Java oracle matrix for the generated
+  protocol, eleven `cargo-fuzz` targets over every untrusted-byte parser
+  (nightly), and real-broker suites (producer, consumer, admin, auth,
+  compression, 3-broker failover) that run in CI as a merge gate.
 
 ## Active Priorities
 
-1. Harden the wire layer for sustained multi-broker workloads:
-   reconnect/backoff behavior, metadata invalidation on leadership errors,
-   predictable in-flight cleanup, and lower-allocation dispatch.
-2. Harden producer behavior under load:
-   batching efficiency, retry semantics, delivery timeout accounting, memory
-   pressure, partition routing, leadership changes, idempotence, and
-   transactions.
-3. Expand stress and benchmark coverage:
-   multi-broker real Kafka runs, leadership movement, soak tests, latency
-   percentiles, and regression thresholds for the 3M messages/sec target.
-4. Keep public API ergonomics close to Kafka Java where that helps users, while
+1. Close the one open correctness branch: the compound-failure re-run. The
+   2026-07-07 soak ([`SOAK-REPORT.md`](SOAK-REPORT.md)) passed steady-state
+   and single-fault chaos but failed the compound phase; the defects it
+   exposed are fixed in code (F3 verified with a deterministic reproducer),
+   so what remains is a fresh multi-hour compound soak (VM ≥ 6 GB) to
+   confirm F1/F4.
+2. Execute the remaining measurement work in the
+   [Production Acceptance Plan](#production-acceptance-plan): B2 (high-RTT
+   emulation), B3 (8–24 h memory soak — the natural extension of the
+   compound re-run), and B4's CI gates once thresholds are agreed.
+3. Keep public API ergonomics close to Kafka Java where that helps users, while
    preserving explicit Rust ownership and error handling.
+
+Earlier priorities — wire-layer hardening (reconnect/backoff, metadata
+invalidation on leadership errors, in-flight cleanup) and producer hardening
+(retry semantics, delivery timeout accounting, idempotence, transactions) —
+are delivered and verified against real brokers; the soak findings F1/F3/F4
+drove the last round of fixes. The original 3M messages/sec target is
+exceeded (currently ~5M rec/s on the 10 B benchmark).
 
 ## Non-Goals
 
@@ -71,10 +89,11 @@ broker loss re-routes affected partitions to their new leaders without wedging
 co-batched ones (`kacrab/tests/real_kafka_cluster.rs`,
 `docker-compose.cluster.yml`).
 
-What remains is **measurement and acceptance under load, not correctness**.
-Each item needs dedicated infrastructure, a time budget, and in some cases an
-SLO threshold that is a product decision, not something the implementation can
-assert for you.
+What remains is **measurement and acceptance under load** — plus one
+correctness confirmation: the compound-failure fixes (F1/F4) await their
+confirming re-run. Each item needs dedicated infrastructure, a time budget,
+and in some cases an SLO threshold that is a product decision, not something
+the implementation can assert for you.
 
 > A few minutes of `docker compose` proves a path *works*; proving it *holds
 > up* needs hours of load, a tuned network, and agreed pass/fail gates.
@@ -85,16 +104,19 @@ assert for you.
 under high, continuous load across all brokers (no unbounded memory growth, no
 stuck partitions, no reordering/duplication with idempotence on).
 
-**Why not done:** the existing benches are short single-shot runs on a single
-node. Multi-broker behavior under sustained pressure (queue depth, in-flight
-caps, backpressure, metadata churn) is unmeasured over time.
+**Status:** run once — the overnight soak of 2026-07-07
+([`SOAK-REPORT.md`](SOAK-REPORT.md)): 4 h 17 m healthy across ~25 rotating
+broker-kill cycles at 1,000 rec/s; producer PASS (0.002% delivery errors, all
+loud; flat RSS), consumer group PASS. The compound phase (a broker lost for
+tens of minutes, then restored) FAILED and produced findings F1–F4: F2 was
+verified not to be a client defect, F3 is fixed and verified with a
+deterministic reproducer, F1/F4 are fixed in code (PR #47) pending
+confirmation.
 
-**Approach:** drive `producer_kafka_bench` (or a long-run harness) against
-`docker-compose.cluster.yml` for 1–4h at a target rate across all partitions,
-mixing in rolling broker restarts, leader elections, and a partition
-reassignment. Assert zero delivery failures (acks=all + idempotence), bounded
-retries, buffered bytes returning to ~0 between bursts, and broker-side record
-counts matching what was sent.
+**Remaining:** a fresh multi-hour compound soak with the VM at ≥ 6 GB to
+confirm F1/F4, then longer runs at higher target rates — the first run's
+1,000 rec/s validates correctness under chaos, not throughput under sustained
+pressure.
 
 **Decisions needed:** target rate, record size, duration, fault cadence.
 
@@ -106,9 +128,10 @@ steady-state memory and in-flight counts; no permanently stuck partition.
 **Goal:** verify behavior when broker links have real latency, jitter, and
 loss (dispatch/retry/timeout tuning is currently only exercised at ~0 RTT).
 
-**Why not done:** co-located brokers have sub-millisecond RTT, so
-timeout/backoff/in-flight interactions that only appear at 50–200 ms RTT are
-untested. This needs network emulation, not just more brokers.
+**Status:** not started — no `netem`/`toxiproxy` tooling exists in the repo
+yet. Co-located brokers have sub-millisecond RTT, so timeout/backoff/in-flight
+interactions that only appear at 50–200 ms RTT are untested. This needs
+network emulation, not just more brokers.
 
 **Approach:** add `tc netem` (delay + jitter + small loss) on the broker
 containers, or run brokers behind a latency-injecting proxy (`toxiproxy`).
@@ -128,8 +151,12 @@ spurious timeouts attributable to the client rather than the emulated link.
 **Goal:** prove there is no leak or unbounded growth over a long run (buffer
 pool, in-flight maps, idempotent state, metadata cache).
 
-**Why not done:** runs so far are short; slow growth (per-connection,
-per-leader-change, per-metadata-refresh) would not show up.
+**Status:** first signal only. The 4 h 17 m soak showed client RSS at
+17 MiB start / 37 MiB max / 13.4 MiB end with no growth trend across ~25
+broker-kill cycles — but slow growth (per-connection, per-leader-change,
+per-metadata-refresh) needs the full 8–24 h window with the buffer-pool and
+in-flight gauges scraped, which has not happened. The natural vehicle is
+extending B1's compound re-run.
 
 **Approach:** run B1's workload for 8–24h with RSS sampled periodically and
 the buffer-pool / in-flight gauges scraped from producer metrics. Include
@@ -147,15 +174,15 @@ return to baseline between bursts.
 **Goal:** turn latency from an anecdote into a gated metric (p50/p99/p999
 end-to-end produce latency) so regressions are caught.
 
-**Why not done:** benches report throughput and memory/CPU comparisons, but
-there is no percentile gate and — more importantly — **no agreed SLO
-thresholds**. A gate needs target numbers, which are a product call.
+**Status:** measurement exists, gating does not. The producer and consumer
+bench binaries record per-record send→ack latency and emit p50/p99/p999, and
+a matched-load comparison against Java is published in `benches/README.md`.
+What is missing is the gate itself: **agreed SLO thresholds** (a product
+call, not an implementation one) and a CI job that fails on regression.
 
-**Approach:** extend the bench harness to record per-record send→ack latency
-and emit p50/p99/p999 (HdrHistogram-style) under single-node and multi-broker;
-compare against the Java client on the same hardware to set realistic targets.
-Wire the percentiles into CI as a soft gate first, then a hard gate once
-thresholds are agreed.
+**Approach:** wire the existing percentiles into CI as a soft gate first,
+then a hard gate once thresholds are agreed — set relative to the published
+Java comparison on the same hardware.
 
 **Decisions needed:** p99/p999 targets (absolute and/or relative-to-Java), the
 workload they apply to, and soft-vs-hard gating in CI.
@@ -174,15 +201,24 @@ regression beyond the agreed threshold.
 
 ## Release Bar
 
-Before calling this production-ready, the project needs:
+Met today:
 
-- protocol compatibility checks for generated schemas against Kafka Java;
+- protocol compatibility checks for generated schemas against Kafka Java
+  (the byte-for-byte oracle matrix);
 - mock broker and real Kafka integration tests for every request path;
-- bounded memory and in-flight behavior under sustained load;
-- explicit timeout, disconnect, retry, and leadership-change behavior;
-- documented config compatibility boundaries against Kafka Java;
-- reproducible benchmarks on realistic batching and multi-broker workloads;
+- explicit timeout, disconnect, retry, and leadership-change behavior
+  (documented in the README's cancellation & drop semantics);
+- documented config compatibility boundaries against Kafka Java (the
+  generated config catalog and the book's field guide);
 - clear public API stability policy and changelogged release notes.
+
+Outstanding — both resolve to the
+[Production Acceptance Plan](#production-acceptance-plan):
+
+- bounded memory and in-flight behavior under sustained load (B1's compound
+  re-run, B3's long soak);
+- reproducible benchmarks on realistic batching and multi-broker workloads
+  (B1 at an agreed target rate, B4's gates).
 
 ## Development Rules
 
