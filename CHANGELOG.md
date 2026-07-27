@@ -121,6 +121,29 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **Two pipelined idempotent retries to one partition could re-send out of
+  sequence order.** ([#2]) After a broker disconnect, each in-flight dispatch
+  retried inside its own task, and an in-task retry re-enqueues with an
+  enqueue-sequencer ticket that has already been served — so nothing ordered
+  the re-sends, and under CPU saturation the base-sequence-1 request could
+  reach the broker before the base-sequence-0 re-send. A real broker answers
+  `OUT_OF_ORDER_SEQUENCE_NUMBER` and the retry path recovers, so no records
+  were lost or reordered on the broker; the cost was a wasted round trip and a
+  flaky ordering test. First dispatches were never affected: sequence stamping
+  and ticket reservation are serialized, so first-attempt wire order was
+  already correct.
+
+  In-task retries now apply the same gate the drain path already had (Kafka
+  `shouldStopDrainBatchesForPartition`'s retry clause): a batch that no longer
+  holds its partition's first in-flight sequence is handed back to the
+  accumulator, whose sequence-ordered queue re-admits it in order. The gate
+  runs only on retry iterations — `producer_dispatcher/multi_broker_dispatch`
+  throughput is unchanged (61.41 Kelem/s with vs 61.22 Kelem/s without, within
+  noise), and the issue's reproducer went from 1 failure in 60 runs to 0 in
+  180 under 3x-core CPU load.
+
+[#2]: https://github.com/pirumu/kacrab/issues/2
+
 - **Single-feature builds were broken, and nothing was checking them.**
   `--features consumer` failed to compile: `wire::{BackoffPolicy, BackoffState}`
   were re-exported only under `cfg(feature = "producer")` while
