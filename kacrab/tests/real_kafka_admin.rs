@@ -298,13 +298,25 @@ async fn real_kafka_admin_extended() {
         .create_acls(vec![binding.clone()])
         .await
         .expect("create_acls");
-    let acls = admin
-        .describe_acls(AclBindingFilter {
-            principal: Some(principal.clone()),
-            ..AclBindingFilter::any()
-        })
-        .await
-        .expect("describe_acls");
+    // `create_acls` returns once the controller has committed the ACL record, but each
+    // broker applies it when it replays that metadata delta and `describe_acls` is served
+    // from the broker's own authorizer state. Reading immediately after the write can
+    // legitimately return nothing, so poll the describe until it lands — the same reason
+    // the client-quota assertion below polls.
+    let mut acls = Vec::new();
+    for _ in 0..25 {
+        acls = admin
+            .describe_acls(AclBindingFilter {
+                principal: Some(principal.clone()),
+                ..AclBindingFilter::any()
+            })
+            .await
+            .expect("describe_acls");
+        if acls.iter().any(|b| b.principal == principal) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
     println!("  acls: created+described {} binding(s)", acls.len());
     assert!(
         acls.iter().any(|b| b.principal == principal),
