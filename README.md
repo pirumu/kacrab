@@ -461,20 +461,49 @@ cover record-batch decoding, the generated response structs, and every
 compression codec:
 
 ```bash
-cargo +nightly fuzz run record_batch_framed -- -max_total_time=60
+cargo +nightly fuzz run record_batch_framed \
+  fuzz/corpus/record_batch_framed fuzz/seeds/record_batch_framed -- \
+  -dict=fuzz/kafka.dict -max_total_time=60
 ```
+
+**The seeds and the dictionary do more work than the runtime does.** The Kafka
+wire format is length-prefixed and version-gated, so an unseeded run spends its
+budget rediscovering framing instead of exercising decoders. The committed seed
+corpus in [`fuzz/seeds/`](fuzz/seeds/) is generated from the *same fixtures the
+Java oracle uses* — every generated message, at every schema version, across six
+fixture shapes — then minimised with `cargo fuzz cmin` to the subset that
+carries the coverage. Regenerate it after adding a schema version:
+
+```bash
+cargo test -p kacrab-protocol --test java_interop -- \
+  --ignored --nocapture generate_fuzz_corpus
+```
+
+[`fuzz/kafka.dict`](fuzz/kafka.dict) supplies the tokens random mutation will
+never find, above all Kafka's `-1` length prefix: null is encoded as a negative
+length, so without that token the fuzzer only ever explores the non-null side of
+every nullable field. Measured effect, edges covered:
+
+| target | unseeded | seeded + dictionary |
+| --- | ---: | ---: |
+| `record_batch_decode` | 150 | **984** |
+| `record_batch_framed` | 774 | **1591** |
+| `response_decode` | — | **11899** |
+| `decompress` | — | **1230** |
 
 Record batches get two targets, and the reason is worth stating because it is
 the difference between fuzzing and the appearance of it. `decode_next_batch`
 validates CRC32C *before* it reads the magic byte, the record count, the varint
 record headers, or the compressed blob. Random bytes clear a CRC32C check with
-probability 2^-32, so `record_batch_decode` — raw bytes straight in — only ever
-exercises framing and rejection, and its coverage curve goes flat almost
-immediately. `record_batch_framed` hands the fuzzer the CRC-covered region and
-builds correct framing around it, so every mutation lands inside the decoder:
-774 edges versus 150, and it is what found the header-count OOM fixed in
-`Record::decode`. Both are kept — the framed target constructs CRC and length
-prefixes correctly by definition, so it can never find a bug in them.
+probability 2^-32, so raw bytes alone only ever exercise framing and rejection.
+`record_batch_framed` hands the fuzzer the CRC-covered region and builds correct
+framing around it, so every mutation lands inside the decoder — that is what
+found the header-count OOM fixed in `Record::decode`. Both targets are kept: the
+framed one constructs CRC and length prefixes correctly by definition, so it can
+never find a bug in them.
+
+None of this makes the decoders *proven* safe. It makes them survivors of
+~20M structured inputs per campaign, which is a different and weaker claim.
 
 They run [nightly in CI][fuzz-url] at 15 minutes per target, and as a 60-second
 smoke on any PR touching `kacrab-protocol/`. The fuzz crate lives outside the

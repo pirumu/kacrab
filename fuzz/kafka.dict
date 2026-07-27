@@ -1,0 +1,85 @@
+# libFuzzer dictionary for the Kafka wire format.
+#
+# A dictionary gives the mutator byte sequences that are meaningful in this
+# protocol but astronomically unlikely to be discovered at random -- above all
+# the sentinel length prefixes. Kafka encodes "null" as a length of -1, so
+# 0xffffffff and 0xffff are the two tokens that unlock every nullable-field
+# branch in the generated decoders; without them the fuzzer only ever explores
+# the non-null side.
+#
+# Used by every target. Tokens that mean nothing to a given target are simply
+# never selected, so one shared dictionary is cheaper than four partial ones.
+
+# --- Null and empty sentinels -------------------------------------------------
+# INT32 -1: null bytes / null array. The single highest-value token here.
+null_i32="\xff\xff\xff\xff"
+# INT16 -1: null string, and the "no error" neighbour of error_code.
+null_i16="\xff\xff"
+# Zero-length string, array, or bytes.
+empty_i32="\x00\x00\x00\x00"
+empty_i16="\x00\x00"
+# Compact (flexible-version) encoding: length is unsigned varint length+1, so
+# 0x00 is null and 0x01 is empty.
+compact_null="\x00"
+compact_empty="\x01"
+
+# --- Small counts -------------------------------------------------------------
+one_i32="\x00\x00\x00\x01"
+two_i32="\x00\x00\x00\x02"
+compact_one="\x02"
+compact_two="\x03"
+
+# --- Numeric boundaries -------------------------------------------------------
+# INT32/INT64 max and min: the shapes that overflow a careless length or offset
+# calculation.
+i32_max="\x7f\xff\xff\xff"
+i32_min="\x80\x00\x00\x00"
+i64_max="\x7f\xff\xff\xff\xff\xff\xff\xff"
+i64_min="\x80\x00\x00\x00\x00\x00\x00\x00"
+# INT64 -1: the invalid/unset offset and producer id.
+minus_one_i64="\xff\xff\xff\xff\xff\xff\xff\xff"
+
+# --- Varints ------------------------------------------------------------------
+# Zigzag: 0x00 is 0, 0x01 is -1, 0x02 is 1.
+varint_zero="\x00"
+varint_minus_one="\x01"
+varint_one="\x02"
+# Maximum-width varint continuation run -- the shape that probes for an
+# unbounded shift or a missing width cap.
+varint_max_width="\xff\xff\xff\xff\x7f"
+varlong_max_width="\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01"
+
+# --- Record batch -------------------------------------------------------------
+# magic v2; anything else must be rejected as UnsupportedMagic.
+magic_v2="\x02"
+# attributes with each compression codec selected (low three bits).
+attr_none="\x00\x00"
+attr_gzip="\x00\x01"
+attr_snappy="\x00\x02"
+attr_lz4="\x00\x03"
+attr_zstd="\x00\x04"
+# attributes with the transactional and control bits set.
+attr_transactional="\x00\x10"
+attr_control="\x00\x20"
+# A zero UUID -- the "no topic id" sentinel in KIP-516 fetches.
+uuid_zero="\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+
+# --- Error codes --------------------------------------------------------------
+# Selected because each drives a distinct branch in client-side handling.
+err_none="\x00\x00"
+err_offset_out_of_range="\x00\x01"
+err_corrupt_message="\x00\x02"
+err_unknown_topic_or_partition="\x00\x03"
+err_not_leader_or_follower="\x00\x06"
+err_message_too_large="\x00\x0a"
+err_out_of_order_sequence="\x00\x2d"
+err_unsupported_version="\x00\x23"
+err_fenced_leader_epoch="\x00\x4a"
+
+# --- Compression magic --------------------------------------------------------
+# Frame headers, so a mutated payload can still enter each codec's real parser
+# rather than being rejected on the first byte.
+gzip_magic="\x1f\x8b\x08"
+zstd_magic="\x28\xb5\x2f\xfd"
+lz4_magic="\x04\x22\x4d\x18"
+snappy_kafka_magic="\x82SNAPPY\x00"

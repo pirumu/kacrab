@@ -43,8 +43,18 @@ release date and links to relevant pull requests or issues.
   nearly useless on its own: CRC32C is validated before the magic byte, the
   record count, the varints, or the compressed blob, so random input passes that
   gate with probability 2^-32 and never reaches the decoder. Building correct
-  framing around fuzzer-controlled bytes took coverage from 150 to 774 edges and
-  is what surfaced the OOM above.
+  framing around fuzzer-controlled bytes is what surfaced the OOM above.
+- A committed seed corpus (`fuzz/seeds/`) and a Kafka wire-format dictionary
+  (`fuzz/kafka.dict`) for the fuzz targets. The seeds are generated from the same
+  fixtures the Java oracle matrix uses — every generated message, at every schema
+  version, across six fixture shapes — by an ignored `generate_fuzz_corpus` test
+  in `java_interop.rs`, then minimised with `cargo fuzz cmin`. The dictionary
+  carries the sentinels random mutation will not find, chiefly Kafka's `-1`
+  length prefix, which gates every nullable field. Together they take
+  `record_batch_decode` from 150 to 984 edges and `record_batch_framed` from 774
+  to 1591; `response_decode` reaches 11899. `response_decode` also now dispatches
+  on the real API key byte and covers 50 client-facing response types rather than
+  12 behind an arbitrary index.
 
 ### Documentation
 
