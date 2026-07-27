@@ -1617,10 +1617,15 @@ impl ProducerDispatcher {
         // are not skipped, then advance — idempotent if the enqueue path already advanced.
         self.enqueue_sequencer.wait_turn(enqueue_ticket).await;
         self.enqueue_sequencer.advance_past(enqueue_ticket);
-        if !matches!(outcome, DispatchOutcome::Requeue(_)) {
-            self.release_idempotent_inflight_after_terminal(&inflight)
-                .await;
-        }
+        // Release on every outcome, requeue included. "In flight" must mean "dispatched
+        // and not yet back", and a requeued batch is back in the accumulator — it
+        // re-registers when it is dispatched again. Keeping it registered across the
+        // requeue leaves a permanent entry behind whenever the batch is not re-dispatched,
+        // and that entry makes `has_inflight_batches` true forever, so every later fresh
+        // batch on the partition defers with `DeferUnresolved` and flush deadlocks with
+        // nothing in flight to unblock it.
+        self.release_idempotent_inflight_after_terminal(&inflight)
+            .await;
         outcome
     }
 
