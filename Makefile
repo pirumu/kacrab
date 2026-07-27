@@ -129,16 +129,27 @@ KACRAB_FEATURE_SETS ?= none producer consumer admin share-consumer macros compre
 # The `pure-rust-tls` provider exists to keep `aws-lc-sys` — the large C/assembly
 # dependency — out of the tree. A feature that merely compiles proves nothing, so
 # assert the dependency is actually gone.
+#
+# `rsa` is banned here for a second reason: it is what `jsonwebtoken`'s pure-Rust
+# backend pulls in, and it carries RUSTSEC-2023-0071 (Marvin attack) with no fixed
+# release. Swapping a C dependency for an unpatched timing sidechannel is not what
+# this feature is for, so the obvious "just enable rust_crypto" regression is a
+# build failure rather than a review catch.
+KACRAB_PURE_RUST_TLS_FEATURES ?= producer,consumer,admin,pure-rust-tls
+KACRAB_PURE_RUST_TLS_BANNED ?= aws-lc-sys rsa
+
 check-pure-rust-tls:
 	cargo check -p kacrab --no-default-features \
-	  --features producer,consumer,admin,pure-rust-tls --all-targets
-	@if cargo tree -p kacrab --no-default-features \
-	     --features producer,consumer,admin,pure-rust-tls -e normal -i aws-lc-sys \
-	     >/dev/null 2>&1; then \
-	  echo "error: aws-lc-sys is still in the tree under pure-rust-tls" >&2; exit 1; \
-	else \
-	  echo "==> pure-rust-tls: aws-lc-sys absent from the dependency tree"; \
-	fi
+	  --features $(KACRAB_PURE_RUST_TLS_FEATURES) --all-targets
+	@set -e; for dep in $(KACRAB_PURE_RUST_TLS_BANNED); do \
+	  if cargo tree -p kacrab --no-default-features \
+	       --features $(KACRAB_PURE_RUST_TLS_FEATURES) -e normal -i "$$dep" \
+	       >/dev/null 2>&1; then \
+	    echo "error: $$dep is in the tree under pure-rust-tls" >&2; exit 1; \
+	  else \
+	    echo "==> pure-rust-tls: $$dep absent from the dependency tree"; \
+	  fi; \
+	done
 
 check-features:
 	@set -e; for features in $(KACRAB_FEATURE_SETS); do \

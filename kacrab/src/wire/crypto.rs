@@ -21,10 +21,6 @@ const NO_PROVIDER_MESSAGE: &str =
      default provider) or `pure-rust-tls` (drops `aws-lc-sys`), or install a \
      `rustls::crypto::CryptoProvider` as the process default before connecting";
 
-/// Whether kacrab compiled a crypto backend in at all.
-pub(crate) const HAS_COMPILED_IN_PROVIDER: bool =
-    cfg!(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"));
-
 /// Install kacrab's compiled-in providers as the process defaults, if nothing else
 /// claimed that slot first. Cheap and idempotent, so call sites need no `Once`.
 #[cfg_attr(
@@ -43,8 +39,9 @@ pub(crate) fn install_default_providers() {
     }
     #[cfg(all(feature = "pure-rust-tls", not(feature = "aws-lc-rs-tls")))]
     {
+        // No `jsonwebtoken` here: `pure-rust-tls` does not depend on it, because its
+        // pure-Rust backend pulls in `rsa` and RUSTSEC-2023-0071 with it.
         let _first_wins = rustls::crypto::ring::default_provider().install_default();
-        let _first_wins = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
     }
 }
 
@@ -64,19 +61,12 @@ pub(crate) fn rustls_provider() -> Result<Arc<CryptoProvider>> {
     )
 }
 
-/// Guard the `jsonwebtoken` signing path, which panics instead of erroring when it
-/// cannot resolve a provider.
+/// Settle `jsonwebtoken`'s provider before the signing path runs, since it panics
+/// rather than erroring when its crate features name zero or two backends.
 ///
-/// # Errors
-///
-/// Returns [`WireError::InvalidTlsConfig`] when no provider is available.
-pub(crate) fn ensure_jwt_provider() -> Result<()> {
+/// Only compiled with `aws-lc-rs-tls`, the one feature that depends on
+/// `jsonwebtoken` at all.
+#[cfg(feature = "aws-lc-rs-tls")]
+pub(crate) fn ensure_jwt_provider() {
     install_default_providers();
-    if HAS_COMPILED_IN_PROVIDER {
-        Ok(())
-    } else {
-        Err(WireError::InvalidTlsConfig(format!(
-            "OAUTHBEARER assertion signing needs a crypto provider: {NO_PROVIDER_MESSAGE}"
-        )))
-    }
 }

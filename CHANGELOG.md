@@ -11,18 +11,28 @@ release date and links to relevant pull requests or issues.
 
 ### Changed — breaking
 
-- **The TLS crypto provider is now an explicit feature.** `rustls` and
-  `jsonwebtoken` no longer come with their default backends baked in. Pick one:
-  `aws-lc-rs-tls` reproduces the previous behaviour, and `pure-rust-tls` swaps both
-  onto `ring`, which drops `aws-lc-sys` — the large C/assembly dependency — from the
-  tree entirely. `make check-pure-rust-tls` asserts that in CI rather than trusting
-  that the feature compiles.
+- **The TLS crypto provider is now an explicit feature.** `rustls` no longer comes
+  with a backend baked in. Pick one: `aws-lc-rs-tls` reproduces the previous
+  behaviour, and `pure-rust-tls` puts `rustls` on `ring`, which drops `aws-lc-sys`
+  — the large C/assembly dependency — from the tree entirely.
+  `make check-pure-rust-tls` asserts the dependency is gone in CI rather than
+  trusting that the feature compiles.
 
-  If you use `SSL`, `SASL_SSL`, or the `OAUTHBEARER` assertion path, add
-  `aws-lc-rs-tls` to your feature list. A build with neither now compiles no crypto
-  backend at all, and a TLS connection returns
+  If you use `SSL` or `SASL_SSL`, add `aws-lc-rs-tls` to your feature list. A build
+  with neither now compiles no crypto backend at all, and a TLS connection returns
   `WireError::InvalidTlsConfig` naming the two features rather than failing at link
   time — a `PLAINTEXT`-only deployment should not pay for a provider it never uses.
+
+  **One capability differs between the two.** Signing an `OAUTHBEARER` JWT
+  assertion locally (`sasl.oauthbearer.assertion.private.key.file`) requires
+  `aws-lc-rs-tls`; under `pure-rust-tls` it returns
+  `WireError::InvalidSaslConfig` naming the feature. `jsonwebtoken` is now an
+  optional dependency that only `aws-lc-rs-tls` pulls in, because its pure-Rust
+  backend depends on `rsa` and RUSTSEC-2023-0071 — a key-recovery timing
+  sidechannel with no fixed release. Trading a C dependency for an unpatched
+  sidechannel is not what that feature is for, so `make check-pure-rust-tls` bans
+  `rsa` alongside `aws-lc-sys`. The other three `OAUTHBEARER` token sources — JAAS
+  option, token file, and HTTP token endpoint — are unaffected in both builds.
 
   Enabling both features is well defined: kacrab installs `aws-lc-rs` as the process
   default before first use, so `--all-features` builds no longer hit `rustls`'s

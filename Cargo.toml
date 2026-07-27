@@ -47,8 +47,9 @@ regex = { version = "1", default-features = false, features = ["std", "unicode"]
 getrandom = "0.3"
 hmac = "0.12"
 jks = { version = "0.3", default-features = false, features = ["rand"] }
-# Crypto backend is selected by kacrab's `aws-lc-rs-tls` / `pure-rust-tls` features,
-# not here, so a build can drop `aws-lc-sys` entirely.
+# Only the locally-signed OAUTHBEARER assertion path needs this, and its crypto
+# backend is a kacrab feature choice, so both the dependency and its backend are
+# turned on from `kacrab/Cargo.toml` rather than here.
 jsonwebtoken = { version = "10.4", default-features = false, features = ["use_pem"] }
 libgssapi = "0.11"
 p12-keystore = "0.3"

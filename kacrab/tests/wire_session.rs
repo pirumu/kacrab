@@ -39,8 +39,7 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
-/// Pick a `rustls` crypto provider for the mock TLS broker and the OAUTHBEARER
-/// assertion tests.
+/// Pick a `rustls` crypto provider for the mock TLS broker.
 ///
 /// The fixtures below build `rustls` server configs directly, and those resolve the
 /// provider from crate features. `--all-features` turns on both `aws-lc-rs` and
@@ -49,15 +48,9 @@ use tokio_rustls::TlsAcceptor;
 #[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 fn install_test_crypto_provider() {
     #[cfg(feature = "aws-lc-rs-tls")]
-    {
-        let _first_wins = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let _first_wins = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
-    }
+    let _first_wins = rustls::crypto::aws_lc_rs::default_provider().install_default();
     #[cfg(all(feature = "pure-rust-tls", not(feature = "aws-lc-rs-tls")))]
-    {
-        let _first_wins = rustls::crypto::ring::default_provider().install_default();
-        let _first_wins = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
-    }
+    let _first_wins = rustls::crypto::ring::default_provider().install_default();
 }
 
 #[tokio::test]
@@ -896,7 +889,7 @@ async fn wire_client_exchanges_oauthbearer_assertion_file_for_token() {
     assert_eq!(oauth.join().await, 1);
 }
 
-#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
+#[cfg(feature = "aws-lc-rs-tls")]
 #[tokio::test]
 async fn wire_client_builds_oauthbearer_assertion_from_private_key_template_and_claims() {
     let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)

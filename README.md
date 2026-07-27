@@ -22,6 +22,7 @@ built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
 [real-broker-url]: https://github.com/pirumu/kacrab/actions/workflows/real-broker.yml
 [real-broker-auth-url]: https://github.com/pirumu/kacrab/actions/workflows/real-broker-auth.yml
 [fuzz-url]: https://github.com/pirumu/kacrab/actions/workflows/fuzz.yml
+[rustsec-rsa]: https://rustsec.org/advisories/RUSTSEC-2023-0071
 [crates-badge]: https://img.shields.io/crates/v/kacrab.svg
 [crates-url]: https://crates.io/crates/kacrab
 [docs-badge]: https://docs.rs/kacrab/badge.svg
@@ -76,10 +77,10 @@ built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
 - **Native Rust**: protocol, wire, and client logic are pure Rust, and the
   workspace forbids `unsafe_code`. Caveat: the default TLS provider
   (`aws-lc-rs-tls`, i.e. `rustls` + `aws-lc-rs`) is C/assembly, and the optional
-  `zstd`, `lz4-hc`, and `gssapi` features add C. The `pure-rust-tls` feature swaps
-  `rustls` and the OAUTHBEARER JWT path onto `ring`, which removes `aws-lc-sys`
-  from the tree entirely — CI asserts that, not just that it compiles. `ring`
-  still vendors some C from BoringSSL, so that is *no aws-lc*, not *zero C*. A
+  `zstd`, `lz4-hc`, and `gssapi` features add C. The `pure-rust-tls` feature puts
+  `rustls` on `ring`, which removes `aws-lc-sys` from the tree entirely — CI
+  asserts the dependency is gone, not just that the feature compiles. `ring` still
+  vendors some C from BoringSSL, so that is *no aws-lc*, not *zero C*. A
   `PLAINTEXT`-only build with the `gzip`/`snappy`/`lz4` codecs compiles no crypto
   provider at all.
 - **Generated protocol**: request/response structs are generated from Apache
@@ -195,10 +196,20 @@ example below names the one it needs); compression codecs `gzip`, `lz4`,
 
 **TLS needs a crypto provider chosen explicitly**: `aws-lc-rs-tls` (the default
 provider, what CI exercises) or `pure-rust-tls` (`ring`-backed, drops
-`aws-lc-sys`). You need one for `SSL`, `SASL_SSL`, or the `OAUTHBEARER` assertion
-path; a `PLAINTEXT`-only build can skip both and compiles no crypto backend at
-all. With neither, a TLS connection fails at config validation with a message
-naming the two features. Enabling both is well defined — `aws-lc-rs` wins.
+`aws-lc-sys`). You need one for `SSL` or `SASL_SSL`; a `PLAINTEXT`-only build can
+skip both and compiles no crypto backend at all. With neither, a TLS connection
+fails at config validation with a message naming the two features. Enabling both
+is well defined — `aws-lc-rs` wins.
+
+One capability differs between them: signing an **`OAUTHBEARER` JWT assertion
+locally** (`sasl.oauthbearer.assertion.private.key.file`) needs `aws-lc-rs-tls`.
+`pure-rust-tls` deliberately leaves `jsonwebtoken` out, because its pure-Rust
+backend depends on `rsa` and [RUSTSEC-2023-0071][rustsec-rsa] — a timing
+sidechannel with no fixed release — and trading a C dependency for an unpatched
+key-recovery sidechannel is not what that feature is for. `make
+check-pure-rust-tls` fails the build if either `aws-lc-sys` or `rsa` reappears.
+The other three `OAUTHBEARER` token sources — JAAS option, token file, and HTTP
+token endpoint — work identically in both builds.
 
 ## Producer
 
@@ -455,8 +466,8 @@ live in `kacrab::common`. There is a runnable tour in
 
 Kafka-compatible property names are used throughout. JAAS strings are accepted
 for migration, but kacrab only parses the credential options; it never loads
-Java login modules. Anything below that touches TLS or signs a JWT needs a crypto
-provider feature — `aws-lc-rs-tls` or `pure-rust-tls`, see [Install](#install):
+Java login modules. Anything below that touches TLS needs a crypto provider
+feature — `aws-lc-rs-tls` or `pure-rust-tls`, see [Install](#install):
 
 ```rust
 let producer = Producer::builder()
@@ -471,7 +482,8 @@ let producer = Producer::builder()
 ```
 
 OAuth bearer tokens can come from JAAS options, files, HTTP(S) token endpoints,
-or locally signed JWT assertions. Custom SASL flows plug in through
+or locally signed JWT assertions — the last of those needs `aws-lc-rs-tls`, see
+[Install](#install). Custom SASL flows plug in through
 `sasl_client_authenticator(...)`.
 
 ## Benchmarks

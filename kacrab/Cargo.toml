@@ -29,11 +29,18 @@ admin = []
 # at config validation with a clear error and no provider is compiled in.
 #
 # `aws-lc-rs-tls` is the documented default and what CI exercises. `pure-rust-tls`
-# swaps both `rustls` and `jsonwebtoken` onto backends that do not build
-# `aws-lc-sys`, which is the large C/assembly dependency in the tree. Note that
-# `ring` still vendors some C from BoringSSL, so this is "no aws-lc", not "zero C".
-aws-lc-rs-tls = ["rustls/aws-lc-rs", "jsonwebtoken/aws_lc_rs"]
-pure-rust-tls = ["rustls/ring", "jsonwebtoken/rust_crypto"]
+# puts `rustls` on `ring`, which drops `aws-lc-sys` — the large C/assembly
+# dependency — from the tree. Note that `ring` still vendors some C from BoringSSL,
+# so this is "no aws-lc", not "zero C".
+aws-lc-rs-tls = ["rustls/aws-lc-rs", "dep:jsonwebtoken", "jsonwebtoken/aws_lc_rs"]
+# Deliberately does NOT pull in `jsonwebtoken`. Its pure-Rust backend
+# (`rust_crypto`) depends on `rsa`, which carries RUSTSEC-2023-0071 (Marvin
+# attack, key recovery through a timing sidechannel) with no fixed release. The
+# point of this feature is a smaller trusted C surface, and trading `aws-lc-sys`
+# for an unpatched timing sidechannel is not that. The cost is that locally
+# signing an OAUTHBEARER JWT assertion is unavailable here; the other three token
+# sources (JAAS option, token file, HTTP token endpoint) are unaffected.
+pure-rust-tls = ["rustls/ring"]
 # Meta-feature: enable kacrab's own codec features (each forwards to
 # `kacrab-protocol/<codec>`) so the codec cfgs gated on these — e.g. the lz4
 # round-trip test — are active too. Selects pure-Rust `lz4`; opt into `lz4-hc`
@@ -78,7 +85,7 @@ crossbeam-queue = { workspace = true }
 getrandom = { workspace = true }
 hmac = { workspace = true }
 jks = { workspace = true }
-jsonwebtoken = { workspace = true }
+jsonwebtoken = { workspace = true, optional = true }
 kacrab-protocol = { workspace = true }
 kacrab-macros = { workspace = true }
 libgssapi = { workspace = true, optional = true }
