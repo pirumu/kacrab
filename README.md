@@ -271,7 +271,7 @@ Java and kacrab compute identically — see the note below):
 | --- | ---: | ---: |
 | 5M x 10 B, 16 partitions | **5.00M rec/s (47.6 MB/s)** | 3.70M rec/s (35.3 MB/s) |
 | 100K x 10 KiB, 3 partitions | **49.5K rec/s (483 MB/s)** | 43.0K rec/s (420 MB/s) |
-| 20K x 4 KiB, `max.message.bytes` below `batch.size` (batch-split path) | **51.5K rec/s (201 MB/s)** | 29.2K rec/s (114 MB/s) |
+| 20K x 4 KiB, `max.message.bytes` below `batch.size` (batch-split path) | **59.3K rec/s (232 MB/s)** | 26.9K rec/s (105 MB/s) |
 | Latency at Java's own rate (10 B) | **0.11 ms avg / 2 ms p99 / 4 ms max** | 0.32 ms / 2 ms / 131-140 ms |
 | Peak RSS / CPU (10 B run, 2026-06-28) | **~68 MiB / ~2.7 s** | ~268 MiB / ~4.1 s |
 

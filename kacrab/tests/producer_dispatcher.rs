@@ -6931,7 +6931,7 @@ async fn dispatcher_releases_encoded_buffers_after_later_local_record_too_large_
 }
 
 #[tokio::test]
-async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_like_java() {
+async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch() {
     let leader_7 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new(|mut request| {
@@ -6956,9 +6956,24 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_lik
                 .records
                 .clone()
                 .expect("records");
+            // The split really divided: the retry carries one record per child, where the
+            // rejected parent carried both.
             let batch = RecordBatch::decode(&mut records).expect("record batch");
-            assert_eq!(batch.records.len(), 2);
+            assert_eq!(batch.records.len(), 1);
             produce_response_frame_for_request(&header, 0, 40)
+        }),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            let mut records = produce.topic_data[0].partition_data[0]
+                .records
+                .clone()
+                .expect("records");
+            let batch = RecordBatch::decode(&mut records).expect("record batch");
+            assert_eq!(batch.records.len(), 1);
+            produce_response_frame_for_request(&header, 0, 41)
         }),
     ])
     .await;
@@ -7012,7 +7027,9 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch_lik
     assert_eq!(metrics.record_batch_split_count, 1);
     assert_eq!(metrics.produce_request_split_count, 0);
     assert_eq!(bootstrap.join().await, 2);
-    assert_eq!(leader_7.join().await, 3);
+    // ApiVersions, the rejected parent, and one produce per child. Java would spend a
+    // fourth produce here re-sending an identical single child before it started halving.
+    assert_eq!(leader_7.join().await, 4);
 }
 
 #[tokio::test]

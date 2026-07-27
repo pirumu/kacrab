@@ -279,14 +279,21 @@ applied — so under the probe it shows `batch.size=262144`, not the `16384` def
 It is formatted from the same override list `build_producer` applies, so the two
 cannot drift; it is printed before the send loop starts and adds no per-record work.
 
-A passing comparison is **both sides reporting the same non-zero
-`batch_splits`**. They use the same split geometry: the first split of a batch
-targets `batch.size` (`partition_sticky_batch_size`), and every re-split of an
-already-split batch targets `max(largest record, estimated batch size / 2)`, as
-Java 4.2.0+ does in `RecordAccumulator.java:507-540`. On the sizing above both
-sides converge on **1270 splits**. Treat any divergence as a real defect, not
-noise: a kacrab count running away while Java's converges means a split handed
-back a single child of the parent's size instead of halving.
+A passing comparison is **both sides reporting a non-zero `batch_splits` that
+converges**, not an equal one. The re-split geometry is the same —
+`max(largest record, estimated batch size / 2)`, as Java 4.2.0+ does in
+`RecordAccumulator.java:507-540` — but kacrab does not pay for Java's first
+round. Java's first split of an accumulator batch targets `batch.size`, the size
+the accumulator already packed the batch to, so it re-sends an identical single
+child and waits for the broker to reject it again before it starts halving.
+kacrab checks the grouping locally, sees it produced one child holding every
+record, and halves on the spot. On the sizing above that is one broker round trip
+saved per batch: **952 splits for kacrab against Java's 1270**, and 3,173 produce
+requests against 3,492.
+
+kacrab's count running *away* while Java's converges would still be a real defect
+— that is a split handing back a child of the parent's size — so watch the
+direction, not the equality.
 
 Also compare `retries` and `errors`, which must both be `0`. The split path
 re-enqueues batches that already hold an idempotent sequence, so a defect in the
@@ -298,12 +305,12 @@ interleaved kacrab/Java pairs, the probe topic recreated before every pass):
 
 | producer | throughput | avg latency | retries | errors | batch_splits |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| kacrab | **51.5K rec/s (201 MB/s)** | **127 ms** | 0 | 0 | 1270 |
-| Java | 29.2K rec/s (114 MB/s) | 179 ms | 0 | 0 | 1270 |
+| kacrab | **59.3K rec/s (232 MB/s)** | **109 ms** | 0 | 0 | 952 |
+| Java | 26.9K rec/s (105 MB/s) | 194 ms | 0 | 0 | 1270 |
 
-kacrab was ahead in all 5 pairs; its slowest round (36.0K rec/s) still beat
-Java's fastest (29.5K rec/s). Both sides warm up over the first rounds — the
-spread is 36.0–57.3K for kacrab and 23.9–29.5K for Java — so compare pairs, not
+kacrab was ahead in all 5 pairs; its slowest round (39.1K rec/s) still beat
+Java's fastest (30.8K rec/s). Both sides warm up over the first rounds — the
+spread is 39.1–63.3K for kacrab and 25.6–30.8K for Java — so compare pairs, not
 absolute single runs.
 
 Like every other real-broker path in this repo the probe is run manually; it is

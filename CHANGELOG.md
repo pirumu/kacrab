@@ -73,13 +73,21 @@ release date and links to relevant pull requests or issues.
   batch that is not a split child is unchanged, and nothing outside the
   `MESSAGE_TOO_LARGE` path is affected.
 
+  A split that hands back a single child holding every record is not a split —
+  the broker rejects it again for the same reason — so the split now halves and
+  regroups locally until the batch really divides. That removes the first round
+  entirely: Java's first split of an accumulator batch targets `batch.size`, the
+  size the accumulator already packed the batch to, so Java re-sends an identical
+  child and pays a broker round trip to learn what the grouping already showed.
+
   Measured against a real broker (20,000 x 4 KiB into a topic with
-  `max.message.bytes=65536` and the producer at `batch.size=262144`): before,
-  every record failed with `DeliveryTimeout` and nothing was delivered; after,
-  the split converges in the same number of rounds as Java — 1270 splits on both
-  sides on the identical workload — and kacrab clears the workload at
-  53,591 rec/s (209 MB/s) against Java's 30,349 rec/s (119 MB/s), with average
-  latency 112–136 ms against Java's 161 ms, no retries and no errors.
+  `max.message.bytes=65536` and the producer at `batch.size=262144`; medians of 5
+  interleaved kacrab/Java pairs): before, every record failed with
+  `DeliveryTimeout` and nothing was delivered; after, kacrab clears the workload
+  at 59,347 rec/s (232 MB/s) at 109 ms average latency against Java's
+  26,881 rec/s (105 MB/s) at 194 ms — 952 splits and 3,173 produce requests
+  against Java's 1,270 and 3,492 — with no retries and no errors. kacrab led in
+  all 5 pairs.
 - Records could be delivered out of sequence, or a flush fail with
   `FlushIncomplete`, on any partition where a batch was requeued — most visibly
   on the `MESSAGE_TOO_LARGE` split path above, which produced 309

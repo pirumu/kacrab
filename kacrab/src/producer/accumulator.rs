@@ -138,8 +138,17 @@ impl ReadyBatch {
     /// halving a topic whose `max.message.bytes` is below `batch.size` can never deliver
     /// anything — every record fails with a delivery timeout.
     ///
+    /// kacrab does not pay for that first no-progress round. Java discovers it by sending
+    /// the identical child and waiting for the broker to reject it again; kacrab checks
+    /// the grouping locally (see [`Self::split_for_retry_with_compression_ratio`]) and
+    /// halves on the spot, so a batch reaches a size the topic accepts in one broker round
+    /// trip fewer. The geometry after that point is the same, and the halving floor below
+    /// still bounds it.
+    ///
     /// The `max_record_size` floor is load-bearing: a batch holding one record larger
-    /// than half the batch would otherwise halve forever and never fit.
+    /// than half the batch would otherwise halve forever and never fit. It also
+    /// guarantees the local re-halving terminates — at the floor every record forms its
+    /// own group, so a batch of two or more records always splits into two or more.
     ///
     /// kacrab has no per-batch `maxRecordSize` field (Kafka maintains one in
     /// `ProducerBatch.tryAppend`); the floor is recomputed from the batch's own records
@@ -149,13 +158,21 @@ impl ReadyBatch {
         if !self.identity.is_split_child() {
             return batch_size;
         }
-        let max_record_bytes = self
-            .records
+        self.halved_split_target_batch_bytes()
+    }
+
+    /// The halving target on its own: `max(largest record, estimated size / 2)`.
+    fn halved_split_target_batch_bytes(&self) -> usize {
+        self.max_record_batch_bytes()
+            .max(self.bytes.checked_div(2).unwrap_or(0))
+    }
+
+    fn max_record_batch_bytes(&self) -> usize {
+        self.records
             .iter()
             .map(estimate_record_batch_bytes)
             .max()
-            .unwrap_or(0);
-        max_record_bytes.max(self.bytes.checked_div(2).unwrap_or(0))
+            .unwrap_or(0)
     }
 
     pub(crate) fn split_for_retry_with_compression_ratio(
@@ -166,7 +183,31 @@ impl ReadyBatch {
         if self.records.len() <= 1 {
             return None;
         }
-        let target_batch_bytes = self.split_target_batch_bytes(batch_size);
+        // A grouping that yields a single child is not a split: the child holds every
+        // record the parent held, so the broker rejects it for the same reason and the
+        // whole round trip bought nothing. That is the normal outcome of the first split
+        // of an accumulator batch, whose target is `batch.size` — the very size the
+        // accumulator already packed it to. Java pays a broker round trip to learn this;
+        // the grouping is local, so halve and regroup here instead until the batch really
+        // divides. The floor terminates the loop: at `max(largest record, 1)` a second
+        // record can never share a group with the first (the group already holds the
+        // record-batch overhead plus one record), so a batch of two or more records
+        // always yields two or more groups.
+        let target_floor_bytes = self.max_record_batch_bytes().max(1);
+        let mut target_batch_bytes = self.split_target_batch_bytes(batch_size);
+        let mut records = self.records;
+        let mut split_groups;
+        loop {
+            split_groups =
+                split_records_by_batch_target(records, target_batch_bytes, compression_ratio);
+            if split_groups.len() > 1 || target_batch_bytes <= target_floor_bytes {
+                break;
+            }
+            target_batch_bytes = target_floor_bytes.max(target_batch_bytes / 2);
+            records = split_groups
+                .pop()
+                .map_or_else(Vec::new, |group| group.records);
+        }
         let identity = self.identity;
         let topic = self.topic;
         let partition = self.partition;
@@ -174,8 +215,6 @@ impl ReadyBatch {
         let first_append_at = self.first_append_at;
         let producer_state = self.producer_state;
         let original_bytes = self.bytes;
-        let split_groups =
-            split_records_by_batch_target(self.records, target_batch_bytes, compression_ratio);
         let mut remaining_bytes = original_bytes;
         let last_index = split_groups.len().saturating_sub(1);
         let split = split_groups
@@ -2176,9 +2215,18 @@ mod tests {
             .cloned()
             .collect();
 
-        assert_eq!(split_count, 1);
-        assert_eq!(split.len(), 1);
-        assert_eq!(split[0].records.len(), 2);
+        // A split that hands back one child holding every record is not a split: the
+        // broker rejects it again for the same reason. Whatever the target started at,
+        // the batch must come back divided, with every record kept and in order.
+        assert!(
+            split_count > 1,
+            "split made no progress: {split_count} child"
+        );
+        assert_eq!(split.len(), split_count);
+        assert_eq!(
+            split.iter().map(|batch| batch.records.len()).sum::<usize>(),
+            2
+        );
         assert_eq!(values, [Bytes::from_static(b"a"), Bytes::from_static(b"b")]);
     }
 
@@ -2206,9 +2254,14 @@ mod tests {
 
         let split_count = accumulator.split_and_requeue_front(batch);
 
-        assert_eq!(split_count, 1);
+        // The subject is the parent's pooled buffer, which Java deallocates as the split
+        // children are re-enqueued: whatever the split arity, no reservation may survive.
+        assert!(
+            split_count > 1,
+            "split made no progress: {split_count} child"
+        );
         assert_eq!(accumulator.buffered_bytes(), 0);
-        assert_eq!(accumulator.buffered_batches(), 1);
+        assert_eq!(accumulator.buffered_batches(), split_count);
     }
 
     #[test]
@@ -2297,6 +2350,45 @@ mod tests {
 
         assert_eq!(split.len(), 3);
         assert!(split.iter().all(|batch| batch.records.len() == 1));
+    }
+
+    #[test]
+    fn ready_batch_first_split_divides_without_a_broker_round_trip() {
+        // The accumulator packs a batch to `batch.size`, so the first split's target —
+        // `batch.size` itself — regroups the same records into one child of the same
+        // size. Java sends that child and waits for the broker to reject it again; the
+        // grouping is local, so kacrab must halve on the spot and come back divided.
+        let now = Instant::now();
+        let records: Vec<_> = (0..8)
+            .map(|_| ProducerRecord::new("orders", 0).value(Bytes::from(vec![0u8; 512])))
+            .collect();
+        let batch = ReadyBatch {
+            identity: ReadyBatchIdentity::Accumulator(11),
+            topic: "orders".to_owned(),
+            partition: 0,
+            records,
+            delivery: None,
+            bytes: 8 * 1_024,
+            pooled_buffer_bytes: 0,
+            first_append_at: now,
+            producer_state: None,
+            split_parent: None,
+        };
+
+        let split = batch
+            .split_for_retry_with_compression_ratio(64 * 1_024, 1.0)
+            .expect("multi-record batch should split for retry");
+
+        assert!(
+            split.len() > 1,
+            "first split handed back {} child holding every record",
+            split.len()
+        );
+        assert_eq!(
+            split.iter().map(|batch| batch.records.len()).sum::<usize>(),
+            8,
+            "every record must survive the split"
+        );
     }
 
     #[test]
