@@ -18,7 +18,8 @@ use bytes::Bytes;
 use kacrab_protocol::{KafkaUuid, generated::ErrorCode};
 
 use super::{
-    DispatchOutcome, Producer, ProducerBuilder, TimedDispatchOutcome, resolve_bootstrap_brokers,
+    DispatchOutcome, InterceptorConfigs, Producer, ProducerBuilder, TimedDispatchOutcome,
+    resolve_bootstrap_brokers,
 };
 use crate::{
     config::ClientConfig,
@@ -1102,6 +1103,110 @@ async fn interceptor_ack_panic_does_not_skip_later_interceptors_like_java() {
     sender.send(&record_metadata(40));
 
     assert_eq!(ack_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn typed_builder_configures_registered_interceptors_like_untyped_build() {
+    let builder_calls = Arc::new(Mutex::new(Vec::new()));
+    let mut typed: crate::producer::TypedProducer<
+        Bytes,
+        Bytes,
+        crate::producer::BytesSerializer,
+        crate::producer::BytesSerializer,
+    > = ProducerBuilder::new()
+        .set("bootstrap.servers", "127.0.0.1:9092")
+        .set("client.id", "typed-configure-test")
+        .interceptor(ConfigureRecordingInterceptor {
+            client_ids: Arc::clone(&builder_calls),
+        })
+        .build_with_serializers(
+            crate::producer::BytesSerializer,
+            crate::producer::BytesSerializer,
+        )
+        .await
+        .expect("typed producer from builder");
+
+    assert_eq!(
+        recorded_client_ids(&builder_calls),
+        vec![Some("typed-configure-test".to_owned())]
+    );
+
+    let later_calls = Arc::new(Mutex::new(Vec::new()));
+    typed
+        .producer_mut()
+        .add_interceptor(ConfigureRecordingInterceptor {
+            client_ids: Arc::clone(&later_calls),
+        });
+
+    assert_eq!(
+        recorded_client_ids(&later_calls),
+        vec![Some("typed-configure-test".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn configured_serializer_builder_configures_registered_interceptors_like_untyped_build() {
+    let builder_calls = Arc::new(Mutex::new(Vec::new()));
+    let mut typed: crate::producer::TypedProducer<
+        Bytes,
+        Bytes,
+        crate::producer::BytesSerializer,
+        crate::producer::BytesSerializer,
+    > = ProducerBuilder::new()
+        .set("bootstrap.servers", "127.0.0.1:9092")
+        .set("client.id", "typed-configure-test")
+        .set(
+            "key.serializer",
+            "org.apache.kafka.common.serialization.BytesSerializer",
+        )
+        .set(
+            "value.serializer",
+            "org.apache.kafka.common.serialization.BytesSerializer",
+        )
+        .interceptor(ConfigureRecordingInterceptor {
+            client_ids: Arc::clone(&builder_calls),
+        })
+        .build_with_configured_serializers()
+        .await
+        .expect("typed producer from configured builder serializers");
+
+    assert_eq!(
+        recorded_client_ids(&builder_calls),
+        vec![Some("typed-configure-test".to_owned())]
+    );
+
+    let later_calls = Arc::new(Mutex::new(Vec::new()));
+    typed
+        .producer_mut()
+        .add_interceptor(ConfigureRecordingInterceptor {
+            client_ids: Arc::clone(&later_calls),
+        });
+
+    assert_eq!(
+        recorded_client_ids(&later_calls),
+        vec![Some("typed-configure-test".to_owned())]
+    );
+}
+
+fn recorded_client_ids(calls: &Arc<Mutex<Vec<Option<String>>>>) -> Vec<Option<String>> {
+    calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+#[derive(Debug)]
+struct ConfigureRecordingInterceptor {
+    client_ids: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+impl ProducerInterceptor for ConfigureRecordingInterceptor {
+    fn configure(&self, configs: &InterceptorConfigs) {
+        self.client_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(configs.client_id.clone());
+    }
 }
 
 #[derive(Debug)]

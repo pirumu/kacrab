@@ -1998,6 +1998,20 @@ impl ProducerBuilder {
     /// Returns an error when config validation, DNS resolution, or connection
     /// setup preparation fails.
     pub async fn build(self) -> Result<Producer> {
+        self.build_byte_producer(SerializerConfigStrip::ByteArrayClassesOnly)
+            .await
+    }
+
+    /// Builds the byte-oriented producer shared by every `build*` entry point.
+    ///
+    /// `serializer_strip` is the only pipeline difference between the untyped and
+    /// typed builders: the untyped [`Self::build`] accepts Java byte-array
+    /// serializer class names and drops just those, while the typed builders carry
+    /// Rust serializers and therefore drop every serializer class config.
+    async fn build_byte_producer(
+        self,
+        serializer_strip: SerializerConfigStrip,
+    ) -> Result<Producer> {
         let Self {
             config,
             sasl_client_authenticator,
@@ -2006,14 +2020,18 @@ impl ProducerBuilder {
             partitioner,
             metric_reporters,
         } = self;
-        let config = client_config_without_byte_array_serializer_class_configs(&config);
-        let config = client_config_without_native_plugin_class_configs(
-            &config,
-            NativePluginClassStrip::default()
-                .interceptors_if(!interceptors.is_empty())
-                .partitioner_if(partitioner.is_some())
-                .metric_reporters_if(!metric_reporters.is_empty()),
-        );
+        let strip = NativePluginClassStrip::default()
+            .interceptors_if(!interceptors.is_empty())
+            .partitioner_if(partitioner.is_some())
+            .metric_reporters_if(!metric_reporters.is_empty());
+        let (config, strip) = match serializer_strip {
+            SerializerConfigStrip::ByteArrayClassesOnly => (
+                client_config_without_byte_array_serializer_class_configs(&config),
+                strip,
+            ),
+            SerializerConfigStrip::AllClasses => (config, strip.serializers()),
+        };
+        let config = client_config_without_native_plugin_class_configs(&config, strip);
         let config = config
             .producer_config()
             .map_err(|error| ProducerError::Config { error })?;
@@ -2057,38 +2075,9 @@ impl ProducerBuilder {
         KS: ProducerSerializer<K>,
         VS: ProducerSerializer<V>,
     {
-        let Self {
-            config,
-            sasl_client_authenticator,
-            sasl_client_authenticator_factory,
-            interceptors,
-            partitioner,
-            metric_reporters,
-        } = self;
-        let config = client_config_without_native_plugin_class_configs(
-            &config,
-            NativePluginClassStrip::default()
-                .serializers()
-                .interceptors_if(!interceptors.is_empty())
-                .partitioner_if(partitioner.is_some())
-                .metric_reporters_if(!metric_reporters.is_empty()),
-        );
-        let config = config
-            .producer_config()
-            .map_err(|error| ProducerError::Config { error })?;
-        let runtime = config.to_producer_runtime_config()?;
-        let endpoints = resolve_bootstrap_brokers(&config).await?;
-        let mut connection = config
-            .to_connection_config()
-            .map_err(|error| ProducerError::Config { error })?;
-        connection.sasl.client_authenticator = sasl_client_authenticator;
-        connection.sasl.client_authenticator_factory = sasl_client_authenticator_factory;
-        let wire = WireClient::connect_with_brokers(connection, config.client_id, endpoints);
-        let mut producer = Producer::from_parts(wire, runtime);
-        producer.interceptors = interceptors;
-        producer.partitioner = partitioner;
-        initialize_metric_reporters(&metric_reporters);
-        producer.metric_reporters = metric_reporters;
+        let producer = self
+            .build_byte_producer(SerializerConfigStrip::AllClasses)
+            .await?;
         Ok(Producer::from_parts_with_serializers(
             producer,
             key_serializer,
@@ -2112,46 +2101,31 @@ impl ProducerBuilder {
         KS: ConfiguredProducerSerializer<K>,
         VS: ConfiguredProducerSerializer<V>,
     {
-        let Self {
-            config,
-            sasl_client_authenticator,
-            sasl_client_authenticator_factory,
-            interceptors,
-            partitioner,
-            metric_reporters,
-        } = self;
-        let key_serializer = KS::from_client_config(&config, true)?;
-        let value_serializer = VS::from_client_config(&config, false)?;
-        let config = client_config_without_native_plugin_class_configs(
-            &config,
-            NativePluginClassStrip::default()
-                .serializers()
-                .interceptors_if(!interceptors.is_empty())
-                .partitioner_if(partitioner.is_some())
-                .metric_reporters_if(!metric_reporters.is_empty()),
-        );
-        let config = config
-            .producer_config()
-            .map_err(|error| ProducerError::Config { error })?;
-        let runtime = config.to_producer_runtime_config()?;
-        let endpoints = resolve_bootstrap_brokers(&config).await?;
-        let mut connection = config
-            .to_connection_config()
-            .map_err(|error| ProducerError::Config { error })?;
-        connection.sasl.client_authenticator = sasl_client_authenticator;
-        connection.sasl.client_authenticator_factory = sasl_client_authenticator_factory;
-        let wire = WireClient::connect_with_brokers(connection, config.client_id, endpoints);
-        let mut producer = Producer::from_parts(wire, runtime);
-        producer.interceptors = interceptors;
-        producer.partitioner = partitioner;
-        initialize_metric_reporters(&metric_reporters);
-        producer.metric_reporters = metric_reporters;
+        // Serializer class names are read from the original config, before the
+        // shared pipeline strips serializer class configs.
+        let key_serializer = KS::from_client_config(&self.config, true)?;
+        let value_serializer = VS::from_client_config(&self.config, false)?;
+        let producer = self
+            .build_byte_producer(SerializerConfigStrip::AllClasses)
+            .await?;
         Ok(Producer::from_parts_with_serializers(
             producer,
             key_serializer,
             value_serializer,
         ))
     }
+}
+
+/// How a `build*` entry point treats `key.serializer` / `value.serializer` class
+/// configs before the producer config is validated.
+#[derive(Debug, Clone, Copy)]
+enum SerializerConfigStrip {
+    /// Untyped `build`: drop only Java byte-array serializer class names, so any
+    /// other configured serializer class still fails validation.
+    ByteArrayClassesOnly,
+    /// Typed builders: Rust serializers replace the JVM plugins, so drop every
+    /// serializer class config.
+    AllClasses,
 }
 
 fn client_config_without_serializer_class_configs(config: &ClientConfig) -> ClientConfig {
