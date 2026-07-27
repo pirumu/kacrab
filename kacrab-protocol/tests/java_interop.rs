@@ -20,10 +20,12 @@ mod generated_test_utils;
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{
     KafkaString, KafkaUuid, RawTaggedField,
+    compression::Compression,
     generated::{
-        ApiVersion, ApiVersionsRequestData, ApiVersionsResponseData, FinalizedFeatureKey,
+        ApiKey, ApiVersion, ApiVersionsRequestData, ApiVersionsResponseData, FinalizedFeatureKey,
         MetadataRequestData, MetadataRequestTopic, SupportedFeatureKey,
     },
+    record::{Record, RecordBatch, RecordHeader},
 };
 
 const KAFKA_VERSION: &str = "4.3.0";
@@ -472,6 +474,264 @@ fn decode_metadata_request(hex_input: &str, version: i16) -> TestResult<Metadata
     let decoded = MetadataRequestData::read(&mut input, version)?;
     assert!(input.is_empty(), "Rust decoder should consume Java bytes");
     Ok(decoded)
+}
+
+// ---------------------------------------------------------------------------
+// Seed corpora for the `cargo-fuzz` targets in `fuzz/`
+// ---------------------------------------------------------------------------
+//
+// Fuzzing a Kafka decoder from zero bytes is close to hopeless: the wire format
+// is length-prefixed and version-gated, so random input dies in the first few
+// fields and libFuzzer never learns the shape of a valid message. A seed corpus
+// is what turns a fuzz target from "explores framing" into "explores the
+// decoder".
+//
+// This lives in the Java-oracle file on purpose. The matrix already builds a
+// known-good encoding of *every* generated message at *every* schema version
+// across six fixture shapes (populated, null optionals, empty and multi-element
+// collections, numeric boundaries, tagged fields), and `protocol_cases()` hands
+// them over as hex. Re-deriving that anywhere else would mean duplicating the
+// fixture modules and the hex helpers; reusing it means the corpus grows
+// automatically whenever a new schema version is generated.
+
+/// Where a fuzz target's committed seed corpus lives, created if absent.
+///
+/// Deliberately `fuzz/seeds/`, not `fuzz/corpus/`: libFuzzer treats the first
+/// corpus directory on its command line as writable and grows it by thousands
+/// of files during a run, so `fuzz/corpus/` is gitignored scratch space. Seeds
+/// are an input to fuzzing and are committed; a run is given both directories.
+fn fuzz_seed_dir(target: &str) -> TestResult<PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or_else(|| io::Error::other("workspace root should exist"))?
+        .join("fuzz")
+        .join("seeds")
+        .join(target);
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn write_seed(target: &str, name: &str, bytes: &[u8]) -> TestResult {
+    fs::write(fuzz_seed_dir(target)?.join(name), bytes)?;
+    Ok(())
+}
+
+/// `ApiKey` by the schema name the matrix uses, e.g. `"FetchResponse"`.
+///
+/// The generated `Debug` name of an `ApiKey` is exactly the schema name minus
+/// the `Request`/`Response` suffix, so the table is derived rather than typed
+/// out — a new API key joins it for free.
+fn response_schema_to_api_key() -> BTreeMap<String, u8> {
+    let mut by_name = BTreeMap::new();
+    for raw in 0_i16..=127 {
+        let Some(api_key) = ApiKey::from_i16(raw) else {
+            continue;
+        };
+        let Ok(byte) = u8::try_from(raw) else {
+            continue;
+        };
+        let _replaced = by_name.insert(format!("{api_key:?}Response"), byte);
+    }
+    by_name
+}
+
+/// Seeds for `response_decode`, laid out as `[api_key, version, body..]`.
+fn write_response_seeds() -> TestResult<usize> {
+    let by_name = response_schema_to_api_key();
+    let mut written = 0_usize;
+    for case in generated_test_utils::protocol_cases() {
+        let Some(api_key) = by_name.get(case.schema_name) else {
+            continue;
+        };
+        let Ok(version_byte) = u8::try_from(case.version) else {
+            continue;
+        };
+        // A fixture that cannot encode at this version is not a corpus entry;
+        // the matrix test is what reports that as a failure, not this.
+        let Ok(encoded) = (case.rust_encode)(case.version) else {
+            continue;
+        };
+        let body = decode_hex(&encoded)?;
+
+        let mut seed = Vec::with_capacity(body.len().saturating_add(2));
+        seed.push(*api_key);
+        seed.push(version_byte);
+        seed.extend_from_slice(&body);
+        write_seed(
+            "response_decode",
+            &format!(
+                "{}_v{}_{}",
+                case.schema_name.to_lowercase(),
+                case.version,
+                case.fixture
+            ),
+            &seed,
+        )?;
+        written = written.saturating_add(1);
+    }
+    Ok(written)
+}
+
+/// The record shapes worth seeding: empty, minimal, null key/value, headers,
+/// and a batch big enough to exercise the record loop.
+fn seed_record_shapes() -> Vec<(&'static str, Vec<Record>)> {
+    let plain = |offset_delta: i32| Record {
+        attributes: 0,
+        timestamp_delta: i64::from(offset_delta),
+        offset_delta,
+        key: Some(Bytes::from_static(b"key")),
+        value: Some(Bytes::from_static(b"value")),
+        headers: Vec::new(),
+    };
+    vec![
+        ("empty", Vec::new()),
+        ("single", vec![plain(0)]),
+        (
+            "null_kv",
+            vec![Record {
+                attributes: 0,
+                timestamp_delta: 0,
+                offset_delta: 0,
+                key: None,
+                value: None,
+                headers: Vec::new(),
+            }],
+        ),
+        (
+            "headers",
+            vec![Record {
+                attributes: 0,
+                timestamp_delta: 1,
+                offset_delta: 0,
+                key: Some(Bytes::from_static(b"k")),
+                value: Some(Bytes::from_static(b"v")),
+                headers: vec![
+                    RecordHeader {
+                        key: Bytes::from_static(b"h1"),
+                        value: Some(Bytes::from_static(b"v1")),
+                    },
+                    RecordHeader {
+                        key: Bytes::from_static(b"h2"),
+                        value: None,
+                    },
+                ],
+            }],
+        ),
+        ("many", (0..32).map(plain).collect()),
+    ]
+}
+
+/// Seeds for both record-batch targets: whole batches for `record_batch_decode`,
+/// and the CRC-covered region alone for `record_batch_framed`, which builds its
+/// own framing and CRC around whatever the fuzzer hands it.
+fn write_record_batch_seeds() -> TestResult<(usize, usize)> {
+    /// log overhead (12) + partitionLeaderEpoch (4) + magic (1) + crc (4).
+    const HEADER_BEFORE_CRC_PAYLOAD: usize = 21;
+
+    let codecs = [
+        (Compression::None, "none"),
+        (Compression::Gzip, "gzip"),
+        (Compression::Snappy, "snappy"),
+        (Compression::Lz4, "lz4"),
+        (Compression::Zstd, "zstd"),
+    ];
+
+    let mut raw = 0_usize;
+    let mut framed = 0_usize;
+    for (codec, codec_name) in codecs {
+        for (shape_name, records) in seed_record_shapes() {
+            let last_offset_delta = i32::try_from(records.len().saturating_sub(1)).unwrap_or(0);
+            let batch = RecordBatch {
+                base_offset: 0,
+                partition_leader_epoch: 0,
+                magic: 2,
+                attributes: codec as i16,
+                last_offset_delta,
+                first_timestamp: 1_700_000_000_000,
+                max_timestamp: 1_700_000_000_999,
+                producer_id: 42,
+                producer_epoch: 7,
+                base_sequence: 0,
+                records,
+            };
+            let mut encoded = BytesMut::new();
+            if batch.encode(&mut encoded).is_err() {
+                continue;
+            }
+            let encoded = encoded.freeze();
+            let name = format!("{codec_name}_{shape_name}");
+            write_seed("record_batch_decode", &name, &encoded)?;
+            raw = raw.saturating_add(1);
+
+            if let Some(crc_payload) = encoded.get(HEADER_BEFORE_CRC_PAYLOAD..) {
+                write_seed("record_batch_framed", &name, crc_payload)?;
+                framed = framed.saturating_add(1);
+            }
+        }
+    }
+    Ok((raw, framed))
+}
+
+/// Seeds for `decompress`, laid out as `[codec_selector, compressed_payload..]`.
+fn write_decompress_seeds() -> TestResult<usize> {
+    let payloads: [(&str, Vec<u8>); 4] = [
+        ("empty", Vec::new()),
+        ("small", b"hello kafka".to_vec()),
+        ("repetitive", vec![b'a'; 4096]),
+        ("mixed", (0_u32..2048).map(|i| (i % 251) as u8).collect()),
+    ];
+    let codecs = [
+        (Compression::Gzip, 1_u8, "gzip"),
+        (Compression::Snappy, 2_u8, "snappy"),
+        (Compression::Lz4, 3_u8, "lz4"),
+        (Compression::Zstd, 4_u8, "zstd"),
+    ];
+
+    let mut written = 0_usize;
+    for (codec, selector, codec_name) in codecs {
+        for (payload_name, payload) in &payloads {
+            let Ok(compressed) = codec.compress(payload) else {
+                continue;
+            };
+            let mut seed = Vec::with_capacity(compressed.len().saturating_add(1));
+            seed.push(selector);
+            seed.extend_from_slice(&compressed);
+            write_seed("decompress", &format!("{codec_name}_{payload_name}"), &seed)?;
+            written = written.saturating_add(1);
+        }
+    }
+    Ok(written)
+}
+
+/// Regenerate every fuzz seed corpus.
+///
+/// Ignored because it writes into the repo. Run it after adding a schema
+/// version or a fuzz target:
+///
+/// ```bash
+/// cargo test -p kacrab-protocol --test java_interop -- --ignored --nocapture \
+///   generate_fuzz_corpus
+/// ```
+///
+/// The seeds are committed so CI and a fresh clone start from the same
+/// population; libFuzzer's own runtime growth in `fuzz/corpus/` is gitignored.
+#[test]
+#[ignore = "writes seed corpora into fuzz/corpus/; run explicitly"]
+fn generate_fuzz_corpus() -> TestResult {
+    let responses = write_response_seeds()?;
+    let (raw, framed) = write_record_batch_seeds()?;
+    let decompress = write_decompress_seeds()?;
+
+    println!("response_decode:     {responses} seeds");
+    println!("record_batch_decode: {raw} seeds");
+    println!("record_batch_framed: {framed} seeds");
+    println!("decompress:          {decompress} seeds");
+
+    assert!(responses > 0, "response corpus should not be empty");
+    assert!(raw > 0, "record-batch corpus should not be empty");
+    assert!(framed > 0, "framed record-batch corpus should not be empty");
+    assert!(decompress > 0, "decompress corpus should not be empty");
+    Ok(())
 }
 
 fn hex(bytes: &[u8]) -> Result<String, std::fmt::Error> {

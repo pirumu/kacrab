@@ -829,6 +829,19 @@ impl Consumer {
     /// Returns as soon as any records are available, or an empty batch when the
     /// timeout elapses first.
     ///
+    /// # Cancellation
+    /// Cancel-safe with respect to records: dropping this future — as the losing
+    /// arm of a [`tokio::select!`] does — never loses a fetched record and never
+    /// advances a position past a record the caller did not receive. An
+    /// in-flight `Fetch` stays owned by the consumer and the next `poll` folds
+    /// it in, along with the KIP-227 fetch sessions it carries.
+    ///
+    /// It is not *transactionally* cancel-safe: a drop can land mid-rebalance or
+    /// mid-auto-commit, which the next `poll` re-drives, and a drop during an
+    /// auto-commit still consumes that `auto.commit.interval.ms` window, so the
+    /// commit slips to the next interval. To avoid both, drive `poll` on its own
+    /// task and break it out with [`Consumer::wakeup`].
+    ///
     /// # Errors
     /// Returns [`ConsumerError::Wakeup`] if [`Consumer::wakeup`] was called, a
     /// wire/broker error, or [`ConsumerError::NoOffsetForPartition`] when a
@@ -961,25 +974,28 @@ impl Consumer {
     /// blocks up to that long for the in-flight fetch; without it only an
     /// already-finished task is reaped. Restores the fetch sessions either way.
     async fn reap_fetch(&mut self, wait: Option<Duration>) -> Result<()> {
-        let Some(mut handle) = self.in_flight_fetch.take() else {
+        let Some(handle) = self.in_flight_fetch.as_mut() else {
             return Ok(());
         };
+        // Joined through `&mut` so the handle is never moved out of `self`
+        // across the await. `poll` is routinely raced in `tokio::select!`, and
+        // this is the await it parks on; taking the handle first would mean a
+        // cancelled poll detaches the task, discarding its records, its
+        // position progress, and the KIP-227 fetch sessions it carries. Left
+        // in place, a cancelled reap costs nothing and the next poll joins it.
         let joined = if let Some(wait) = wait {
-            match tokio::time::timeout(wait, &mut handle).await {
+            match tokio::time::timeout(wait, handle).await {
                 Ok(joined) => joined,
-                Err(_elapsed) => {
-                    // Still airborne — put it back; a later poll reaps it.
-                    self.in_flight_fetch = Some(handle);
-                    return Ok(());
-                },
+                // Still airborne — it stays in `self`; a later poll reaps it.
+                Err(_elapsed) => return Ok(()),
             }
         } else {
             if !handle.is_finished() {
-                self.in_flight_fetch = Some(handle);
                 return Ok(());
             }
-            (&mut handle).await
+            handle.await
         };
+        self.in_flight_fetch = None;
         // A panicked/aborted task lost the sessions it carried; the default
         // left by `spawn_fetch`'s take() re-opens them with full fetches.
         let outcome = joined
@@ -2222,6 +2238,49 @@ mod tests {
             .expect("bounded reap");
         assert!(consumer.in_flight_fetch.is_some(), "task is put back again");
         consumer.in_flight_fetch.take().expect("handle").abort();
+    }
+
+    /// Dropping a `reap_fetch` future mid-await must not lose the in-flight
+    /// fetch. `poll` is routinely raced in `tokio::select!`, and the losing
+    /// branch's future is dropped at whatever `.await` it was parked on —
+    /// usually this one, because it is the only await that blocks for long.
+    /// If the handle were taken out of `self` before the await, that drop
+    /// would detach the task: its records, its position progress, and the
+    /// KIP-227 incremental fetch sessions it carries would all be discarded,
+    /// and the next fetch would have to re-open full sessions.
+    #[tokio::test]
+    async fn reap_fetch_survives_a_cancelled_await() {
+        let mut consumer = consumer_no_group().await;
+        consumer.in_flight_fetch = Some(tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            FetchTaskOutcome {
+                result: Ok(fetch::FetchProgress::default()),
+                sessions: fetch::FetchSessions::default(),
+            }
+        }));
+
+        // Park on the await, then drop the future — exactly what the losing
+        // arm of a `select!` does.
+        {
+            let reaping = consumer.reap_fetch(Some(Duration::from_secs(30)));
+            tokio::pin!(reaping);
+            let raced = tokio::time::timeout(Duration::from_millis(5), &mut reaping).await;
+            assert!(raced.is_err(), "the reap is still parked on the join");
+        }
+
+        assert!(
+            consumer.in_flight_fetch.is_some(),
+            "a cancelled reap must leave the in-flight fetch owned by the consumer, not detach it",
+        );
+        // And the retained handle is still joinable: the next poll reaps it.
+        consumer
+            .reap_fetch(Some(Duration::from_secs(5)))
+            .await
+            .expect("the retained handle still joins");
+        assert!(
+            consumer.in_flight_fetch.is_none(),
+            "a completed reap clears the handle",
+        );
     }
 
     #[tokio::test]

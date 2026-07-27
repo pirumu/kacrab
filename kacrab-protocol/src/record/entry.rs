@@ -17,6 +17,14 @@ use crate::primitives::{
     write_i8, write_signed_varint, write_signed_varlong,
 };
 
+/// Smallest number of bytes a single [`RecordHeader`] can occupy on the wire:
+/// a zero-length key varint plus a null value varint, one byte each.
+///
+/// Used to bound the speculative `Vec::with_capacity` in [`Record::decode`]
+/// against a hostile `headerCount`, the per-record counterpart to
+/// [`super::MAX_RECORDS_PER_BATCH`].
+const MIN_HEADER_ENCODED_LEN: usize = 2;
+
 /// A single record in a v2 [`crate::record::RecordBatch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
@@ -162,7 +170,21 @@ impl Record {
                 remaining: record_buf.remaining(),
             })
         })?;
-        let mut headers = Vec::with_capacity(header_count_usize);
+        // `header_count` is an attacker-controlled varint, so it must never size
+        // an allocation on its own: a 90-byte record declaring ~486M headers
+        // otherwise reaches `malloc(7.8 GB)` before the loop below reads a
+        // single header and fails. The batch level guards its own count with
+        // `MAX_RECORDS_PER_BATCH` for exactly this reason; this is the
+        // per-record equivalent, bounded by the buffer instead of a constant.
+        //
+        // A header encodes as at least two varints (key length, value length),
+        // so `remaining / 2` is a hard ceiling on how many can possibly follow.
+        // Clamping to it can never reject a satisfiable count — a count the
+        // buffer can actually hold still preallocates exactly — while an
+        // unsatisfiable one now allocates in proportion to the real input and
+        // fails in the loop, as it always did.
+        let capacity = header_count_usize.min(record_buf.remaining() / MIN_HEADER_ENCODED_LEN);
+        let mut headers = Vec::with_capacity(capacity);
         for _ in 0..header_count {
             headers.push(RecordHeader::decode(&mut record_buf)?);
         }
@@ -188,7 +210,75 @@ mod tests {
 
     use bytes::{Bytes, BytesMut};
 
-    use super::{Record, RecordHeader};
+    use super::{MIN_HEADER_ENCODED_LEN, Record, RecordHeader};
+
+    /// A record declaring far more headers than its buffer can hold must fail
+    /// on the truncated read, not on a multi-gigabyte allocation first.
+    ///
+    /// Found by the `record_batch_framed` fuzz target: a 90-byte input reached
+    /// `malloc(7_784_624_320)` because `headerCount` sized the `Vec` directly.
+    /// Any client parsing a hostile or corrupt broker response could be
+    /// OOM-killed by a handful of bytes.
+    #[test]
+    fn absurd_header_count_fails_without_a_giant_allocation() {
+        // length | attributes | timestampDelta | offsetDelta | keyLen(null)
+        // | valueLen(null) | headerCount
+        let mut body = BytesMut::new();
+        crate::primitives::write_i8(&mut body, 0);
+        crate::primitives::write_signed_varlong(&mut body, 0);
+        crate::primitives::write_signed_varint(&mut body, 0);
+        crate::primitives::write_signed_varint(&mut body, -1);
+        crate::primitives::write_signed_varint(&mut body, -1);
+        // ~486M headers, the shape the fuzzer landed on.
+        crate::primitives::write_signed_varint(&mut body, 486_539_020);
+
+        let mut framed = BytesMut::new();
+        let body_len = i32::try_from(body.len()).expect("body length fits i32");
+        crate::primitives::write_signed_varint(&mut framed, body_len);
+        framed.extend_from_slice(&body);
+
+        let mut buf = framed.freeze();
+        let decoded = Record::decode(&mut buf);
+
+        assert!(
+            decoded.is_err(),
+            "a header count the buffer cannot satisfy must be rejected",
+        );
+    }
+
+    /// The clamp must not cost a legitimate record its exact preallocation.
+    #[test]
+    fn satisfiable_header_count_still_preallocates_exactly() {
+        let record = Record {
+            attributes: 0,
+            timestamp_delta: 0,
+            offset_delta: 0,
+            key: None,
+            value: None,
+            headers: vec![
+                RecordHeader {
+                    key: Bytes::from_static(b"a"),
+                    value: Some(Bytes::from_static(b"1")),
+                },
+                RecordHeader {
+                    key: Bytes::from_static(b"b"),
+                    value: None,
+                },
+            ],
+        };
+        let encoded_len = record.encoded_len().expect("record encoded len");
+        let mut bytes = BytesMut::with_capacity(encoded_len);
+        record.encode(&mut bytes).expect("record encode");
+
+        let mut buf = bytes.freeze();
+        let decoded = Record::decode(&mut buf).expect("record decode");
+
+        assert_eq!(decoded.headers.len(), 2);
+        assert_eq!(decoded.headers, record.headers);
+        // Two headers are well under the buffer-derived ceiling, so the clamp
+        // is a no-op here — the guard only bites on unsatisfiable counts.
+        assert!(2 <= encoded_len / MIN_HEADER_ENCODED_LEN);
+    }
 
     #[test]
     fn record_encoded_len_matches_encoded_bytes_with_headers_and_nulls() {

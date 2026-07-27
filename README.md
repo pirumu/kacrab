@@ -7,6 +7,7 @@
 built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
 
 [![CI][ci-badge]][ci-url]
+[![real-broker][real-broker-badge]][real-broker-url]
 [![crates.io][crates-badge]][crates-url]
 [![docs.rs][docs-badge]][docs-url]
 [![MSRV][msrv-badge]][msrv-url]
@@ -17,6 +18,10 @@ built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
 
 [ci-badge]: https://github.com/pirumu/kacrab/actions/workflows/ci.yml/badge.svg?branch=master
 [ci-url]: https://github.com/pirumu/kacrab/actions/workflows/ci.yml
+[real-broker-badge]: https://github.com/pirumu/kacrab/actions/workflows/real-broker.yml/badge.svg?branch=master
+[real-broker-url]: https://github.com/pirumu/kacrab/actions/workflows/real-broker.yml
+[real-broker-auth-url]: https://github.com/pirumu/kacrab/actions/workflows/real-broker-auth.yml
+[fuzz-url]: https://github.com/pirumu/kacrab/actions/workflows/fuzz.yml
 [crates-badge]: https://img.shields.io/crates/v/kacrab.svg
 [crates-url]: https://crates.io/crates/kacrab
 [docs-badge]: https://docs.rs/kacrab/badge.svg
@@ -59,7 +64,8 @@ built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
 - **Fast and lean**: on the same broker and defaults, producer throughput is
   **+35%** over Java on small records (**+15%** on 10 KiB, **2.2x** when broker
   `max.message.bytes` forces batch splitting) with about 4x less memory, and at
-  Java's own offered load kacrab's latency is lower at every percentile; consumer
+  Java's own offered load kacrab's latency is lower or tied at every percentile,
+  with a ~30x lower maximum; consumer
   throughput is **1.9-4x** higher with about 16-20x less memory. See
   [Benchmarks](#benchmarks).
 - **Native Rust**: protocol, wire, and client logic are pure Rust, and the
@@ -69,9 +75,55 @@ built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
   provider and the `gzip`/`snappy`/`lz4` codecs.
 - **Generated protocol**: request/response structs are generated from Apache
   Kafka schemas and checked byte-for-byte against the Kafka Java client oracle.
-- **Verified with real brokers**: every client surface (producer, consumer,
-  admin, every SASL mechanism and TLS mode, every compression codec, 3-broker
-  failover) is verified end-to-end against real Apache Kafka 4.3.0 brokers.
+- **Verified with real brokers, in CI**: every client surface (producer,
+  consumer, admin, every SASL mechanism and TLS mode, every compression codec,
+  3-broker failover) runs end-to-end against real Apache Kafka 4.3.0 containers
+  as a merge gate. The producer, consumer, compression, admin, and cluster-
+  failover suites run on
+  [every pull request and every push to `master`][real-broker-url]; the
+  authenticated-listener suites (SASL, TLS, GSSAPI against a real MIT KDC) run
+  [weekly and on any PR touching the auth stack][real-broker-auth-url], because
+  they need a KDC and generated certificates.
+
+## How this compares to the other Rust Kafka clients
+
+If you are already in Rust, the question is not "kacrab vs the Java client" — it
+is "why not `rust-rdkafka`". Verified against each project's own documentation
+and release history as of 2026-07-27:
+
+| | kacrab 0.3 | rust-rdkafka 0.39 | rskafka 0.6 | kafka-rust 0.10 |
+| --- | --- | --- | --- | --- |
+| Implementation | Rust protocol stack | wraps librdkafka 2.12.1 (C) | Rust | Rust |
+| Build needs | `cargo` alone | C toolchain, GNU make, pthreads (or the `cmake-build` feature); librdkafka sources vendored and statically linked by default | `cargo` alone | `cargo` alone |
+| Async model | tokio-native | tokio via `StreamConsumer`/`FutureProducer` over librdkafka's own poll threads | tokio-native | blocking |
+| Consumer groups | classic + KIP-848 | classic + KIP-848 (GA in librdkafka 2.12, opt in via `group.protocol`) | none — explicit non-goal | classic |
+| Transactions | yes | yes | none — explicit non-goal | not documented |
+| Admin API | 62 operations | yes | none | not documented |
+| Broker versions | targets 4.3.0 | broad | not stated | tested 0.8.2–3.1 |
+| Latest release | 2026-07 | 2026-01 | 2025-03 | 2023-09 |
+
+rskafka states its own scope plainly — *"No support for offset tracking,
+consumer groups, transactions, etc."* — it is a deliberately minimal
+produce/consume client, not a competitor on surface area. kafka-rust warns
+*"Use it in production at your own risk"* and has not released since 2023.
+
+So the real comparison is with `rust-rdkafka`, and it is narrower than the table
+makes it look — feature-wise the two are close, because both track the same
+protocol.
+
+**Choose `rust-rdkafka` if** you need battle-tested code with years of
+production mileage, need a Kafka version older than 4.x, or want the ecosystem
+that has grown around librdkafka. It is the safe default and this project does
+not pretend otherwise.
+
+**Choose kacrab if** a C toolchain in your build is a real cost — cross
+compilation, musl static builds, `cargo install` for downstream users, audit
+surface — or you want the client to be Rust the whole way down: `forbid(unsafe_code)`
+across the workspace, tokio-native backpressure instead of a wrapped poll loop,
+and Kafka errors as typed Rust enums rather than C return codes. See
+[Cancellation & drop semantics](#cancellation--drop-semantics) for the async
+behaviour that follows from that, and
+[When not to use kacrab](#when-not-to-use-kacrab) for the honest limits.
 
 ## Documentation
 
@@ -98,8 +150,16 @@ stops there.
 
 Test coverage (`cargo llvm-cov`): **~87% maintained-source** line coverage
 (generated protocol excluded), with the producer module at about 92%. The raw
-whole-workspace number is lower because it counts generated protocol structs
-for APIs not yet wired up (streams).
+whole-workspace number is lower because codegen covers the entire Kafka message
+set — all 93 API keys — so the Java oracle check stays exhaustive, while the
+client wires the 67 a client actually issues. Of the 26 unwired, 21 are
+broker-internal or KRaft controller RPCs no client ever sends (`LeaderAndIsr`,
+`StopReplica`, `UpdateMetadata`, the broker-registration and Raft-quorum
+families, the share-coordinator state RPCs); the other 5 are client-facing
+surfaces kacrab does not implement — the share consumer (`ShareFetch`,
+`ShareAcknowledge`, `ShareGroupHeartbeat`), `DescribeTopicPartitions`, and the
+Streams member protocol (`StreamsGroupHeartbeat`), which is out of scope per
+above. The admin-side share and streams group operations *are* wired.
 
 ## Install
 
@@ -307,6 +367,70 @@ Read the numbers with the caveats in mind:
 - Every kacrab run above had zero retries/errors, with fully correct
   idempotence.
 
+## Cancellation & drop semantics
+
+Async Kafka clients get raced in `tokio::select!` and dropped on shutdown paths,
+so here is what each public future does when it is cancelled — dropped before it
+resolves — and what each client does when it is dropped without `close()`.
+
+| Future | Cancel-safe | What a mid-await drop costs |
+| --- | --- | --- |
+| `Consumer::poll` | Yes, for records | No fetched record, position, or fetch session is lost. An in-flight `Fetch` stays owned by the consumer and is folded in by the next `poll`. |
+| `Producer::send`'s `SendFuture` | Yes | Nothing. The record is already in the accumulator (`send` is a plain `fn`, not `async`) and still delivers; a registered callback still fires. Same semantics as dropping Java's returned `Future`. |
+| `Producer::flush` / `close` | No | Dispatch continues, but you lose the guarantee that every prior send completed. Re-`flush` before relying on it. |
+| `Consumer::commit_async` | No | If dropped during the coordinator lookup, the commit is never enqueued and the callback never fires. Once enqueued the handoff is synchronous and cannot be cancelled. |
+| `Consumer::commit_sync` | No | The `OffsetCommit` may have reached the broker and applied. Treat the offset as indeterminate and re-commit. |
+
+Two caveats on `poll` specifically. It is cancel-safe with respect to **records**,
+which is the property `select!` users need — a cancelled `poll` never drops
+records on the floor, and never advances a position past a record you did not
+receive. It is not *transactionally* cancel-safe: a drop can land mid-rebalance
+or mid-auto-commit, which the next `poll` re-drives. And a drop during
+auto-commit still consumes that `auto.commit.interval.ms` window, so the commit
+slips to the next interval. If you need neither hazard, run `poll` in its own
+`tokio::spawn` and use [`Consumer::wakeup`](#consumer) to break it out, which is
+the Java-equivalent shape.
+
+Dropping a client without closing it:
+
+- **`Producer`** — buffered records do not vanish silently. Every incomplete
+  delivery resolves as `Err(ProducerError::DeliveryDropped)`, waking pending
+  `SendFuture`s and firing registered callbacks with that error. This is
+  stricter than Java, where a garbage-collected producer loses buffered records
+  with no notification. Use `close()` to flush them, or `close_now()` to fail
+  them explicitly with `ProducerError::ProducerClosed`.
+- **`Consumer`** — the heartbeat, async-commit, and in-flight fetch tasks are
+  aborted, so no broker connection is kept alive by a detached task. Nothing is
+  committed and the group is not left: the group waits out
+  `session.timeout.ms` before rebalancing. Use `close()` to auto-commit and
+  leave the group promptly.
+
+## When not to use kacrab
+
+- **You need brokers older than Kafka 4.x.** kacrab targets and is tested
+  against 4.3.0 only. Version negotiation exists, but nothing older is
+  exercised in CI, so treat old-broker support as unverified. Use
+  `rust-rdkafka`.
+- **You need Kafka Streams.** Out of scope, permanently — this is a client
+  library. See [Status](#status).
+- **You need a share consumer.** The Kafka 4.x share-group *consumer*
+  (`ShareFetch`) is not implemented. The admin-side share-group operations are.
+- **You need years of production mileage.** kacrab is pre-1.0 and first
+  published in July 2026. The public API can change between minor versions.
+  `rust-rdkafka` wraps a library that has been in production for over a decade;
+  that difference is real and no benchmark closes it.
+- **Your workload is cross-DC or high-RTT.** Every number in this repo comes
+  from a co-located broker at sub-millisecond RTT. Timeout, backoff, and
+  in-flight interactions that only appear at 50–200 ms RTT are untested —
+  that is item B2 in [`ROADMAP.md`](ROADMAP.md), and it is not done.
+- **You need a long-soak guarantee.** The one published multi-hour run
+  ([`SOAK-REPORT.md`](SOAK-REPORT.md)) went 4 h 17 m healthy across ~25
+  broker-kill cycles, then hit a terminal wedge during a compound infra
+  failure. The defects it exposed are fixed in code, but the confirming
+  compound re-run has not happened yet. Memory soak (B3) is also outstanding.
+- **You need bindings for another language.** There are none, and none are
+  planned.
+
 ## Testing
 
 ```bash
@@ -326,6 +450,90 @@ Protocol compatibility is also gated by a byte-for-byte Java oracle matrix
 (`make test-protocol-java-matrix`; needs Java + Maven). Line coverage runs via
 `cargo llvm-cov` with generated artifacts excluded. See [`Makefile`](Makefile)
 and [`benches/README.md`](benches/README.md).
+
+The Java oracle proves the decoders are correct on *well-formed* input. The
+decoders that parse untrusted broker bytes are separately fuzzed for the other
+half — garbage, truncation, hostile length prefixes — because `forbid(unsafe_code)`
+rules out memory corruption but not a panic, an unbounded allocation, or a
+non-terminating loop, and a panic on a client's decode path is a denial of
+service. Ten [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
+cover every parser that reads untrusted bytes, from the socket inward: the
+length-prefixed frame, record-batch decoding, the generated response structs,
+every compression codec, the SASL handshake, and the OAUTHBEARER token
+endpoint:
+
+```bash
+cargo +nightly fuzz run record_batch_framed \
+  fuzz/corpus/record_batch_framed fuzz/seeds/record_batch_framed -- \
+  -dict=fuzz/kafka.dict -max_total_time=60
+```
+
+**The seeds and the dictionary do more work than the runtime does.** The Kafka
+wire format is length-prefixed and version-gated, so an unseeded run spends its
+budget rediscovering framing instead of exercising decoders. The committed seed
+corpus in [`fuzz/seeds/`](fuzz/seeds/) is generated from the *same fixtures the
+Java oracle uses* — every generated message, at every schema version, across six
+fixture shapes — then minimised with `cargo fuzz cmin` to the subset that
+carries the coverage. Regenerate it after adding a schema version:
+
+```bash
+cargo test -p kacrab-protocol --test java_interop -- \
+  --ignored --nocapture generate_fuzz_corpus
+```
+
+[`fuzz/kafka.dict`](fuzz/kafka.dict) supplies the tokens random mutation will
+never find, above all Kafka's `-1` length prefix: null is encoded as a negative
+length, so without that token the fuzzer only ever explores the non-null side of
+every nullable field. Measured effect, edges covered:
+
+| target | unseeded | seeded + dictionary |
+| --- | ---: | ---: |
+| `record_batch_decode` | 150 | **984** |
+| `record_batch_framed` | 774 | **1591** |
+| `response_decode` | — | **11899** |
+| `decompress` | — | **1230** |
+| `frame_decode` | — | **78** |
+| `oauth_http_response` | — | **1007** |
+| `scram_server_first` | — | **271** |
+| `scram_server_first_nonced` | 199 | **742** |
+| `scram_server_final` | — | **322** |
+| `jaas_option` | — | **137** |
+
+**The SASL targets are the ones that matter most.** SCRAM is mutual
+authentication, but the client only proves the *server* at server-final — so
+everything the server-first parser touches is reachable by anyone who can answer
+on the broker's address. Those parsers are `pub(crate)`, so `kacrab` exposes them
+to `fuzz/` as `fn(&[u8])` shims behind an internal `__fuzzing` feature that is
+`#[doc(hidden)]`, off by default, and exempt from semver.
+
+`scram_server_first` gets the same two-target treatment as record batches, for
+the same reason. `client_final` rejects any server-first whose nonce does not
+extend the client's own randomly generated nonce, which a fuzzer cannot guess, so
+raw bytes stall at 199 edges and never reach the salt decode or the PBKDF2
+derivation. `scram_server_first_nonced` satisfies that gate in the harness so
+mutations land on the fields behind it — which is how the unbounded iteration
+count below became reproducible.
+
+Record batches get two targets, and the reason is worth stating because it is
+the difference between fuzzing and the appearance of it. `decode_next_batch`
+validates CRC32C *before* it reads the magic byte, the record count, the varint
+record headers, or the compressed blob. Random bytes clear a CRC32C check with
+probability 2^-32, so raw bytes alone only ever exercise framing and rejection.
+`record_batch_framed` hands the fuzzer the CRC-covered region and builds correct
+framing around it, so every mutation lands inside the decoder — that is what
+found the header-count OOM fixed in `Record::decode`. Both targets are kept: the
+framed one constructs CRC and length prefixes correctly by definition, so it can
+never find a bug in them.
+
+None of this makes the decoders *proven* safe. It makes them survivors of
+~20M structured inputs per campaign, which is a different and weaker claim.
+
+They run [nightly in CI][fuzz-url] at 15 minutes per target, and as a 60-second
+smoke on any PR touching `kacrab-protocol/`. The fuzz crate lives outside the
+workspace ([`fuzz/`](fuzz/)) because cargo-fuzz needs nightly and a sanitizer,
+which the pinned stable toolchain cannot provide. Decompression is bounded by
+`MAX_DECOMPRESSED_LEN` in every codec, so a declared-size zip bomb is rejected
+rather than allocated; the `decompress` target asserts that bound holds.
 
 ## Workspace
 
@@ -351,6 +559,8 @@ Internal (not published):
 - [`examples/`](examples/): runnable producer/consumer/admin examples.
 - [`benches/`](benches/): internal benchmark crate: real-Kafka harnesses and
   microbenchmarks.
+- [`fuzz/`](fuzz/): `cargo-fuzz` targets for the decoders that parse untrusted
+  broker bytes. Outside the workspace — it needs nightly plus a sanitizer.
 
 ## License
 

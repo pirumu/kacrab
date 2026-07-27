@@ -39,6 +39,13 @@ lz4 = ["kacrab-protocol/lz4"]
 lz4-hc = ["kacrab-protocol/lz4-hc"]
 macros = []
 producer = []
+# Internal, unstable, and not part of the public API: re-exports the crate's
+# untrusted-input parsers so `fuzz/` can reach them. The SASL handshake parsers
+# run against bytes from a peer that is not yet authenticated, which makes them
+# the highest-value fuzz targets in the crate, but they are `pub(crate)` and a
+# fuzz target lives in a separate crate. Never enable this outside `fuzz/`; it
+# is exempt from semver and its contents can change without notice.
+__fuzzing = []
 snappy = ["kacrab-protocol/snappy"]
 zstd = ["kacrab-protocol/zstd"]
 

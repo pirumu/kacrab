@@ -1,0 +1,128 @@
+name: fuzz
+
+# Fuzzes every parser that reads untrusted bytes, from the socket inward: the
+# length-prefixed frame, record batches, the generated response structs, the
+# compression codecs, and the SASL handshake. The SASL targets matter most --
+# SCRAM proves the server only at server-final, so those parsers run against a
+# peer that has not authenticated yet.
+#
+# `forbid(unsafe_code)` rules out memory corruption but not a panic, an
+# unbounded allocation, or a non-terminating loop — and in a client, any of
+# those on a parse path is a denial of service, so these paths need input no
+# test writes by hand.
+#
+# -timeout is load-bearing here, not boilerplate: a server-controlled PBKDF2
+# iteration count is CPU amplification, and it surfaces as a libFuzzer timeout
+# rather than as a crash.
+#
+# Two cadences. Every PR that touches a fuzzed parser gets a short smoke run
+# (60s per target) seeded from the committed corpus, which catches an obvious
+# regression without slowing the merge. The nightly run is the real one: 15
+# minutes per target, and it uploads any crashing input as an artifact.
+#
+# The fuzz crate is deliberately outside the workspace (see fuzz/Cargo.toml):
+# cargo-fuzz needs nightly and a sanitizer, which the pinned stable toolchain in
+# rust-toolchain.toml cannot provide.
+
+on:
+  schedule:
+    # Nightly, 04:00 UTC — an hour after the weekly auth sweep so the two never
+    # contend for runners.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "kacrab-protocol/**"
+      # The SASL handshake parsers the scram_* and jaas_option targets drive.
+      - "kacrab/src/wire/auth.rs"
+      - "kacrab/src/lib.rs"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One crashing target must not cancel the others — a fuzz run's whole
+      # point is collecting every distinct finding in one pass.
+      fail-fast: false
+      matrix:
+        target:
+          - frame_decode
+          - record_batch_decode
+          - record_batch_framed
+          - response_decode
+          - decompress
+          - oauth_http_response
+          - scram_server_first
+          - scram_server_first_nonced
+          - scram_server_final
+          - jaas_option
+    steps:
+      - uses: actions/checkout@v4
+
+      # zstd and lz4 need a C compiler (gcc is preinstalled); the fuzz crate
+      # enables every codec so all four decompressors are covered.
+      - name: Nightly toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup component add --toolchain nightly rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # 60s on a PR keeps the gate fast; the nightly schedule runs 15 minutes
+      # per target, which is where new findings actually come from.
+      - name: Set duration
+        id: duration
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "seconds=60" >> "$GITHUB_OUTPUT"
+          else
+            echo "seconds=900" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Two corpus directories: the first is libFuzzer's writable working set,
+      # the second the committed seeds it starts from. Seeds matter more than
+      # runtime here -- the Kafka wire format is length-prefixed and
+      # version-gated, so an unseeded run spends its budget rediscovering
+      # framing. Seeded, record_batch_decode reaches 984 edges against 150
+      # unseeded. The dictionary supplies the sentinels random mutation will
+      # never find, above all the -1 length prefix that gates every nullable
+      # field.
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          mkdir -p fuzz/corpus/${{ matrix.target }}
+          cargo +nightly fuzz run ${{ matrix.target }} \
+            fuzz/corpus/${{ matrix.target }} \
+            fuzz/seeds/${{ matrix.target }} -- \
+            -dict=fuzz/kafka.dict \
+            -max_total_time=${{ steps.duration.outputs.seconds }} \
+            -timeout=25 \
+            -rss_limit_mb=4096
+
+      # Only produced when libFuzzer found something; the input is the whole
+      # reproduction, so it is the one artifact worth keeping.
+      - name: Upload crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

@@ -453,6 +453,22 @@ Java's ceiling on top. The headline tables are not wrong — they simply compare
 clients running at different speeds, which is the right way to read a saturation
 benchmark and the wrong way to read a latency one.
 
+> **Why avg differs while p50/p95/p99 tie.** Both sides record latency at the same
+> resolution: a truncated integer millisecond. Java computes
+> `int latency = (int) (now - start)` from `System.currentTimeMillis()`
+> (`ProducerPerformance.java:554`); kacrab's port does
+> `i32::try_from(latency.as_millis())` on an `Instant` delta
+> (`producer_kafka_bench.rs:1068`). Both then report `avg = totalLatency / count`
+> over those integers (`ProducerPerformance.java:515`,
+> `producer_kafka_bench.rs:1186`) and take percentiles from the same
+> reservoir-sampled array capped at 500,000 samples. So the avg column is a
+> like-for-like comparison, not a finer instrument: it is simply the *fraction* of
+> records that landed in a bucket above 0 ms. avg 0.11 means roughly 11% of kacrab's
+> records took >= 1 ms; Java's 0.32 means roughly 32% of its did. That is also why
+> the percentiles can tie at 0 / 1 / 2 — with ~89% of samples at 0 ms, p50 is 0 and
+> p95 falls in the 1 ms bucket for both. The avg is the only column that resolves a
+> difference smaller than the 1 ms quantum, which is exactly why it is here.
+
 Reproduce:
 
 ```bash

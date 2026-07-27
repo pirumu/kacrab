@@ -240,6 +240,17 @@ impl ScramExchange {
         ))
     }
 
+    /// The randomly generated client nonce, for the fuzz harness only.
+    ///
+    /// `client_final` rejects any server-first whose nonce does not extend this
+    /// value, and it is fresh random per exchange. A fuzzer cannot guess it, so
+    /// without this accessor every input dies at the nonce check and the salt,
+    /// iteration-count, and PBKDF2 paths behind it are unreachable.
+    #[cfg(feature = "__fuzzing")]
+    pub(crate) fn fuzz_client_nonce(&self) -> &str {
+        &self.client_nonce
+    }
+
     /// Handles the server-first message and returns the final client proof
     /// plus the expected server signature bytes.
     ///
@@ -339,6 +350,35 @@ impl ScramExchange {
     }
 }
 
+/// Smallest PBKDF2 iteration count the client will accept from a server.
+///
+/// Kafka's own value: `ScramMechanism` declares `minIterations = 4096` for both
+/// `SCRAM-SHA-256` and `SCRAM-SHA-512`, and the Java client enforces it against
+/// the server-first message (`ScramSaslClient.java:127`). kacrab previously only
+/// rejected zero, so a server could force the key derivation down to a single
+/// iteration — a downgrade the client would accept silently.
+const MIN_SCRAM_ITERATIONS: u32 = 4096;
+
+/// Largest PBKDF2 iteration count the client will accept from a server.
+///
+/// The iteration count is not data the client stores, it is work the client
+/// *performs*: `salted_password` runs one HMAC per iteration. An unbounded count
+/// is therefore CPU amplification driven by a peer that has not authenticated
+/// yet — SCRAM proves the server only at server-final — so anyone who can answer
+/// on the broker's address can pin a core per connection by replying `i=`
+/// `4294967295`.
+///
+/// Java does not bound this on the client path. `ScramMechanism` declares
+/// `maxIterations = 16384`, but that ceiling is only applied by the
+/// `kafka-storage add-scram` tool (`ScramParser.java:189`); the controller's own
+/// `AlterUserScramCredentials` path checks the minimum alone
+/// (`ScramControlManager.java:290`), so a legitimately provisioned credential can
+/// exceed 16384 and using Kafka's declared maximum here would break real
+/// deployments. This bound is instead chosen to be far above any plausible
+/// configuration — 244x Kafka's default and 61x its tooling ceiling — while
+/// still capping the work a hostile server can demand.
+const MAX_SCRAM_ITERATIONS: u32 = 1_000_000;
+
 #[derive(Debug)]
 struct ScramServerFirst {
     nonce: String,
@@ -368,10 +408,15 @@ impl ScramServerFirst {
                 "SCRAM iteration count is invalid".to_owned(),
             )
         })?;
-        if iterations == 0 {
-            return Err(crate::wire::WireError::SaslAuthentication(
-                "SCRAM iteration count must be positive".to_owned(),
-            ));
+        if iterations < MIN_SCRAM_ITERATIONS {
+            return Err(crate::wire::WireError::SaslAuthentication(format!(
+                "SCRAM iteration count {iterations} is below the minimum {MIN_SCRAM_ITERATIONS}"
+            )));
+        }
+        if iterations > MAX_SCRAM_ITERATIONS {
+            return Err(crate::wire::WireError::SaslAuthentication(format!(
+                "SCRAM iteration count {iterations} exceeds the maximum {MAX_SCRAM_ITERATIONS}"
+            )));
         }
         Ok(Self {
             nonce,
@@ -654,7 +699,7 @@ pub(crate) struct OAuthTokenCache {
 }
 
 #[derive(Debug, Clone)]
-struct OAuthToken {
+pub(crate) struct OAuthToken {
     value: String,
     issued_at: Instant,
     expires_at: Option<Instant>,
@@ -1278,7 +1323,9 @@ fn form_encode(value: &str) -> Result<String, crate::wire::WireError> {
     Ok(encoded)
 }
 
-fn parse_oauthbearer_http_response(response: &[u8]) -> Result<OAuthToken, crate::wire::WireError> {
+pub(crate) fn parse_oauthbearer_http_response(
+    response: &[u8],
+) -> Result<OAuthToken, crate::wire::WireError> {
     let response = str::from_utf8(response).map_err(|_error| {
         crate::wire::WireError::TokenRefresh("OAUTHBEARER token response is not UTF-8".to_owned())
     })?;
@@ -1352,7 +1399,75 @@ mod tests {
 
     use std::time::{Duration, Instant};
 
-    use super::{OAuthToken, SaslConfig};
+    use super::{
+        MAX_SCRAM_ITERATIONS, MIN_SCRAM_ITERATIONS, OAuthToken, SaslConfig, SaslMechanism,
+        ScramExchange,
+    };
+
+    fn server_first(nonce: &str, iterations: &str) -> String {
+        format!("r={nonce}extra,s=QSXCR+Q6sek8bf92,i={iterations}")
+    }
+
+    fn exchange() -> (ScramExchange, String) {
+        let (exchange, _client_first) = ScramExchange::start(
+            SaslMechanism::ScramSha256,
+            Some(r#"username="u" password="p";"#),
+        )
+        .expect("scram exchange should start");
+        let nonce = exchange.client_nonce.clone();
+        (exchange, nonce)
+    }
+
+    /// A server-chosen iteration count is *work the client performs*, one HMAC
+    /// per iteration, and it arrives before the server has been authenticated —
+    /// SCRAM proves the server only at server-final. Unbounded, `i=4294967295`
+    /// pins a core for minutes per connection.
+    ///
+    /// Demonstrated by the `scram_server_first_nonced` fuzz target, which times
+    /// out on exactly this input.
+    #[test]
+    fn scram_rejects_an_iteration_count_above_the_maximum() {
+        let (exchange, nonce) = exchange();
+        let error = exchange
+            .client_final(server_first(&nonce, "4294967295").as_bytes())
+            .expect_err("an absurd iteration count must be rejected");
+        assert!(
+            format!("{error}").contains("exceeds the maximum"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Java's client enforces `ScramMechanism.minIterations` (4096) against the
+    /// server-first message; kacrab previously accepted anything non-zero, so a
+    /// server could silently downgrade the key derivation to one iteration.
+    #[test]
+    fn scram_rejects_an_iteration_count_below_the_java_minimum() {
+        let (exchange, nonce) = exchange();
+        for below in ["1", "4095"] {
+            let error = exchange
+                .client_final(server_first(&nonce, below).as_bytes())
+                .expect_err("a below-minimum iteration count must be rejected");
+            assert!(
+                format!("{error}").contains("below the minimum"),
+                "unexpected error for i={below}: {error}"
+            );
+        }
+    }
+
+    /// The accepted range must still admit what real brokers send: Kafka's
+    /// default is exactly the minimum.
+    #[test]
+    fn scram_accepts_the_iteration_counts_real_brokers_use() {
+        for accepted in [MIN_SCRAM_ITERATIONS, 8192, 16384, MAX_SCRAM_ITERATIONS] {
+            let (exchange, nonce) = exchange();
+            let result =
+                exchange.client_final(server_first(&nonce, &accepted.to_string()).as_bytes());
+            assert!(
+                result.is_ok(),
+                "i={accepted} should be accepted, got {result:?}"
+            );
+        }
+    }
 
     #[test]
     fn oauth_token_refresh_deadline_applies_configured_jitter_once() {

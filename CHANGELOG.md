@@ -7,6 +7,108 @@ This project is pre-1.0; minor releases may still change public APIs.
 The format is based on human-readable release notes. Each entry includes the
 release date and links to relevant pull requests or issues.
 
+## Unreleased
+
+### Fixed
+
+- **A server could pin a client CPU through the SCRAM iteration count, and could
+  silently weaken key derivation.** `ScramServerFirst::parse` accepted any
+  non-zero `i=` value from the server-first message and handed it straight to
+  `salted_password`, which runs one HMAC per iteration. The count is not data the
+  client stores, it is work the client performs — and it arrives *before* the
+  server is authenticated, since SCRAM proves the server only at server-final. A
+  reply of `i=4294967295` therefore pins a core for minutes per connection, from
+  anyone who can answer on the broker's address. Separately, accepting counts
+  below 4096 let a server downgrade the derivation to as little as one iteration;
+  Java's client rejects those (`ScramSaslClient.java:127` against
+  `ScramMechanism.minIterations`), so this was also a parity gap.
+
+  The accepted range is now `[4096, 1_000_000]`. The minimum is Kafka's own
+  `minIterations`. The maximum is deliberately *not* Kafka's declared
+  `maxIterations` of 16384: that ceiling is only applied by the
+  `kafka-storage add-scram` tool (`ScramParser.java:189`), while the controller's
+  `AlterUserScramCredentials` path checks the minimum alone
+  (`ScramControlManager.java:290`), so a legitimately provisioned credential can
+  exceed it and enforcing 16384 would break real deployments. 1,000,000 is 244x
+  Kafka's default and 61x its tooling ceiling, so no plausible configuration is
+  affected, while the work a hostile server can demand stays bounded.
+- **A hostile record header count could OOM the client.** `Record::decode` sized
+  its header `Vec` straight from the wire's `headerCount` varint, checking only
+  that it was non-negative. A 90-byte record declaring ~486M headers reached
+  `malloc(7.8 GB)` before the decode loop read a single header and failed, so a
+  corrupt or malicious broker response could OOM-kill any kacrab client with a
+  handful of bytes — the batch level had guarded its own count with
+  `MAX_RECORDS_PER_BATCH` for exactly this reason, but the per-record path had
+  no equivalent. The speculative allocation is now clamped by what the remaining
+  buffer can hold (a header is at least two varints), which cannot reject a
+  satisfiable count. Found by the new `record_batch_framed` fuzz target; covered
+  by `absurd_header_count_fails_without_a_giant_allocation`.
+- `Consumer::poll` is now cancel-safe with respect to records. `reap_fetch` moved
+  the in-flight `Fetch` handle out of the consumer before awaiting it, so
+  dropping a `poll` future mid-await — the ordinary fate of the losing arm of a
+  `tokio::select!` — detached the task and discarded whatever it had fetched,
+  along with the partition positions it carried and the KIP-227 incremental
+  fetch sessions, forcing the next fetch to re-open full sessions. The handle is
+  now joined through `&mut` and stays owned by the consumer, so a cancelled poll
+  costs nothing and the next poll folds the fetch in. Covered by
+  `reap_fetch_survives_a_cancelled_await`.
+
+### Added
+
+- `cargo-fuzz` targets for the decoders that parse untrusted broker bytes:
+  `record_batch_decode`, `record_batch_framed`, `response_decode`, and
+  `decompress`. They run nightly in CI at 15 minutes per target and as a
+  60-second smoke on any PR touching `kacrab-protocol/`. The fuzz crate lives
+  outside the workspace because cargo-fuzz needs nightly plus a sanitizer.
+  `record_batch_framed` exists because raw-byte fuzzing of a record batch is
+  nearly useless on its own: CRC32C is validated before the magic byte, the
+  record count, the varints, or the compressed blob, so random input passes that
+  gate with probability 2^-32 and never reaches the decoder. Building correct
+  framing around fuzzer-controlled bytes is what surfaced the OOM above.
+- `frame_decode` and `oauth_http_response` fuzz targets, closing the two
+  remaining untrusted-input parsers. `frame_decode` covers the length-prefixed
+  response frame — the first thing that touches socket bytes, ahead of every
+  decoder — and confirms what inspection suggested: negative lengths rejected,
+  `MAX_FRAME_LENGTH` enforced, truncation checked, and the split zero-copy rather
+  than a speculative allocation. `oauth_http_response` covers the hand-written
+  HTTP parser behind `sasl.oauthbearer.token.endpoint.url`, which splits headers
+  on `\r\n\r\n` and takes the status by whitespace position before the body
+  reaches `serde_json`. Both clean; no defects found.
+- Four fuzz targets over the SASL handshake — `scram_server_first`,
+  `scram_server_first_nonced`, `scram_server_final`, and `jaas_option` — reaching
+  the parsers that run against a peer which has not authenticated yet. They reach
+  crate-private code through a new internal `__fuzzing` feature on `kacrab` that
+  exposes thin `fn(&[u8])` shims; it is `#[doc(hidden)]`, off by default, and
+  exempt from semver. `scram_server_first` needs two targets for the same reason
+  record batches do: the client-nonce check is unguessable, so raw bytes stall at
+  199 edges while the nonce-satisfying variant reaches 742 and made the iteration
+  count above reproducible.
+- A committed seed corpus (`fuzz/seeds/`) and a Kafka wire-format dictionary
+  (`fuzz/kafka.dict`) for the fuzz targets. The seeds are generated from the same
+  fixtures the Java oracle matrix uses — every generated message, at every schema
+  version, across six fixture shapes — by an ignored `generate_fuzz_corpus` test
+  in `java_interop.rs`, then minimised with `cargo fuzz cmin`. The dictionary
+  carries the sentinels random mutation will not find, chiefly Kafka's `-1`
+  length prefix, which gates every nullable field. Together they take
+  `record_batch_decode` from 150 to 984 edges and `record_batch_framed` from 774
+  to 1591; `response_decode` reaches 11899. `response_decode` also now dispatches
+  on the real API key byte and covers 50 client-facing response types rather than
+  12 behind an arbitrary index.
+
+### Documentation
+
+- New README sections: a verified comparison against `rust-rdkafka`, `rskafka`,
+  and `kafka-rust`; "Cancellation & drop semantics" documenting the cancel-safety
+  of every public future and what dropping a client without `close()` does; and
+  "When not to use kacrab".
+- Corrected the Highlights latency claim from "lower at every percentile" to
+  "lower or tied", matching the matched-load table and the Caveats section, and
+  documented why the latency *average* differs while p50/p95/p99 tie (both sides
+  quantize to integer milliseconds; the average is the fraction above 0 ms).
+- Replaced the coverage footnote's "(streams)" with the real breakdown of the 26
+  unwired generated APIs, and synced the design book to `0.3.0` and the current
+  benchmark figures.
+
 ## 0.3.0 — 2026-07-27
 
 Producer batch-split release. A topic whose `max.message.bytes` sits below the

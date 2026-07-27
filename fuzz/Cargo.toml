@@ -1,0 +1,106 @@
+[package]
+name = "kacrab-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Detached from the workspace on purpose: `cargo-fuzz` builds these targets with
+# a nightly toolchain and `-Z sanitizer`, which the pinned stable toolchain in
+# rust-toolchain.toml cannot do. Keeping it out of the workspace means
+# `make test` / `make clippy` never try to compile it.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+
+[dependencies.kacrab-protocol]
+path = "../kacrab-protocol"
+features = ["gzip", "snappy", "lz4", "zstd"]
+
+# `__fuzzing` re-exports the crate-private SASL handshake parsers as thin
+# `fn(&[u8])` shims. They read bytes from a peer that has not authenticated yet,
+# which makes them the highest-value untrusted input in the client.
+[dependencies.kacrab]
+path = "../kacrab"
+features = ["__fuzzing"]
+
+# Fuzz targets are built with debug assertions so arithmetic overflow is a
+# finding rather than a silent wrap.
+[profile.release]
+debug = true
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "record_batch_decode"
+path = "fuzz_targets/record_batch_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "record_batch_framed"
+path = "fuzz_targets/record_batch_framed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frame_decode"
+path = "fuzz_targets/frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oauth_http_response"
+path = "fuzz_targets/oauth_http_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scram_server_first"
+path = "fuzz_targets/scram_server_first.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scram_server_first_nonced"
+path = "fuzz_targets/scram_server_first_nonced.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scram_server_final"
+path = "fuzz_targets/scram_server_final.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jaas_option"
+path = "fuzz_targets/jaas_option.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "response_decode"
+path = "fuzz_targets/response_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decompress"
+path = "fuzz_targets/decompress.rs"
+test = false
+doc = false
+bench = false

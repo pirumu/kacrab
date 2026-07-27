@@ -1,0 +1,6 @@
+# libFuzzer's writable working corpus: it grows by thousands of files during a
+# run. The committed starting population lives in seeds/, which is NOT ignored.
+corpus
+artifacts
+coverage
+target

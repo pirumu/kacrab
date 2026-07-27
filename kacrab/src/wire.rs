@@ -1,6 +1,6 @@
 //! Runtime Kafka wire/session support.
 
-mod auth;
+pub(crate) mod auth;
 mod backoff;
 mod broker;
 mod buffer;
