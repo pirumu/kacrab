@@ -582,43 +582,63 @@ impl DecodedFetch {
                 self.blob = Bytes::new();
                 break;
             };
-            let leader_epoch =
-                (batch.partition_leader_epoch >= 0).then_some(batch.partition_leader_epoch);
+            let (records, leader_epoch) =
+                batch_records(batch, &self.topic, self.partition.partition);
             self.next_leader_epoch = leader_epoch;
-            let log_append_time = batch.attributes & LOG_APPEND_TIME_BIT != 0;
-            let timestamp_type = if log_append_time {
-                TimestampType::LogAppendTime
-            } else {
-                TimestampType::CreateTime
-            };
-            for record in batch.records {
-                let offset = batch
-                    .base_offset
-                    .saturating_add(i64::from(record.offset_delta));
-                if offset < self.position_offset {
+            for record in records {
+                // A fetch can land mid-batch: the broker returns the whole batch
+                // containing the position, so records before it are re-served.
+                if record.offset < self.position_offset {
                     continue;
                 }
-                let timestamp = if log_append_time {
-                    batch.max_timestamp
-                } else {
-                    batch.first_timestamp.saturating_add(record.timestamp_delta)
-                };
-                self.records.push_back(ConsumerRecord {
-                    topic: std::sync::Arc::clone(&self.topic),
-                    partition: self.partition.partition,
-                    offset,
-                    timestamp,
-                    timestamp_type,
-                    key: record.key,
-                    value: record.value,
-                    headers: record.headers,
-                    leader_epoch,
-                });
-                self.next_offset = offset.saturating_add(1);
+                self.next_offset = record.offset.saturating_add(1);
+                self.records.push_back(record);
             }
         }
         Ok(())
     }
+}
+
+/// Map one decoded record batch to its [`ConsumerRecord`]s, in offset order,
+/// plus the batch's leader epoch when the broker reported one.
+///
+/// Shared with the share consumer, which decodes the same v2 record batches out
+/// of a `ShareFetch` response but selects records by acquisition rather than by
+/// position.
+pub(super) fn batch_records(
+    batch: kacrab_protocol::record::RecordBatch,
+    topic: &std::sync::Arc<str>,
+    partition: i32,
+) -> (Vec<ConsumerRecord>, Option<i32>) {
+    let leader_epoch = (batch.partition_leader_epoch >= 0).then_some(batch.partition_leader_epoch);
+    let log_append_time = batch.attributes & LOG_APPEND_TIME_BIT != 0;
+    let timestamp_type = if log_append_time {
+        TimestampType::LogAppendTime
+    } else {
+        TimestampType::CreateTime
+    };
+    let records = batch
+        .records
+        .into_iter()
+        .map(|record| ConsumerRecord {
+            topic: std::sync::Arc::clone(topic),
+            partition,
+            offset: batch
+                .base_offset
+                .saturating_add(i64::from(record.offset_delta)),
+            timestamp: if log_append_time {
+                batch.max_timestamp
+            } else {
+                batch.first_timestamp.saturating_add(record.timestamp_delta)
+            },
+            timestamp_type,
+            key: record.key,
+            value: record.value,
+            headers: record.headers,
+            leader_epoch,
+        })
+        .collect();
+    (records, leader_epoch)
 }
 
 impl FetchBuffer {

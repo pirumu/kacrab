@@ -99,8 +99,9 @@ if you want the destination. The two crown-jewel deep dives are
 > **Status**
 >
 > kacrab `0.3.0` is published on [crates.io](https://crates.io/crates/kacrab)
-> (producer, consumer, and admin surfaces). Pre-1.0, the public API can still
-> change between minor versions; this book tracks `master`. A Kafka Streams
-> runtime and a share *consumer* are out of scope — this is a client library —
-> though the admin surface does cover the share-group and streams-group
-> operations Kafka 4.x exposes to `Admin`.
+> (producer, consumer, share-consumer, and admin surfaces). Pre-1.0, the public
+> API can still change between minor versions; this book tracks `master`. A
+> Kafka Streams runtime is out of scope — this is a client library — though the
+> admin surface does cover the streams-group operations Kafka 4.x exposes to
+> `Admin`. The KIP-932 share *consumer* is implemented behind the
+> `share-consumer` feature, alongside the admin-side share-group operations.

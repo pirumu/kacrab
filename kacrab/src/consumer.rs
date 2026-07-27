@@ -11,6 +11,10 @@
 //! protocols (classic `JoinGroup`/`SyncGroup` and KIP-848
 //! `ConsumerGroupHeartbeat`), fetch with incremental sessions, and offset
 //! commit/fetch.
+//!
+//! The `share-consumer` feature adds [`ShareConsumer`], the KIP-932 share-group
+//! consuming surface: acquired records with per-record acknowledgement instead of
+//! partition ownership with offset commits.
 
 mod assignor;
 mod client;
@@ -24,8 +28,15 @@ mod metrics;
 mod next_gen;
 mod offsets;
 mod record;
+#[cfg(feature = "share-consumer")]
+mod share;
 mod subscription;
 
+#[cfg(feature = "share-consumer")]
+pub use self::share::{
+    AcknowledgeType, AcknowledgementCommitCallback, ShareAcknowledgementMode, ShareAcquireMode,
+    ShareConsumer, ShareRecord, ShareRecords, ShareRuntimeConfig,
+};
 pub use self::{
     client::{Consumer, OffsetCommitCallback},
     config::{AutoOffsetReset, ConsumerRuntimeConfig, GroupProtocol, IsolationLevel},

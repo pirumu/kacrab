@@ -7,7 +7,7 @@
         kafka-topic-delete kafka-topic-recreate bench-kafka-topic \
         bench-kafka bench-kafka-java-default bench-kafka-split-probe \
         bench-kafka-consumer bench-kafka-consumer-java-default \
-        ci ci-strict tools
+        check-features ci ci-strict tools
 
 KAFKA_BIN ?= $(HOME)/.local/share/kacrab-kafka/current/bin
 KAFKA_TOPICS ?= $(KAFKA_BIN)/kafka-topics.sh
@@ -37,6 +37,7 @@ help:
 	@echo "  test-protocol-java - compile ignored Java interop tests"
 	@echo "  test-protocol-java-matrix - run ignored Java oracle matrix"
 	@echo "  clippy      - clippy with -D warnings"
+	@echo "  check-features - build every feature selection a user can make"
 	@echo "  fmt         - cargo +nightly fmt --all"
 	@echo "  fmt-check   - cargo +nightly fmt --all -- --check"
 	@echo "  install-hooks - use tracked git hooks from .githooks"
@@ -111,6 +112,27 @@ test-protocol-full: test-protocol test-protocol-java-matrix
 
 clippy:
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# Build the feature selections users actually make. `clippy`/`test` above run
+# `--all-features`, the one configuration nobody ships, so an internal gated on
+# the wrong surface passes there and breaks a single-feature build. Each surface
+# alone, plus the pairs the README documents.
+KACRAB_FEATURE_SETS ?= none producer consumer admin share-consumer macros compression \
+                       gzip snappy lz4 zstd \
+                       producer,consumer producer,admin consumer,admin \
+                       producer,share-consumer share-consumer,admin \
+                       producer,consumer,admin producer,consumer,admin,share-consumer,macros
+
+check-features:
+	@set -e; for features in $(KACRAB_FEATURE_SETS); do \
+	  if [ "$$features" = "none" ]; then \
+	    echo "==> kacrab (no features)"; \
+	    cargo check -p kacrab --no-default-features --all-targets; \
+	  else \
+	    echo "==> kacrab --features $$features"; \
+	    cargo check -p kacrab --no-default-features --features "$$features" --all-targets; \
+	  fi; \
+	done
 
 fmt:
 	cargo +nightly fmt --all

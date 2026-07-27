@@ -1825,6 +1825,24 @@ kafka_config! {
         #[comment("Maximum number of records returned from one poll call.")]
         max_poll_records: i32,
 
+        #[key("share.acknowledgement.mode")]
+        #[default(String::from("implicit"))]
+        #[kafka_type("string")]
+        #[kafka_default("implicit")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/consumer-configs/#consumerconfigs_share.acknowledgement.mode")]
+        #[comment("Share consumer acknowledgement mode: implicit acknowledges on the next poll/commit, explicit requires acknowledge() per record.")]
+        share_acknowledgement_mode: String,
+
+        #[key("share.acquire.mode")]
+        #[default(String::from("batch_optimized"))]
+        #[kafka_type("string")]
+        #[kafka_default("batch_optimized")]
+        #[status(native)]
+        #[source("https://kafka.apache.org/43/configuration/consumer-configs/#consumerconfigs_share.acquire.mode")]
+        #[comment("Share consumer acquire mode: record_limit caps a poll at max.poll.records, batch_optimized may exceed it to align with batch boundaries.")]
+        share_acquire_mode: String,
+
         #[key("receive.buffer.bytes")]
         #[default(65_536_i32)]
         #[kafka_type("int")]

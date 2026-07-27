@@ -1955,8 +1955,11 @@ async fn async_commit_loop(
     }
 }
 
-/// Resolve `bootstrap.servers` into wire broker endpoints.
-async fn resolve_bootstrap_brokers(config: &ConsumerConfig) -> Result<Vec<BrokerEndpoint>> {
+/// Resolve `bootstrap.servers` into wire broker endpoints. Shared with the
+/// share consumer, which bootstraps from the same typed consumer config.
+pub(super) async fn resolve_bootstrap_brokers(
+    config: &ConsumerConfig,
+) -> Result<Vec<BrokerEndpoint>> {
     let mut endpoints = Vec::new();
     for (index, server) in config.bootstrap_servers.as_slice().iter().enumerate() {
         let node_id = i32::try_from(index).map_err(|_error| ConsumerError::InvalidArgument {

@@ -363,7 +363,9 @@ mod tests {
 
     use kacrab_protocol::{KafkaUuid, generated::ErrorCode};
 
-    use super::{MetadataManager, MetadataRecoveryAction, PartitionLeaderChange};
+    #[cfg(feature = "producer")]
+    use super::PartitionLeaderChange;
+    use super::{MetadataManager, MetadataRecoveryAction};
     use crate::wire::{
         BrokerEndpoint, BrokerMetadata, ClusterMetadata, ConnectionConfig,
         MetadataRecoveryStrategy, PartitionMetadata, TopicMetadata,
@@ -542,6 +544,11 @@ mod tests {
         );
     }
 
+    // `apply_partition_leader_update` and its `PartitionLeaderChange` input only
+    // exist for the producer's leadership-change path, so this test has to carry
+    // the same gate the code does — otherwise a consumer-only or admin-only build
+    // fails to compile its own unit tests.
+    #[cfg(feature = "producer")]
     #[test]
     fn manager_applies_current_leader_update_only_when_epoch_is_current() {
         let start = Instant::now();
@@ -595,6 +602,7 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "producer")]
     fn broker_metadata(node_id: i32) -> BrokerMetadata {
         BrokerMetadata {
             node_id,
@@ -604,6 +612,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "producer")]
     fn leader_change<'a>(
         topic: &'a str,
         partition_index: i32,

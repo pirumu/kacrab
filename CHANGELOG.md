@@ -9,7 +9,81 @@ release date and links to relevant pull requests or issues.
 
 ## Unreleased
 
+### Added
+
+- **Share consumer (KIP-932), behind the new `share-consumer` feature.**
+  `ShareConsumer` joins a share group, acquires records under the broker's
+  acquisition lock, and acknowledges them per record instead of committing
+  offsets — the queue-style surface consumer groups serve badly. It closes the
+  asymmetry where kacrab could already *administer* share groups
+  (`describe_share_groups` and friends) but not consume from them, which forced a
+  second client just to produce the traffic the admin surface managed.
+
+  The three client-facing RPCs were already generated and are now wired:
+  `ShareGroupHeartbeat` (v1) for membership and assignment, `ShareFetch` (v1–2)
+  for acquire-and-fetch with piggy-backed acknowledgements, and
+  `ShareAcknowledge` (v1–2) for standalone acknowledgement and share-session
+  close. The share-coordinator state RPCs stay unwired; a client never issues
+  them.
+
+  The surface matches Java's `ShareConsumer` method for method:
+  `accept`/`acknowledge`/`acknowledge_offset`, `commit`/`commit_timeout`/
+  `commit_async`, `set_acknowledgement_commit_callback`,
+  `acquisition_lock_timeout` (the broker's per-response lock budget, which is
+  what tells an application how long it has before a batch becomes
+  re-deliverable), `client_instance_id`, `metrics`, `close`/`close_timeout`, and
+  `wakeup`. `commit_async` deliberately sends nothing on its own — a share
+  session is a strictly ordered epoch sequence per broker, so a second request
+  racing the poll loop would invalidate the session; Java behaves the same way,
+  piggy-backing the acknowledgements onto the next `ShareFetch`.
+
+  `AcknowledgeType::{Accept, Release, Reject, Renew}` disposes of each record,
+  `ShareRecord::delivery_count` carries the KIP-932 delivery attempt count so
+  poison messages can be rejected rather than retried forever, and both
+  acknowledgement modes work: `implicit` (the Kafka default) accepts the batch on
+  the next `poll`/`commit`, `explicit` requires every delivered record to be
+  acknowledged and errors otherwise. Acknowledgements are batched into the next
+  `ShareFetch`, so there is no round trip per record. Cancellation and drop
+  semantics are documented in the README table: a dropped `poll` or a dropped
+  consumer leaves acquired records to their acquisition lock, which redelivers
+  them rather than losing them.
+
+  `share.acknowledgement.mode` and `share.acquire.mode` are promoted from
+  `ConfigStatus::NativeReview` to `Native` in the generated config catalog; they
+  are now typed fields on `ConsumerConfig`. `share.acquire.mode=record_limit`
+  needs `ShareFetch` v2 and is inert against a v1-only broker (`max.poll.records`
+  still bounds acquisition through the request's `max_records` field).
+
+  Verified against a real Apache Kafka 4.3.0 broker in
+  `kacrab/tests/real_kafka_share_consumer.rs`, run by the `real-broker` workflow:
+  both acknowledgement modes, all three dispositions (a `Release`d record comes
+  back, a `Reject`ed one does not), delivery counts climbing to the broker's
+  archive limit, three consumers on a one-partition topic consuming every record
+  exactly once, acquisition-lock expiry redelivering an abandoned consumer's
+  records, and admin interop against the live group.
+
 ### Fixed
+
+- **Single-feature builds were broken, and nothing was checking them.**
+  `--features consumer` failed to compile: `wire::{BackoffPolicy, BackoffState}`
+  were re-exported only under `cfg(feature = "producer")` while
+  `consumer/coordinator.rs` uses them for the `FindCoordinator` retry. Sweeping
+  for the same class found two more, both in unit tests that named producer-only
+  items without carrying the gate the code does
+  (`wire/metadata/manager.rs`'s `apply_partition_leader_update` test and
+  `wire/broker.rs`'s `BrokerHandle` literal). Every gate in the repo runs
+  `--all-features`, the one configuration no user has, so none of it was visible.
+
+  Fixed, and gated: `make check-features` builds all 17 feature selections a user
+  can make — each surface alone, the documented pairs, and none at all — and runs
+  as its own CI job.
+- **The single-broker `docker-compose.kafka.yml` fixture could not run share
+  groups.** The share coordinator auto-creates its internal
+  `__share_group_state` topic at replication factor 3, which fails with
+  `INVALID_REPLICATION_FACTOR` on a one-broker cluster; every share-partition
+  initialization then timed out and a share consumer acquired nothing, with no
+  client-visible error. Scaled to the fixture like the offsets and transaction
+  logs.
 
 - **A server could pin a client CPU through the SCRAM iteration count, and could
   silently weaken key derivation.** `ScramServerFirst::parse` accepted any

@@ -53,6 +53,11 @@ built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
   detection (KIP-320), `commit_sync`/`commit_async`/auto-commit, background
   heartbeat, static membership, typed deserializers, interceptors, and
   `metrics()`.
+- **Share consumer (KIP-932)**: the queue-shaped consuming surface, behind the
+  `share-consumer` feature. `ShareGroupHeartbeat`/`ShareFetch`/`ShareAcknowledge`
+  with per-record `Accept`/`Release`/`Reject` acknowledgement, delivery-count
+  tracking for poison messages, implicit and explicit acknowledgement modes, and
+  more consumers than partitions in one group. See [Share consumer](#share-consumer).
 - **Admin**: the full Apache Kafka 4.3.0 `Admin` surface (62 operations):
   topics, configs (incremental), ACLs, groups & offsets, transactions,
   delegation tokens, quotas, SCRAM, reassignments, KRaft quorum, and the 4.x
@@ -152,14 +157,14 @@ Test coverage (`cargo llvm-cov`): **~87% maintained-source** line coverage
 (generated protocol excluded), with the producer module at about 92%. The raw
 whole-workspace number is lower because codegen covers the entire Kafka message
 set — all 93 API keys — so the Java oracle check stays exhaustive, while the
-client wires the 67 a client actually issues. Of the 26 unwired, 21 are
+client wires the 70 a client actually issues. Of the 23 unwired, 21 are
 broker-internal or KRaft controller RPCs no client ever sends (`LeaderAndIsr`,
 `StopReplica`, `UpdateMetadata`, the broker-registration and Raft-quorum
-families, the share-coordinator state RPCs); the other 5 are client-facing
-surfaces kacrab does not implement — the share consumer (`ShareFetch`,
-`ShareAcknowledge`, `ShareGroupHeartbeat`), `DescribeTopicPartitions`, and the
-Streams member protocol (`StreamsGroupHeartbeat`), which is out of scope per
-above. The admin-side share and streams group operations *are* wired.
+families, the share-coordinator state RPCs); the other 2 are client-facing
+surfaces kacrab does not implement — `DescribeTopicPartitions` and the Streams
+member protocol (`StreamsGroupHeartbeat`), which is out of scope per above. The
+admin-side share and streams group operations *are* wired, and so is the share
+consumer itself (`ShareGroupHeartbeat`/`ShareFetch`/`ShareAcknowledge`).
 
 ## Install
 
@@ -171,10 +176,10 @@ kacrab = { version = "0.3", features = ["producer", "consumer", "admin"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
-Available features: `producer`, `consumer`, `admin` (each example below names
-the one it needs); compression codecs `gzip`, `lz4`, `snappy`, `zstd` (or the
-`compression` meta-feature for all four); Kerberos via `gssapi`; config macro
-helpers via `macros`.
+Available features: `producer`, `consumer`, `admin`, `share-consumer` (each
+example below names the one it needs); compression codecs `gzip`, `lz4`,
+`snappy`, `zstd` (or the `compression` meta-feature for all four); Kerberos via
+`gssapi`; config macro helpers via `macros`.
 
 ## Producer
 
@@ -261,6 +266,91 @@ or automatically, with leader-epoch awareness. `ConsumerInterceptor`s and
 `metrics()` round out the surface. See the book's
 [consumer chapter](docs-book/src/consumer.md) for the rebalancing and fetching
 deep dives.
+
+## Share consumer
+
+Requires the `share-consumer` feature. A share group (KIP-932) turns a topic into
+a work queue: records are *acquired* under a broker-held lock rather than read at
+a position, so more consumers than partitions can share a topic and each record
+is disposed of on its own instead of by committing an offset. `ShareConsumer` is
+a separate type from `Consumer` because none of `assign`, `seek`, `position`, or
+`commit_sync` means anything in that model.
+
+```rust
+use std::time::Duration;
+
+use kacrab::consumer::{AcknowledgeType, ShareConsumer};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut consumer = ShareConsumer::from_map([
+        ("bootstrap.servers", "127.0.0.1:9092"),
+        ("group.id", "work-queue"),
+        ("share.acknowledgement.mode", "explicit"),
+    ])
+    .await?;
+    consumer.subscribe(["jobs"])?;
+
+    loop {
+        let records = consumer.poll(Duration::from_millis(500)).await?;
+        for record in records.iter() {
+            let outcome = if record.delivery_count > 5 {
+                // Poison message: archive it instead of retrying forever.
+                AcknowledgeType::Reject
+            } else if handle(record).is_ok() {
+                AcknowledgeType::Accept
+            } else {
+                AcknowledgeType::Release
+            };
+            consumer.acknowledge(record, outcome)?;
+        }
+        consumer.commit().await?;
+    }
+}
+# fn handle(_record: &kacrab::consumer::ShareRecord) -> Result<(), ()> { Ok(()) }
+```
+
+`share.acknowledgement.mode=implicit` (the Kafka default) acknowledges the whole
+batch with `Accept` on the next `poll`/`commit` and makes `acknowledge` an error;
+`explicit` requires every delivered record to be acknowledged before the next
+`poll`/`commit`. `share.acquire.mode` controls whether a poll may exceed
+`max.poll.records` to land on batch boundaries. Acknowledgements are batched and
+piggy-backed onto the next `ShareFetch`, so the acknowledgement path costs no
+extra round trip per record.
+
+The surface maps one-to-one onto Java's `ShareConsumer`:
+
+| Java | kacrab |
+| --- | --- |
+| `subscription()` / `subscribe` / `unsubscribe` | same names |
+| `poll(Duration)` | `poll(Duration)` |
+| `acknowledge(record)` | `accept(record)` |
+| `acknowledge(record, type)` | `acknowledge(record, type)` |
+| `acknowledge(topic, partition, offset, type)` | `acknowledge_offset(&partition, offset, type)` |
+| `commitSync()` / `commitSync(Duration)` | `commit()` / `commit_timeout(Duration)` |
+| `commitAsync()` | `commit_async()` |
+| `setAcknowledgementCommitCallback` | `set_acknowledgement_commit_callback` |
+| `acquisitionLockTimeoutMs()` | `acquisition_lock_timeout()` |
+| `clientInstanceId(Duration)` | `client_instance_id()` |
+| `metrics()` | `metrics()` |
+| `close()` / `close(Duration)` | `close()` / `close_timeout(Duration)` |
+| `wakeup()` | `wakeup()` |
+
+`commit_async` sends nothing by itself, and that is deliberate rather than a
+shortcut: a share session is a strictly ordered epoch sequence per broker, so a
+second request racing the poll loop would invalidate the session. Java does the
+same — the acknowledgements ride the next `ShareFetch` and the broker's verdict
+reaches the acknowledgement callback. Registering that callback also moves
+rejected acknowledgements off the `poll`/`commit` return value and into the
+callback, matching Java; without one they surface as an error, because dropping
+them would hide that those records are about to be redelivered.
+`registerMetricForSubscription` has no analogue here, the same way it has none on
+`Consumer`.
+
+The admin-side view of the same groups (`describe_share_groups`,
+`list_share_group_offsets`, `alter_share_group_offsets`,
+`delete_share_group_offsets`, `delete_share_groups`) lives on `AdminClient` and
+needs only the `admin` feature.
 
 ## Admin
 
@@ -380,6 +470,8 @@ resolves — and what each client does when it is dropped without `close()`.
 | `Producer::flush` / `close` | No | Dispatch continues, but you lose the guarantee that every prior send completed. Re-`flush` before relying on it. |
 | `Consumer::commit_async` | No | If dropped during the coordinator lookup, the commit is never enqueued and the callback never fires. Once enqueued the handoff is synchronous and cannot be cancelled. |
 | `Consumer::commit_sync` | No | The `OffsetCommit` may have reached the broker and applied. Treat the offset as indeterminate and re-commit. |
+| `ShareConsumer::poll` | No | The `ShareFetch` response is discarded, so records the broker acquired for this member stay locked until the acquisition lock expires (`group.share.record.lock.duration.ms`) and are then redelivered. Nothing is lost; a record can be delivered twice. |
+| `ShareConsumer::commit` | No | The `ShareAcknowledge` may have reached the broker and applied. Unapplied acknowledgements are not retried — those records keep their lock and are redelivered. |
 
 Two caveats on `poll` specifically. It is cancel-safe with respect to **records**,
 which is the property `select!` users need — a cancelled `poll` never drops
@@ -404,6 +496,12 @@ Dropping a client without closing it:
   committed and the group is not left: the group waits out
   `session.timeout.ms` before rebalancing. Use `close()` to auto-commit and
   leave the group promptly.
+- **`ShareConsumer`** — nothing is acknowledged and no share session is closed,
+  so records still under acquisition become re-deliverable when their lock
+  expires rather than being silently lost, and the group waits out the session
+  timeout before reassigning. Use `close()` to flush pending acknowledgements,
+  close the share sessions (which releases the rest immediately instead of at
+  lock expiry), and leave the group.
 
 ## When not to use kacrab
 
@@ -413,8 +511,6 @@ Dropping a client without closing it:
   `rust-rdkafka`.
 - **You need Kafka Streams.** Out of scope, permanently — this is a client
   library. See [Status](#status).
-- **You need a share consumer.** The Kafka 4.x share-group *consumer*
-  (`ShareFetch`) is not implemented. The admin-side share-group operations are.
 - **You need years of production mileage.** kacrab is pre-1.0 and first
   published in July 2026. The public API can change between minor versions.
   `rust-rdkafka` wraps a library that has been in production for over a decade;
@@ -435,8 +531,14 @@ Dropping a client without closing it:
 
 ```bash
 make fmt-check clippy test    # workspace suite, all features
+make check-features           # every feature selection a user can actually make
 make deny                     # dependency & license checks
 ```
+
+`check-features` exists because every other gate runs `--all-features`, which is
+the one configuration nobody ships. An internal gated on the wrong surface
+compiles there and breaks for whoever enables a single feature — which is exactly
+how `--features consumer` alone stayed broken. CI runs it as its own job.
 
 Real-broker smoke tests are ignored by default and run against the local compose
 files (`docker-compose.{kafka,kafka-admin,auth,gssapi,tls,cluster}.yml`):
