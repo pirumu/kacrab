@@ -1427,6 +1427,16 @@ impl ProducerDispatcher {
                     return Err(error);
                 },
             }
+            // Same in-task-retry ordering gate as `dispatch_drained_inner`: a batch
+            // that no longer holds its partition's first in-flight sequence must go
+            // back through the accumulator instead of re-sending here.
+            if self.retry_requires_sequence_order_requeue(&batches).await {
+                if self.metrics_are_enabled() {
+                    self.metrics.record_requeue();
+                }
+                accumulator.requeue_front(batches)?;
+                return Ok(Vec::new());
+            }
         }
     }
 
@@ -1618,6 +1628,31 @@ impl ProducerDispatcher {
         }
     }
 
+    /// Kafka `shouldStopDrainBatchesForPartition`'s retry clause applied to the
+    /// in-task retry path: a batch that already carries a sequence may only be
+    /// re-sent while it holds its partition's first in-flight sequence. The drain
+    /// path enforces this in [`Self::prepare_drained_batches`], but an in-task
+    /// retry bypasses the drain — and its enqueue ticket has already been served,
+    /// so the enqueue sequencer imposes no order on the re-send either. Two
+    /// same-partition dispatches retrying a dropped connection would otherwise
+    /// race their re-sends and can put the higher base sequence on the wire
+    /// first. Returning `true` tells the caller to hand the batches back
+    /// (`Requeue`) so the accumulator's sequence-ordered queue and the drain gate
+    /// re-admit them in order, like Kafka's `reenqueueBatches` + drain.
+    async fn retry_requires_sequence_order_requeue(&self, batches: &[ReadyBatch]) -> bool {
+        if !self.idempotence.enabled {
+            return false;
+        }
+        let state = self.producer_state.lock().await;
+        batches.iter().any(|batch| {
+            batch.producer_state.is_some_and(|producer_state| {
+                state
+                    .first_inflight_sequence(&batch.topic, batch.partition)
+                    .is_some_and(|first| first != producer_state.base_sequence)
+            })
+        })
+    }
+
     /// Batches that carry a sequence but will never be dispatched again (a flush that
     /// hands them to nobody, an abort that discards them): release their sequences so
     /// they stop gating the partition. Every other requeue keeps its registration.
@@ -1807,6 +1842,13 @@ impl ProducerDispatcher {
                     fail_deliveries(&mut batches, &error);
                     return DispatchOutcome::Delivered(Err(error));
                 },
+            }
+            // A retryable error was absorbed and the loop would re-send in-task. If a
+            // sibling dispatch holds an earlier in-flight sequence for any of these
+            // partitions, hand the batches back instead so the drain gate re-admits
+            // them in base-sequence order.
+            if self.retry_requires_sequence_order_requeue(&batches).await {
+                return DispatchOutcome::Requeue(batches);
             }
         }
     }

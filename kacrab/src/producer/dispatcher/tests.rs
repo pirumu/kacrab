@@ -1910,6 +1910,100 @@ fn ready_batch_with_value(topic: &str, partition: i32, value: &'static [u8]) -> 
         .expect("ready batch")
 }
 
+fn idempotent_dispatcher() -> ProducerDispatcher {
+    ProducerDispatcher::with_config(
+        test_wire(),
+        ProducerRuntimeConfig {
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                ..ProducerIdempotenceConfig::default()
+            },
+            ..ProducerRuntimeConfig::default()
+        },
+    )
+}
+
+fn sequenced_batch(topic: &str, partition: i32, base_sequence: i32) -> super::ReadyBatch {
+    let mut batch = ready_batch(topic, partition);
+    batch.producer_state = Some(crate::producer::ProducerBatchState {
+        identity: ProducerIdentity {
+            producer_id: 42,
+            producer_epoch: 3,
+        },
+        base_sequence,
+    });
+    batch
+}
+
+#[tokio::test]
+async fn in_task_retry_requeues_batch_that_is_not_first_inflight_sequence_like_java() {
+    // Kafka `shouldStopDrainBatchesForPartition`: a retried batch may only be
+    // re-sent while it holds its partition's first in-flight sequence. With the
+    // sequence-0 sibling still in flight, the sequence-1 batch must go back
+    // through the accumulator instead of re-sending in-task — otherwise the two
+    // retries race and the higher base sequence can reach the broker first.
+    let dispatcher = idempotent_dispatcher();
+    {
+        let mut state = dispatcher.producer_state.lock().await;
+        state.register_inflight_sequence("orders", 0, 0);
+        state.register_inflight_sequence("orders", 0, 1);
+    }
+
+    let trailing = sequenced_batch("orders", 0, 1);
+    assert!(
+        dispatcher
+            .retry_requires_sequence_order_requeue(&[trailing])
+            .await
+    );
+}
+
+#[tokio::test]
+async fn in_task_retry_resends_batch_holding_first_inflight_sequence() {
+    let dispatcher = idempotent_dispatcher();
+    {
+        let mut state = dispatcher.producer_state.lock().await;
+        state.register_inflight_sequence("orders", 0, 0);
+        state.register_inflight_sequence("orders", 0, 1);
+    }
+
+    let first = sequenced_batch("orders", 0, 0);
+    assert!(
+        !dispatcher
+            .retry_requires_sequence_order_requeue(&[first])
+            .await
+    );
+}
+
+#[tokio::test]
+async fn in_task_retry_gate_ignores_unsequenced_and_unregistered_batches() {
+    let dispatcher = idempotent_dispatcher();
+
+    // No in-flight registration at all: nothing to order against.
+    let sequenced = sequenced_batch("orders", 0, 1);
+    assert!(
+        !dispatcher
+            .retry_requires_sequence_order_requeue(&[sequenced])
+            .await
+    );
+
+    // A batch that never got a sequence stamped cannot be gated.
+    let unsequenced = ready_batch("orders", 0);
+    assert!(
+        !dispatcher
+            .retry_requires_sequence_order_requeue(&[unsequenced])
+            .await
+    );
+
+    // A non-idempotent dispatcher never requeues for sequence order.
+    let non_idempotent = ProducerDispatcher::new(test_wire());
+    let batch = sequenced_batch("orders", 0, 1);
+    assert!(
+        !non_idempotent
+            .retry_requires_sequence_order_requeue(&[batch])
+            .await
+    );
+}
+
 #[tokio::test]
 async fn retryable_broker_error_fails_definitively_when_attempts_exhausted_like_java() {
     // Kafka Sender.canRetry stops retrying once attempts are exhausted: the
