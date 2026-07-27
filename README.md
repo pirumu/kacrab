@@ -490,7 +490,7 @@ every nullable field. Measured effect, edges covered:
 | --- | ---: | ---: |
 | `record_batch_decode` | 150 | **984** |
 | `record_batch_framed` | 774 | **1591** |
-| `response_decode` | — | **11899** |
+| `response_decode` | — | **14740** |
 | `decompress` | — | **1230** |
 | `frame_decode` | — | **79** |
 | `consumer_protocol_metadata` | — | **386** |
