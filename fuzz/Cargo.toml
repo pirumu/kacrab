@@ -50,6 +50,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "consumer_protocol_metadata"
+path = "fuzz_targets/consumer_protocol_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "frame_decode"
 path = "fuzz_targets/frame_decode.rs"
 test = false

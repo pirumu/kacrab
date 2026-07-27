@@ -31,8 +31,24 @@ const MAGIC_V2: u8 = 2;
 fuzz_target!(|data: &[u8]| {
     // `data` is the CRC-covered region: attributes(2) | lastOffsetDelta(4) |
     // firstTimestamp(8) | maxTimestamp(8) | producerId(8) | producerEpoch(2) |
-    // baseSequence(4) | recordCount(4) | records[..]. Shorter inputs are still
-    // useful — they exercise the truncation paths inside the batch body.
+    // baseSequence(4) | recordCount(4) | records[..].
+    //
+    // Padded to at least 40 bytes because `RecordBatch::decode` rejects
+    // `batch_length < BATCH_HEADER_SIZE` (49) before it validates CRC or reads
+    // any field (record/batch.rs). Since the harness sets
+    // `batch_length = 9 + data.len()`, anything shorter than 40 takes one early
+    // return and contributes nothing — a fifth of the mutation budget wasted on
+    // inputs that cannot reach the decoder.
+    const MIN_CRC_PAYLOAD: usize = 40;
+    let mut padded;
+    let data = if data.len() < MIN_CRC_PAYLOAD {
+        padded = data.to_vec();
+        padded.resize(MIN_CRC_PAYLOAD, 0);
+        padded.as_slice()
+    } else {
+        data
+    };
+
     let mut body = Vec::with_capacity(data.len() + 9);
     body.extend_from_slice(&0_i32.to_be_bytes()); // partitionLeaderEpoch
     body.push(MAGIC_V2);

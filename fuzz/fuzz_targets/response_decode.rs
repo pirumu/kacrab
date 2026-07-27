@@ -8,14 +8,21 @@
 //! Input layout is `[api_key, version, body..]`. The first byte is the real
 //! Kafka API key (`ApiKey::Produce == 0`, `Fetch == 1`, …) rather than an index
 //! into a list, so a seed file is self-describing and stays valid when this
-//! match grows. `tools/gen-fuzz-corpus` writes seeds in exactly this shape from
+//! match grows. `generate_fuzz_corpus` in `kacrab-protocol/tests/java_interop.rs` writes seeds in this shape from
 //! the same fixtures the Java oracle uses.
 //!
 //! Versions are deliberately unclamped: an out-of-range version must produce
 //! `UnsupportedVersion`, never a panic.
 //!
-//! Coverage here is the client-facing responses, not all 93 API keys — the
-//! broker-internal and KRaft controller RPCs are never parsed by this client.
+//! Coverage is every API key this client actually issues — all 67 of them,
+//! enumerated against the crate rather than picked by hand, since a
+//! hand-picked "hot path" set had quietly missed 15.
+//!
+//! The other 26 generated API keys are deliberately absent and are not a gap.
+//! Responses are dispatched by the correlation id of a request this client
+//! sent, so a decoder for an API the client never issues cannot be reached: a
+//! broker cannot make us parse `LeaderAndIsrResponse` when we never sent
+//! `LeaderAndIsr`. Unreachable code is not attack surface.
 
 #![no_main]
 
@@ -52,14 +59,21 @@ fn decode(api_key: u8, version: i16, body: &mut Bytes) -> bool {
         24 => drop(AddPartitionsToTxnResponseData::read(body, version)),
         25 => drop(AddOffsetsToTxnResponseData::read(body, version)),
         26 => drop(EndTxnResponseData::read(body, version)),
+        27 => drop(WriteTxnMarkersResponseData::read(body, version)),
         28 => drop(TxnOffsetCommitResponseData::read(body, version)),
         29 => drop(DescribeAclsResponseData::read(body, version)),
         30 => drop(CreateAclsResponseData::read(body, version)),
         31 => drop(DeleteAclsResponseData::read(body, version)),
         32 => drop(DescribeConfigsResponseData::read(body, version)),
+        33 => drop(AlterConfigsResponseData::read(body, version)),
+        34 => drop(AlterReplicaLogDirsResponseData::read(body, version)),
         35 => drop(DescribeLogDirsResponseData::read(body, version)),
         36 => drop(SaslAuthenticateResponseData::read(body, version)),
         37 => drop(CreatePartitionsResponseData::read(body, version)),
+        38 => drop(CreateDelegationTokenResponseData::read(body, version)),
+        39 => drop(RenewDelegationTokenResponseData::read(body, version)),
+        40 => drop(ExpireDelegationTokenResponseData::read(body, version)),
+        41 => drop(DescribeDelegationTokenResponseData::read(body, version)),
         42 => drop(DeleteGroupsResponseData::read(body, version)),
         43 => drop(ElectLeadersResponseData::read(body, version)),
         44 => drop(IncrementalAlterConfigsResponseData::read(body, version)),
@@ -74,12 +88,21 @@ fn decode(api_key: u8, version: i16, body: &mut Bytes) -> bool {
         57 => drop(UpdateFeaturesResponseData::read(body, version)),
         60 => drop(DescribeClusterResponseData::read(body, version)),
         61 => drop(DescribeProducersResponseData::read(body, version)),
+        64 => drop(UnregisterBrokerResponseData::read(body, version)),
         65 => drop(DescribeTransactionsResponseData::read(body, version)),
         66 => drop(ListTransactionsResponseData::read(body, version)),
         68 => drop(ConsumerGroupHeartbeatResponseData::read(body, version)),
         69 => drop(ConsumerGroupDescribeResponseData::read(body, version)),
+        71 => drop(GetTelemetrySubscriptionsResponseData::read(body, version)),
+        72 => drop(PushTelemetryResponseData::read(body, version)),
         74 => drop(ListConfigResourcesResponseData::read(body, version)),
         77 => drop(ShareGroupDescribeResponseData::read(body, version)),
+        80 => drop(AddRaftVoterResponseData::read(body, version)),
+        81 => drop(RemoveRaftVoterResponseData::read(body, version)),
+        89 => drop(StreamsGroupDescribeResponseData::read(body, version)),
+        90 => drop(DescribeShareGroupOffsetsResponseData::read(body, version)),
+        91 => drop(AlterShareGroupOffsetsResponseData::read(body, version)),
+        92 => drop(DeleteShareGroupOffsetsResponseData::read(body, version)),
         _ => return false,
     }
     true

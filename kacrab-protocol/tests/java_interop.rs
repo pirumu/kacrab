@@ -511,6 +511,30 @@ fn fuzz_seed_dir(target: &str) -> TestResult<PathBuf> {
     Ok(dir)
 }
 
+/// Empty a generated seed directory before rewriting it.
+///
+/// Without this the generator is not idempotent. The committed seeds carry
+/// libFuzzer's SHA-1 filenames because they were passed through
+/// `cargo fuzz cmin` after generation, while `write_seed` emits readable names —
+/// so a second run would deposit a parallel set of name-based duplicates beside
+/// the minimised ones rather than refresh them, and the corpus would grow every
+/// time someone regenerated it.
+///
+/// Only the directories this generator owns are cleared. The seeds for
+/// `frame_decode`, `jaas_option`, `oauth_http_response`, and the three `scram_*`
+/// targets are hand-written — they are not derivable from the protocol fixtures
+/// — and are left alone.
+fn clear_seed_dir(target: &str) -> TestResult {
+    let dir = fuzz_seed_dir(target)?;
+    for entry in fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path.is_file() {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
 fn write_seed(target: &str, name: &str, bytes: &[u8]) -> TestResult {
     fs::write(fuzz_seed_dir(target)?.join(name), bytes)?;
     Ok(())
@@ -559,6 +583,46 @@ fn write_response_seeds() -> TestResult<usize> {
         seed.extend_from_slice(&body);
         write_seed(
             "response_decode",
+            &format!(
+                "{}_v{}_{}",
+                case.schema_name.to_lowercase(),
+                case.version,
+                case.fixture
+            ),
+            &seed,
+        )?;
+        written = written.saturating_add(1);
+    }
+    Ok(written)
+}
+
+/// Seeds for `consumer_protocol_metadata`, laid out as
+/// `[selector, version_hi, version_lo, body..]`.
+///
+/// These two schemas are not API keys — they travel as opaque `Bytes` inside
+/// `JoinGroupResponse.members[].metadata`, `SyncGroupResponse.assignment`, and
+/// `DescribeGroupsResponse.member_assignment` — so `write_response_seeds` skips
+/// them and they need their own writer. The call sites strip a two-byte version
+/// prefix before decoding, and the seed reproduces that framing.
+fn write_consumer_protocol_seeds() -> TestResult<usize> {
+    let mut written = 0_usize;
+    for case in generated_test_utils::protocol_cases() {
+        let selector = match case.schema_name {
+            "ConsumerProtocolSubscription" => 0_u8,
+            "ConsumerProtocolAssignment" => 1_u8,
+            _ => continue,
+        };
+        let Ok(encoded) = (case.rust_encode)(case.version) else {
+            continue;
+        };
+        let body = decode_hex(&encoded)?;
+
+        let mut seed = Vec::with_capacity(body.len().saturating_add(3));
+        seed.push(selector);
+        seed.extend_from_slice(&case.version.to_be_bytes());
+        seed.extend_from_slice(&body);
+        write_seed(
+            "consumer_protocol_metadata",
             &format!(
                 "{}_v{}_{}",
                 case.schema_name.to_lowercase(),
@@ -713,21 +777,53 @@ fn write_decompress_seeds() -> TestResult<usize> {
 ///   generate_fuzz_corpus
 /// ```
 ///
+/// Regeneration is a two-step workflow — this test, then minimisation:
+///
+/// ```bash
+/// cargo test -p kacrab-protocol --test java_interop -- --ignored --nocapture \
+///   generate_fuzz_corpus
+/// for t in response_decode consumer_protocol_metadata record_batch_decode \
+///          record_batch_framed decompress; do
+///   cargo +nightly fuzz cmin "$t" "fuzz/seeds/$t"
+/// done
+/// ```
+///
 /// The seeds are committed so CI and a fresh clone start from the same
 /// population; libFuzzer's own runtime growth in `fuzz/corpus/` is gitignored.
+///
+/// Seed size matters beyond coverage: libFuzzer derives `-max_len` from the
+/// largest file in the supplied corpus when the flag is unset, so an
+/// unrepresentatively small seed silently caps input size. The workflow sets
+/// `-max_len` explicitly to keep the two independent.
 #[test]
 #[ignore = "writes seed corpora into fuzz/corpus/; run explicitly"]
 fn generate_fuzz_corpus() -> TestResult {
+    for target in [
+        "response_decode",
+        "consumer_protocol_metadata",
+        "record_batch_decode",
+        "record_batch_framed",
+        "decompress",
+    ] {
+        clear_seed_dir(target)?;
+    }
+
     let responses = write_response_seeds()?;
+    let member_metadata = write_consumer_protocol_seeds()?;
     let (raw, framed) = write_record_batch_seeds()?;
     let decompress = write_decompress_seeds()?;
 
     println!("response_decode:     {responses} seeds");
+    println!("consumer_protocol:   {member_metadata} seeds");
     println!("record_batch_decode: {raw} seeds");
     println!("record_batch_framed: {framed} seeds");
     println!("decompress:          {decompress} seeds");
 
     assert!(responses > 0, "response corpus should not be empty");
+    assert!(
+        member_metadata > 0,
+        "consumer-protocol corpus should not be empty"
+    );
     assert!(raw > 0, "record-batch corpus should not be empty");
     assert!(framed > 0, "framed record-batch corpus should not be empty");
     assert!(decompress > 0, "decompress corpus should not be empty");

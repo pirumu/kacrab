@@ -17,11 +17,13 @@ fuzz_target!(|data: &[u8]| {
     let Some((selector, payload)) = data.split_first() else {
         return;
     };
-    let codec = match selector % 5 {
-        0 => Compression::None,
-        1 => Compression::Gzip,
-        2 => Compression::Snappy,
-        3 => Compression::Lz4,
+    // Four codecs, not five: `Compression::None::decompress` is `payload.to_vec()`
+    // (compression.rs:183), so including it spent one execution in five on a
+    // memcpy that produces no coverage.
+    let codec = match selector % 4 {
+        0 => Compression::Gzip,
+        1 => Compression::Snappy,
+        2 => Compression::Lz4,
         _ => Compression::Zstd,
     };
 

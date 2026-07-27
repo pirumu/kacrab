@@ -11,9 +11,21 @@ name: fuzz
 # those on a parse path is a denial of service, so these paths need input no
 # test writes by hand.
 #
-# -timeout is load-bearing here, not boilerplate: a server-controlled PBKDF2
-# iteration count is CPU amplification, and it surfaces as a libFuzzer timeout
-# rather than as a crash.
+# Three libFuzzer flags carry real weight here and are set deliberately:
+#
+#   -max_len          libFuzzer's default is NOT 4096 when a corpus is supplied:
+#                     it is the size of the largest file in it. The committed
+#                     seeds are small, so leaving this unset silently capped
+#                     frame_decode at 12 bytes -- worse than running with no
+#                     seeds at all. Always set it explicitly.
+#   -malloc_limit_mb  Bounds a *single* allocation, and defaults to the rss
+#                     limit. At 4096 it could not see the 100 MB preallocation a
+#                     49-byte record batch can request, which is the exact class
+#                     of bug this suite already caught once in Record::decode.
+#   -timeout          Catches CPU amplification, which surfaces as a hang rather
+#                     than a crash. Tuned per target: the SCRAM targets run
+#                     PBKDF2 up to MAX_SCRAM_ITERATIONS legitimately, so their
+#                     bound sits just above that cost, not at a round number.
 #
 # Two cadences. Every PR that touches a fuzzed parser gets a short smoke run
 # (60s per target) seeded from the committed corpus, which catches an obvious
@@ -106,6 +118,44 @@ jobs:
       # unseeded. The dictionary supplies the sentinels random mutation will
       # never find, above all the -1 length prefix that gates every nullable
       # field.
+      # The working corpus is restored from and saved back to the cache, so
+      # nightly runs compound instead of restarting from the committed seeds
+      # every time. Keyed by run id with a target prefix so each run writes a
+      # fresh entry and restores the newest previous one.
+      - name: Restore corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      # SCRAM targets legitimately run up to MAX_SCRAM_ITERATIONS (1e6) HMAC
+      # rounds per input under a sanitizer, so they need both a longer timeout
+      # and a smaller max_len than the decoders.
+      - name: Set libFuzzer bounds
+        id: bounds
+        run: |
+          # malloc: 64 MiB is a tripwire for the preallocation class this suite
+          # already caught in Record::decode. It cannot apply to the targets that
+          # decompress: MAX_DECOMPRESSED_LEN deliberately allows 1 GiB (roughly
+          # 10:1 over the 100 MiB frame cap), so a legitimate expansion would
+          # trip a 64 MiB limit. Those get a bound just above the crate's own.
+          case "${{ matrix.target }}" in
+            scram_server_first_nonced) echo "max_len=512"  >> "$GITHUB_OUTPUT"
+                                       echo "timeout=60"   >> "$GITHUB_OUTPUT"
+                                       echo "malloc=64"    >> "$GITHUB_OUTPUT" ;;
+            scram_*|jaas_option)       echo "max_len=1024" >> "$GITHUB_OUTPUT"
+                                       echo "timeout=10"   >> "$GITHUB_OUTPUT"
+                                       echo "malloc=64"    >> "$GITHUB_OUTPUT" ;;
+            record_batch_*|decompress) echo "max_len=8192" >> "$GITHUB_OUTPUT"
+                                       echo "timeout=10"   >> "$GITHUB_OUTPUT"
+                                       echo "malloc=1100"  >> "$GITHUB_OUTPUT" ;;
+            *)                         echo "max_len=8192" >> "$GITHUB_OUTPUT"
+                                       echo "timeout=10"   >> "$GITHUB_OUTPUT"
+                                       echo "malloc=64"    >> "$GITHUB_OUTPUT" ;;
+          esac
+
       - name: Fuzz ${{ matrix.target }}
         run: |
           mkdir -p fuzz/corpus/${{ matrix.target }}
@@ -114,8 +164,16 @@ jobs:
             fuzz/seeds/${{ matrix.target }} -- \
             -dict=fuzz/kafka.dict \
             -max_total_time=${{ steps.duration.outputs.seconds }} \
-            -timeout=25 \
+            -max_len=${{ steps.bounds.outputs.max_len }} \
+            -timeout=${{ steps.bounds.outputs.timeout }} \
+            -malloc_limit_mb=${{ steps.bounds.outputs.malloc }} \
             -rss_limit_mb=4096
+
+      # Keep the cached corpus from growing without bound: minimise to the
+      # subset that still carries the coverage before it is saved.
+      - name: Minimise corpus
+        if: success() && github.event_name != 'pull_request'
+        run: cargo +nightly fuzz cmin ${{ matrix.target }} fuzz/corpus/${{ matrix.target }}
 
       # Only produced when libFuzzer found something; the input is the whole
       # reproduction, so it is the one artifact worth keeping.

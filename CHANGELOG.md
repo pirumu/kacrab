@@ -32,6 +32,12 @@ release date and links to relevant pull requests or issues.
   exceed it and enforcing 16384 would break real deployments. 1,000,000 is 244x
   Kafka's default and 61x its tooling ceiling, so no plausible configuration is
   affected, while the work a hostile server can demand stays bounded.
+- **A hostile record count could preallocate ~120 MB from a 49-byte batch.**
+  `RecordBatch::decode` sized its record `Vec` from the wire's `recordCount`,
+  bounded only by `MAX_RECORDS_PER_BATCH` (1,000,000) — which caps the count but
+  still allows a batch of a few dozen bytes to demand hundreds of megabytes. Now
+  clamped by what the payload can actually hold, the same guard `Record::decode`
+  received for its header count. No behaviour change for valid input.
 - **A hostile record header count could OOM the client.** `Record::decode` sized
   its header `Vec` straight from the wire's `headerCount` varint, checking only
   that it was non-negative. A 90-byte record declaring ~486M headers reached
@@ -65,6 +71,14 @@ release date and links to relevant pull requests or issues.
   record count, the varints, or the compressed blob, so random input passes that
   gate with probability 2^-32 and never reaches the decoder. Building correct
   framing around fuzzer-controlled bytes is what surfaced the OOM above.
+- `consumer_protocol_metadata` fuzz target over `ConsumerProtocolSubscription`
+  and `ConsumerProtocolAssignment` — the only decoders in the crate fed by
+  another *client* rather than by the broker or the operator. The group leader
+  decodes every member's subscription, and every follower plus any admin client
+  decodes the assignment, so anyone authorised to join a group reaches them.
+  `response_decode` could not: they travel as opaque `Bytes` inside `JoinGroup`
+  and `SyncGroup` responses with their own version prefix, which both call sites
+  read off the wire and pass to `read` unvalidated.
 - `frame_decode` and `oauth_http_response` fuzz targets, closing the two
   remaining untrusted-input parsers. `frame_decode` covers the length-prefixed
   response frame — the first thing that touches socket bytes, ahead of every
@@ -94,6 +108,21 @@ release date and links to relevant pull requests or issues.
   to 1591; `response_decode` reaches 11899. `response_decode` also now dispatches
   on the real API key byte and covers 50 client-facing response types rather than
   12 behind an arbitrary index.
+
+### Changed
+
+- The fuzz workflow now sets `-max_len`, `-malloc_limit_mb`, and `-timeout`
+  explicitly per target, caches the working corpus between nightly runs so
+  exploration compounds instead of restarting from the committed seeds, and
+  minimises it with `cargo fuzz cmin` before saving. Leaving `-max_len` unset had
+  been silently capping targets at the size of their largest seed — 12 bytes for
+  `frame_decode`, which made committing seeds actively harmful. `response_decode`
+  gained API key 71 (`GetTelemetrySubscriptions`), which was missing from its
+  dispatch. The `frame_decode` guard asserted a frame *count* rather than a
+  shrinking buffer, so 400,004 zero bytes tripped it against a correctly
+  behaving decoder; it now asserts the real invariant. `generate_fuzz_corpus`
+  clears the directories it owns so regeneration replaces rather than
+  accumulates.
 
 ### Documentation
 
