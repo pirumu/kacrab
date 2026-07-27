@@ -76,13 +76,35 @@ release date and links to relevant pull requests or issues.
   Measured against a real broker (20,000 x 4 KiB into a topic with
   `max.message.bytes=65536` and the producer at `batch.size=262144`): before,
   every record failed with `DeliveryTimeout` and nothing was delivered; after,
-  the split converges in the same number of rounds as Java — 1272 splits against
-  Java's 1270 on the identical workload. Throughput on this path is still far
-  below Java's (Java clears the same 20,000 records in about a second; kacrab
-  takes tens of seconds and a share of records can still exhaust `buffer.memory`
-  and fail their `max.block.ms` append deadline). That remaining gap is speed on
-  a deliberately pathological configuration, not a correctness defect, and is
-  tracked as follow-up work rather than fixed here.
+  the split converges in the same number of rounds as Java — 1270 splits on both
+  sides on the identical workload — and kacrab clears the workload at
+  53,591 rec/s (209 MB/s) against Java's 30,349 rec/s (119 MB/s), with average
+  latency 112–136 ms against Java's 161 ms, no retries and no errors.
+- Records could be delivered out of sequence, or a flush fail with
+  `FlushIncomplete`, on any partition where a batch was requeued — most visibly
+  on the `MESSAGE_TOO_LARGE` split path above, which produced 309
+  `OutOfOrderSequenceNumber` responses per run and left the final flush unable
+  to complete. The idempotent in-flight set was released when a batch was
+  requeued, but Kafka's `inflightBatchesBySequence` tracks every batch that
+  holds a sequence and has not terminally completed, including one waiting in
+  the accumulator. The drain gate
+  (`shouldStopDrainBatchesForPartition`) compares a retried batch against that
+  set, so releasing early made the batch measure itself against *other*, higher
+  sequences and defer indefinitely while fresh batches kept going out — the
+  broker saw the partition's sequence run backwards. The registration now
+  survives a requeue; a split hands it from parent to children the way
+  `RecordAccumulator.splitAndReenqueue` does; and the two paths that abandon
+  batches instead of re-dispatching them (a flush with no accumulator to hand
+  them back to, an abort that discards buffered work) release it explicitly.
+- A partition could stop making progress after a split even though its batches
+  were still buffered, surfacing as `FlushIncomplete` with records left
+  unsent. Only one produce request is started per partition per selection, and
+  the drain gate admits only the batch holding the partition's first in-flight
+  sequence; the selection picked whichever batch the drain returned first, which
+  after a split re-enqueues several children at once could be a higher-sequence
+  sibling. The gate then deferred that pick every cycle while the batch that
+  would unblock the partition was never selected. Selection now takes the lowest
+  base sequence, matching Kafka's deque head.
 - A `MESSAGE_TOO_LARGE` split that produced more than one child reported every
   record outside the first child as `DeliveryDropped`. The whole batch's delivery
   state went to child 0 and the other children were left with none, so their
