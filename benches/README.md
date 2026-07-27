@@ -10,8 +10,10 @@ configs on both sides — full tables under
 [Real-Kafka Producer Baselines](#real-kafka-producer-baselines) and
 [Real-Kafka Consumer Baselines](#real-kafka-consumer-baselines)):
 
-- **Producer**: ~+25% records/sec over Java `kafka-producer-perf-test` at
-  `acks=all` + idempotence, with ~3.9x less peak RSS and ~1.5x less CPU.
+- **Producer** (re-measured 2026-07-27): **+35%** records/sec over Java
+  `kafka-producer-perf-test` on 5M x 10 B and **+15%** on 100K x 10 KiB, at
+  `acks=all` + idempotence, with ~3.9x less peak RSS and ~1.5x less CPU. Pinned to
+  Java's own rate, kacrab's latency is lower at every percentile.
 - **Consumer**: ~1.9x (10 B records) to ~4x (10 KiB records) Java's
   `kafka-consumer-perf-test` throughput, at ~16-20x less peak RSS and ~9-17x
   less CPU, with group joins ~15x faster.
@@ -369,14 +371,23 @@ kafka-producer-perf-test.sh --topic kacrab-16p --num-records 5000000 \
   bootstrap.servers=127.0.0.1:9092 acks=all enable.idempotence=true
 ```
 
+Medians of 5 interleaved kacrab/Java pairs, 2026-07-27, on the corrected bench and
+with the co-located head-batch sweep in place. Both `MB/sec` columns come from the
+same summary line and are computed identically on both sides.
+
 | Metric | kacrab | Java `kafka-producer-perf-test` |
 | --- | ---: | ---: |
-| Throughput | ~4.79-4.86M rec/sec (46.3 MiB/sec) | 3.80-3.84M rec/sec |
-| Latency avg | ~1.7 ms | ~0.38 ms |
-| Latency p99 | ~13 ms | ~3 ms |
+| Throughput | **5.00M rec/sec (47.6 MB/sec)** | 3.70M rec/sec (35.3 MB/sec) |
+| Latency avg | 0.61 ms | **0.35 ms** |
+| Latency p50 / p95 / p99 | 0 / 5 / 6 ms | **0 / 1 / 2 ms** |
+| Latency max | **12 ms** | 127 ms |
 | retries / errors | 0 / 0 | 0 / 0 |
 
-kacrab wins throughput (about +25% over Java) while staying fully
+Previous revision of this table (2026-07-02, before the sweep) read
+~4.79-4.86M rec/sec at ~1.7 ms avg / ~13 ms p99 — the sweep raised throughput and
+cut latency at the same time.
+
+kacrab wins throughput (about +35% over Java on this workload) while staying fully
 idempotent-correct. Java shows lower typical latency in this table, but the two
 sides are not at the same offered load — see
 [Matched-load latency](#matched-load-latency), where kacrab wins once both are
@@ -432,19 +443,21 @@ network RTT).
 
 ### Throughput + latency (100K x 10 KiB, 3 partitions, default `batch.size`)
 
+Medians of 5 interleaved pairs, 2026-07-27, corrected bench:
+
 | Metric | kacrab | Java `kafka-producer-perf-test` |
 | --- | ---: | ---: |
-| Throughput | ~55.5-58.4K rec/sec (~542-570 MB/sec) | 42.7-46.4K rec/sec (417-453 MB/sec) |
-| Latency avg / p99 | ~36 ms / ~78 ms ⚠️ | ~43 ms / ~92 ms |
+| Throughput | **49.5K rec/sec (483 MB/sec)** | 43.0K rec/sec (420 MB/sec) |
+| Latency avg | **40.5 ms** | 43.1 ms |
+| Latency p50 / p95 / p99 | **39 / 48** / 85 ms | 41 / 64 / **83** ms |
+| Latency max | **92 ms** | 133 ms |
 | retries / errors | 0 / 0 | 0 / 0 |
 
-⚠️ **This latency row is the most distorted of the whole set — do not read it as
-kacrab beating Java.** At ~570 MB/sec of 10 KiB records the 32 MiB producer
-buffer refills far faster than the drain empties it, so this scenario is
-backpressure-saturated: a large share of these records went through the retry
-path that used to reset the per-record clock, and their buffer wait is missing
-from the ~36 ms / ~78 ms. Java's ~43 ms / ~92 ms includes its full blocking wait.
-The apparent kacrab win here may not survive a re-run on the corrected bench.
+The 2026-07-02 revision of this row read ~542-570 MB/sec for kacrab against
+417-453 MB/sec for Java. That gap was inflated: it quoted kacrab's own `MiB/s`
+summary line against Java's `MB/sec` line. Read from the same line on both sides,
+the 10 KiB throughput lead is **+15%**, not +25-30%. The latency figures held up
+on re-measurement (~36 ms then, ~40.5 ms now, within run-to-run spread).
 
 A 10 KiB record exceeds half of the default 16 KiB `batch.size`, so every batch
 holds one record; throughput stays high because each `acks=all` produce request
@@ -579,9 +592,13 @@ sample counts, and the accumulator benchmark uses `BatchSize::LargeInput`):
   target. The baselines above run the default `acks=all` + idempotence config;
   the relaxed `acks=1` / no-idempotence config is opt-in via
   `KACRAB_BENCH_ACKS1=1`.
-- kacrab producer throughput prints payload MiB/sec while Kafka's Java producer
-  perf tool prints decimal MB/sec, so those two columns are not the same unit
-  (the consumer benches compute identical mebibyte columns on both sides).
+- The `records sent, … MB/sec` summary line is the comparable one: Java computes
+  `1000 * bytes / elapsed / (1024 * 1024)` and labels it `MB/sec`
+  (`ProducerPerformance.java:508`), and kacrab's port does exactly the same, so both
+  columns are mebibytes under a `MB` label and compare directly. kacrab *also*
+  prints its own `MiB/s` scenario line; quoting that one against Java's `MB/sec`
+  mixes two different lines and overstates the gap, which an earlier revision of
+  the 10 KiB table did.
 - The executable Rust benches port Kafka Java `ProducerPerformance.Stats` /
   `ConsumerPerformance` sampling, window reporting, total summary, and
   callback-success-only accounting, plus a coarse `/usr/bin/time -l` CPU-time

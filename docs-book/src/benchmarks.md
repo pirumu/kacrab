@@ -14,31 +14,38 @@ Measured against native Apache Kafka 4.3.0 single-node KRaft on the same machine
 through the public producer API at the **default** Kafka-compatible config
 (`acks=all`, `enable.idempotence=true`, no compression):
 
-| Metric (5M × 10B, 16 partitions, 2026-07-02) | kacrab | Java `kafka-producer-perf-test` |
+Medians of 5 interleaved kacrab/Java pairs, 2026-07-27. Both `MB/s` columns come
+from the same summary line, computed identically on both sides (Java divides by
+`1024 * 1024` and labels it `MB/sec`; kacrab's port matches).
+
+| Metric (5M × 10B, 16 partitions) | kacrab | Java `kafka-producer-perf-test` |
 |---|---:|---:|
-| Throughput | ~4.79–4.86M rec/s (≈46.3 MiB/s) | 3.80–3.84M rec/s |
-| Latency avg | ~1.7 ms | ~0.38 ms |
-| Latency p99 | ~13 ms | ~3 ms |
+| Throughput | **5.00M rec/s (47.6 MB/s)** | 3.70M rec/s (35.3 MB/s) |
+| Latency avg | 0.61 ms | **0.35 ms** |
+| Latency p50 / p95 / p99 | 0 / 5 / 6 ms | **0 / 1 / 2 ms** |
+| Latency max | **12 ms** | 127 ms |
 | retries / errors | 0 / 0 | 0 / 0 |
 
 | Metric (100K × 10 KiB, 3 partitions, default `batch.size`) | kacrab | Java |
 |---|---:|---:|
-| Throughput | ~542–570 MB/s (55.5–58.4K rec/s) | 417–453 MB/s (42.7–46.4K rec/s) |
-| Latency avg / p99 | ~36 ms / ~78 ms | ~43 ms / ~92 ms |
+| Throughput | **49.5K rec/s (483 MB/s)** | 43.0K rec/s (420 MB/s) |
+| Latency avg | **40.5 ms** | 43.1 ms |
+| Latency p50 / p95 / p99 | **39 / 48** / 85 ms | 41 / 64 / **83** ms |
+| Latency max | **92 ms** | 133 ms |
 
 | Resource (same 10B workload, `/usr/bin/time -l`, 2026-06-28) | kacrab | Java | Java overhead |
 |---|---:|---:|---:|
 | Peak RSS | ~68 MiB | ~268 MiB | **~3.9×** |
 | Total CPU (user+sys) | ~2.7 s | ~4.1 s | **~1.5×** |
 
-## Where the +25–28% comes from
+## Where the throughput lead comes from
 
 Throughput here is **broker-bound**: both clients spend most of the run waiting
 on `acks=all` round trips, so cheaper per-record CPU barely moves the needle.
 kacrab's records/sec edge comes from keeping the broker's write path busier —
 a deeper per-partition pipeline plus coalescing one ready batch from every
 partition into each produce request (on 10 KiB records, where each batch holds a
-single record, that coalescing is the entire difference between ~540 MB/s and
+single record, that coalescing is the entire difference between ~480 MB/s and
 one-record-per-round-trip collapse). The native-vs-JVM win also shows up in
 efficiency: ~4× less resident memory (no JVM heap/metaspace) and ~1.5× less CPU
 per record. The Java CPU figure also includes one-time JVM startup + JIT warmup
