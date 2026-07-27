@@ -456,9 +456,9 @@ decoders that parse untrusted broker bytes are separately fuzzed for the other
 half — garbage, truncation, hostile length prefixes — because `forbid(unsafe_code)`
 rules out memory corruption but not a panic, an unbounded allocation, or a
 non-terminating loop, and a panic on a client's decode path is a denial of
-service. Four [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
-cover record-batch decoding, the generated response structs, and every
-compression codec:
+service. Eight [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
+cover record-batch decoding, the generated response structs, every compression
+codec, and the SASL handshake:
 
 ```bash
 cargo +nightly fuzz run record_batch_framed \
@@ -490,6 +490,25 @@ every nullable field. Measured effect, edges covered:
 | `record_batch_framed` | 774 | **1591** |
 | `response_decode` | — | **11899** |
 | `decompress` | — | **1230** |
+| `scram_server_first` | — | **271** |
+| `scram_server_first_nonced` | 199 | **742** |
+| `scram_server_final` | — | **322** |
+| `jaas_option` | — | **137** |
+
+**The SASL targets are the ones that matter most.** SCRAM is mutual
+authentication, but the client only proves the *server* at server-final — so
+everything the server-first parser touches is reachable by anyone who can answer
+on the broker's address. Those parsers are `pub(crate)`, so `kacrab` exposes them
+to `fuzz/` as `fn(&[u8])` shims behind an internal `__fuzzing` feature that is
+`#[doc(hidden)]`, off by default, and exempt from semver.
+
+`scram_server_first` gets the same two-target treatment as record batches, for
+the same reason. `client_final` rejects any server-first whose nonce does not
+extend the client's own randomly generated nonce, which a fuzzer cannot guess, so
+raw bytes stall at 199 edges and never reach the salt decode or the PBKDF2
+derivation. `scram_server_first_nonced` satisfies that gate in the harness so
+mutations land on the fields behind it — which is how the unbounded iteration
+count below became reproducible.
 
 Record batches get two targets, and the reason is worth stating because it is
 the difference between fuzzing and the appearance of it. `decode_next_batch`

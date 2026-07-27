@@ -1,12 +1,20 @@
 name: fuzz
 
-# Fuzzes the decoders that parse untrusted broker bytes: record batches,
-# generated response structs, and the compression codecs. `forbid(unsafe_code)`
-# rules out memory corruption but not a panic, an unbounded allocation, or a
-# non-terminating loop — and in a client, a panic on the decode path is a denial
-# of service, so these paths need input no test writes by hand.
+# Fuzzes the parsers that read untrusted bytes: record batches, generated
+# response structs, the compression codecs, and the SASL handshake. The SASL
+# targets matter most -- SCRAM proves the server only at server-final, so those
+# parsers run against a peer that has not authenticated yet.
 #
-# Two cadences. Every PR that touches the protocol crate gets a short smoke run
+# `forbid(unsafe_code)` rules out memory corruption but not a panic, an
+# unbounded allocation, or a non-terminating loop — and in a client, any of
+# those on a parse path is a denial of service, so these paths need input no
+# test writes by hand.
+#
+# -timeout is load-bearing here, not boilerplate: a server-controlled PBKDF2
+# iteration count is CPU amplification, and it surfaces as a libFuzzer timeout
+# rather than as a crash.
+#
+# Two cadences. Every PR that touches a fuzzed parser gets a short smoke run
 # (60s per target) seeded from the committed corpus, which catches an obvious
 # regression without slowing the merge. The nightly run is the real one: 15
 # minutes per target, and it uploads any crashing input as an artifact.
@@ -24,6 +32,9 @@ on:
   pull_request:
     paths:
       - "kacrab-protocol/**"
+      # The SASL handshake parsers the scram_* and jaas_option targets drive.
+      - "kacrab/src/wire/auth.rs"
+      - "kacrab/src/lib.rs"
       - "fuzz/**"
       - ".github/workflows/fuzz.yml"
 
@@ -52,6 +63,10 @@ jobs:
           - record_batch_framed
           - response_decode
           - decompress
+          - scram_server_first
+          - scram_server_first_nonced
+          - scram_server_final
+          - jaas_option
     steps:
       - uses: actions/checkout@v4
 
@@ -96,6 +111,7 @@ jobs:
             fuzz/seeds/${{ matrix.target }} -- \
             -dict=fuzz/kafka.dict \
             -max_total_time=${{ steps.duration.outputs.seconds }} \
+            -timeout=25 \
             -rss_limit_mb=4096
 
       # Only produced when libFuzzer found something; the input is the whole

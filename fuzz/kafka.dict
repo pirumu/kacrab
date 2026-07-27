@@ -83,3 +83,25 @@ gzip_magic="\x1f\x8b\x08"
 zstd_magic="\x28\xb5\x2f\xfd"
 lz4_magic="\x04\x22\x4d\x18"
 snappy_kafka_magic="\x82SNAPPY\x00"
+
+# --- SASL / SCRAM ------------------------------------------------------------
+# The server-first and server-final attribute keys. Without these the mutator
+# has to invent "r=", ",s=", ",i=" from scratch and never reaches the salt
+# decode or the PBKDF2 derivation behind them.
+scram_nonce="r="
+scram_salt=",s="
+scram_iterations=",i="
+scram_error="e="
+scram_verifier="v="
+scram_gs2_biws="c=biws,"
+# A realistic iteration count, and the shapes that probe for a missing bound.
+scram_iter_default=",i=4096"
+scram_iter_huge=",i=4294967295"
+scram_iter_one=",i=1"
+# Base64 alphabet edges for the salt decode.
+b64_padding="=="
+b64_sample="QSXCR+Q6sek8bf92"
+# JAAS config delimiters and the key names the parser scans for.
+jaas_username="username="
+jaas_password="password="
+jaas_terminator=";"

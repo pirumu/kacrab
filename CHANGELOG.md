@@ -11,6 +11,27 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **A server could pin a client CPU through the SCRAM iteration count, and could
+  silently weaken key derivation.** `ScramServerFirst::parse` accepted any
+  non-zero `i=` value from the server-first message and handed it straight to
+  `salted_password`, which runs one HMAC per iteration. The count is not data the
+  client stores, it is work the client performs — and it arrives *before* the
+  server is authenticated, since SCRAM proves the server only at server-final. A
+  reply of `i=4294967295` therefore pins a core for minutes per connection, from
+  anyone who can answer on the broker's address. Separately, accepting counts
+  below 4096 let a server downgrade the derivation to as little as one iteration;
+  Java's client rejects those (`ScramSaslClient.java:127` against
+  `ScramMechanism.minIterations`), so this was also a parity gap.
+
+  The accepted range is now `[4096, 1_000_000]`. The minimum is Kafka's own
+  `minIterations`. The maximum is deliberately *not* Kafka's declared
+  `maxIterations` of 16384: that ceiling is only applied by the
+  `kafka-storage add-scram` tool (`ScramParser.java:189`), while the controller's
+  `AlterUserScramCredentials` path checks the minimum alone
+  (`ScramControlManager.java:290`), so a legitimately provisioned credential can
+  exceed it and enforcing 16384 would break real deployments. 1,000,000 is 244x
+  Kafka's default and 61x its tooling ceiling, so no plausible configuration is
+  affected, while the work a hostile server can demand stays bounded.
 - **A hostile record header count could OOM the client.** `Record::decode` sized
   its header `Vec` straight from the wire's `headerCount` varint, checking only
   that it was non-negative. A 90-byte record declaring ~486M headers reached
@@ -44,6 +65,15 @@ release date and links to relevant pull requests or issues.
   record count, the varints, or the compressed blob, so random input passes that
   gate with probability 2^-32 and never reaches the decoder. Building correct
   framing around fuzzer-controlled bytes is what surfaced the OOM above.
+- Four fuzz targets over the SASL handshake — `scram_server_first`,
+  `scram_server_first_nonced`, `scram_server_final`, and `jaas_option` — reaching
+  the parsers that run against a peer which has not authenticated yet. They reach
+  crate-private code through a new internal `__fuzzing` feature on `kacrab` that
+  exposes thin `fn(&[u8])` shims; it is `#[doc(hidden)]`, off by default, and
+  exempt from semver. `scram_server_first` needs two targets for the same reason
+  record batches do: the client-nonce check is unguessable, so raw bytes stall at
+  199 edges while the nonce-satisfying variant reaches 742 and made the iteration
+  count above reproducible.
 - A committed seed corpus (`fuzz/seeds/`) and a Kafka wire-format dictionary
   (`fuzz/kafka.dict`) for the fuzz targets. The seeds are generated from the same
   fixtures the Java oracle matrix uses — every generated message, at every schema
