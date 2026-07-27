@@ -19,7 +19,10 @@ mod sasl;
 mod socket;
 mod tls;
 
-#[cfg(feature = "producer")]
+// The consumer's coordinator path uses the same exponential backoff as the
+// producer (`FindCoordinator` while `__consumer_offsets` loads), so a
+// consumer-only build needs these too.
+#[cfg(any(feature = "producer", feature = "consumer"))]
 pub(crate) use self::backoff::{BackoffPolicy, BackoffState};
 #[cfg(feature = "producer")]
 pub(crate) use self::broker::PendingBrokerResponse;

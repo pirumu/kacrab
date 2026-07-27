@@ -71,6 +71,26 @@ jobs:
       - name: Test (workspace, all features)
         run: make test
 
+  # Every gate above runs `--all-features`, which is exactly the configuration
+  # no user has. A shared internal re-exported under only one surface's cfg
+  # therefore compiles here and fails for whoever enables one feature — that is
+  # how `--features consumer` alone stayed broken (`wire::BackoffPolicy` was
+  # gated on `producer` while the consumer's FindCoordinator retry uses it).
+  # This job builds what users actually select.
+  feature-matrix:
+    name: feature matrix (each surface on its own)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pinned Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build every feature selection a user can make
+        run: make check-features
+
   coverage:
     name: coverage (llvm-cov)
     runs-on: ubuntu-latest

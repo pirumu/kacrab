@@ -1513,14 +1513,25 @@ mod tests {
         assert!(fresh_rx.await.is_err());
     }
 
+    /// Build a `BrokerHandle` without a broker task behind it.
+    ///
+    /// `capabilities` only exists under the surfaces that read a negotiated
+    /// version, so the literal has to carry the same gate the field does — a
+    /// test that names the field unconditionally breaks an admin-only or
+    /// feature-less build.
+    fn test_broker_handle(tx: mpsc::Sender<RequestCommand>) -> BrokerHandle {
+        BrokerHandle {
+            tx,
+            #[cfg(any(feature = "producer", feature = "consumer"))]
+            capabilities: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
     #[tokio::test]
     async fn broker_handle_reports_full_and_closed_queue() {
         let (tx, mut rx) = mpsc::channel(1);
         tx.try_send(request_command()).expect("prefill queue");
-        let full = BrokerHandle {
-            tx,
-            capabilities: Arc::new(std::sync::RwLock::new(None)),
-        };
+        let full = test_broker_handle(tx);
 
         assert!(matches!(
             full.send::<_, ApiVersionsResponseData>(
@@ -1535,10 +1546,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
-        let closed = BrokerHandle {
-            tx,
-            capabilities: Arc::new(std::sync::RwLock::new(None)),
-        };
+        let closed = test_broker_handle(tx);
         assert!(matches!(
             closed
                 .send::<_, ApiVersionsResponseData>(ApiKey::ApiVersions, 3, &api_versions_request())
