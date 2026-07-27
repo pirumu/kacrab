@@ -33,6 +33,28 @@ from the same summary line, computed identically on both sides (Java divides by
 | Latency p50 / p95 / p99 | **39 / 48** / 85 ms | 41 / 64 / **83** ms |
 | Latency max | **92 ms** | 133 ms |
 
+The two scenarios above never come near a broker limit, so no batch is ever
+rejected and the split path is untested by them. Driven deliberately — a
+one-partition topic with `max.message.bytes=65536` against a producer at
+`batch.size=262144`, so every full batch is rejected with `MESSAGE_TOO_LARGE` —
+the gap is much wider, because kacrab spends one broker round trip per batch
+fewer than Java. Java's first split of an accumulator batch targets `batch.size`,
+the size the accumulator already packed the batch to, so it re-sends a single
+child holding every record and waits for the broker to reject it again before it
+starts halving. kacrab checks the grouping locally and halves on the spot.
+
+| Metric (20K × 4 KiB, 1 partition, `max.message.bytes` < `batch.size`) | kacrab | Java |
+|---|---:|---:|
+| Throughput | **59.3K rec/s (232 MB/s)** | 26.9K rec/s (105 MB/s) |
+| Latency avg | **109 ms** | 194 ms |
+| Produce requests | **3,173** | 3,492 |
+| Batch splits | **952** | 1,270 |
+| retries / errors | 0 / 0 | 0 / 0 |
+
+Before 0.3.0 this workload delivered nothing at all: the split regrouped each
+rejected batch into a child of the same size for the broker to reject again, and
+every record failed with `DeliveryTimeout`.
+
 | Resource (same 10B workload, `/usr/bin/time -l`, 2026-06-28) | kacrab | Java | Java overhead |
 |---|---:|---:|---:|
 | Peak RSS | ~68 MiB | ~268 MiB | **~3.9×** |

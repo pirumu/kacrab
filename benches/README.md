@@ -13,7 +13,12 @@ configs on both sides — full tables under
 - **Producer** (re-measured 2026-07-27): **+35%** records/sec over Java
   `kafka-producer-perf-test` on 5M x 10 B and **+15%** on 100K x 10 KiB, at
   `acks=all` + idempotence, with ~3.9x less peak RSS and ~1.5x less CPU. Pinned to
-  Java's own rate, kacrab's latency is lower at every percentile.
+  Java's own rate, kacrab's latency is lower at every percentile. On the
+  `MESSAGE_TOO_LARGE` batch-split path — a topic whose `max.message.bytes` is
+  below the producer's `batch.size` — kacrab is **2.2x** Java's throughput at
+  **1.8x lower latency**, because it does not spend a broker round trip on the
+  first split, which regroups a batch into a single child of its own size. See
+  [Batch-split probe](#batch-split-probe).
 - **Consumer**: ~1.9x (10 B records) to ~4x (10 KiB records) Java's
   `kafka-consumer-perf-test` throughput, at ~16-20x less peak RSS and ~9-17x
   less CPU, with group joins ~15x faster.

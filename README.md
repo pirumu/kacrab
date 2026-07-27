@@ -57,10 +57,10 @@ built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
   stores and mutual TLS; native Rust custom-authenticator hooks. Handshake and
   auth failures fail fast with the broker's reason, matching Java.
 - **Fast and lean**: on the same broker and defaults, producer throughput is
-  **+35%** over Java on small records (**+15%** on 10 KiB) with about 4x less
-  memory, and at Java's own offered load kacrab's latency is lower at every
-  percentile; consumer throughput is
-  **1.9-4x** higher with about 16-20x less memory. See
+  **+35%** over Java on small records (**+15%** on 10 KiB, **2.2x** when broker
+  `max.message.bytes` forces batch splitting) with about 4x less memory, and at
+  Java's own offered load kacrab's latency is lower at every percentile; consumer
+  throughput is **1.9-4x** higher with about 16-20x less memory. See
   [Benchmarks](#benchmarks).
 - **Native Rust**: protocol, wire, and client logic are pure Rust, and the
   workspace forbids `unsafe_code`. Caveat: the default TLS provider
@@ -265,7 +265,9 @@ and the book's [benchmarks chapter](docs-book/src/benchmarks.md).
 
 **Producer** (2026-07-27; medians of 5 interleaved kacrab/Java pairs. Both
 throughput columns come from the same `records sent, … MB/sec` summary line, which
-Java and kacrab compute identically — see the note below):
+Java and kacrab compute identically — see the note below). The first two rows are
+the default parity scenarios; the third drives the `MESSAGE_TOO_LARGE` batch-split
+path, which kacrab clears in one broker round trip per batch fewer than Java:
 
 | Scenario | kacrab | Java `kafka-producer-perf-test` |
 | --- | ---: | ---: |
