@@ -699,7 +699,7 @@ pub(crate) struct OAuthTokenCache {
 }
 
 #[derive(Debug, Clone)]
-struct OAuthToken {
+pub(crate) struct OAuthToken {
     value: String,
     issued_at: Instant,
     expires_at: Option<Instant>,
@@ -1323,7 +1323,9 @@ fn form_encode(value: &str) -> Result<String, crate::wire::WireError> {
     Ok(encoded)
 }
 
-fn parse_oauthbearer_http_response(response: &[u8]) -> Result<OAuthToken, crate::wire::WireError> {
+pub(crate) fn parse_oauthbearer_http_response(
+    response: &[u8],
+) -> Result<OAuthToken, crate::wire::WireError> {
     let response = str::from_utf8(response).map_err(|_error| {
         crate::wire::WireError::TokenRefresh("OAUTHBEARER token response is not UTF-8".to_owned())
     })?;

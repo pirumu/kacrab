@@ -65,6 +65,15 @@ release date and links to relevant pull requests or issues.
   record count, the varints, or the compressed blob, so random input passes that
   gate with probability 2^-32 and never reaches the decoder. Building correct
   framing around fuzzer-controlled bytes is what surfaced the OOM above.
+- `frame_decode` and `oauth_http_response` fuzz targets, closing the two
+  remaining untrusted-input parsers. `frame_decode` covers the length-prefixed
+  response frame — the first thing that touches socket bytes, ahead of every
+  decoder — and confirms what inspection suggested: negative lengths rejected,
+  `MAX_FRAME_LENGTH` enforced, truncation checked, and the split zero-copy rather
+  than a speculative allocation. `oauth_http_response` covers the hand-written
+  HTTP parser behind `sasl.oauthbearer.token.endpoint.url`, which splits headers
+  on `\r\n\r\n` and takes the status by whitespace position before the body
+  reaches `serde_json`. Both clean; no defects found.
 - Four fuzz targets over the SASL handshake — `scram_server_first`,
   `scram_server_first_nonced`, `scram_server_final`, and `jaas_option` — reaching
   the parsers that run against a peer which has not authenticated yet. They reach

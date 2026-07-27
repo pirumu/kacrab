@@ -456,9 +456,11 @@ decoders that parse untrusted broker bytes are separately fuzzed for the other
 half — garbage, truncation, hostile length prefixes — because `forbid(unsafe_code)`
 rules out memory corruption but not a panic, an unbounded allocation, or a
 non-terminating loop, and a panic on a client's decode path is a denial of
-service. Eight [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
-cover record-batch decoding, the generated response structs, every compression
-codec, and the SASL handshake:
+service. Ten [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
+cover every parser that reads untrusted bytes, from the socket inward: the
+length-prefixed frame, record-batch decoding, the generated response structs,
+every compression codec, the SASL handshake, and the OAUTHBEARER token
+endpoint:
 
 ```bash
 cargo +nightly fuzz run record_batch_framed \
@@ -490,6 +492,8 @@ every nullable field. Measured effect, edges covered:
 | `record_batch_framed` | 774 | **1591** |
 | `response_decode` | — | **11899** |
 | `decompress` | — | **1230** |
+| `frame_decode` | — | **78** |
+| `oauth_http_response` | — | **1007** |
 | `scram_server_first` | — | **271** |
 | `scram_server_first_nonced` | 199 | **742** |
 | `scram_server_final` | — | **322** |

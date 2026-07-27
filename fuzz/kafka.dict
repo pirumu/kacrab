@@ -105,3 +105,22 @@ b64_sample="QSXCR+Q6sek8bf92"
 jaas_username="username="
 jaas_password="password="
 jaas_terminator=";"
+
+# --- OAUTHBEARER token endpoint ----------------------------------------------
+# The hand-written HTTP parser splits on the header terminator and takes the
+# status by whitespace position, so these three tokens are what get it past
+# framing and into the JSON body.
+http_header_end="\x0d\x0a\x0d\x0a"
+http_crlf="\x0d\x0a"
+http_200="HTTP/1.1 200 OK"
+http_401="HTTP/1.1 401 Unauthorized"
+oauth_access_token="access_token"
+oauth_expires_in="expires_in"
+json_object_open="{\x22"
+json_kv="\x22:\x22"
+
+# --- Response frame ----------------------------------------------------------
+# MAX_FRAME_LENGTH (100 MiB) and the values either side of it.
+frame_max="\x06\x40\x00\x00"
+frame_over_max="\x06\x40\x00\x01"
+frame_negative="\xff\xff\xff\xff"

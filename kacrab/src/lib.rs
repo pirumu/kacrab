@@ -122,6 +122,17 @@ pub mod __fuzz {
         ));
     }
 
+    /// Parse an OAUTHBEARER token-endpoint HTTP response.
+    ///
+    /// A hand-written HTTP parser over raw socket bytes: it splits headers from
+    /// body on `\r\n\r\n`, pulls the status code out of the request line by
+    /// whitespace position, then parses the body as JSON. Reached whenever
+    /// `sasl.oauthbearer.token.endpoint.url` is configured, so its input comes
+    /// from whatever answers at that URL.
+    pub fn oauthbearer_http_response(bytes: &[u8]) {
+        drop(crate::wire::auth::parse_oauthbearer_http_response(bytes));
+    }
+
     /// Parse a JAAS config string, which carries the SASL credentials.
     pub fn jaas_option(bytes: &[u8]) {
         let Ok(config) = core::str::from_utf8(bytes) else {
