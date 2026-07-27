@@ -58,6 +58,19 @@ pub enum KafkaConfigErrorKind {
         /// Root path searched recursively.
         root: PathBuf,
     },
+    /// A catalog status used a gate label missing from `GATE_LABEL_FEATURES`.
+    #[error(
+        "catalog gate label {label:?} has no row in GATE_LABEL_FEATURES \
+         (kacrab-codegen/src/kafka_config/rust_catalog.rs); add its compiled-feature mapping \
+         there so the generated `gate_label_supported` stays complete"
+    )]
+    UnmappedGateLabel {
+        /// Gate label used by a `FeatureGated`/`Future` status.
+        label: String,
+    },
+    /// Formatting the generated Rust catalog failed.
+    #[error(transparent)]
+    Format(#[from] crate::format::FormatError),
 }
 
 impl KafkaConfigError {

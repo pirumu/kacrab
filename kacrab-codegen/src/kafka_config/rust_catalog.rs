@@ -5,21 +5,50 @@ use std::collections::BTreeSet;
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 
-use super::model::{
-    ConfigCatalogDocument, ConfigKeyDocument, ConfigOrigin, ConfigValueDefault, JavaConfigType,
-    KafkaConfigClient,
+use super::{
+    error::{KafkaConfigError, KafkaConfigErrorKind},
+    model::{
+        ConfigCatalogDocument, ConfigKeyDocument, ConfigOrigin, ConfigValueDefault, JavaConfigType,
+        KafkaConfigClient,
+    },
 };
 use crate::format;
 
 /// Native typed config keys already exposed by `kacrab`.
 pub type NativeConfigKeys = BTreeSet<(KafkaConfigClient, String)>;
 
+/// Gate label minted by [`classify_status`] for `ssl.*` keys.
+const TLS_GATE_LABEL: &str = "tls-rustls";
+/// Gate label minted by [`classify_status`] for `sasl.*` keys.
+const SASL_GATE_LABEL: &str = "sasl";
+
+/// Cargo features backing each catalog gate label.
+///
+/// Labels are minted in [`classify_status`]; the runtime support map emitted
+/// into `catalog.rs` (`gate_label_supported`) is generated from this table, so
+/// a status label without a row here fails generation instead of silently
+/// classifying a supported key as unsupported at runtime. An empty feature
+/// list means the backing code is always compiled.
+const GATE_LABEL_FEATURES: &[(&str, &[&str])] = &[
+    (SASL_GATE_LABEL, &[]),
+    (TLS_GATE_LABEL, &["aws-lc-rs-tls", "pure-rust-tls"]),
+];
+
+/// Cargo features backing one gate label, or `None` for an unmapped label.
+fn gate_features_for(label: &str) -> Option<&'static [&'static str]> {
+    GATE_LABEL_FEATURES
+        .iter()
+        .find(|(known, _features)| *known == label)
+        .map(|(_known, features)| *features)
+}
+
 /// Generate `kacrab/src/config/catalog.rs` from a Kafka config snapshot.
 pub fn generate_rust_catalog(
     document: &ConfigCatalogDocument,
     native_keys: &NativeConfigKeys,
-) -> Result<String, format::FormatError> {
+) -> Result<String, KafkaConfigError> {
     let source_ref = document.source_ref.as_str();
+    let gate_support_fn = gate_support_fn_tokens(&collect_gate_labels(document, native_keys)?);
     let client_catalogs: Vec<TokenStream> = document
         .clients
         .iter()
@@ -63,9 +92,88 @@ pub fn generate_rust_catalog(
                 ClientKind::Admin => ADMIN_CONFIGS,
             }
         }
+
+        #gate_support_fn
     };
 
-    format::pretty(tokens, "Kafka config catalog")
+    format::pretty(tokens, "Kafka config catalog").map_err(KafkaConfigError::new)
+}
+
+/// Distinct gate labels used by `FeatureGated`/`Future` statuses, validated
+/// against [`GATE_LABEL_FEATURES`].
+fn collect_gate_labels(
+    document: &ConfigCatalogDocument,
+    native_keys: &NativeConfigKeys,
+) -> Result<BTreeSet<&'static str>, KafkaConfigError> {
+    let mut labels = BTreeSet::new();
+    for client in &document.clients {
+        for config in &client.configs {
+            let Some(label) = classify_status(client.client, config, native_keys).gate_label else {
+                continue;
+            };
+            if gate_features_for(label).is_none() {
+                return Err(KafkaConfigError::new(
+                    KafkaConfigErrorKind::UnmappedGateLabel {
+                        label: label.to_owned(),
+                    },
+                ));
+            }
+            let _inserted = labels.insert(label);
+        }
+    }
+    Ok(labels)
+}
+
+/// Emit `gate_label_supported` for the labels the catalog actually uses.
+fn gate_support_fn_tokens(labels: &BTreeSet<&'static str>) -> TokenStream {
+    let const_defs: Vec<TokenStream> = labels
+        .iter()
+        .map(|label| {
+            let ident = gate_const_ident(label);
+            // Named consts rather than inline cfg!: under --all-features every
+            // arm would fold to a bool literal and trip match_like_matches_macro.
+            let value = match gate_features_for(label) {
+                Some([]) | None => quote!(true),
+                Some(features) => {
+                    let predicates = features.iter().map(|feature| quote!(feature = #feature));
+                    quote!(cfg!(any(#(#predicates),*)))
+                },
+            };
+            quote! {
+                const #ident: bool = #value;
+            }
+        })
+        .collect();
+    let arms: Vec<TokenStream> = labels
+        .iter()
+        .map(|label| {
+            let ident = gate_const_ident(label);
+            quote!(#label => #ident)
+        })
+        .collect();
+
+    quote! {
+        /// Reports whether the compiled feature set backs a catalog gate label.
+        ///
+        /// Generated from `GATE_LABEL_FEATURES` in
+        /// `kacrab-codegen/src/kafka_config/rust_catalog.rs`; generation fails
+        /// on any gate label missing from that table, so the fallback arm only
+        /// guards labels that never appear in this catalog.
+        #[must_use]
+        pub(crate) fn gate_label_supported(label: &str) -> bool {
+            #(#const_defs)*
+            match label {
+                #(#arms,)*
+                _ => false,
+            }
+        }
+    }
+}
+
+/// `SCREAMING_SNAKE` support-const ident for one gate label.
+fn gate_const_ident(label: &str) -> Ident {
+    let upper = label.replace('-', "_").to_uppercase();
+    format_ident!("{upper}_SUPPORTED")
 }
 
 /// Parse native typed config keys from `kacrab/src/config/clients.rs`.
@@ -173,27 +281,33 @@ fn classify_status<'a>(
         return StatusDecision {
             expr: quote!(ConfigStatus::Native),
             comment,
+            gate_label: None,
         };
     }
     if native_keys.contains(&(client, config.key.clone())) {
         return StatusDecision {
             expr: quote!(ConfigStatus::Native),
             comment: "Map to a typed Rust field and support Java-style property parsing.",
+            gate_label: None,
         };
     }
     if config.key.starts_with("ssl.") {
         return StatusDecision {
             expr: quote!(ConfigStatus::FeatureGated {
-                feature: "tls-rustls"
+                feature: #TLS_GATE_LABEL
             }),
             comment: "TLS key can be modeled in Rust when the TLS feature is enabled; Java store \
                       formats may need conversion/skip during design-spec.",
+            gate_label: Some(TLS_GATE_LABEL),
         };
     }
     if config.key.starts_with("sasl.") {
         return StatusDecision {
-            expr: quote!(ConfigStatus::FeatureGated { feature: "sasl" }),
+            expr: quote!(ConfigStatus::FeatureGated {
+                feature: #SASL_GATE_LABEL
+            }),
             comment: "SASL key can be modeled in Rust when SASL support is implemented.",
+            gate_label: Some(SASL_GATE_LABEL),
         };
     }
     if is_java_only(config) {
@@ -201,6 +315,7 @@ fn classify_status<'a>(
             expr: quote!(ConfigStatus::SkipJavaOnly),
             comment: "Java/JVM class or plugin hook; Rust should expose typed traits/builders \
                       instead of accepting JVM class names.",
+            gate_label: None,
         };
     }
 
@@ -208,6 +323,7 @@ fn classify_status<'a>(
         expr: quote!(ConfigStatus::NativeReview),
         comment: "Official Kafka client key; include in catalog and review exact Rust \
                   type/default before exposing it as stable typed API.",
+        gate_label: None,
     }
 }
 
@@ -285,6 +401,10 @@ fn parse_string_attr(line: &str, attr_name: &str) -> Option<String> {
 struct StatusDecision<'a> {
     expr: TokenStream,
     comment: &'a str,
+    /// Gate label when the status is `FeatureGated`/`Future`; drives
+    /// [`collect_gate_labels`] so every minted label is checked against
+    /// [`GATE_LABEL_FEATURES`].
+    gate_label: Option<&'static str>,
 }
 
 fn comment_with_platforms(comment: &str, platforms: &[String]) -> String {
@@ -390,7 +510,10 @@ impl JavaConfigTypeExt for JavaConfigType {
 
 #[cfg(test)]
 mod tests {
-    use super::{NativeConfigKeys, generate_rust_catalog, parse_native_config_keys};
+    use super::{
+        NativeConfigKeys, SASL_GATE_LABEL, TLS_GATE_LABEL, gate_features_for,
+        generate_rust_catalog, parse_native_config_keys,
+    };
     use crate::kafka_config::{
         ConfigCatalogDocument, ConfigClientDocument, ConfigKeyDocument, ConfigOrigin,
         ConfigValueDefault, JavaConfigType, KafkaConfigClient, RuntimeConfigOverlayDocument,
@@ -495,8 +618,34 @@ mod tests {
             "generated catalog should link official Kafka docs"
         );
         assert!(
+            generated.contains("pub(crate) fn gate_label_supported(label: &str) -> bool"),
+            "generated catalog should emit the gate-label support map"
+        );
+        assert!(
+            generated.contains("const TLS_RUSTLS_SUPPORTED: bool = cfg!(")
+                && generated.contains("feature = \"aws-lc-rs-tls\"")
+                && generated.contains("\"tls-rustls\" => TLS_RUSTLS_SUPPORTED"),
+            "the tls-rustls gate should map to the compiled TLS provider features"
+        );
+        assert!(
             syn::parse_file(&generated).is_ok(),
             "generated catalog should be valid Rust after quote lowering"
+        );
+    }
+
+    #[test]
+    fn gate_label_features_cover_every_minted_label() {
+        for label in [TLS_GATE_LABEL, SASL_GATE_LABEL] {
+            assert!(
+                gate_features_for(label).is_some(),
+                "classify_status mints gate label {label:?}, so GATE_LABEL_FEATURES needs a row \
+                 for it"
+            );
+        }
+        assert_eq!(
+            gate_features_for("no-such-gate"),
+            None,
+            "unmapped labels must be rejected so generation fails loudly"
         );
     }
 

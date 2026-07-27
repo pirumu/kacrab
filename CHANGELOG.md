@@ -121,6 +121,15 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **The gate-label support map is now generated, not hand-maintained.** The
+  feature-aware validation below originally shipped with a hand-written
+  label→feature map in `kacrab/src/config.rs`, one more place config knowledge
+  could drift. `kacrab-codegen` now emits `gate_label_supported` into the
+  generated catalog from the same `GATE_LABEL_FEATURES` table that mints the
+  labels in `classify_status`, and catalog generation fails with
+  `UnmappedGateLabel` on any label missing from that table — so a new gate
+  label cannot reach the runtime as silently-unsupported.
+
 - **`UnknownKeyPolicy::Report` could never actually return a report.** The
   `kafka_config!`-generated `from_properties` ran an unconditional
   "every key must have a typed field" loop *after* `validate_properties`, with no

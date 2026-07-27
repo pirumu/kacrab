@@ -33,13 +33,13 @@ fn catalog_covers_official_kafka_43_config_pages() {
 }
 
 /// Pins the set of gate labels the catalog uses for `FeatureGated`/`Future`
-/// statuses to the labels `gated_feature_enabled` in `kacrab/src/config.rs`
-/// knows how to map.
+/// statuses.
 ///
-/// That mapping is hand-written and fails closed: an unmapped label makes
-/// `validate_properties` reject the key in both policies even when the backing
-/// feature is compiled in. Safe, but silent — so when catalog regeneration
-/// introduces a new gate label, this test fails first and names the fix.
+/// The label→feature support map is generated into `catalog.rs` from
+/// `GATE_LABEL_FEATURES` in `kacrab-codegen/src/kafka_config/rust_catalog.rs`,
+/// and generation fails on a label missing from that table. This pin is the
+/// second line of defense: it catches a committed catalog whose label set
+/// changed without this crate's tests being reviewed.
 #[test]
 fn catalog_gate_labels_are_mapped_by_feature_support() {
     let mut labels: Vec<&str> = CONFIG_CATALOG
@@ -57,9 +57,9 @@ fn catalog_gate_labels_are_mapped_by_feature_support() {
     assert_eq!(
         labels,
         ["sasl", "tls-rustls"],
-        "the catalog introduced a gate label that gated_feature_enabled (kacrab/src/config.rs) \
-         does not map; extend its match with the new label's compiled-feature check, then update \
-         this pin"
+        "the catalog's gate-label set changed; review GATE_LABEL_FEATURES in \
+         kacrab-codegen/src/kafka_config/rust_catalog.rs and the feature-gating tests in this \
+         file, then update this pin"
     );
 }
 

@@ -43,32 +43,6 @@ pub fn find_config(client: ClientKind, key: &str) -> Option<&'static ConfigEntry
     catalog_for(client).iter().find(|entry| entry.key == key)
 }
 
-/// Reports whether the compiled feature set backs a catalog gate label.
-///
-/// The labels are catalog metadata, not cargo feature names: `"tls-rustls"`
-/// predates the `aws-lc-rs-tls`/`pure-rust-tls` provider split and names no
-/// cargo feature at all, so it has to be mapped to the providers by hand.
-/// `"sasl"` is unconditionally supported — the SCRAM/PLAIN/OAUTHBEARER cores
-/// are always compiled, and only the GSSAPI extras are feature-gated, which the
-/// wire layer enforces when the mechanism is actually negotiated.
-///
-/// Unknown labels fail closed: a gate nobody has mapped yet is a gate whose
-/// backing code may not exist, and answering "supported" there would let a
-/// security-sensitive key through unvalidated.
-fn gated_feature_enabled(feature: &str) -> bool {
-    // Named rather than inlined: under `--all-features` the `cfg!` folds to a
-    // literal `true`, and a match whose arms are all literals trips
-    // `clippy::match_like_matches_macro` into suggesting `matches!` — which
-    // would silently hard-code the mapping for every other feature set.
-    const TLS_RUSTLS: bool = cfg!(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"));
-
-    match feature {
-        "tls-rustls" => TLS_RUSTLS,
-        "sasl" => true,
-        _ => false,
-    }
-}
-
 /// Validates raw Java-style properties against the official config catalog.
 ///
 /// This only validates key support/classification. Typed value parsing happens
@@ -110,8 +84,11 @@ pub fn validate_properties(
             // silent downgrade); with it, the key has a typed field and parses
             // downstream, so it is accepted without a warning — pinned by
             // `tests/public_configs.rs` mapping the full `ssl.*`/`sasl.*` set.
+            // The label→feature map is generated into `catalog.rs` from the same
+            // codegen table that mints the labels, so an unmapped label fails at
+            // catalog generation rather than here.
             ConfigStatus::FeatureGated { feature } | ConfigStatus::Future { feature } => {
-                if !gated_feature_enabled(feature) {
+                if !catalog::gate_label_supported(feature) {
                     return Err(ConfigError::UnsupportedFeature {
                         client,
                         key: key.into(),
