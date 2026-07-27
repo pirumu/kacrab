@@ -7,7 +7,7 @@ This project is pre-1.0; minor releases may still change public APIs.
 The format is based on human-readable release notes. Each entry includes the
 release date and links to relevant pull requests or issues.
 
-## Unreleased
+## 0.3.0 — 2026-07-27
 
 ### Added
 
@@ -40,6 +40,36 @@ release date and links to relevant pull requests or issues.
   available as `ProducerMetricsSnapshot::produce_request_split_count`, now
   without a Java-named meter. Workloads that only hit request-grouping splits
   will see the Java-named `batch-split-*` metrics drop toward zero.
+- **Producer dispatch:** once a broker is receiving a produce request, the head
+  batch of every partition that broker leads now rides along on the same
+  request, instead of each partition waiting out its own `linger.ms` or filling
+  to `batch.size` first. This is Kafka's `RecordAccumulator.drainBatchesForOneNode`
+  behaviour, which takes each partition's head batch with no readiness check once
+  the node is already being sent to. Swept batches pass through the same
+  in-flight reservation and idempotent-sequence bookkeeping as normally drained
+  ones, and the sweep only fires when partition leadership is already in the
+  metadata cache, so it never adds a metadata fetch ahead of a ready batch.
+
+  Measured against a native single-node Kafka 4.3.0 at 5M x 10 B over 16
+  partitions, this raised throughput and cut latency at the same time:
+  43.9 -> 47.6 MB/s, 1.65 -> 0.61 ms average latency, 10 -> 6 ms p99, with the
+  produce-request count roughly halving as more partitions coalesce into each
+  request.
+
+### Fixed
+
+- The producer parity benchmark took its per-record latency timestamp inside the
+  send loop, and a `Backpressure` result did not advance the record counter, so
+  the retry captured a fresh timestamp and the time spent waiting for buffer
+  memory was dropped from that record's latency — dropped most from the records
+  that waited longest. Java has no such gap: `ProducerPerformance` captures
+  `sendStartMs` once and `KafkaProducer.send` blocks inside that window when the
+  accumulator is full. Benchmark-only; no client behaviour changed.
+- Published producer byte-rate figures compared kacrab's own `MiB/s` scenario
+  line against Java's `MB/sec` line. Both tools compute
+  `bytes / elapsed / (1024 * 1024)` on their `records sent, ... MB/sec` line, so
+  that is the comparable one; read from it, the 10 KiB throughput lead is +15%
+  rather than the +25-30% previously published. The 10 B lead is +35%.
 
 ## 0.2.0 — 2026-07-07
 
