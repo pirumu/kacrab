@@ -46,6 +46,7 @@ fn ready_batch(topic: &str, partition: i32) -> crate::producer::ReadyBatch {
         pooled_buffer_bytes: 1,
         first_append_at: std::time::Instant::now(),
         producer_state: None,
+        split_parent: None,
     }
 }
 
@@ -2825,6 +2826,7 @@ async fn terminal_dispatch_completes_accumulator_batch_identity() {
         pooled_buffer_bytes: batches[0].pooled_buffer_bytes(),
         first_append_at: batches[0].first_append_at,
         producer_state: None,
+        split_parent: None,
     };
     batches[0].bytes = 128;
     batches[0].pooled_buffer_bytes = 128;

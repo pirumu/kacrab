@@ -479,6 +479,7 @@ fn idempotent_producer_keeps_configured_dispatch_task_concurrency() {
             pooled_buffer_bytes: 1,
             first_append_at: Instant::now(),
             producer_state: None,
+            split_parent: None,
         };
         let ready = ReadyBatch {
             identity: ReadyBatchIdentity::test(1),
@@ -490,6 +491,7 @@ fn idempotent_producer_keeps_configured_dispatch_task_concurrency() {
             pooled_buffer_bytes: 1,
             first_append_at: Instant::now(),
             producer_state: None,
+            split_parent: None,
         };
         sender
             .state

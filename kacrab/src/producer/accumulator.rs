@@ -2,7 +2,10 @@
 
 use std::{
     collections::VecDeque,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -97,6 +100,15 @@ pub struct ReadyBatch {
     pub first_append_at: Instant,
     /// Idempotent producer fields assigned once for this drained batch.
     pub(crate) producer_state: Option<ProducerBatchState>,
+    /// Identity of the batch this one was split out of, set only on the children of a
+    /// `MESSAGE_TOO_LARGE` split and only until they are requeued.
+    ///
+    /// [`RecordAccumulator::requeue_front`] completes it: once the records live in the
+    /// children the parent batch no longer exists, and leaving it in the incomplete set
+    /// would leak an identity per split. It cannot be derived from `identity` — a split
+    /// child's identity is a bare unique id — and it is deliberately dropped when the
+    /// child is requeued, because by then its parent is already completed.
+    pub(crate) split_parent: Option<ReadyBatchIdentity>,
 }
 
 impl ReadyBatch {
@@ -109,14 +121,52 @@ impl ReadyBatch {
         self.pooled_buffer_bytes
     }
 
+    /// Java parity: `RecordAccumulator.splitAndReenqueue` picks the split target as
+    ///
+    /// ```java
+    /// int targetSplitBatchSize = this.batchSize;
+    /// if (bigBatch.isSplitBatch())
+    ///     targetSplitBatchSize = Math.max(bigBatch.maxRecordSize,
+    ///                                     bigBatch.estimatedSizeInBytes() / 2);
+    /// ```
+    ///
+    /// The first split of an accumulator batch targets `batch.size` and therefore makes
+    /// no progress: the accumulator already caps every appended batch at `batch.size`, so
+    /// regrouping against that same limit reproduces a child of the same size and the
+    /// broker rejects it again. Every *re*-split halves instead, so the pieces shrink
+    /// geometrically until they fit under the topic's `max.message.bytes`. Without the
+    /// halving a topic whose `max.message.bytes` is below `batch.size` can never deliver
+    /// anything — every record fails with a delivery timeout.
+    ///
+    /// The `max_record_size` floor is load-bearing: a batch holding one record larger
+    /// than half the batch would otherwise halve forever and never fit.
+    ///
+    /// kacrab has no per-batch `maxRecordSize` field (Kafka maintains one in
+    /// `ProducerBatch.tryAppend`); the floor is recomputed from the batch's own records
+    /// here instead. That keeps the field out of `PartitionBatch`/requeue plumbing and
+    /// costs one pass over the records, only on the `MESSAGE_TOO_LARGE` path.
+    fn split_target_batch_bytes(&self, batch_size: usize) -> usize {
+        if !self.identity.is_split_child() {
+            return batch_size;
+        }
+        let max_record_bytes = self
+            .records
+            .iter()
+            .map(estimate_record_batch_bytes)
+            .max()
+            .unwrap_or(0);
+        max_record_bytes.max(self.bytes.checked_div(2).unwrap_or(0))
+    }
+
     pub(crate) fn split_for_retry_with_compression_ratio(
         self,
-        target_batch_bytes: usize,
+        batch_size: usize,
         compression_ratio: f32,
     ) -> Option<Vec<Self>> {
         if self.records.len() <= 1 {
             return None;
         }
+        let target_batch_bytes = self.split_target_batch_bytes(batch_size);
         let identity = self.identity;
         let topic = self.topic;
         let partition = self.partition;
@@ -139,16 +189,25 @@ impl ReadyBatch {
                     remaining_bytes = remaining_bytes.saturating_sub(bytes);
                     bytes
                 };
+                // Every child completes its own slice of the parent's delivery state:
+                // the records keep the `SendFuture`s the caller already holds, so a
+                // child cannot be given fresh delivery state, and handing the whole
+                // sender to child 0 (correct only while a split had one child) would
+                // drop every record the other children carry.
+                let child_delivery = delivery.as_mut().map(|sender| {
+                    sender.split_records(group.first_record_index, group.records.len())
+                });
                 Self {
-                    identity: identity.split_child(u32::try_from(index).unwrap_or(u32::MAX)),
+                    identity: ReadyBatchIdentity::new_split(),
                     topic: topic.clone(),
                     partition,
                     records: group.records,
-                    delivery: if index == 0 { delivery.take() } else { None },
+                    delivery: child_delivery,
                     bytes,
                     pooled_buffer_bytes: 0,
                     first_append_at,
                     producer_state: split_producer_state(producer_state, group.first_record_index),
+                    split_parent: Some(identity),
                 }
             })
             .collect();
@@ -156,33 +215,35 @@ impl ReadyBatch {
     }
 }
 
+/// Source of the unique ids carried by [`ReadyBatchIdentity::Split`].
+///
+/// Split children used to be numbered by their position inside a single split
+/// (`Split { parent, index }`), which is only unique while a batch splits once. The
+/// halving re-split makes a split child split again, and its own children would reuse
+/// indices its siblings already hold — colliding in the accumulator's buffered and
+/// incomplete identity sets. One process-wide counter keeps every split batch distinct
+/// however deep the split chain runs.
+static NEXT_SPLIT_BATCH_ID: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ReadyBatchIdentity {
     Accumulator(u64),
-    Split {
-        parent: u64,
-        index: u32,
-    },
+    Split(u64),
     #[cfg(test)]
     Test(u64),
 }
 
 impl ReadyBatchIdentity {
-    const fn split_child(self, index: u32) -> Self {
-        match self {
-            Self::Accumulator(parent) | Self::Split { parent, .. } => Self::Split { parent, index },
-            #[cfg(test)]
-            Self::Test(parent) => Self::Split { parent, index },
-        }
+    fn new_split() -> Self {
+        Self::Split(NEXT_SPLIT_BATCH_ID.fetch_add(1, Ordering::Relaxed))
     }
 
-    const fn split_parent(self) -> Option<Self> {
-        match self {
-            Self::Split { parent, .. } => Some(Self::Accumulator(parent)),
-            Self::Accumulator(_) => None,
-            #[cfg(test)]
-            Self::Test(_) => None,
-        }
+    /// Java parity: `ProducerBatch.isSplitBatch()` — true once this batch is itself the
+    /// product of a `MESSAGE_TOO_LARGE` split, which is what makes the next split halve.
+    /// Unlike [`ReadyBatch::split_parent`] this survives a requeue/re-drain cycle, which
+    /// is exactly what the halving needs.
+    const fn is_split_child(self) -> bool {
+        matches!(self, Self::Split(_))
     }
 
     #[cfg(test)]
@@ -638,6 +699,7 @@ impl RecordAccumulator {
                         pooled_buffer_bytes: batch.buffer_bytes,
                         first_append_at: batch.first_append_at,
                         producer_state: batch.producer_state,
+                        split_parent: None,
                     });
                 }
             }
@@ -681,6 +743,7 @@ impl RecordAccumulator {
                 pooled_buffer_bytes: batch.buffer_bytes,
                 first_append_at: batch.first_append_at,
                 producer_state: batch.producer_state,
+                split_parent: None,
             });
         }
         ready
@@ -732,6 +795,7 @@ impl RecordAccumulator {
                 pooled_buffer_bytes: batch.buffer_bytes,
                 first_append_at: batch.first_append_at,
                 producer_state: batch.producer_state,
+                split_parent: None,
             });
         }
         ready
@@ -765,6 +829,7 @@ impl RecordAccumulator {
                     pooled_buffer_bytes: batch.buffer_bytes,
                     first_append_at: batch.first_append_at,
                     producer_state: batch.producer_state,
+                    split_parent: None,
                 });
             }
         }
@@ -786,7 +851,7 @@ impl RecordAccumulator {
         self.validate_requeue_identities(&batches)?;
         let split_parents: Vec<_> = batches
             .iter()
-            .filter_map(|batch| batch.identity.split_parent())
+            .filter_map(|batch| batch.split_parent)
             .filter(|parent| self.incomplete_batch_identities.contains(parent))
             .collect();
         for batch in batches.into_iter().rev() {
@@ -852,7 +917,7 @@ impl RecordAccumulator {
         for batch in batches {
             if self.buffered_batch_identities.contains(&batch.identity)
                 || !seen.insert(batch.identity)
-                || !self.can_requeue_identity(batch.identity)
+                || !self.can_requeue_batch(batch)
             {
                 return Err(ProducerError::BatchLifecycle(
                     "duplicate ready batch identity requeued",
@@ -862,14 +927,18 @@ impl RecordAccumulator {
         Ok(())
     }
 
-    fn can_requeue_identity(&self, identity: ReadyBatchIdentity) -> bool {
+    /// A batch may return to the queue if it is still tracked as incomplete, or if it is
+    /// a fresh split child standing in for a parent that is. The parent is read from
+    /// [`ReadyBatch::split_parent`] rather than derived from the identity: a re-split
+    /// child's parent is another split batch, and the identity carries no linkage.
+    fn can_requeue_batch(&self, batch: &ReadyBatch) -> bool {
         #[cfg(test)]
-        if matches!(identity, ReadyBatchIdentity::Test(_)) {
+        if matches!(batch.identity, ReadyBatchIdentity::Test(_)) {
             return true;
         }
-        self.incomplete_batch_identities.contains(&identity)
-            || identity
-                .split_parent()
+        self.incomplete_batch_identities.contains(&batch.identity)
+            || batch
+                .split_parent
                 .is_some_and(|parent| self.incomplete_batch_identities.contains(&parent))
     }
 }
@@ -1452,7 +1521,8 @@ mod tests {
         estimate_record_batch_bytes, estimated_batch_bytes_for_sizing,
     };
     use crate::producer::{
-        ProducerCompression, ProducerIdentity, ProducerRecord, transaction::ProducerBatchState,
+        ProducerCompression, ProducerIdentity, ProducerRecord, RecordMetadata,
+        transaction::ProducerBatchState,
     };
 
     const TEST_LARGE_BATCH_SIZE: usize = 16 * 1024;
@@ -1480,6 +1550,7 @@ mod tests {
             pooled_buffer_bytes: 128,
             first_append_at: now,
             producer_state: None,
+            split_parent: None,
         }
     }
 
@@ -1972,6 +2043,7 @@ mod tests {
             pooled_buffer_bytes: batch.pooled_buffer_bytes,
             first_append_at: batch.first_append_at,
             producer_state: None,
+            split_parent: None,
         };
 
         accumulator
@@ -2225,6 +2297,226 @@ mod tests {
 
         assert_eq!(split.len(), 3);
         assert!(split.iter().all(|batch| batch.records.len() == 1));
+    }
+
+    #[test]
+    fn ready_batch_split_target_halves_only_for_split_children() {
+        let now = Instant::now();
+        let records: Vec<_> = (0..4)
+            .map(|_| ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")))
+            .collect();
+        let parent = ReadyBatch {
+            identity: ReadyBatchIdentity::Accumulator(7),
+            topic: "orders".to_owned(),
+            partition: 0,
+            records,
+            delivery: None,
+            bytes: 6_000,
+            pooled_buffer_bytes: 0,
+            first_append_at: now,
+            producer_state: None,
+            split_parent: None,
+        };
+
+        assert_eq!(
+            parent.split_target_batch_bytes(2_048),
+            2_048,
+            "a batch that is not a split child must keep targeting batch.size"
+        );
+
+        let child = ReadyBatch {
+            identity: ReadyBatchIdentity::Split(7),
+            ..parent
+        };
+
+        assert_eq!(
+            child.split_target_batch_bytes(2_048),
+            3_000,
+            "a split child must halve its own estimated size instead of reusing batch.size"
+        );
+    }
+
+    #[test]
+    fn ready_batch_split_target_floors_at_the_largest_record() {
+        let now = Instant::now();
+        let large_record_bytes = estimate_record_batch_bytes(
+            &ProducerRecord::new("orders", 0).value(Bytes::from(vec![0u8; 8 * 1024])),
+        );
+        let child = ReadyBatch {
+            identity: ReadyBatchIdentity::Split(1),
+            topic: "orders".to_owned(),
+            partition: 0,
+            records: vec![
+                ProducerRecord::new("orders", 0).value(Bytes::from(vec![0u8; 8 * 1024])),
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"small")),
+            ],
+            delivery: None,
+            bytes: 1_024,
+            pooled_buffer_bytes: 0,
+            first_append_at: now,
+            producer_state: None,
+            split_parent: None,
+        };
+
+        assert_eq!(
+            child.split_target_batch_bytes(64 * 1024),
+            large_record_bytes,
+            "halving must not shrink below the largest record in the batch"
+        );
+    }
+
+    /// Regression: a split handed the parent's whole delivery state to child 0 and left
+    /// every other child with none, so once a split produced more than one child the
+    /// records the other children carried were reported as `DeliveryDropped`.
+    #[test]
+    fn ready_batch_split_completes_every_child_delivery_not_just_the_first() {
+        let mut accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(TEST_LARGE_BATCH_SIZE)
+                .buffer_memory(TEST_LARGE_BATCH_SIZE * 4)
+                .linger(Duration::from_secs(1)),
+        );
+        let results = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        for value in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()] {
+            let delivery = accumulator
+                .append_for_delivery(
+                    ProducerRecord::new("orders", 0).value(Bytes::copy_from_slice(value)),
+                )
+                .expect("append record for delivery");
+            let sink = std::sync::Arc::clone(&results);
+            delivery.register_callback(Box::new(move |result| {
+                sink.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(result.map(|receipt| receipt.offset).map_err(|_error| ()));
+            }));
+        }
+        let batch = accumulator
+            .drain_all()
+            .pop()
+            .expect("drained delivery batch");
+
+        // The compression-ratio estimate shrinks the target enough to produce one child
+        // per record, which is exactly the shape that used to drop deliveries.
+        let split = batch
+            .split_for_retry_with_compression_ratio(78, 2.0)
+            .expect("multi-record batch should split for retry");
+
+        assert_eq!(split.len(), 3);
+        assert!(
+            split.iter().all(|child| child.delivery.is_some()),
+            "every split child must carry the delivery state for the records it holds"
+        );
+        for (index, mut child) in split.into_iter().enumerate() {
+            let sender = child.delivery.take().expect("child delivery");
+            assert_eq!(
+                sender.record_count(),
+                1,
+                "a split child must only account for the records it carries"
+            );
+            sender.send_records(vec![RecordMetadata {
+                topic: std::sync::Arc::from("orders"),
+                partition: 0,
+                leader_id: 7,
+                offset: i64::try_from(index).unwrap_or(0),
+                timestamp_ms: -1,
+                serialized_key_size: -1,
+                serialized_value_size: 1,
+            }]);
+        }
+
+        let delivered = results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+
+        assert_eq!(
+            delivered,
+            vec![Ok(0), Ok(1), Ok(2)],
+            "every record of a split batch must receive its own receipt"
+        );
+    }
+
+    /// Regression: a topic whose `max.message.bytes` is below the producer's
+    /// `batch.size` could never deliver anything, because every re-split regrouped the
+    /// rejected records against the same constant `batch.size` target and produced a
+    /// child of the same size for the broker to reject again.
+    #[test]
+    fn ready_batch_resplit_converges_below_a_broker_limit_under_batch_size() {
+        const BATCH_SIZE: usize = 256 * 1024;
+        const BROKER_LIMIT: usize = 64 * 1024;
+        const MAX_SPLIT_ROUNDS: usize = 10;
+
+        let now = Instant::now();
+        let mut accumulator = RecordAccumulator::new(
+            AccumulatorConfig::default()
+                .batch_size(BATCH_SIZE)
+                .buffer_memory(BATCH_SIZE * 8)
+                .linger(Duration::from_secs(1)),
+        );
+        for _ in 0..64 {
+            accumulator
+                .append_at(
+                    ProducerRecord::new("orders", 0).value(Bytes::from(vec![7u8; 4 * 1024])),
+                    now,
+                )
+                .expect("append record");
+        }
+        let mut batches = accumulator.drain_all();
+        let total_records: usize = batches.iter().map(|batch| batch.records.len()).sum();
+        assert!(
+            batches
+                .iter()
+                .any(|batch| estimate_ready_batch_encoded_bytes(&batch.records) > BROKER_LIMIT),
+            "expected at least one batch over the broker limit to split"
+        );
+
+        // Each round is one broker MESSAGE_TOO_LARGE rejection: split the oversized
+        // batches, hand the children back to the accumulator exactly as the dispatcher
+        // does, and drain them again for the next attempt.
+        let mut rounds = 0usize;
+        while batches
+            .iter()
+            .any(|batch| estimate_ready_batch_encoded_bytes(&batch.records) > BROKER_LIMIT)
+        {
+            assert!(
+                rounds < MAX_SPLIT_ROUNDS,
+                "re-splitting never converged below the broker limit: split targets are not \
+                 halving, so the broker would reject every child until delivery.timeout.ms"
+            );
+            rounds = rounds.saturating_add(1);
+            let split: Vec<_> = batches
+                .into_iter()
+                .flat_map(|batch| {
+                    if estimate_ready_batch_encoded_bytes(&batch.records) > BROKER_LIMIT {
+                        batch
+                            .split_for_retry_with_compression_ratio(BATCH_SIZE, 1.0)
+                            .expect("multi-record oversized batch should split")
+                    } else {
+                        vec![batch]
+                    }
+                })
+                .collect();
+            accumulator.requeue_front(split).expect(
+                "split children must be requeueable: their identities stay unique across split \
+                 levels and their parent is still tracked as incomplete",
+            );
+            batches = accumulator.drain_all();
+        }
+
+        assert!(
+            batches
+                .iter()
+                .all(|batch| estimate_ready_batch_encoded_bytes(&batch.records) <= BROKER_LIMIT),
+            "every split child must fit under the broker limit"
+        );
+        assert_eq!(
+            batches
+                .iter()
+                .map(|batch| batch.records.len())
+                .sum::<usize>(),
+            total_records,
+            "splitting must preserve every record"
+        );
     }
 
     #[test]

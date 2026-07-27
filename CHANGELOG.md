@@ -58,6 +58,45 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- Records sent to a topic whose `max.message.bytes` is below the producer's
+  `batch.size` were never delivered — every oversized batch failed with
+  `DeliveryTimeout`. A batch rejected with `MESSAGE_TOO_LARGE` was re-split
+  against a constant `batch.size` target, but the accumulator already caps every
+  batch at `batch.size`, so the split regrouped the same records into a child of
+  the same size for the broker to reject again, forever. Re-splits now halve the
+  target the way Kafka's `RecordAccumulator.splitAndReenqueue` does — a batch
+  that is itself a split child targets
+  `max(largest record, estimated batch size / 2)` — so the pieces shrink
+  geometrically until they fit. The `max(largest record, ..)` floor keeps a batch
+  holding one large record from halving forever, and a single-record batch that
+  still does not fit stays a terminal failure, as in Java. The first split of a
+  batch that is not a split child is unchanged, and nothing outside the
+  `MESSAGE_TOO_LARGE` path is affected.
+
+  Measured against a real broker (20,000 x 4 KiB into a topic with
+  `max.message.bytes=65536` and the producer at `batch.size=262144`): before,
+  every record failed with `DeliveryTimeout` and nothing was delivered; after,
+  the split converges in the same number of rounds as Java — 1272 splits against
+  Java's 1270 on the identical workload. Throughput on this path is still far
+  below Java's (Java clears the same 20,000 records in about a second; kacrab
+  takes tens of seconds and a share of records can still exhaust `buffer.memory`
+  and fail their `max.block.ms` append deadline). That remaining gap is speed on
+  a deliberately pathological configuration, not a correctness defect, and is
+  tracked as follow-up work rather than fixed here.
+- A `MESSAGE_TOO_LARGE` split that produced more than one child reported every
+  record outside the first child as `DeliveryDropped`. The whole batch's delivery
+  state went to child 0 and the other children were left with none, so their
+  records never received a receipt. Each child now completes its own slice of the
+  shared delivery state. Previously only reachable when the compression-ratio
+  estimate shrank the split target; the halving above makes multi-child splits
+  the normal case.
+- A batch that had to be split more than once could not be requeued at all: the
+  second split minted child identities by position, colliding with the first
+  split's siblings, and the accumulator's requeue guard rejected the batch with
+  `BatchLifecycle`, stalling the partition. Split children now carry a unique
+  identity and an explicit link to the batch they were split from, so a split
+  chain of any depth stays consistent with the buffered and incomplete batch
+  bookkeeping.
 - The producer parity benchmark took its per-record latency timestamp inside the
   send loop, and a `Backpressure` result did not advance the record counter, so
   the retry captured a fresh timestamp and the time spent waiting for buffer
