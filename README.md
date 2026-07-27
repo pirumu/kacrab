@@ -135,6 +135,44 @@ and Kafka errors as typed Rust enums rather than C return codes. See
 behaviour that follows from that, and
 [When not to use kacrab](#when-not-to-use-kacrab) for the honest limits.
 
+### Why generate the protocol instead of using `kafka-protocol`
+
+[`kafka-protocol`](https://crates.io/crates/kafka-protocol) is the established
+Rust implementation of the Kafka wire format — well over 7M downloads, generated
+from the same upstream JSON schemas kacrab reads. Reaching for it would have been
+the default choice, so the reason not to should be stated rather than assumed.
+
+It is a *types and codecs* crate by design, and kacrab needs the generator itself,
+not only its output:
+
+- **The generated code is the oracle harness.** `kacrab-protocol` emits, for every
+  message at every schema version, a fixture plus the Java class name that decodes
+  it. `java_client_preserves_all_rust_generated_protocol_fixtures`
+  ([`tests/java_interop.rs`](kacrab-protocol/tests/java_interop.rs)) compiles
+  against `org.apache.kafka:kafka-clients:4.3.0` and asserts every fixture
+  round-trips **byte-for-byte** through the real Java client, in both directions.
+  That check is only exhaustive because the generator produces the cases along with
+  the structs — bolting it onto a dependency's output means hand-maintaining the
+  matrix, and a hand-maintained matrix stops being exhaustive the first time a
+  schema version is added.
+- **The fuzz seeds come from the same fixtures.** `generate_fuzz_corpus` in that
+  same harness emits [`fuzz/seeds/`](fuzz/seeds/) from the exact bytes the oracle
+  validated. The seeded-versus-unseeded edge counts in [Testing](#testing) are the
+  measure of what that buys; the corpus exists because the fixtures already did.
+- **The client needs metadata the wire types do not carry.** Version negotiation
+  resolves through generated `client_api_info`
+  ([`version.rs`](kacrab-protocol/src/version.rs)), and the producer hot path
+  preallocates from generated `encoded_len` rather than encoding into a growing
+  buffer ([`producer/batch.rs:169`](kacrab/src/producer/batch.rs)). Both are
+  generator outputs shaped by how the client uses them.
+- **The Kafka version is a pinned input, not a dependency's release cadence.**
+  kacrab targets 4.3.0 and regenerates from `apache/kafka@4.3.0` on demand; the
+  same resolver also generates the config catalog, so protocol and config never
+  drift to different upstream revisions.
+
+None of this is a defect in `kafka-protocol` — it is a different job. If you want
+Kafka wire types in your own project and not a client, use it.
+
 ## Documentation
 
 - **[Design & Internals book](https://pirumu.github.io/kacrab/)**: architecture
