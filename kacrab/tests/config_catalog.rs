@@ -32,6 +32,37 @@ fn catalog_covers_official_kafka_43_config_pages() {
     );
 }
 
+/// Pins the set of gate labels the catalog uses for `FeatureGated`/`Future`
+/// statuses to the labels `gated_feature_enabled` in `kacrab/src/config.rs`
+/// knows how to map.
+///
+/// That mapping is hand-written and fails closed: an unmapped label makes
+/// `validate_properties` reject the key in both policies even when the backing
+/// feature is compiled in. Safe, but silent — so when catalog regeneration
+/// introduces a new gate label, this test fails first and names the fix.
+#[test]
+fn catalog_gate_labels_are_mapped_by_feature_support() {
+    let mut labels: Vec<&str> = CONFIG_CATALOG
+        .iter()
+        .filter_map(|entry| match entry.status {
+            ConfigStatus::FeatureGated { feature } | ConfigStatus::Future { feature } => {
+                Some(feature)
+            },
+            _ => None,
+        })
+        .collect();
+    labels.sort_unstable();
+    labels.dedup();
+
+    assert_eq!(
+        labels,
+        ["sasl", "tls-rustls"],
+        "the catalog introduced a gate label that gated_feature_enabled (kacrab/src/config.rs) \
+         does not map; extend its match with the new label's compiled-feature check, then update \
+         this pin"
+    );
+}
+
 #[test]
 fn catalog_merges_kacrab_runtime_socket_overlay() {
     let quickack = catalog_for(ClientKind::Producer)
