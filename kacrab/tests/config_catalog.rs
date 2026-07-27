@@ -124,6 +124,7 @@ fn lenient_property_validation_reports_unknown_and_java_only_keys() {
     assert!(report.warnings()[1].message.contains("unknown"));
 }
 
+#[cfg(not(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls")))]
 #[test]
 fn feature_gated_security_keys_are_errors_even_when_lenient() {
     let properties = Properties::from_iter([("ssl.truststore.location", "/tmp/truststore.pem")]);
@@ -139,6 +140,55 @@ fn feature_gated_security_keys_are_errors_even_when_lenient() {
             feature: "tls-rustls",
         }
     );
+}
+
+#[cfg(not(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls")))]
+#[test]
+fn feature_gated_security_keys_are_errors_when_strict() {
+    let properties = Properties::from_iter([("ssl.truststore.location", "/tmp/truststore.pem")]);
+
+    let error = validate_properties(ClientKind::Producer, &properties, UnknownKeyPolicy::Deny)
+        .expect_err("strict mode must not silently accept unsupported security credentials");
+
+    assert_eq!(
+        error,
+        ConfigError::UnsupportedFeature {
+            client: ClientKind::Producer,
+            key: "ssl.truststore.location".into(),
+            feature: "tls-rustls",
+        }
+    );
+}
+
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
+#[test]
+fn feature_gated_security_keys_are_accepted_when_tls_is_compiled() {
+    let properties = Properties::from_iter([("ssl.truststore.location", "/tmp/truststore.pem")]);
+
+    for policy in [UnknownKeyPolicy::Deny, UnknownKeyPolicy::Report] {
+        let report = validate_properties(ClientKind::Producer, &properties, policy)
+            .expect("a compiled TLS provider makes ssl.* keys supported");
+
+        assert!(
+            report.warnings().is_empty(),
+            "supported security keys must not warn under {policy:?}"
+        );
+    }
+}
+
+#[test]
+fn sasl_gated_keys_are_accepted_under_every_policy() {
+    let properties = Properties::from_iter([("sasl.kerberos.service.name", "kafka")]);
+
+    for policy in [UnknownKeyPolicy::Deny, UnknownKeyPolicy::Report] {
+        let report = validate_properties(ClientKind::Producer, &properties, policy)
+            .expect("SASL cores are always compiled, so sasl-gated keys are supported");
+
+        assert!(
+            report.warnings().is_empty(),
+            "supported SASL keys must not warn under {policy:?}"
+        );
+    }
 }
 
 #[test]

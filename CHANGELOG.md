@@ -121,6 +121,23 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **Strict property validation silently accepted feature-gated security keys.**
+  `validate_properties` matched `UnknownKeyPolicy` with the arms inverted for
+  `ConfigStatus::FeatureGated`/`Future`: lenient (`Report`) mode returned
+  `ConfigError::UnsupportedFeature`, while strict (`Deny`) mode — the mode
+  `ClientConfig::producer_config` and friends use — accepted the key and dropped
+  it. Supplying `ssl.truststore.location` to a build with no TLS provider
+  therefore produced a config that connected without the trust material the
+  caller asked for, and the stricter setting was the one that failed open.
+
+  Gate handling is now feature-aware and policy-independent. A gated key whose
+  backing feature is not compiled is an error in *both* modes; a gated key that
+  is backed by compiled code is accepted with no warning, because it has a typed
+  field and parses downstream. The catalog's gate labels are metadata rather than
+  cargo feature names — `tls-rustls` predates the
+  `aws-lc-rs-tls`/`pure-rust-tls` split and names no feature at all — so they are
+  mapped explicitly, and an unrecognised label fails closed.
+
 - **Two pipelined idempotent retries to one partition could re-send out of
   sequence order.** ([#2]) After a broker disconnect, each in-flight dispatch
   retried inside its own task, and an in-task retry re-enqueues with an

@@ -43,6 +43,32 @@ pub fn find_config(client: ClientKind, key: &str) -> Option<&'static ConfigEntry
     catalog_for(client).iter().find(|entry| entry.key == key)
 }
 
+/// Reports whether the compiled feature set backs a catalog gate label.
+///
+/// The labels are catalog metadata, not cargo feature names: `"tls-rustls"`
+/// predates the `aws-lc-rs-tls`/`pure-rust-tls` provider split and names no
+/// cargo feature at all, so it has to be mapped to the providers by hand.
+/// `"sasl"` is unconditionally supported — the SCRAM/PLAIN/OAUTHBEARER cores
+/// are always compiled, and only the GSSAPI extras are feature-gated, which the
+/// wire layer enforces when the mechanism is actually negotiated.
+///
+/// Unknown labels fail closed: a gate nobody has mapped yet is a gate whose
+/// backing code may not exist, and answering "supported" there would let a
+/// security-sensitive key through unvalidated.
+fn gated_feature_enabled(feature: &str) -> bool {
+    // Named rather than inlined: under `--all-features` the `cfg!` folds to a
+    // literal `true`, and a match whose arms are all literals trips
+    // `clippy::match_like_matches_macro` into suggesting `matches!` — which
+    // would silently hard-code the mapping for every other feature set.
+    const TLS_RUSTLS: bool = cfg!(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"));
+
+    match feature {
+        "tls-rustls" => TLS_RUSTLS,
+        "sasl" => true,
+        _ => false,
+    }
+}
+
 /// Validates raw Java-style properties against the official config catalog.
 ///
 /// This only validates key support/classification. Typed value parsing happens
@@ -51,7 +77,10 @@ pub fn find_config(client: ClientKind, key: &str) -> Option<&'static ConfigEntry
 /// # Errors
 ///
 /// Returns [`ConfigError`] when strict mode sees an unknown/Java-only key, or
-/// when a security-sensitive feature-gated key is supplied without support.
+/// when a feature-gated key is supplied without the backing feature compiled
+/// in. The feature-gated rule is policy-independent: such a key errors in
+/// *both* strict and lenient mode, because silently dropping a security
+/// credential is never a safe outcome.
 pub fn validate_properties(
     client: ClientKind,
     properties: &Properties,
@@ -76,16 +105,18 @@ pub fn validate_properties(
 
         match entry.status {
             ConfigStatus::Native | ConfigStatus::NativeReview => {},
+            // Invariant: a gated key never depends on `unknown_key_policy`. Without the
+            // backing feature it is an error in both modes (a dropped credential is a
+            // silent downgrade); with it, the key has a typed field and parses
+            // downstream, so it is accepted without a warning — pinned by
+            // `tests/public_configs.rs` mapping the full `ssl.*`/`sasl.*` set.
             ConfigStatus::FeatureGated { feature } | ConfigStatus::Future { feature } => {
-                match unknown_key_policy {
-                    UnknownKeyPolicy::Deny => {},
-                    UnknownKeyPolicy::Report => {
-                        return Err(ConfigError::UnsupportedFeature {
-                            client,
-                            key: key.into(),
-                            feature,
-                        });
-                    },
+                if !gated_feature_enabled(feature) {
+                    return Err(ConfigError::UnsupportedFeature {
+                        client,
+                        key: key.into(),
+                        feature,
+                    });
                 }
             },
             ConfigStatus::SkipJavaOnly => match unknown_key_policy {
