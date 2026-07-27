@@ -34,9 +34,11 @@ configure it well*.
   incremental fetch sessions (KIP-227), topic-id fetches (KIP-516), and
   truncation detection (KIP-320). See [The consumer client](./consumer.md).
 - **No JVM tax — measured, not asserted.** At identical default configs
-  against the same native broker, the producer is ~25–28% faster than Java's
-  own perf tool at ~4× less memory; the consumer reads 1.9–4× faster at
-  ~16–20× less memory. See [Benchmarks](./benchmarks.md).
+  against the same native broker, the producer is **+35%** faster than Java's
+  own perf tool on small records (**+15%** on 10 KiB, **2.2×** when the broker's
+  `max.message.bytes` forces batch splitting) at ~4× less memory; the consumer
+  reads 1.9–4× faster at ~16–20× less memory. See
+  [Benchmarks](./benchmarks.md).
 - **A generated, oracle-checked protocol.** Request/response types are
   generated from the upstream Kafka schemas and cross-checked against the Java
   client as an external oracle. See [Protocol codegen](./codegen.md).
@@ -96,7 +98,9 @@ if you want the destination. The two crown-jewel deep dives are
 
 > **Status**
 >
-> kacrab `0.1.0` is published on [crates.io](https://crates.io/crates/kacrab)
+> kacrab `0.3.0` is published on [crates.io](https://crates.io/crates/kacrab)
 > (producer, consumer, and admin surfaces). Pre-1.0, the public API can still
-> change between minor versions; this book tracks `master`. Kafka Streams and
-> share groups are separate products and not part of this client.
+> change between minor versions; this book tracks `master`. A Kafka Streams
+> runtime and a share *consumer* are out of scope — this is a client library —
+> though the admin surface does cover the share-group and streams-group
+> operations Kafka 4.x exposes to `Admin`.

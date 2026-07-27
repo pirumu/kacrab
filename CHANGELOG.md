@@ -7,6 +7,59 @@ This project is pre-1.0; minor releases may still change public APIs.
 The format is based on human-readable release notes. Each entry includes the
 release date and links to relevant pull requests or issues.
 
+## Unreleased
+
+### Fixed
+
+- **A hostile record header count could OOM the client.** `Record::decode` sized
+  its header `Vec` straight from the wire's `headerCount` varint, checking only
+  that it was non-negative. A 90-byte record declaring ~486M headers reached
+  `malloc(7.8 GB)` before the decode loop read a single header and failed, so a
+  corrupt or malicious broker response could OOM-kill any kacrab client with a
+  handful of bytes — the batch level had guarded its own count with
+  `MAX_RECORDS_PER_BATCH` for exactly this reason, but the per-record path had
+  no equivalent. The speculative allocation is now clamped by what the remaining
+  buffer can hold (a header is at least two varints), which cannot reject a
+  satisfiable count. Found by the new `record_batch_framed` fuzz target; covered
+  by `absurd_header_count_fails_without_a_giant_allocation`.
+- `Consumer::poll` is now cancel-safe with respect to records. `reap_fetch` moved
+  the in-flight `Fetch` handle out of the consumer before awaiting it, so
+  dropping a `poll` future mid-await — the ordinary fate of the losing arm of a
+  `tokio::select!` — detached the task and discarded whatever it had fetched,
+  along with the partition positions it carried and the KIP-227 incremental
+  fetch sessions, forcing the next fetch to re-open full sessions. The handle is
+  now joined through `&mut` and stays owned by the consumer, so a cancelled poll
+  costs nothing and the next poll folds the fetch in. Covered by
+  `reap_fetch_survives_a_cancelled_await`.
+
+### Added
+
+- `cargo-fuzz` targets for the decoders that parse untrusted broker bytes:
+  `record_batch_decode`, `record_batch_framed`, `response_decode`, and
+  `decompress`. They run nightly in CI at 15 minutes per target and as a
+  60-second smoke on any PR touching `kacrab-protocol/`. The fuzz crate lives
+  outside the workspace because cargo-fuzz needs nightly plus a sanitizer.
+  `record_batch_framed` exists because raw-byte fuzzing of a record batch is
+  nearly useless on its own: CRC32C is validated before the magic byte, the
+  record count, the varints, or the compressed blob, so random input passes that
+  gate with probability 2^-32 and never reaches the decoder. Building correct
+  framing around fuzzer-controlled bytes took coverage from 150 to 774 edges and
+  is what surfaced the OOM above.
+
+### Documentation
+
+- New README sections: a verified comparison against `rust-rdkafka`, `rskafka`,
+  and `kafka-rust`; "Cancellation & drop semantics" documenting the cancel-safety
+  of every public future and what dropping a client without `close()` does; and
+  "When not to use kacrab".
+- Corrected the Highlights latency claim from "lower at every percentile" to
+  "lower or tied", matching the matched-load table and the Caveats section, and
+  documented why the latency *average* differs while p50/p95/p99 tie (both sides
+  quantize to integer milliseconds; the average is the fraction above 0 ms).
+- Replaced the coverage footnote's "(streams)" with the real breakdown of the 26
+  unwired generated APIs, and synced the design book to `0.3.0` and the current
+  benchmark figures.
+
 ## 0.3.0 — 2026-07-27
 
 Producer batch-split release. A topic whose `max.message.bytes` sits below the
