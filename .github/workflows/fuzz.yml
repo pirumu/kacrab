@@ -1,0 +1,97 @@
+name: fuzz
+
+# Fuzzes the decoders that parse untrusted broker bytes: record batches,
+# generated response structs, and the compression codecs. `forbid(unsafe_code)`
+# rules out memory corruption but not a panic, an unbounded allocation, or a
+# non-terminating loop — and in a client, a panic on the decode path is a denial
+# of service, so these paths need input no test writes by hand.
+#
+# Two cadences. Every PR that touches the protocol crate gets a short smoke run
+# (60s per target) seeded from the committed corpus, which catches an obvious
+# regression without slowing the merge. The nightly run is the real one: 15
+# minutes per target, and it uploads any crashing input as an artifact.
+#
+# The fuzz crate is deliberately outside the workspace (see fuzz/Cargo.toml):
+# cargo-fuzz needs nightly and a sanitizer, which the pinned stable toolchain in
+# rust-toolchain.toml cannot provide.
+
+on:
+  schedule:
+    # Nightly, 04:00 UTC — an hour after the weekly auth sweep so the two never
+    # contend for runners.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "kacrab-protocol/**"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One crashing target must not cancel the others — a fuzz run's whole
+      # point is collecting every distinct finding in one pass.
+      fail-fast: false
+      matrix:
+        target:
+          - record_batch_decode
+          - record_batch_framed
+          - response_decode
+          - decompress
+    steps:
+      - uses: actions/checkout@v4
+
+      # zstd and lz4 need a C compiler (gcc is preinstalled); the fuzz crate
+      # enables every codec so all four decompressors are covered.
+      - name: Nightly toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup component add --toolchain nightly rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # 60s on a PR keeps the gate fast; the nightly schedule runs 15 minutes
+      # per target, which is where new findings actually come from.
+      - name: Set duration
+        id: duration
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "seconds=60" >> "$GITHUB_OUTPUT"
+          else
+            echo "seconds=900" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
+            -max_total_time=${{ steps.duration.outputs.seconds }} \
+            -rss_limit_mb=4096
+
+      # Only produced when libFuzzer found something; the input is the whole
+      # reproduction, so it is the one artifact worth keeping.
+      - name: Upload crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
