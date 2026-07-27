@@ -8,7 +8,7 @@
 //! Input layout is `[api_key, version, body..]`. The first byte is the real
 //! Kafka API key (`ApiKey::Produce == 0`, `Fetch == 1`, …) rather than an index
 //! into a list, so a seed file is self-describing and stays valid when this
-//! match grows. `tools/gen-fuzz-corpus` writes seeds in exactly this shape from
+//! match grows. `generate_fuzz_corpus` in `kacrab-protocol/tests/java_interop.rs` writes seeds in this shape from
 //! the same fixtures the Java oracle uses.
 //!
 //! Versions are deliberately unclamped: an out-of-range version must produce
@@ -78,6 +78,7 @@ fn decode(api_key: u8, version: i16, body: &mut Bytes) -> bool {
         66 => drop(ListTransactionsResponseData::read(body, version)),
         68 => drop(ConsumerGroupHeartbeatResponseData::read(body, version)),
         69 => drop(ConsumerGroupDescribeResponseData::read(body, version)),
+        71 => drop(GetTelemetrySubscriptionsResponseData::read(body, version)),
         74 => drop(ListConfigResourcesResponseData::read(body, version)),
         77 => drop(ShareGroupDescribeResponseData::read(body, version)),
         _ => return false,

@@ -456,6 +456,36 @@ fn parse_scram_attribute(value: &str, key: &str) -> Option<String> {
         .find_map(|part| part.strip_prefix(prefix.as_str()).map(ToOwned::to_owned))
 }
 
+/// A fixed client nonce, used only when the internal `__fuzzing` feature is on.
+///
+/// # This destroys SCRAM's security guarantee
+///
+/// The client nonce is what makes the SCRAM transcript unique per exchange and
+/// what stops a recorded server-first from being replayed. Pinning it is only
+/// acceptable because `__fuzzing` exists solely to let `fuzz/` reach
+/// crate-private parsers: the feature is `#[doc(hidden)]`, off by default,
+/// exempt from semver, and documented as never-enable-outside-`fuzz/`.
+///
+/// It is pinned because libFuzzer requires a deterministic target. With a fresh
+/// random nonce per iteration the harness feeds a different effective input each
+/// run, so coverage is unstable and a crash artifact found in CI is not
+/// guaranteed to reproduce locally — which defeats the point of keeping the
+/// artifact.
+#[cfg(feature = "__fuzzing")]
+const FUZZ_FIXED_NONCE: &str = "fuzzfuzzfuzzfuzzfuzzfuzzfuzzfuzz";
+
+// Signature matches the real implementation so the call site is unchanged; the
+// `Result` is never `Err` here, which clippy would otherwise flag.
+#[cfg(feature = "__fuzzing")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Mirrors the fallible signature of the non-fuzzing generate_nonce."
+)]
+fn generate_nonce() -> Result<String, crate::wire::WireError> {
+    Ok(FUZZ_FIXED_NONCE.to_owned())
+}
+
+#[cfg(not(feature = "__fuzzing"))]
 fn generate_nonce() -> Result<String, crate::wire::WireError> {
     let mut bytes = [0_u8; 24];
     getrandom::fill(&mut bytes).map_err(|error| {

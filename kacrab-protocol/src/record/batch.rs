@@ -22,6 +22,15 @@ use crate::{
 };
 
 const MAGIC_V2: i8 = 2;
+
+/// Smallest number of bytes a single [`Record`] can occupy on the wire: a length
+/// varint, `attributes`, and the five varints after it, one byte each.
+///
+/// Bounds the speculative `Vec::with_capacity` in [`RecordBatch::decode`]
+/// against a hostile `recordCount`, the batch-level counterpart to the header
+/// guard in `Record::decode`.
+const MIN_RECORD_ENCODED_LEN: usize = 7;
+
 const LOG_OVERHEAD: usize = 12;
 const BATCH_HEADER_SIZE: i32 = 49;
 const BATCH_HEADER_SIZE_USIZE: usize = 49;
@@ -358,7 +367,18 @@ impl RecordBatch {
             Bytes::from(decompressed)
         };
 
-        let mut records = Vec::with_capacity(record_count_usize);
+        // `MAX_RECORDS_PER_BATCH` caps the declared count, but 1,000,000 records
+        // still preallocates hundreds of megabytes from a batch of a few dozen
+        // bytes — measured at `malloc(226_060_171)` from one fuzz input. Cap the
+        // speculative allocation by what the payload could actually hold, the
+        // same guard `Record::decode` applies to its header count.
+        //
+        // A record is at least seven bytes on the wire: a length varint plus
+        // `attributes` and the five varints after it, each a minimum of one
+        // byte. So `remaining / 7` is a hard ceiling on how many can follow, and
+        // clamping to it can never reject a count the buffer can satisfy.
+        let capacity = record_count_usize.min(records_data.remaining() / MIN_RECORD_ENCODED_LEN);
+        let mut records = Vec::with_capacity(capacity);
         for _ in 0..record_count {
             let rec = Record::decode(&mut records_data)
                 .map_err(|e| RecordError::at_offset(base_offset, e.kind))?;

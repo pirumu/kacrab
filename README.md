@@ -456,11 +456,11 @@ decoders that parse untrusted broker bytes are separately fuzzed for the other
 half — garbage, truncation, hostile length prefixes — because `forbid(unsafe_code)`
 rules out memory corruption but not a panic, an unbounded allocation, or a
 non-terminating loop, and a panic on a client's decode path is a denial of
-service. Ten [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
+service. Eleven [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
 cover every parser that reads untrusted bytes, from the socket inward: the
 length-prefixed frame, record-batch decoding, the generated response structs,
-every compression codec, the SASL handshake, and the OAUTHBEARER token
-endpoint:
+consumer-group member metadata, every compression codec, the SASL handshake, and
+the OAUTHBEARER token endpoint:
 
 ```bash
 cargo +nightly fuzz run record_batch_framed \
@@ -492,12 +492,38 @@ every nullable field. Measured effect, edges covered:
 | `record_batch_framed` | 774 | **1591** |
 | `response_decode` | — | **11899** |
 | `decompress` | — | **1230** |
-| `frame_decode` | — | **78** |
-| `oauth_http_response` | — | **1007** |
-| `scram_server_first` | — | **271** |
-| `scram_server_first_nonced` | 199 | **742** |
+| `frame_decode` | — | **79** |
+| `consumer_protocol_metadata` | — | **386** |
+| `oauth_http_response` | — | **1013** |
+| `scram_server_first` | — | **245** |
+| `scram_server_first_nonced` | 199 | **743** |
 | `scram_server_final` | — | **322** |
 | `jaas_option` | — | **137** |
+
+`consumer_protocol_metadata` sits at a trust boundary none of the others do.
+Every other parser here reads bytes from the broker or the operator; this one
+reads bytes *another consumer wrote*. `ConsumerProtocolSubscription` is decoded
+by the group leader for every member, and `ConsumerProtocolAssignment` by every
+follower and by any admin client describing the group — so anyone authorised to
+join a group can feed the decoder of every other member. `response_decode` does
+not reach it: these travel as opaque `Bytes` inside `JoinGroupResponse` and
+`SyncGroupResponse`, with their own version prefix.
+
+Three libFuzzer flags are set deliberately rather than left to default, and the
+reasons are worth repeating because two of them bit this suite:
+
+- **`-max_len`** does *not* default to 4096 when a corpus is supplied — it
+  becomes the size of the largest file in it. The committed seeds are small, so
+  leaving it unset had silently capped `frame_decode` at **12 bytes**, making the
+  seeded target worse than an unseeded one.
+- **`-malloc_limit_mb`** bounds a single allocation and defaults to the rss
+  limit. At 4096 it could not see the ~120 MB preallocation a 49-byte record
+  batch can request. It is 64 MiB for every target that does not decompress, and
+  above `MAX_DECOMPRESSED_LEN` for those that do, since a 1 GiB expansion there
+  is by design.
+- **`-timeout`** catches CPU amplification, which surfaces as a hang, not a
+  crash. Tuned per target: the SCRAM targets legitimately run PBKDF2 up to
+  `MAX_SCRAM_ITERATIONS`.
 
 **The SASL targets are the ones that matter most.** SCRAM is mutual
 authentication, but the client only proves the *server* at server-final — so

@@ -29,19 +29,26 @@ fuzz_target!(|data: &[u8]| {
         );
     }
 
-    // Drain the buffer frame by frame the way a session loop does. A frame that
-    // decodes must consume its own length plus the 4-byte prefix; anything else
-    // either desynchronises the stream or spins forever.
+    // Drain the buffer frame by frame the way a session loop does.
+    //
+    // The invariant is that every successful decode strictly shrinks the buffer,
+    // which is what makes a session loop terminate. Asserting a *frame count*
+    // instead would be wrong: a zero-length frame is legal and consumes exactly
+    // its 4-byte prefix, so 400_004 bytes of zeroes legitimately yields 100_001
+    // frames. An earlier version of this target capped the count at 100_000 and
+    // fired on precisely that input — a manufactured finding against a decoder
+    // that was behaving correctly.
     let mut buf = Bytes::copy_from_slice(data);
-    let mut guard = 0_u32;
-    while let Ok(frame) = decode_response_frame(&mut buf) {
-        guard += 1;
+    loop {
+        let before = buf.len();
+        let Ok(frame) = decode_response_frame(&mut buf) else {
+            break;
+        };
         assert!(
-            guard < 100_000,
-            "decode_response_frame yielded 100k frames from {} bytes — it is not \
-             consuming the buffer",
-            data.len(),
+            buf.len() < before,
+            "decode_response_frame returned a {}-byte frame while leaving the buffer \
+             at {before} bytes — a session loop over this would spin forever",
+            frame.len(),
         );
-        let _payload = frame;
     }
 });
