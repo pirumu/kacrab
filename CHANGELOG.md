@@ -69,8 +69,7 @@ release date and links to relevant pull requests or issues.
   `max(largest record, estimated batch size / 2)` — so the pieces shrink
   geometrically until they fit. The `max(largest record, ..)` floor keeps a batch
   holding one large record from halving forever, and a single-record batch that
-  still does not fit stays a terminal failure, as in Java. The first split of a
-  batch that is not a split child is unchanged, and nothing outside the
+  still does not fit stays a terminal failure, as in Java. Nothing outside the
   `MESSAGE_TOO_LARGE` path is affected.
 
   A split that hands back a single child holding every record is not a split —
