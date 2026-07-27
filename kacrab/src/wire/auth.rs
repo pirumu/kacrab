@@ -1140,6 +1140,9 @@ fn build_oauthbearer_assertion(config: &SaslConfig) -> Result<String, crate::wir
     let (mut header, mut claims) = oauthbearer_assertion_template(config)?;
     header.alg = algorithm;
     merge_oauthbearer_config_claims(config, &mut claims)?;
+    // `jsonwebtoken` panics rather than erroring when it cannot resolve a crypto
+    // provider from its crate features, so settle that before handing it the key.
+    crate::wire::crypto::ensure_jwt_provider()?;
     jsonwebtoken::encode(&header, &Value::Object(claims), &encoding_key).map_err(|error| {
         crate::wire::WireError::TokenRefresh(format!("cannot sign OAUTHBEARER assertion: {error}"))
     })

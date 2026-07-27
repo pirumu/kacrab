@@ -10,7 +10,7 @@ use rustls::{
         danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
         verify_server_cert_signed_by_trust_anchor,
     },
-    crypto::{CryptoProvider, WebPkiSupportedAlgorithms},
+    crypto::WebPkiSupportedAlgorithms,
     pki_types::{
         CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime, pem::PemObject,
     },
@@ -82,9 +82,7 @@ pub(crate) async fn connect_client(
 ) -> Result<TlsStream<TcpStream>> {
     validate_supported_options(config)?;
     let roots = root_store(config)?;
-    let provider = CryptoProvider::get_default()
-        .cloned()
-        .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+    let provider = super::crypto::rustls_provider()?;
     let versions = enabled_protocol_versions(config)?;
     let builder = ClientConfig::builder_with_provider(Arc::clone(&provider))
         .with_protocol_versions(&versions)

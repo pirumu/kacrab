@@ -47,15 +47,18 @@ regex = { version = "1", default-features = false, features = ["std", "unicode"]
 getrandom = "0.3"
 hmac = "0.12"
 jks = { version = "0.3", default-features = false, features = ["rand"] }
-jsonwebtoken = { version = "10.4", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+# Crypto backend is selected by kacrab's `aws-lc-rs-tls` / `pure-rust-tls` features,
+# not here, so a build can drop `aws-lc-sys` entirely.
+jsonwebtoken = { version = "10.4", default-features = false, features = ["use_pem"] }
 libgssapi = "0.11"
 p12-keystore = "0.3"
 pkcs8 = { version = "0.11", features = ["encryption", "getrandom", "pem", "std"] }
-rustls = "0.23"
+# Same: no default provider, so the crypto backend stays a kacrab feature choice.
+rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
 rustls-native-certs = "0.8"
 sha2 = "0.10"
 socket2 = { version = "0.6", features = ["all"] }
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12"] }
 
 # Proc-macro toolchain — shared by `kacrab-macros` (derive macros) and
 # `kacrab-codegen` (schema → Rust source emission). Members opt into `syn`

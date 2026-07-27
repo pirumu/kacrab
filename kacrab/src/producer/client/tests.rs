@@ -401,12 +401,12 @@ fn async_transaction_control_uses_nonblocking_dispatcher_snapshot() {
         ),
         (
             "commit_transaction",
-            "pub async fn commit_transaction(&mut self) -> Result<()> {",
+            "pub async fn commit_transaction(&self) -> Result<()> {",
             "/// Abort the open transaction.",
         ),
         (
             "abort_transaction",
-            "pub async fn abort_transaction(&mut self) -> Result<()> {",
+            "pub async fn abort_transaction(&self) -> Result<()> {",
             "async fn end_transaction_with_max_block(",
         ),
         (
@@ -1413,7 +1413,7 @@ fn guaranteed_order_selection_emits_one_batch_per_partition_per_cycle() {
 async fn flush_waits_for_in_flight_slot_and_reports_local_delivery_timeout() {
     let mut config = runtime_config(1);
     config.delivery_timeout = Duration::ZERO;
-    let mut producer = Producer::from_parts(test_wire(), config);
+    let producer = Producer::from_parts(test_wire(), config);
     producer
         .sender
         .lock()
@@ -1566,6 +1566,7 @@ fn dispatch_task_result_requeues_batches_or_errors_for_flush() {
     ));
 }
 
+#[cfg(feature = "__bench")]
 #[test]
 fn dispatch_task_result_records_latency_when_metrics_are_enabled() {
     let mut producer = producer(1);
@@ -1589,7 +1590,7 @@ fn dispatch_task_result_records_latency_when_metrics_are_enabled() {
 
 #[tokio::test]
 async fn facade_transaction_wrappers_fail_locally_without_transactional_id() {
-    let mut producer = producer(1);
+    let producer = producer(1);
 
     assert!(matches!(
         producer.init_transactions().await,
@@ -1623,7 +1624,7 @@ async fn commit_transaction_reports_transaction_error_before_flush_like_java() {
         transaction_timeout_ms: 60_000,
         transaction_two_phase_commit: false,
     };
-    let mut producer = Producer::from_parts(test_wire(), config);
+    let producer = Producer::from_parts(test_wire(), config);
     producer
         .control_dispatcher
         .set_abortable_transaction_error_for_test(ErrorCode::UnknownProducerId)
@@ -1648,7 +1649,7 @@ async fn commit_transaction_reports_transaction_error_before_flush_like_java() {
 
 #[tokio::test]
 async fn commit_transaction_reports_local_transaction_state_before_flush_like_java() {
-    let mut producer = producer(1);
+    let producer = producer(1);
     producer
         .sender
         .lock()
@@ -1670,7 +1671,7 @@ async fn commit_transaction_reports_local_transaction_state_before_flush_like_ja
         transaction_timeout_ms: 60_000,
         transaction_two_phase_commit: false,
     };
-    let mut producer = Producer::from_parts(test_wire(), config);
+    let producer = Producer::from_parts(test_wire(), config);
     producer
         .sender
         .lock()
@@ -1697,7 +1698,7 @@ async fn abort_transaction_drops_buffered_records_like_java() {
         transaction_timeout_ms: 60_000,
         transaction_two_phase_commit: false,
     };
-    let mut producer = Producer::from_parts(test_wire(), config);
+    let producer = Producer::from_parts(test_wire(), config);
     producer
         .control_dispatcher
         .set_open_transaction_for_test(
@@ -1936,7 +1937,7 @@ fn flush_from_delivery_callback_is_rejected_like_java() {
     let callback_rejected = Arc::clone(&rejected);
     delivery.register_callback(Box::new(move |_result| {
         let result = {
-            let mut producer = callback_producer
+            let producer = callback_producer
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             callback_runtime.block_on(producer.flush())
@@ -2090,7 +2091,7 @@ async fn close_timeout_zero_drops_buffered_records_like_java() {
 
 #[tokio::test]
 async fn flush_records_local_metrics_like_java() {
-    let mut producer = producer(1);
+    let producer = producer(1);
 
     assert_eq!(producer.metrics().flush_count, 0);
     producer.flush().await.expect("empty flush");

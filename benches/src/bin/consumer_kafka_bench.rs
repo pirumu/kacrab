@@ -711,7 +711,7 @@ async fn prefill_topic(options: &BenchOptions, scenario: &Scenario) {
         "prefill: topic={}, records={}, value_size={}",
         scenario.topic, scenario.records, scenario.value_size
     );
-    let mut producer = Producer::builder()
+    let producer = Producer::builder()
         .set("bootstrap.servers", options.bootstrap.clone())
         .set("client.id", "kacrab-consumer-bench-prefill")
         .build()

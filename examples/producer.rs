@@ -36,17 +36,17 @@ const TRANSACTIONAL_ID: Option<&str> = None;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = ExampleArgs::parse(env::args().skip(1))?;
-    let mut producer = build_producer(&args.bootstrap).await?;
+    let producer = build_producer(&args.bootstrap).await?;
 
     if TRANSACTIONAL_ID.is_some() {
         producer.init_transactions().await?;
         producer.begin_transaction()?;
     }
 
-    let deliveries = match write_records(&mut producer, &args).await {
+    let deliveries = match write_records(&producer, &args).await {
         Ok(deliveries) => deliveries,
         Err(error) => {
-            abort_transaction_if_open(&mut producer).await;
+            abort_transaction_if_open(&producer).await;
             return Err(error);
         },
     };
@@ -94,7 +94,7 @@ async fn build_producer(bootstrap: &str) -> Result<Producer, Box<dyn Error>> {
 }
 
 async fn write_records(
-    producer: &mut Producer,
+    producer: &Producer,
     args: &ExampleArgs,
 ) -> Result<Vec<SendFuture>, Box<dyn Error>> {
     let mut deliveries = Vec::with_capacity(args.messages.saturating_add(2));
@@ -134,7 +134,7 @@ fn record(topic: &str, partition: i32, sequence: usize, prefix: &str) -> Produce
         .value(format!("{prefix}-{sequence}"))
 }
 
-async fn abort_transaction_if_open(producer: &mut Producer) {
+async fn abort_transaction_if_open(producer: &Producer) {
     if TRANSACTIONAL_ID.is_none() {
         return;
     }

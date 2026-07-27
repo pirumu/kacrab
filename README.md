@@ -71,13 +71,17 @@ built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
   `max.message.bytes` forces batch splitting) with about 4x less memory, and at
   Java's own offered load kacrab's latency is lower or tied at every percentile,
   with a ~30x lower maximum; consumer
-  throughput is **1.9-4x** higher with about 16-20x less memory. See
+  throughput is **1.9-4x** higher with about 16x less memory. See
   [Benchmarks](#benchmarks).
 - **Native Rust**: protocol, wire, and client logic are pure Rust, and the
   workspace forbids `unsafe_code`. Caveat: the default TLS provider
-  (`rustls` + `aws-lc-rs`) uses C/assembly, and the optional `zstd`, `lz4-hc`,
-  and `gssapi` features add C. For a C-free build, use a pure-Rust `rustls`
-  provider and the `gzip`/`snappy`/`lz4` codecs.
+  (`aws-lc-rs-tls`, i.e. `rustls` + `aws-lc-rs`) is C/assembly, and the optional
+  `zstd`, `lz4-hc`, and `gssapi` features add C. The `pure-rust-tls` feature swaps
+  `rustls` and the OAUTHBEARER JWT path onto `ring`, which removes `aws-lc-sys`
+  from the tree entirely — CI asserts that, not just that it compiles. `ring`
+  still vendors some C from BoringSSL, so that is *no aws-lc*, not *zero C*. A
+  `PLAINTEXT`-only build with the `gzip`/`snappy`/`lz4` codecs compiles no crypto
+  provider at all.
 - **Generated protocol**: request/response structs are generated from Apache
   Kafka schemas and checked byte-for-byte against the Kafka Java client oracle.
 - **Verified with real brokers, in CI**: every client surface (producer,
@@ -105,7 +109,7 @@ and release history as of 2026-07-27:
 | Transactions | yes | yes | none — explicit non-goal | not documented |
 | Admin API | 62 operations | yes | none | not documented |
 | Broker versions | targets 4.3.0 | broad | not stated | tested 0.8.2–3.1 |
-| Latest release | 2026-07 | 2026-01 | 2025-03 | 2023-09 |
+| Untrusted-byte decode path | Rust, `forbid(unsafe_code)` workspace-wide, [11 fuzz targets nightly][fuzz-url] | C (librdkafka) | Rust | Rust |
 
 rskafka states its own scope plainly — *"No support for offset tracking,
 consumer groups, transactions, etc."* — it is a deliberately minimal
@@ -137,14 +141,22 @@ behaviour that follows from that, and
   rebalancing and fetching, SASL/TLS handshakes, protocol codegen, and benchmark
   methodology. Source lives in [`docs-book/`](docs-book/).
 - **API reference**: [docs.rs/kacrab](https://docs.rs/kacrab).
+- **Release notes**: [`CHANGELOG.md`](CHANGELOG.md). kacrab is pre-1.0, so minor
+  versions can break API — read it before bumping.
+- **MSRV**: currently 1.95, pinned in `rust-toolchain.toml` and checked in CI. An
+  MSRV bump is treated as a breaking change and gets its own `CHANGELOG.md` entry;
+  it will not arrive in a patch release.
 
 ## Status
 
 Protocol, wire, auth, producer, consumer, and admin all have a verified usable
-baseline. The remaining work before calling this production-ready is
-**measurement under load, not correctness**: sustained multi-broker stress,
-cross-DC/high-RTT coverage, memory soak, and latency-percentile gates. The
-concrete plan is in [`ROADMAP.md`](ROADMAP.md).
+baseline. The remaining work before calling this production-ready is **mostly
+measurement under load**: sustained multi-broker stress, cross-DC/high-RTT
+coverage, memory soak, and latency-percentile gates. The one known correctness
+gap is the compound-failure path in [`SOAK-REPORT.md`](SOAK-REPORT.md) — the
+defects it exposed are fixed in code, but the confirming compound re-run has not
+happened yet, so treat that branch as open rather than closed. The concrete plan
+is in [`ROADMAP.md`](ROADMAP.md).
 
 **Kafka Streams is out of scope.** kacrab is a Kafka *client* library, the
 equivalent of `KafkaProducer`/`KafkaConsumer`/`Admin`, not a stream-processing
@@ -172,7 +184,7 @@ Nothing is enabled by default (`default = []`) — turn on the surfaces you use:
 
 ```toml
 [dependencies]
-kacrab = { version = "0.3", features = ["producer", "consumer", "admin"] }
+kacrab = { version = "0.3", features = ["producer", "consumer", "admin", "aws-lc-rs-tls"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
@@ -180,6 +192,13 @@ Available features: `producer`, `consumer`, `admin`, `share-consumer` (each
 example below names the one it needs); compression codecs `gzip`, `lz4`,
 `snappy`, `zstd` (or the `compression` meta-feature for all four); Kerberos via
 `gssapi`; config macro helpers via `macros`.
+
+**TLS needs a crypto provider chosen explicitly**: `aws-lc-rs-tls` (the default
+provider, what CI exercises) or `pure-rust-tls` (`ring`-backed, drops
+`aws-lc-sys`). You need one for `SSL`, `SASL_SSL`, or the `OAUTHBEARER` assertion
+path; a `PLAINTEXT`-only build can skip both and compiles no crypto backend at
+all. With neither, a TLS connection fails at config validation with a message
+naming the two features. Enabling both is well defined — `aws-lc-rs` wins.
 
 ## Producer
 
@@ -194,7 +213,7 @@ use kacrab::producer::{Producer, ProducerRecord};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut producer = Producer::builder()
+    let producer = Producer::builder()
         .set("bootstrap.servers", "127.0.0.1:9092")
         .set("acks", "all")
         .set("enable.idempotence", "true")
@@ -202,11 +221,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
+    // `unassigned` lets the key pick the partition through murmur2 + the sticky
+    // partitioner, like Java. Use `ProducerRecord::new(topic, partition)` only when
+    // you genuinely want to pin one.
     let delivery = producer.send(
-        ProducerRecord::new("orders", 0).key("order-42").value("created"),
+        ProducerRecord::unassigned("orders").key("order-42").value("created"),
     )?;
 
-    producer.flush().await?;
+    // No `flush()` needed here: the background sender drains on `linger.ms`, so the
+    // delivery future resolves on its own. `flush()` is for "every prior send has
+    // completed" barriers; `close()` below already flushes.
     let receipt = delivery.await?;
     println!("{}-{}@{}", receipt.topic, receipt.partition, receipt.offset);
 
@@ -214,6 +238,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+### Sharing a producer
+
+`Producer` is `Send + Sync` and does not implement `Clone`, so the Java model of
+one producer shared by the whole application maps to `Arc<Producer>`. Everything
+on the hot path and the whole transaction lifecycle takes `&self`:
+
+```rust,ignore
+let producer = Arc::new(Producer::builder()./* ... */.build().await?);
+
+for _ in 0..workers {
+    let producer = Arc::clone(&producer);
+    tokio::spawn(async move {
+        producer.send(ProducerRecord::unassigned("orders").value("..."))?;
+        producer.flush().await                       // &self
+    });
+}
+```
+
+`send`, `send_with_callback`, `flush`, `init_transactions`, `begin_transaction`,
+`commit_transaction`, `abort_transaction`, and `send_offsets_to_transaction` all
+take `&self`. Only two groups need exclusive access, and both are one-time setup
+or teardown rather than steady-state calls:
+
+- `&mut self` — `set_partitioner`, `add_interceptor`, `add_metric_reporter`,
+  `enable_metrics`, and the `register_*`/`unregister_*` metric hooks. Configure
+  these before wrapping the producer in an `Arc`.
+- `self` — `close`, `close_now`, `close_timeout`. Use `Arc::try_unwrap` on the
+  last handle, or just drop the `Arc`: every incomplete delivery then resolves as
+  `Err(ProducerError::DeliveryDropped)` rather than vanishing.
+
+Note that a **custom partitioner takes every record off the inline fast path**:
+`set_partitioner` may block or re-enter user code, so `send` routes each record
+through the FIFO drain instead of appending it with zero `.await`. Ordering and
+delivery are unchanged, but the [Benchmarks](#benchmarks) numbers are measured on
+the built-in murmur2 + sticky/adaptive partitioner and do not carry over.
 
 Transactions use the same producer (`transactional.id` +
 `init_transactions`/`begin_transaction`/`commit_transaction`). Interceptors
@@ -263,7 +323,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Records are bytes-first (`ConsumerRecord.key/value: Option<Bytes>`), with a
 typed `ConsumerDeserializer` layer on top. Offsets can be committed sync, async,
 or automatically, with leader-epoch awareness. `ConsumerInterceptor`s and
-`metrics()` round out the surface. See the book's
+`metrics()` round out the surface, and the Java lookup calls are all here too:
+`committed()`, `beginning_offsets()`, `end_offsets()`, `offsets_for_times()`,
+`enforce_rebalance()`, and rack-aware fetch-from-follower via `client.rack`
+(KIP-392).
+
+`wakeup()` takes `&self`, so another task can interrupt a blocking `poll` — the
+in-flight or next `poll` returns `ConsumerError::Wakeup`, matching Java's
+`KafkaConsumer.wakeup()`. See
+[Cancellation & drop semantics](#cancellation--drop-semantics) for how that
+compares with cancelling the `poll` future directly. See the book's
 [consumer chapter](docs-book/src/consumer.md) for the rebalancing and fetching
 deep dives.
 
@@ -386,7 +455,8 @@ live in `kacrab::common`. There is a runnable tour in
 
 Kafka-compatible property names are used throughout. JAAS strings are accepted
 for migration, but kacrab only parses the credential options; it never loads
-Java login modules:
+Java login modules. Anything below that touches TLS or signs a JWT needs a crypto
+provider feature — `aws-lc-rs-tls` or `pure-rust-tls`, see [Install](#install):
 
 ```rust
 let producer = Producer::builder()
@@ -472,6 +542,13 @@ resolves — and what each client does when it is dropped without `close()`.
 | `Consumer::commit_sync` | No | The `OffsetCommit` may have reached the broker and applied. Treat the offset as indeterminate and re-commit. |
 | `ShareConsumer::poll` | No | The `ShareFetch` response is discarded, so records the broker acquired for this member stay locked until the acquisition lock expires (`group.share.record.lock.duration.ms`) and are then redelivered. Nothing is lost; a record can be delivered twice. |
 | `ShareConsumer::commit` | No | The `ShareAcknowledge` may have reached the broker and applied. Unapplied acknowledgements are not retried — those records keep their lock and are redelivered. |
+| `Producer::init_transactions` | No, but not abandoned | The coordinator round trip runs on its own task, so `InitProducerId` still completes and the producer id/epoch is still installed. You lose only the `Result`. Re-call it: the operation is marked pending, and the retry joins the in-flight one instead of issuing a second. |
+| `Producer::commit_transaction` / `abort_transaction` | No, but not abandoned | Same shape: `EndTxn` still reaches the coordinator and the transaction still commits or aborts. A cancelled `commit` is **not** an implicit abort. Re-call *the same* operation to pick the result back up; calling the other one while it is pending returns `ProducerError::InvalidTransactionState`. |
+| `Producer::send_offsets_to_transaction` | No, but not abandoned | `AddOffsetsToTxn` + `TxnOffsetCommit` still run to completion on their own task. Re-call it with the same offsets to observe the result. |
+| `Admin::*` | No | Admin calls are plain request/response with no client-side state machine: a mid-await drop loses the response and nothing local changes. Whether the broker applied the operation is indeterminate, so re-issue it and rely on the operation being idempotent (or check with the matching `describe_*`). |
+
+`Producer::begin_transaction` is a plain `fn`, not `async` — there is no future to
+cancel. The four rows above cover the whole EOS surface.
 
 Two caveats on `poll` specifically. It is cancel-safe with respect to **records**,
 which is the property `select!` users need — a cancelled `poll` never drops
@@ -601,6 +678,13 @@ every nullable field. Measured effect, edges covered:
 | `scram_server_first_nonced` | 199 | **743** |
 | `scram_server_final` | — | **322** |
 | `jaas_option` | — | **137** |
+
+The `—` cells are not omitted results: an unseeded baseline is only meaningful for
+a target whose framing a fuzzer can reach unaided. The other eight sit behind a
+length prefix, an API-version gate, or a text grammar, so an unseeded run stalls
+in front of the decoder and its edge count measures the gate rather than the
+parser. The three targets carrying both columns are the ones where the comparison
+says something — and they are why the seed corpus exists.
 
 `consumer_protocol_metadata` sits at a trust boundary none of the others do.
 Every other parser here reads bytes from the broker or the operator; this one

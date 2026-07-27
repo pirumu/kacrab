@@ -9,6 +9,53 @@ release date and links to relevant pull requests or issues.
 
 ## Unreleased
 
+### Changed — breaking
+
+- **The TLS crypto provider is now an explicit feature.** `rustls` and
+  `jsonwebtoken` no longer come with their default backends baked in. Pick one:
+  `aws-lc-rs-tls` reproduces the previous behaviour, and `pure-rust-tls` swaps both
+  onto `ring`, which drops `aws-lc-sys` — the large C/assembly dependency — from the
+  tree entirely. `make check-pure-rust-tls` asserts that in CI rather than trusting
+  that the feature compiles.
+
+  If you use `SSL`, `SASL_SSL`, or the `OAUTHBEARER` assertion path, add
+  `aws-lc-rs-tls` to your feature list. A build with neither now compiles no crypto
+  backend at all, and a TLS connection returns
+  `WireError::InvalidTlsConfig` naming the two features rather than failing at link
+  time — a `PLAINTEXT`-only deployment should not pay for a provider it never uses.
+
+  Enabling both features is well defined: kacrab installs `aws-lc-rs` as the process
+  default before first use, so `--all-features` builds no longer hit `rustls`'s
+  "could not automatically determine the process-level `CryptoProvider`" panic. An
+  application that installs its own provider first keeps it.
+
+- **`Producer::flush`, `commit_transaction`, and `abort_transaction` take `&self`.**
+  They previously took `&mut self` while `send` and `begin_transaction` took
+  `&self`, so an `Arc<Producer>` — the natural translation of Java's one-producer-
+  per-application model — could open a transaction but not commit it, and could not
+  flush at all. The exclusive borrow was never required: nothing in the flush chain
+  mutates a field, and the internals were already interior-mutable.
+
+  `TypedProducer::send` moves from `&mut self` to `&self` for the same reason, and
+  `close`/`close_timeout` no longer bind `mut self`. Existing callers keep compiling;
+  `let mut producer` bindings simply become redundant. See the new
+  [Sharing a producer](README.md#sharing-a-producer) section for what still needs
+  exclusive access (`set_partitioner`, interceptors, metric hooks) and what needs
+  ownership (`close`).
+
+- **Benchmark diagnostics moved behind the internal `__bench` feature.**
+  `SYNC_NOW_BUFFER_SPINS`, `Producer::enable_dispatch_latency_metrics`, and
+  `Producer::take_dispatch_latency_samples` were reachable on the stable public API
+  despite being instruments for measuring kacrab, not for using it. They are now
+  `#[doc(hidden)]` behind `__bench`, off by default and exempt from semver — the
+  same treatment `__fuzzing` already gets. `Producer::from_parts` is likewise
+  `#[doc(hidden)]`, matching the visibility of the `ProducerRuntimeConfig` it takes.
+
+  These sample a *dispatch-group* clock and were never the source of the published
+  latency tables, which use the per-record `send_with_callback` clock described in
+  [`benches/README.md`](benches/README.md). Their docs now say so, and the stale
+  reference to a non-existent `send_now` method is gone.
+
 ### Added
 
 - **Share consumer (KIP-932), behind the new `share-consumer` feature.**

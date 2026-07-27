@@ -99,6 +99,12 @@ struct TelemetrySubscription {
 
 impl Producer {
     /// Build a producer from an existing wire client and runtime config.
+    ///
+    /// [`ProducerRuntimeConfig`] is an internal runtime shape reachable only through
+    /// [`producer::internals`](crate::producer::internals), so this constructor is
+    /// hidden and exempt from semver alongside it. Build producers with
+    /// [`Producer::builder`] instead.
+    #[doc(hidden)]
     #[must_use]
     pub fn from_parts(wire: WireClient, config: ProducerRuntimeConfig) -> Self {
         let max_block = config.max_block;
@@ -549,7 +555,7 @@ impl Producer {
     /// # Errors
     ///
     /// Returns an error when a buffered batch cannot be routed or delivered.
-    pub async fn flush(&mut self) -> Result<()> {
+    pub async fn flush(&self) -> Result<()> {
         if super::record::in_delivery_callback() {
             return Err(ProducerError::CallbackOperation { operation: "flush" });
         }
@@ -561,7 +567,7 @@ impl Producer {
         result
     }
 
-    async fn flush_inner(&mut self) -> Result<()> {
+    async fn flush_inner(&self) -> Result<()> {
         self.ensure_background_sender_loop();
         // Drain any records queued on the synchronous-send slow path so they are
         // appended to the accumulator before the flush dispatches buffered batches
@@ -633,7 +639,7 @@ impl Producer {
     /// # Errors
     ///
     /// Returns an error from flushing records or `EndTxn`.
-    pub async fn commit_transaction(&mut self) -> Result<()> {
+    pub async fn commit_transaction(&self) -> Result<()> {
         let started_at = std::time::Instant::now();
         let dispatcher = self.control_dispatcher();
         let retry_pending_commit = dispatcher.pending_end_transaction_matches(true).await?;
@@ -655,7 +661,7 @@ impl Producer {
     /// # Errors
     ///
     /// Returns an error from `EndTxn`.
-    pub async fn abort_transaction(&mut self) -> Result<()> {
+    pub async fn abort_transaction(&self) -> Result<()> {
         let started_at = std::time::Instant::now();
         let dispatcher = self.control_dispatcher();
         let retry_pending_abort = dispatcher.pending_end_transaction_matches(false).await?;
@@ -762,7 +768,7 @@ impl Producer {
     /// # Errors
     ///
     /// Returns any error from [`Self::flush`].
-    pub async fn close(mut self) -> Result<()> {
+    pub async fn close(self) -> Result<()> {
         if super::record::in_delivery_callback() {
             return Ok(());
         }
@@ -787,7 +793,7 @@ impl Producer {
     ///
     /// Returns any error from [`Self::flush`], or a timeout error if the flush
     /// does not complete within the requested duration.
-    pub async fn close_timeout(mut self, timeout: std::time::Duration) -> Result<()> {
+    pub async fn close_timeout(self, timeout: std::time::Duration) -> Result<()> {
         if super::record::in_delivery_callback() {
             return Ok(());
         }
@@ -1246,6 +1252,13 @@ impl Producer {
     /// Samples are measured from the earliest append timestamp in a drained
     /// dispatch group until the broker response has been handled. This avoids
     /// per-record delivery handles on the untracked throughput path.
+    ///
+    /// This is a *dispatch-group* clock, not a per-record one, so it is not
+    /// comparable with Java's `ProducerPerformance` latency columns. The published
+    /// benchmark tables use the per-record `send_with_callback` clock instead — see
+    /// `benches/README.md`. Available only under the internal `__bench` feature.
+    #[cfg(feature = "__bench")]
+    #[doc(hidden)]
     pub fn enable_dispatch_latency_metrics(&mut self) {
         let samples = self
             .dispatch_latency_samples
@@ -1279,11 +1292,27 @@ impl Producer {
     }
 
     /// Set a Rust-native producer partitioner for unassigned records.
+    ///
+    /// # Performance
+    ///
+    /// This takes the producer off the inline append fast path for **every** record,
+    /// not just the ones the partitioner has to resolve: a custom partitioner may
+    /// block or call back into user code, so [`Self::send`] hands each record to the
+    /// FIFO drain instead of appending it with zero `.await`. Ordering and delivery
+    /// are unchanged, but the throughput numbers in the repository benchmarks are
+    /// measured on the built-in murmur2 + sticky/adaptive partitioner and do not
+    /// apply here.
     pub fn set_partitioner(&mut self, partitioner: impl ProducerPartitioner) {
         self.partitioner = ProducerPartitionerHandle::new(partitioner);
     }
 
     /// Take and clear collected dispatch latency samples.
+    ///
+    /// See [`Self::enable_dispatch_latency_metrics`] for what these measure and why
+    /// they are not the numbers in the published benchmark tables. Available only
+    /// under the internal `__bench` feature.
+    #[cfg(feature = "__bench")]
+    #[doc(hidden)]
     #[must_use]
     pub fn take_dispatch_latency_samples(&self) -> Vec<std::time::Duration> {
         self.dispatch_latency_samples
@@ -1314,12 +1343,7 @@ impl Producer {
         self.wait_for_handled_dispatch(true).await
     }
 
-    #[expect(
-        clippy::needless_pass_by_ref_mut,
-        reason = "part of the &mut self flush/abort control-plane surface; dispatch latency \
-                  samples are now interior-mutable so no field is mutated directly here"
-    )]
-    async fn wait_for_abort_completion(&mut self) -> Result<()> {
+    async fn wait_for_abort_completion(&self) -> Result<()> {
         let dispatch_latency_samples = &self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;
@@ -1339,12 +1363,7 @@ impl Producer {
             .await
     }
 
-    #[expect(
-        clippy::needless_pass_by_ref_mut,
-        reason = "part of the &mut self flush control-plane surface; dispatch latency samples are \
-                  now interior-mutable so no field is mutated directly here"
-    )]
-    async fn drive_flush_until_complete(&mut self) -> Result<()> {
+    async fn drive_flush_until_complete(&self) -> Result<()> {
         let dispatch_latency_samples = &self.dispatch_latency_samples;
         let metrics_enabled = self.metrics_enabled;
         let metrics = &self.metrics;

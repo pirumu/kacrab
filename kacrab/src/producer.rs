@@ -18,6 +18,14 @@ mod sender;
 mod serializer;
 mod transaction;
 
+/// Diagnostic hooks for measuring kacrab, exposed only under the internal
+/// `__bench` feature so `benches/` can reach them.
+///
+/// Not part of the public API and exempt from semver: these exist to instrument
+/// the producer during benchmark runs, not to be built on.
+#[cfg(feature = "__bench")]
+#[doc(hidden)]
+pub use self::sender::SYNC_NOW_BUFFER_SPINS;
 pub(crate) use self::{
     accumulator::{AccumulatorConfig, ReadyBatch},
     config::ProducerRuntimeConfig,
@@ -47,7 +55,6 @@ pub use self::{
         DeliveryCallback, Header, Headers, ProducerRecord, RecordHeader, RecordHeaders,
         RecordMetadata, SendFuture,
     },
-    sender::SYNC_NOW_BUFFER_SPINS,
     serializer::{
         BooleanSerializer, ByteArraySerializer, BytesSerializer, ConfiguredProducerSerializer,
         DoubleSerializer, FloatSerializer, IntegerSerializer, ListInnerSerializer,

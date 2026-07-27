@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // The key uses the built-in StringSerializer; the value uses our custom one.
     // K = String and V = OrderEvent are inferred from the serializer types.
-    let mut producer = Producer::builder()
+    let producer = Producer::builder()
         .set("bootstrap.servers", bootstrap.as_str())
         .set("client.id", "kacrab-typed-serializer-example")
         .set("acks", "all")

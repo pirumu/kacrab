@@ -24,6 +24,16 @@ features = ["producer", "consumer", "share-consumer", "admin", "compression", "m
 [features]
 default = []
 admin = []
+# TLS crypto provider. Exactly one of these should be on for `SSL`/`SASL_SSL`
+# listeners or for the `OAUTHBEARER` JWT path; with neither, TLS connections fail
+# at config validation with a clear error and no provider is compiled in.
+#
+# `aws-lc-rs-tls` is the documented default and what CI exercises. `pure-rust-tls`
+# swaps both `rustls` and `jsonwebtoken` onto backends that do not build
+# `aws-lc-sys`, which is the large C/assembly dependency in the tree. Note that
+# `ring` still vendors some C from BoringSSL, so this is "no aws-lc", not "zero C".
+aws-lc-rs-tls = ["rustls/aws-lc-rs", "jsonwebtoken/aws_lc_rs"]
+pure-rust-tls = ["rustls/ring", "jsonwebtoken/rust_crypto"]
 # Meta-feature: enable kacrab's own codec features (each forwards to
 # `kacrab-protocol/<codec>`) so the codec cfgs gated on these — e.g. the lz4
 # round-trip test — are active too. Selects pure-Rust `lz4`; opt into `lz4-hc`
@@ -51,6 +61,12 @@ share-consumer = ["consumer"]
 # fuzz target lives in a separate crate. Never enable this outside `fuzz/`; it
 # is exempt from semver and its contents can change without notice.
 __fuzzing = []
+# Internal, unstable, and not part of the public API: exposes the producer's
+# dispatch-latency sampler and the sync-send spin counter so `benches/` can
+# report them. These are diagnostics for measuring kacrab, not a surface for
+# using it. Never enable this outside `benches/`; it is exempt from semver and
+# its contents can change without notice.
+__bench = []
 snappy = ["kacrab-protocol/snappy"]
 zstd = ["kacrab-protocol/zstd"]
 
