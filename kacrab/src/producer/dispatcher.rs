@@ -1501,8 +1501,14 @@ impl ProducerDispatcher {
             match self.dispatch_drained(batches, now, enqueue_ticket).await {
                 DispatchOutcome::Delivered(result) => return result,
                 // Unroutable: the caller owns these batches and there is no accumulator
-                // to hand them back to, so the flush is genuinely incomplete.
-                DispatchOutcome::Requeue(_batches) => return Err(ProducerError::FlushIncomplete),
+                // to hand them back to, so the flush is genuinely incomplete. They are
+                // abandoned here, so release their sequences — a requeue keeps its
+                // registration precisely because the batch is expected to come back, and
+                // one that never does would gate the partition forever.
+                DispatchOutcome::Requeue(batches) => {
+                    self.release_abandoned_idempotent_inflight(&batches).await;
+                    return Err(ProducerError::FlushIncomplete);
+                },
                 // A `MESSAGE_TOO_LARGE` split is transparent to the caller: routing is
                 // fine and the children are ready to send immediately. Dispatch them here
                 // instead of dropping them — dropping lost every record in the split and
@@ -1567,19 +1573,36 @@ impl ProducerDispatcher {
         }
     }
 
-    /// Terminal completion of a dispatch (anything but a requeue): drop its batches
-    /// from the in-flight set (Kafka `removeInFlightBatch`) and re-attempt
-    /// `maybeResolveSequences` for each touched partition, which now succeeds for
-    /// any partition that has fully drained.
+    /// Terminal completion of a dispatch: drop its batches from the in-flight set
+    /// (Kafka `removeInFlightBatch`) and re-attempt `maybeResolveSequences` for each
+    /// touched partition, which now succeeds for any partition that has fully drained.
     async fn release_idempotent_inflight_after_terminal(&self, inflight: &[(String, i32, i32)]) {
+        self.remove_idempotent_inflight(inflight).await;
+        self.resolve_idempotent_partitions(inflight).await;
+    }
+
+    /// Drop base sequences from the in-flight set without running
+    /// `maybeResolveSequences`. Split hand-over needs the two halves apart: the first
+    /// child reuses the parent's own base sequence, so the parent must be removed
+    /// before the children register, and the resolve must run only after.
+    async fn remove_idempotent_inflight(&self, inflight: &[(String, i32, i32)]) {
+        if !self.idempotence.enabled || inflight.is_empty() {
+            return;
+        }
+        let mut state = self.producer_state.lock().await;
+        for (topic, partition, base_sequence) in inflight {
+            state.remove_inflight_sequence(topic, *partition, *base_sequence);
+        }
+    }
+
+    /// Kafka `maybeResolveSequences` for every partition touched by `inflight`, run
+    /// once the set reflects the batches that are really still outstanding.
+    async fn resolve_idempotent_partitions(&self, inflight: &[(String, i32, i32)]) {
         if !self.idempotence.enabled || inflight.is_empty() {
             return;
         }
         let transactional = self.idempotence.transactional_id.is_some();
         let mut state = self.producer_state.lock().await;
-        for (topic, partition, base_sequence) in inflight {
-            state.remove_inflight_sequence(topic, *partition, *base_sequence);
-        }
         let mut resolved = AHashSet::new();
         for (topic, partition, _) in inflight {
             if !resolved.insert((topic.as_str(), *partition)) {
@@ -1593,6 +1616,15 @@ impl ProducerDispatcher {
                 ambiguous,
             );
         }
+    }
+
+    /// Batches that carry a sequence but will never be dispatched again (a flush that
+    /// hands them to nobody, an abort that discards them): release their sequences so
+    /// they stop gating the partition. Every other requeue keeps its registration.
+    pub(crate) async fn release_abandoned_idempotent_inflight(&self, batches: &[ReadyBatch]) {
+        let inflight = idempotent_inflight_of(batches);
+        self.release_idempotent_inflight_after_terminal(&inflight)
+            .await;
     }
 
     pub(crate) async fn dispatch_drained(
@@ -1617,15 +1649,34 @@ impl ProducerDispatcher {
         // are not skipped, then advance — idempotent if the enqueue path already advanced.
         self.enqueue_sequencer.wait_turn(enqueue_ticket).await;
         self.enqueue_sequencer.advance_past(enqueue_ticket);
-        // Release on every outcome, requeue included. "In flight" must mean "dispatched
-        // and not yet back", and a requeued batch is back in the accumulator — it
-        // re-registers when it is dispatched again. Keeping it registered across the
-        // requeue leaves a permanent entry behind whenever the batch is not re-dispatched,
-        // and that entry makes `has_inflight_batches` true forever, so every later fresh
-        // batch on the partition defers with `DeferUnresolved` and flush deadlocks with
-        // nothing in flight to unblock it.
-        self.release_idempotent_inflight_after_terminal(&inflight)
-            .await;
+        // Kafka's `inflightBatchesBySequence` does NOT mean "on the wire": it holds every
+        // batch that has been stamped with a sequence and has not terminally completed,
+        // including one sitting in the accumulator waiting to be retried. That is what
+        // makes the drain gate work — a retried batch is compared against a set that
+        // contains itself, so it is the partition's `firstInFlightSequence` exactly when
+        // no lower sequence is still outstanding. Releasing on requeue drops the batch out
+        // of its own comparison, the gate then measures it against higher sequences and
+        // defers it while fresh batches keep going out, and the broker sees the partition's
+        // sequence run backwards (`OUT_OF_ORDER_SEQUENCE_NUMBER`).
+        match &outcome {
+            // Still sequenced, still uncompleted: stays registered. Whoever abandons the
+            // batches instead of re-dispatching them releases the registration.
+            DispatchOutcome::Requeue(_) => {},
+            // Kafka `splitAndReenqueue` + `maybeRemoveAndDeallocateBatch(bigBatch)`: the
+            // parent ceases to exist and its children inherit its sequence range, so hand
+            // the registration over rather than dropping it. Remove first — the first child
+            // reuses the parent's base sequence — and resolve only once the set is correct.
+            DispatchOutcome::RequeueSplit(children) => {
+                let children_inflight = idempotent_inflight_of(children);
+                self.remove_idempotent_inflight(&inflight).await;
+                self.register_idempotent_inflight(&children_inflight).await;
+                self.resolve_idempotent_partitions(&inflight).await;
+            },
+            DispatchOutcome::Delivered(_) => {
+                self.release_idempotent_inflight_after_terminal(&inflight)
+                    .await;
+            },
+        }
         outcome
     }
 

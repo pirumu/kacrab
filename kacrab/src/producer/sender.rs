@@ -1066,7 +1066,12 @@ impl ProducerSender {
         RequeueObserver: FnMut(),
     {
         self.state
-            .wait_for_abort_completion(&self.accumulator, observe_latency, observe_requeue)
+            .wait_for_abort_completion(
+                &self.accumulator,
+                &self.dispatcher,
+                observe_latency,
+                observe_requeue,
+            )
             .await
     }
 
@@ -3077,6 +3082,7 @@ impl ProducerSenderState {
     pub(crate) async fn wait_for_abort_completion<LatencyObserver, RequeueObserver>(
         &mut self,
         accumulator: &SharedAccumulator,
+        dispatcher: &ProducerDispatcher,
         mut observe_latency: LatencyObserver,
         mut observe_requeue: RequeueObserver,
     ) -> Result<(), ProducerError>
@@ -3104,7 +3110,13 @@ impl ProducerSenderState {
                     ..
                 }) => {
                     // Abort discards buffered work either way, so a split child is
-                    // dropped here exactly like an unroutable batch.
+                    // dropped here exactly like an unroutable batch. Both still hold an
+                    // idempotent sequence registration (a requeued batch keeps it so the
+                    // drain gate can compare it against itself); nothing will re-dispatch
+                    // them now, so release it or the partition stays gated forever.
+                    dispatcher
+                        .release_abandoned_idempotent_inflight(&batches)
+                        .await;
                     let identities = batches.iter().map(|batch| batch.identity);
                     let _completed = accumulator.complete_batch_identities(identities);
                     observe_requeue();
@@ -3649,6 +3661,23 @@ impl ProducerSenderState {
             };
         }
 
+        // One request per partition per selection, so *which* batch is picked decides
+        // whether the partition makes progress at all: `prepare_drained_batches` only
+        // lets through the batch holding the partition's `firstInFlightSequence`
+        // (Kafka `shouldStopDrainBatchesForPartition`). Kafka picks the deque head,
+        // which is the lowest sequence by construction; kacrab's drain order can put a
+        // higher-sequence sibling first after a `MESSAGE_TOO_LARGE` split re-enqueues
+        // several children at once, and the pick is then deferred by the gate every
+        // cycle while the batch that would unblock the partition is never selected —
+        // flush ends with `FlushIncomplete` and records still buffered. Order the
+        // candidates by base sequence so the pick is always the one the gate admits.
+        // Not-yet-sequenced batches sort last: a retry outranks a fresh batch.
+        let mut batches = batches;
+        batches.sort_by_key(|batch| {
+            batch
+                .producer_state
+                .map_or(i32::MAX, |state| state.base_sequence)
+        });
         let mut dispatchable = Vec::with_capacity(batches.len());
         let mut deferred = Vec::new();
         let mut partitions = Vec::new();

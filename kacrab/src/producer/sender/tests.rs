@@ -225,6 +225,7 @@ async fn wait_for_abort_completion_handles_in_flight_dispatches_until_empty() {
     state
         .wait_for_abort_completion(
             &accumulator,
+            &test_dispatcher(),
             |latency| observed_latencies.push(latency),
             || observed_requeues += 1,
         )
@@ -259,6 +260,7 @@ async fn wait_for_abort_completion_drops_requeued_in_flight_batches() {
     state
         .wait_for_abort_completion(
             &accumulator,
+            &test_dispatcher(),
             |latency| observed_latencies.push(latency),
             || observed_requeues += 1,
         )
