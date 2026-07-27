@@ -1494,10 +1494,30 @@ impl ProducerDispatcher {
         if batches.is_empty() {
             return Ok(Vec::new());
         }
-        let enqueue_ticket = self.enqueue_sequencer.reserve_ticket();
-        match self.dispatch_drained(batches, now, enqueue_ticket).await {
-            DispatchOutcome::Delivered(result) => result,
-            DispatchOutcome::Requeue(_batches) => Err(ProducerError::FlushIncomplete),
+        let mut batches = batches;
+        let mut now = now;
+        loop {
+            let enqueue_ticket = self.enqueue_sequencer.reserve_ticket();
+            match self.dispatch_drained(batches, now, enqueue_ticket).await {
+                DispatchOutcome::Delivered(result) => return result,
+                // Unroutable: the caller owns these batches and there is no accumulator
+                // to hand them back to, so the flush is genuinely incomplete.
+                DispatchOutcome::Requeue(_batches) => return Err(ProducerError::FlushIncomplete),
+                // A `MESSAGE_TOO_LARGE` split is transparent to the caller: routing is
+                // fine and the children are ready to send immediately. Dispatch them here
+                // instead of dropping them — dropping lost every record in the split and
+                // surfaced as a bare `FlushIncomplete`.
+                DispatchOutcome::RequeueSplit(split) => {
+                    if let Some(error) = self
+                        .check_delivery_timeout_before_retry(&split, false)
+                        .await
+                    {
+                        return Err(error);
+                    }
+                    batches = split;
+                    now = Instant::now();
+                },
+            }
         }
     }
 
@@ -1516,7 +1536,9 @@ impl ProducerDispatcher {
             .await
         {
             DispatchOutcome::Delivered(result) => result,
-            DispatchOutcome::Requeue(batches) => {
+            // Both go back to the accumulator so no record is lost. The caller retries;
+            // a split child is ready immediately, an unroutable batch waits for metadata.
+            DispatchOutcome::Requeue(batches) | DispatchOutcome::RequeueSplit(batches) => {
                 accumulator.requeue_front(batches)?;
                 Err(ProducerError::FlushIncomplete)
             },
@@ -1769,7 +1791,7 @@ impl ProducerDispatcher {
             // RecordAccumulator.splitAndReenqueue and records the constant 1.0.
             self.metrics.record_batch_split();
         }
-        DispatchOutcome::Requeue(split)
+        DispatchOutcome::RequeueSplit(split)
     }
 
     fn reset_compression_ratio_after_message_too_large(
@@ -3734,7 +3756,16 @@ const fn increment_sequence(sequence: i32, increment: i32) -> i32 {
 #[derive(Debug)]
 pub(crate) enum DispatchOutcome {
     Delivered(Result<Vec<RecordMetadata>>),
+    /// The batches could not be routed — their leaders are unknown or unreachable.
+    /// The sender pauses background dispatch after this, because retrying
+    /// immediately would spin against the same broken metadata.
     Requeue(Vec<ReadyBatch>),
+    /// The batches are the children of a `MESSAGE_TOO_LARGE` split and are ready to
+    /// send right now. Routing is fine; only the size was wrong. The sender must NOT
+    /// pause for this — every split round would otherwise cost a backoff, which is
+    /// what made a low `max.message.bytes` topic take tens of seconds where Java
+    /// takes about one.
+    RequeueSplit(Vec<ReadyBatch>),
 }
 
 /// Outcome of assigning idempotent state to one freshly drained batch.

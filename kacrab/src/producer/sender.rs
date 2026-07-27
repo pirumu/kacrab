@@ -2948,6 +2948,24 @@ impl ProducerSenderState {
                     Ok(())
                 }
             },
+            Ok(TimedDispatchOutcome {
+                outcome: DispatchOutcome::RequeueSplit(batches),
+                ..
+            }) => {
+                // Deliberately does NOT call `observe_requeue`. That observer is what
+                // makes the background loop pause dispatch, which is right for an
+                // unroutable-leader requeue and wrong here: these are `MESSAGE_TOO_LARGE`
+                // split children whose routing is fine and which are ready to send now.
+                // Pausing per split round is what made a topic with a low
+                // `max.message.bytes` take tens of seconds where Java takes about one.
+                // The split itself is already counted by `record_batch_split`.
+                accumulator.requeue_front(batches)?;
+                if requeue_is_error {
+                    Err(ProducerError::FlushIncomplete)
+                } else {
+                    Ok(())
+                }
+            },
             Err(error) => Err(error),
         }
     }
@@ -3081,9 +3099,12 @@ impl ProducerSenderState {
                     result.map(|_receipts| ())?;
                 },
                 Ok(TimedDispatchOutcome {
-                    outcome: DispatchOutcome::Requeue(batches),
+                    outcome:
+                        DispatchOutcome::Requeue(batches) | DispatchOutcome::RequeueSplit(batches),
                     ..
                 }) => {
+                    // Abort discards buffered work either way, so a split child is
+                    // dropped here exactly like an unroutable batch.
                     let identities = batches.iter().map(|batch| batch.identity);
                     let _completed = accumulator.complete_batch_identities(identities);
                     observe_requeue();

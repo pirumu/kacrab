@@ -1072,8 +1072,8 @@ async fn message_too_large_split_counts_one_batch_split_per_event() {
         )
         .await;
 
-    let super::DispatchOutcome::Requeue(split) = outcome else {
-        panic!("expected a requeue of the split batches");
+    let super::DispatchOutcome::RequeueSplit(split) = outcome else {
+        panic!("expected a split requeue of the split batches");
     };
     assert!(
         split.len() >= 3,
@@ -1098,8 +1098,8 @@ async fn cascading_message_too_large_split_counts_each_split_event() {
             0,
         )
         .await;
-    let super::DispatchOutcome::Requeue(split) = outcome else {
-        panic!("expected a requeue of the split batches");
+    let super::DispatchOutcome::RequeueSplit(split) = outcome else {
+        panic!("expected a split requeue of the split batches");
     };
     let child = split
         .into_iter()
@@ -1110,7 +1110,7 @@ async fn cascading_message_too_large_split_counts_each_split_event() {
         .message_too_large_split_outcome(vec![child], "orders".to_owned(), 0)
         .await;
 
-    assert!(matches!(outcome, super::DispatchOutcome::Requeue(_)));
+    assert!(matches!(outcome, super::DispatchOutcome::RequeueSplit(_)));
     assert_eq!(dispatcher.metrics().record_batch_split_count, 2);
     assert_eq!(batch_split_total(&dispatcher), 2.0);
 }
@@ -1148,8 +1148,8 @@ async fn message_too_large_split_without_metrics_still_requeues_split_batches() 
         )
         .await;
 
-    let super::DispatchOutcome::Requeue(split) = outcome else {
-        panic!("expected a requeue of the split batches");
+    let super::DispatchOutcome::RequeueSplit(split) = outcome else {
+        panic!("expected a split requeue of the split batches");
     };
     assert!(split.len() >= 3);
     assert_eq!(dispatcher.metrics().record_batch_split_count, 0);
