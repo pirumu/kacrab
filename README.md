@@ -57,8 +57,10 @@ built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
   stores and mutual TLS; native Rust custom-authenticator hooks. Handshake and
   auth failures fail fast with the broker's reason, matching Java.
 - **Fast and lean**: on the same broker and defaults, producer throughput is
-  **+25-28%** over Java with about 4x less memory; consumer throughput is
-  **1.9-4x** higher with about 16-20x less memory. See
+  **+35%** over Java on small records (**+15%** on 10 KiB, **2.2x** when broker
+  `max.message.bytes` forces batch splitting) with about 4x less memory, and at
+  Java's own offered load kacrab's latency is lower at every percentile; consumer
+  throughput is **1.9-4x** higher with about 16-20x less memory. See
   [Benchmarks](#benchmarks).
 - **Native Rust**: protocol, wire, and client logic are pure Rust, and the
   workspace forbids `unsafe_code`. Caveat: the default TLS provider
@@ -105,7 +107,7 @@ Nothing is enabled by default (`default = []`) — turn on the surfaces you use:
 
 ```toml
 [dependencies]
-kacrab = { version = "0.2", features = ["producer", "consumer", "admin"] }
+kacrab = { version = "0.3", features = ["producer", "consumer", "admin"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
@@ -261,13 +263,19 @@ idempotence; consumer at `max.poll.records=500`). Host: MacBook Pro M3 Pro
 reproduction commands, and caveats are in [`benches/README.md`](benches/README.md)
 and the book's [benchmarks chapter](docs-book/src/benchmarks.md).
 
-**Producer** (2026-07-02):
+**Producer** (2026-07-27; medians of 5 interleaved kacrab/Java pairs. Both
+throughput columns come from the same `records sent, … MB/sec` summary line, which
+Java and kacrab compute identically — see the note below). The first two rows are
+the default parity scenarios; the third drives the `MESSAGE_TOO_LARGE` batch-split
+path, which kacrab clears in one broker round trip per batch fewer than Java:
 
 | Scenario | kacrab | Java `kafka-producer-perf-test` |
 | --- | ---: | ---: |
-| 5M x 10 B, 16 partitions | **4.79-4.86M rec/s** | 3.80-3.84M rec/s |
-| 100K x 10 KiB, 3 partitions | **~542 MiB/s** | 417-453 MB/s |
-| Peak RSS / CPU (10 B run) | **~68 MiB / ~2.7 s** | ~268 MiB / ~4.1 s |
+| 5M x 10 B, 16 partitions | **5.00M rec/s (47.6 MB/s)** | 3.70M rec/s (35.3 MB/s) |
+| 100K x 10 KiB, 3 partitions | **49.5K rec/s (483 MB/s)** | 43.0K rec/s (420 MB/s) |
+| 20K x 4 KiB, `max.message.bytes` below `batch.size` (batch-split path) | **59.3K rec/s (232 MB/s)** | 26.9K rec/s (105 MB/s) |
+| Latency at Java's own rate (10 B) | **0.11 ms avg / 2 ms p99 / 4 ms max** | 0.32 ms / 2 ms / 131-140 ms |
+| Peak RSS / CPU (10 B run, 2026-06-28) | **~68 MiB / ~2.7 s** | ~268 MiB / ~4.1 s |
 
 **Consumer** (2026-07-02):
 
@@ -282,10 +290,20 @@ Read the numbers with the caveats in mind:
 - Single-node, RF=1, broker co-located with the client: this is a
   client-efficiency signal, not a production throughput claim. 10-byte rows
   inflate records/sec; the byte-rate columns are the more useful comparison.
-- Latency is closed-loop saturation latency, not open-loop SLA latency. Java
-  keeps a lower typical producer latency on the 16-partition workload. That is
-  a pipeline-depth tradeoff (`max.in.flight=1` brings kacrab's p99 to ~2 ms at
-  the same throughput). At 1-3 partitions, kacrab latency is at or below Java's.
+- Both byte-rate columns are mebibytes despite the `MB/sec` label — Java's
+  `ProducerPerformance` computes `bytes / elapsed / (1024 * 1024)` and prints it as
+  `MB/sec` (`ProducerPerformance.java:508`), and kacrab's port does the same. They
+  are directly comparable. An earlier revision of these tables quoted kacrab's own
+  separate `MiB/s` summary line against Java's, which mixed two different lines and
+  overstated the 10 KiB gap.
+- **Latency is closed-loop saturation latency, and the two clients are not at the
+  same offered load.** Each runs flat out, so each measures latency at its own
+  saturation point — and kacrab is pushing ~35% more throughput than Java. Pinned
+  to Java's own rate, kacrab wins or ties every latency metric: 0.11 ms avg,
+  2 ms p99, 4 ms max against Java's 0.32 / 2 / 131-140 (5M x 10 B, 16 partitions,
+  interleaved, 2026-07-27). Java's ~130 ms maxima are JVM client pauses; kacrab on
+  the same broker stays under 16 ms. See
+  [`benches/README.md`](benches/README.md#matched-load-latency).
 - Every kacrab run above had zero retries/errors, with fully correct
   idempotence.
 

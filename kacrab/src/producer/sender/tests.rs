@@ -46,6 +46,7 @@ fn ready_batch(topic: &str, partition: i32) -> crate::producer::ReadyBatch {
         pooled_buffer_bytes: 1,
         first_append_at: std::time::Instant::now(),
         producer_state: None,
+        split_parent: None,
     }
 }
 
@@ -224,6 +225,7 @@ async fn wait_for_abort_completion_handles_in_flight_dispatches_until_empty() {
     state
         .wait_for_abort_completion(
             &accumulator,
+            &test_dispatcher(),
             |latency| observed_latencies.push(latency),
             || observed_requeues += 1,
         )
@@ -258,6 +260,7 @@ async fn wait_for_abort_completion_drops_requeued_in_flight_batches() {
     state
         .wait_for_abort_completion(
             &accumulator,
+            &test_dispatcher(),
             |latency| observed_latencies.push(latency),
             || observed_requeues += 1,
         )
@@ -2825,6 +2828,7 @@ async fn terminal_dispatch_completes_accumulator_batch_identity() {
         pooled_buffer_bytes: batches[0].pooled_buffer_bytes(),
         first_append_at: batches[0].first_append_at,
         producer_state: None,
+        split_parent: None,
     };
     batches[0].bytes = 128;
     batches[0].pooled_buffer_bytes = 128;
@@ -3045,6 +3049,48 @@ async fn drain_ready_dispatch_batches_drains_accumulator_before_preparing() {
     assert_eq!(selection.dispatchable[0].partition, 0);
     assert!(selection.deferred.is_empty());
     assert_eq!(accumulator.buffered_records(), 0);
+}
+
+#[tokio::test]
+async fn drain_ready_dispatch_batches_keeps_unroutable_colocated_partitions_buffered() {
+    let state = ProducerSenderState::new_with_idempotent_ordering(5, true);
+    // No brokers, so the co-located sweep cannot resolve a leader for the unready
+    // partition. It must leave that batch buffered rather than drain one it cannot
+    // route — dropping it here would lose records and leak the buffer reservation.
+    let dispatcher = crate::producer::dispatcher::ProducerDispatcher::new(
+        WireClient::connect_with_brokers(ConnectionConfig::default(), "producer-test", []),
+    );
+    let now = std::time::Instant::now();
+    let accumulator = SharedAccumulator::with_config(
+        AccumulatorConfig::default()
+            .batch_size(512)
+            .linger(Duration::from_secs(30))
+            .buffer_memory(64 * 1024),
+    );
+    accumulator
+        .append_at(
+            ProducerRecord::new("orders", 0).value(Bytes::from(vec![b'a'; 512])),
+            now,
+        )
+        .expect("append full record");
+    accumulator
+        .append_at(
+            ProducerRecord::new("orders", 1).value(Bytes::from_static(b"b")),
+            now,
+        )
+        .expect("append half-full record");
+
+    let selection = state
+        .drain_ready_dispatch_batches(&dispatcher, &accumulator, now)
+        .await
+        .expect("ready batches should prepare")
+        .expect("ready batch should produce a selection");
+
+    assert_eq!(selection.dispatchable.len(), 1);
+    assert_eq!(selection.dispatchable[0].partition, 0);
+    assert!(selection.deferred.is_empty());
+    assert_eq!(accumulator.buffered_records(), 1);
+    assert_eq!(accumulator.buffered_bytes(), 512);
 }
 
 #[tokio::test]

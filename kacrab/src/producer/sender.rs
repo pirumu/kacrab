@@ -1066,7 +1066,12 @@ impl ProducerSender {
         RequeueObserver: FnMut(),
     {
         self.state
-            .wait_for_abort_completion(&self.accumulator, observe_latency, observe_requeue)
+            .wait_for_abort_completion(
+                &self.accumulator,
+                &self.dispatcher,
+                observe_latency,
+                observe_requeue,
+            )
             .await
     }
 
@@ -2948,6 +2953,24 @@ impl ProducerSenderState {
                     Ok(())
                 }
             },
+            Ok(TimedDispatchOutcome {
+                outcome: DispatchOutcome::RequeueSplit(batches),
+                ..
+            }) => {
+                // Deliberately does NOT call `observe_requeue`. That observer is what
+                // makes the background loop pause dispatch, which is right for an
+                // unroutable-leader requeue and wrong here: these are `MESSAGE_TOO_LARGE`
+                // split children whose routing is fine and which are ready to send now.
+                // Pausing per split round is what made a topic with a low
+                // `max.message.bytes` take tens of seconds where Java takes about one.
+                // The split itself is already counted by `record_batch_split`.
+                accumulator.requeue_front(batches)?;
+                if requeue_is_error {
+                    Err(ProducerError::FlushIncomplete)
+                } else {
+                    Ok(())
+                }
+            },
             Err(error) => Err(error),
         }
     }
@@ -3059,6 +3082,7 @@ impl ProducerSenderState {
     pub(crate) async fn wait_for_abort_completion<LatencyObserver, RequeueObserver>(
         &mut self,
         accumulator: &SharedAccumulator,
+        dispatcher: &ProducerDispatcher,
         mut observe_latency: LatencyObserver,
         mut observe_requeue: RequeueObserver,
     ) -> Result<(), ProducerError>
@@ -3081,9 +3105,18 @@ impl ProducerSenderState {
                     result.map(|_receipts| ())?;
                 },
                 Ok(TimedDispatchOutcome {
-                    outcome: DispatchOutcome::Requeue(batches),
+                    outcome:
+                        DispatchOutcome::Requeue(batches) | DispatchOutcome::RequeueSplit(batches),
                     ..
                 }) => {
+                    // Abort discards buffered work either way, so a split child is
+                    // dropped here exactly like an unroutable batch. Both still hold an
+                    // idempotent sequence registration (a requeued batch keeps it so the
+                    // drain gate can compare it against itself); nothing will re-dispatch
+                    // them now, so release it or the partition stays gated forever.
+                    dispatcher
+                        .release_abandoned_idempotent_inflight(&batches)
+                        .await;
                     let identities = batches.iter().map(|batch| batch.identity);
                     let _completed = accumulator.complete_batch_identities(identities);
                     observe_requeue();
@@ -3628,6 +3661,23 @@ impl ProducerSenderState {
             };
         }
 
+        // One request per partition per selection, so *which* batch is picked decides
+        // whether the partition makes progress at all: `prepare_drained_batches` only
+        // lets through the batch holding the partition's `firstInFlightSequence`
+        // (Kafka `shouldStopDrainBatchesForPartition`). Kafka picks the deque head,
+        // which is the lowest sequence by construction; kacrab's drain order can put a
+        // higher-sequence sibling first after a `MESSAGE_TOO_LARGE` split re-enqueues
+        // several children at once, and the pick is then deferred by the gate every
+        // cycle while the batch that would unblock the partition is never selected —
+        // flush ends with `FlushIncomplete` and records still buffered. Order the
+        // candidates by base sequence so the pick is always the one the gate admits.
+        // Not-yet-sequenced batches sort last: a retry outranks a fresh batch.
+        let mut batches = batches;
+        batches.sort_by_key(|batch| {
+            batch
+                .producer_state
+                .map_or(i32::MAX, |state| state.base_sequence)
+        });
         let mut dispatchable = Vec::with_capacity(batches.len());
         let mut deferred = Vec::new();
         let mut partitions = Vec::new();
@@ -3705,7 +3755,7 @@ impl ProducerSenderState {
         // ready backlog would requeue all but one per partition every cycle — O(N)
         // churn under the accumulator lock per dispatch. Non-idempotent dispatch
         // coalesces every ready batch into one request, so it drains them all.
-        let batches = if self.idempotent_ordering {
+        let mut batches = if self.idempotent_ordering {
             accumulator.drain_front_ready(now)
         } else {
             accumulator.drain_ready(now)
@@ -3713,6 +3763,16 @@ impl ProducerSenderState {
         if batches.is_empty() {
             return Ok(None);
         }
+        // Both branches drain by per-partition readiness, which is only Kafka's
+        // `RecordAccumulator.ready` half. Now that at least one broker is receiving a
+        // request, take the head batch of every other partition it leads as
+        // `drainBatchesForOneNode` does — a half-full batch whose linger has not
+        // expired rides along instead of waiting out its own linger for a request it
+        // could have shared. Swept before `select_dispatchable_batches` on purpose:
+        // they then pass through the same per-partition reservation, in-flight
+        // registration and stop-drain gates as every other drained batch, and a
+        // partition already at its in-flight cap simply defers and is re-enqueued.
+        dispatcher.sweep_colocated_head_batches(accumulator, &mut batches);
         self.prepare_dispatch_batches(dispatcher, batches)
             .await
             .map(Some)
@@ -3776,7 +3836,12 @@ impl ProducerSenderState {
         dispatcher: &ProducerDispatcher,
         accumulator: &SharedAccumulator,
     ) -> Result<PreparedAllDispatch, DispatchPrepareError> {
-        if accumulator.buffered_bytes() == 0 {
+        // Records, not bytes. `buffered_bytes` counts pooled buffer reservations, and a
+        // `MESSAGE_TOO_LARGE` split child is requeued holding none — the parent's
+        // reservation was released when it drained. So after a split this can read zero
+        // while thousands of records are still queued, and flush would report itself
+        // complete and let the producer drop them on close.
+        if accumulator.buffered_records() == 0 {
             return Ok(PreparedAllDispatch::Empty);
         }
         if let Some(result) = self.wait_for_completed_dispatch_slot().await {

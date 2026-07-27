@@ -5,7 +5,7 @@
         kafka-start kafka-stop kafka-data-du kafka-topic-prune-delete-dirs \
         kafka-tools-check kafka-topic-describe kafka-topic-create \
         kafka-topic-delete kafka-topic-recreate bench-kafka-topic \
-        bench-kafka bench-kafka-java-default \
+        bench-kafka bench-kafka-java-default bench-kafka-split-probe \
         bench-kafka-consumer bench-kafka-consumer-java-default \
         ci ci-strict tools
 
@@ -71,6 +71,8 @@ help:
 	@echo "  bench-kafka           - run Rust real-Kafka bench with fixed default scenarios"
 	@echo "                          uses Java-style per-record public producer send"
 	@echo "  bench-kafka-java-default - run Java default scenarios 5x with effective config snapshots"
+	@echo "  bench-kafka-split-probe - opt-in MESSAGE_TOO_LARGE probe: one Rust + one Java pass"
+	@echo "                          against a low max.message.bytes topic, batch_splits side by side"
 	@echo "  bench-kafka-consumer  - run Rust real-Kafka consumer bench (ConsumerPerformance mirror)"
 	@echo "                          KACRAB_BENCH_PREFILL=1 fills the topics on first use"
 	@echo "  bench-kafka-consumer-java-default - run Java consumer default scenarios 5x"
@@ -182,6 +184,11 @@ bench-kafka: kafka-topic-create
 
 bench-kafka-java-default: kafka-tools-check kafka-topic-create
 	KAFKA_BIN="$(KAFKA_BIN)" KAFKA_ROOT="$(KAFKA_ROOT)" KAFKA_PRODUCER_PERF="$(KAFKA_PRODUCER_PERF)" KACRAB_BOOTSTRAP="$(KACRAB_BOOTSTRAP)" KACRAB_BENCH_TOPIC="$(KACRAB_BENCH_TOPIC)" benches/scripts/producer_default_matrix.sh
+
+# The split probe uses its own low max.message.bytes topic (created by the script), not
+# $(KACRAB_BENCH_TOPIC), so it does not depend on kafka-topic-create.
+bench-kafka-split-probe: kafka-tools-check
+	KAFKA_BIN="$(KAFKA_BIN)" KAFKA_ROOT="$(KAFKA_ROOT)" KAFKA_TOPICS="$(KAFKA_TOPICS)" KAFKA_PRODUCER_PERF="$(KAFKA_PRODUCER_PERF)" KACRAB_BOOTSTRAP="$(KACRAB_BOOTSTRAP)" benches/scripts/producer_default_matrix.sh --split-probe
 
 # The consumer bench manages its own per-scenario topics (kacrab-bench /
 # kacrab-bench-10k unless KACRAB_BENCH_TOPIC is exported), so it does not

@@ -34,6 +34,7 @@ pub enum ProducerMetricValue {
 
 /// Point-in-time producer metrics for operational diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct ProducerMetricsSnapshot {
     /// Records accepted into the producer accumulator.
     pub records_appended: u64,
@@ -49,6 +50,8 @@ pub struct ProducerMetricsSnapshot {
     pub produce_request_payload_bytes: u64,
     /// Produce request grouping splits forced by the max request size limit.
     pub produce_request_split_count: u64,
+    /// Record batch splits forced by a broker `MESSAGE_TOO_LARGE` response.
+    pub record_batch_split_count: u64,
     /// Records included in produce requests sent to brokers.
     pub produce_record_count: u64,
     /// Retry attempts after retryable produce failures.
@@ -115,6 +118,155 @@ pub(crate) struct ProducerQueueMetrics {
 }
 
 impl ProducerMetricsSnapshot {
+    /// An all-zero snapshot.
+    ///
+    /// This type is `#[non_exhaustive]`, so downstream crates cannot build one with a
+    /// struct expression. `ZERO` is usable in const context as their baseline value.
+    pub const ZERO: Self = Self {
+        records_appended: 0,
+        produce_request_count: 0,
+        produce_request_bytes: 0,
+        produce_batch_count: 0,
+        produce_batch_bytes: 0,
+        produce_request_payload_bytes: 0,
+        produce_request_split_count: 0,
+        record_batch_split_count: 0,
+        produce_record_count: 0,
+        produce_retry_count: 0,
+        produce_error_count: 0,
+        requeue_count: 0,
+        in_flight_stall_count: 0,
+        queue_depth_bytes: 0,
+        queue_depth_records: 0,
+        buffer_available_bytes: 0,
+        waiting_threads: 0,
+        incomplete_batches: 0,
+        in_flight_dispatches: 0,
+        average_batch_fill_ratio: 0.0,
+        average_compression_ratio: 0.0,
+        flush_count: 0,
+        flush_total_latency: Duration::ZERO,
+        metadata_wait_count: 0,
+        metadata_wait_total_latency: Duration::ZERO,
+        transaction_init_count: 0,
+        transaction_init_total_latency: Duration::ZERO,
+        transaction_begin_count: 0,
+        transaction_begin_total_latency: Duration::ZERO,
+        send_offsets_to_transaction_count: 0,
+        send_offsets_to_transaction_total_latency: Duration::ZERO,
+        transaction_commit_count: 0,
+        transaction_commit_total_latency: Duration::ZERO,
+        transaction_abort_count: 0,
+        transaction_abort_total_latency: Duration::ZERO,
+    };
+
+    /// Return the difference between this snapshot and an earlier `baseline`.
+    ///
+    /// The two field kinds are treated differently, which is the part that is easy to
+    /// get wrong:
+    ///
+    /// - **Monotonic counters** (every `*_count`, `*_bytes`, `records_appended`, and the
+    ///   `*_total_latency` durations) are `saturating_sub(baseline)`, so a baseline above the
+    ///   current value clamps to zero instead of wrapping.
+    /// - **Gauges and instantaneous values** (`queue_depth_bytes`, `queue_depth_records`,
+    ///   `buffer_available_bytes`, `waiting_threads`, `incomplete_batches`, `in_flight_dispatches`,
+    ///   `average_batch_fill_ratio`, `average_compression_ratio`) are point-in-time readings, not
+    ///   accumulators, so the baseline is ignored and the current value is reported as-is.
+    ///
+    /// The body is an exhaustive struct literal on purpose: this type is
+    /// `#[non_exhaustive]`, so only code inside this crate can write one, and a newly
+    /// added field is a compile error here instead of a silent zero in every caller.
+    #[must_use]
+    pub const fn delta_since(&self, baseline: &Self) -> Self {
+        Self {
+            records_appended: self
+                .records_appended
+                .saturating_sub(baseline.records_appended),
+            produce_request_count: self
+                .produce_request_count
+                .saturating_sub(baseline.produce_request_count),
+            produce_request_bytes: self
+                .produce_request_bytes
+                .saturating_sub(baseline.produce_request_bytes),
+            produce_batch_count: self
+                .produce_batch_count
+                .saturating_sub(baseline.produce_batch_count),
+            produce_batch_bytes: self
+                .produce_batch_bytes
+                .saturating_sub(baseline.produce_batch_bytes),
+            produce_request_payload_bytes: self
+                .produce_request_payload_bytes
+                .saturating_sub(baseline.produce_request_payload_bytes),
+            produce_request_split_count: self
+                .produce_request_split_count
+                .saturating_sub(baseline.produce_request_split_count),
+            record_batch_split_count: self
+                .record_batch_split_count
+                .saturating_sub(baseline.record_batch_split_count),
+            produce_record_count: self
+                .produce_record_count
+                .saturating_sub(baseline.produce_record_count),
+            produce_retry_count: self
+                .produce_retry_count
+                .saturating_sub(baseline.produce_retry_count),
+            produce_error_count: self
+                .produce_error_count
+                .saturating_sub(baseline.produce_error_count),
+            requeue_count: self.requeue_count.saturating_sub(baseline.requeue_count),
+            in_flight_stall_count: self
+                .in_flight_stall_count
+                .saturating_sub(baseline.in_flight_stall_count),
+            queue_depth_bytes: self.queue_depth_bytes,
+            queue_depth_records: self.queue_depth_records,
+            buffer_available_bytes: self.buffer_available_bytes,
+            waiting_threads: self.waiting_threads,
+            incomplete_batches: self.incomplete_batches,
+            in_flight_dispatches: self.in_flight_dispatches,
+            average_batch_fill_ratio: self.average_batch_fill_ratio,
+            average_compression_ratio: self.average_compression_ratio,
+            flush_count: self.flush_count.saturating_sub(baseline.flush_count),
+            flush_total_latency: self
+                .flush_total_latency
+                .saturating_sub(baseline.flush_total_latency),
+            metadata_wait_count: self
+                .metadata_wait_count
+                .saturating_sub(baseline.metadata_wait_count),
+            metadata_wait_total_latency: self
+                .metadata_wait_total_latency
+                .saturating_sub(baseline.metadata_wait_total_latency),
+            transaction_init_count: self
+                .transaction_init_count
+                .saturating_sub(baseline.transaction_init_count),
+            transaction_init_total_latency: self
+                .transaction_init_total_latency
+                .saturating_sub(baseline.transaction_init_total_latency),
+            transaction_begin_count: self
+                .transaction_begin_count
+                .saturating_sub(baseline.transaction_begin_count),
+            transaction_begin_total_latency: self
+                .transaction_begin_total_latency
+                .saturating_sub(baseline.transaction_begin_total_latency),
+            send_offsets_to_transaction_count: self
+                .send_offsets_to_transaction_count
+                .saturating_sub(baseline.send_offsets_to_transaction_count),
+            send_offsets_to_transaction_total_latency: self
+                .send_offsets_to_transaction_total_latency
+                .saturating_sub(baseline.send_offsets_to_transaction_total_latency),
+            transaction_commit_count: self
+                .transaction_commit_count
+                .saturating_sub(baseline.transaction_commit_count),
+            transaction_commit_total_latency: self
+                .transaction_commit_total_latency
+                .saturating_sub(baseline.transaction_commit_total_latency),
+            transaction_abort_count: self
+                .transaction_abort_count
+                .saturating_sub(baseline.transaction_abort_count),
+            transaction_abort_total_latency: self
+                .transaction_abort_total_latency
+                .saturating_sub(baseline.transaction_abort_total_latency),
+        }
+    }
+
     /// Return one named metric value from this snapshot.
     #[must_use]
     pub fn metric(&self, name: &str) -> Option<ProducerMetricValue> {
@@ -129,6 +281,9 @@ impl ProducerMetricsSnapshot {
             )),
             "produce_request_split_count" => {
                 Some(ProducerMetricValue::Count(self.produce_request_split_count))
+            },
+            "record_batch_split_count" => {
+                Some(ProducerMetricValue::Count(self.record_batch_split_count))
             },
             "produce_record_count" => Some(ProducerMetricValue::Count(self.produce_record_count)),
             "produce_retry_count" => Some(ProducerMetricValue::Count(self.produce_retry_count)),
@@ -200,6 +355,7 @@ impl ProducerMetricsSnapshot {
             "produce_batch_bytes",
             "produce_request_payload_bytes",
             "produce_request_split_count",
+            "record_batch_split_count",
             "produce_record_count",
             "produce_retry_count",
             "produce_error_count",
@@ -243,6 +399,7 @@ impl ProducerMetricsSnapshot {
                 | "produce_batch_bytes"
                 | "produce_request_payload_bytes"
                 | "produce_request_split_count"
+                | "record_batch_split_count"
                 | "produce_record_count"
                 | "produce_retry_count"
                 | "produce_error_count"
@@ -389,6 +546,9 @@ fn producer_metric_description(name: &str) -> &'static str {
         },
         "produce_request_split_count" => {
             "produce request grouping splits forced by max request size"
+        },
+        "record_batch_split_count" => {
+            "record batch splits forced by a broker MESSAGE_TOO_LARGE response"
         },
         "produce_record_count" => "records included in produce requests",
         "produce_retry_count" => "retry attempts after retryable produce failures",
@@ -567,6 +727,7 @@ struct ProducerMetricsInner {
     produce_batch_bytes: AtomicU64,
     produce_request_payload_bytes: AtomicU64,
     produce_request_split_count: AtomicU64,
+    record_batch_split_count: AtomicU64,
     produce_record_count: AtomicU64,
     produce_retry_count: AtomicU64,
     produce_error_count: AtomicU64,
@@ -796,10 +957,23 @@ impl ProducerMetrics {
         }
     }
 
+    /// Record a produce request grouping split forced by `max.request.size`.
+    ///
+    /// This is a kacrab-only local packing decision; Java has no metric for it, so it
+    /// deliberately does not feed the Java-named `batch-split` meter.
     pub(crate) fn record_request_split(&self) {
         let _previous = self
             .inner
             .produce_request_split_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a record batch split forced by a broker `MESSAGE_TOO_LARGE` response —
+    /// the sole feed of the Java-named `producer-metrics:batch-split-*` meter.
+    pub(crate) fn record_batch_split(&self) {
+        let _previous = self
+            .inner
+            .record_batch_split_count
             .fetch_add(1, Ordering::Relaxed);
         self.inner.sender_registry.record_split();
     }
@@ -948,6 +1122,7 @@ impl ProducerMetrics {
                 .inner
                 .produce_request_split_count
                 .load(Ordering::Relaxed),
+            record_batch_split_count: self.inner.record_batch_split_count.load(Ordering::Relaxed),
             produce_record_count,
             produce_retry_count: self.inner.produce_retry_count.load(Ordering::Relaxed),
             produce_error_count: self.inner.produce_error_count.load(Ordering::Relaxed),
@@ -1929,11 +2104,9 @@ mod tests {
             produce_batch_bytes: 256,
             produce_request_payload_bytes: 256,
             produce_request_split_count: 1,
+            record_batch_split_count: 1,
             produce_record_count: 3,
             produce_retry_count: 1,
-            produce_error_count: 0,
-            requeue_count: 0,
-            in_flight_stall_count: 0,
             queue_depth_bytes: 128,
             queue_depth_records: 4,
             buffer_available_bytes: 512,
@@ -1944,18 +2117,7 @@ mod tests {
             average_compression_ratio: 1.0,
             flush_count: 1,
             flush_total_latency: Duration::from_millis(2),
-            metadata_wait_count: 0,
-            metadata_wait_total_latency: Duration::ZERO,
-            transaction_init_count: 0,
-            transaction_init_total_latency: Duration::ZERO,
-            transaction_begin_count: 0,
-            transaction_begin_total_latency: Duration::ZERO,
-            send_offsets_to_transaction_count: 0,
-            send_offsets_to_transaction_total_latency: Duration::ZERO,
-            transaction_commit_count: 0,
-            transaction_commit_total_latency: Duration::ZERO,
-            transaction_abort_count: 0,
-            transaction_abort_total_latency: Duration::ZERO,
+            ..ProducerMetricsSnapshot::ZERO
         };
 
         let payload = snapshot.to_otlp_metrics_data(42);
@@ -1984,6 +2146,74 @@ mod tests {
             payload
                 .windows([0x10, 0x02, 0x18, 0x01].len())
                 .any(|window| window == [0x10, 0x02, 0x18, 0x01])
+        );
+    }
+
+    #[test]
+    fn snapshot_delta_subtracts_counters_and_clamps_a_backwards_baseline() {
+        let baseline = ProducerMetricsSnapshot {
+            records_appended: 10,
+            produce_request_count: 40,
+            flush_total_latency: Duration::from_millis(30),
+            transaction_commit_total_latency: Duration::from_millis(9),
+            ..ProducerMetricsSnapshot::ZERO
+        };
+        let current = ProducerMetricsSnapshot {
+            records_appended: 25,
+            produce_request_count: 7,
+            flush_total_latency: Duration::from_millis(50),
+            transaction_commit_total_latency: Duration::from_millis(4),
+            ..ProducerMetricsSnapshot::ZERO
+        };
+
+        let delta = current.delta_since(&baseline);
+
+        assert_eq!(delta.records_appended, 15);
+        assert_eq!(delta.produce_request_count, 0);
+        assert_eq!(delta.flush_total_latency, Duration::from_millis(20));
+        assert_eq!(delta.transaction_commit_total_latency, Duration::ZERO);
+    }
+
+    #[test]
+    fn snapshot_delta_reports_gauges_at_their_current_value() {
+        let baseline = ProducerMetricsSnapshot {
+            queue_depth_bytes: 4096,
+            queue_depth_records: 64,
+            buffer_available_bytes: 8192,
+            waiting_threads: 5,
+            incomplete_batches: 9,
+            in_flight_dispatches: 3,
+            average_batch_fill_ratio: 0.9,
+            average_compression_ratio: 2.5,
+            ..ProducerMetricsSnapshot::ZERO
+        };
+        let current = ProducerMetricsSnapshot {
+            queue_depth_bytes: 128,
+            queue_depth_records: 2,
+            buffer_available_bytes: 512,
+            waiting_threads: 1,
+            incomplete_batches: 4,
+            in_flight_dispatches: 2,
+            average_batch_fill_ratio: 0.25,
+            average_compression_ratio: 1.5,
+            ..ProducerMetricsSnapshot::ZERO
+        };
+
+        let delta = current.delta_since(&baseline);
+
+        assert_eq!(delta.queue_depth_bytes, current.queue_depth_bytes);
+        assert_eq!(delta.queue_depth_records, current.queue_depth_records);
+        assert_eq!(delta.buffer_available_bytes, current.buffer_available_bytes);
+        assert_eq!(delta.waiting_threads, current.waiting_threads);
+        assert_eq!(delta.incomplete_batches, current.incomplete_batches);
+        assert_eq!(delta.in_flight_dispatches, current.in_flight_dispatches);
+        assert!(
+            (delta.average_batch_fill_ratio - current.average_batch_fill_ratio).abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (delta.average_compression_ratio - current.average_compression_ratio).abs()
+                < f64::EPSILON
         );
     }
 

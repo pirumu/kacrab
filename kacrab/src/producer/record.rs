@@ -538,6 +538,16 @@ pub(crate) struct DeliverySender {
     state: Arc<DeliveryState>,
     completed: bool,
     next_record_index: usize,
+    /// Index of this sender's first record inside the shared delivery state.
+    ///
+    /// A `MESSAGE_TOO_LARGE` split gives every child batch a sub-sender over the same
+    /// state (see [`DeliverySender::split_records`]). Without the offset each child would
+    /// write its receipts over records `0..n` and the records it does not carry would
+    /// never be completed at all.
+    first_record_index: usize,
+    /// How many records this sender is responsible for, or `None` when it owns every
+    /// record registered on the state (the un-split case).
+    owned_records: Option<usize>,
 }
 
 struct DeliveryState {
@@ -630,6 +640,8 @@ impl SendFuture {
                 state: Arc::clone(&state),
                 completed: false,
                 next_record_index: 1,
+                first_record_index: 0,
+                owned_records: None,
             },
             Self {
                 state,
@@ -719,27 +731,52 @@ impl DeliverySender {
     }
 
     pub(crate) fn record_count(&self) -> usize {
-        lock_len(&self.state.record_metadata)
+        self.owned_records
+            .unwrap_or_else(|| lock_len(&self.state.record_metadata))
+    }
+
+    /// Hand out a sub-sender for `count` records starting `offset` records into this
+    /// sender's own range, sharing the same delivery state.
+    ///
+    /// Used when a `MESSAGE_TOO_LARGE` batch splits: the records keep the `SendFuture`s
+    /// the caller already holds, so the children cannot be given fresh delivery state —
+    /// each one instead completes only the slice of the original state it carries. The
+    /// parent handle is marked completed because its children supersede it; dropping it
+    /// must not close a state its children are still filling in.
+    pub(crate) fn split_records(&mut self, offset: usize, count: usize) -> Self {
+        self.completed = true;
+        Self {
+            state: Arc::clone(&self.state),
+            completed: false,
+            next_record_index: self.next_record_index,
+            first_record_index: self.first_record_index.saturating_add(offset),
+            owned_records: Some(count),
+        }
     }
 
     pub(crate) fn send(self, receipt: &RecordMetadata) {
         let metadata = record_delivery_metadata_snapshot(&self.state);
-        let receipts = metadata
-            .iter()
-            .enumerate()
-            .map(|(record_index, metadata)| receipt_for_record(receipt, record_index, *metadata))
+        let receipts = (0..self.record_count())
+            .map(|record_index| {
+                let metadata = metadata
+                    .get(self.first_record_index.saturating_add(record_index))
+                    .copied()
+                    .unwrap_or_else(RecordDeliveryMetadata::unknown);
+                receipt_for_record(receipt, record_index, metadata)
+            })
             .collect();
         self.send_records(receipts);
     }
 
     pub(crate) fn send_records(mut self, receipts: Vec<RecordMetadata>) {
         let record_metadata = record_delivery_metadata_snapshot(&self.state);
+        let stored_receipts = receipts.len();
         let receipts = receipts
             .into_iter()
             .enumerate()
             .map(|(record_index, mut receipt)| {
                 let metadata = record_metadata
-                    .get(record_index)
+                    .get(self.first_record_index.saturating_add(record_index))
                     .copied()
                     .unwrap_or_else(RecordDeliveryMetadata::unknown);
                 receipt.serialized_key_size = metadata.serialized_key_size;
@@ -747,7 +784,13 @@ impl DeliverySender {
                 receipt
             })
             .collect();
-        store_record_receipts(&self.state, receipts);
+        store_record_receipts(&self.state, self.first_record_index, receipts);
+        if stored_receipts >= self.record_count() {
+            // Every record this sender owns now has a receipt, so dropping it must not
+            // close the state: after a split the remaining records belong to sibling
+            // batches that are still in flight.
+            self.completed = true;
+        }
         if !all_record_receipts_ready(&self.state) {
             return;
         }
@@ -1102,13 +1145,17 @@ fn record_delivery_receipt(
         .map(|receipt| receipt.ok_or(ProducerError::DeliveryDropped))
 }
 
-fn store_record_receipts(state: &DeliveryState, receipts: Vec<RecordMetadata>) {
+fn store_record_receipts(
+    state: &DeliveryState,
+    first_record_index: usize,
+    receipts: Vec<RecordMetadata>,
+) {
     let mut stored = state
         .receipts
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     for (index, receipt) in receipts.into_iter().enumerate() {
-        if let Some(slot) = stored.get_mut(index) {
+        if let Some(slot) = stored.get_mut(first_record_index.saturating_add(index)) {
             *slot = Some(receipt);
         }
     }

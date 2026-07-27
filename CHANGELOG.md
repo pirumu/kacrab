@@ -7,7 +7,157 @@ This project is pre-1.0; minor releases may still change public APIs.
 The format is based on human-readable release notes. Each entry includes the
 release date and links to relevant pull requests or issues.
 
-## Unreleased
+## 0.3.0 — 2026-07-27
+
+Producer batch-split release. A topic whose `max.message.bytes` sits below the
+producer's `batch.size` could not deliver anything at all; fixing that exposed
+four further defects in the split and idempotent-sequence paths that the default
+scenarios never reach. The split path now delivers every record with no retries
+and no errors, and is **2.2x Java's throughput** on the same workload. Includes
+one breaking metrics API change (`ProducerMetricsSnapshot` is `#[non_exhaustive]`),
+so this is a minor version bump under the pre-1.0 convention.
+([#52](https://github.com/pirumu/kacrab/pull/52))
+
+### Added
+
+- `ProducerMetricsSnapshot::record_batch_split_count` — record-batch splits
+  forced by a broker `MESSAGE_TOO_LARGE` response, counted one per split event
+  the way Java's `Sender.completeBatch` does. The producer parity bench prints
+  it as the `batch_splits` column, so that column is now a real both-sides
+  comparison against `kafka-producer-perf-test.sh --print-metrics`.
+- `ProducerMetricsSnapshot::delta_since` — the difference between two snapshots,
+  the companion to the `#[non_exhaustive]` change below. Monotonic counters (and
+  the `*_total_latency` durations) are subtracted with saturation; gauges
+  (`queue_depth_*`, `buffer_available_bytes`, `waiting_threads`,
+  `incomplete_batches`, `in_flight_dispatches`, and the `average_*` ratios) are
+  point-in-time readings and keep the current value. Downstream crates that used
+  to compute this with a struct expression should call it instead of assigning
+  fields one by one, so a metric added later cannot be silently left at zero.
+
+### Changed
+
+- **Breaking:** `ProducerMetricsSnapshot` is now `#[non_exhaustive]`.
+  Downstream crates can no longer build one with a struct expression
+  (including functional-update `..base` syntax); start from the new
+  `ProducerMetricsSnapshot::ZERO` associated constant — it is usable in const
+  context — and assign the fields you need. Reading fields is unaffected.
+- **Behaviour change:** `producer-metrics:batch-split-rate` and
+  `producer-metrics:batch-split-total` now count `MESSAGE_TOO_LARGE`
+  record-batch splits, matching Java's semantics. They were previously fed by
+  the `max.request.size` Produce-request grouping split, a kacrab-specific
+  event with no Java equivalent. That grouping count is unchanged and remains
+  available as `ProducerMetricsSnapshot::produce_request_split_count`, now
+  without a Java-named meter. Workloads that only hit request-grouping splits
+  will see the Java-named `batch-split-*` metrics drop toward zero.
+- **Producer dispatch:** once a broker is receiving a produce request, the head
+  batch of every partition that broker leads now rides along on the same
+  request, instead of each partition waiting out its own `linger.ms` or filling
+  to `batch.size` first. This is Kafka's `RecordAccumulator.drainBatchesForOneNode`
+  behaviour, which takes each partition's head batch with no readiness check once
+  the node is already being sent to. Swept batches pass through the same
+  in-flight reservation and idempotent-sequence bookkeeping as normally drained
+  ones, and the sweep only fires when partition leadership is already in the
+  metadata cache, so it never adds a metadata fetch ahead of a ready batch.
+
+  Measured against a native single-node Kafka 4.3.0 at 5M x 10 B over 16
+  partitions, this raised throughput and cut latency at the same time:
+  43.9 -> 47.6 MB/s, 1.65 -> 0.61 ms average latency, 10 -> 6 ms p99, with the
+  produce-request count roughly halving as more partitions coalesce into each
+  request.
+
+### Fixed
+
+- **Nothing was delivered to a topic whose `max.message.bytes` is below the
+  producer's `batch.size`** — every oversized batch failed with `DeliveryTimeout`.
+  A batch rejected with `MESSAGE_TOO_LARGE` was re-split against a constant
+  `batch.size` target, but the accumulator already caps every batch at
+  `batch.size`, so the split regrouped the same records into a child of the same
+  size for the broker to reject again, forever. Re-splits now halve the target the
+  way Kafka's `RecordAccumulator.splitAndReenqueue` does — a batch that is itself
+  a split child targets `max(largest record, estimated batch size / 2)` — so the
+  pieces shrink geometrically until they fit. The `max(largest record, ..)` floor
+  keeps a batch holding one large record from halving forever, and a single-record
+  batch that still does not fit stays a terminal failure, as in Java.
+- **A split that produced more than one child dropped every record outside the
+  first child.** The whole batch's delivery state went to child 0 and the other
+  children were left with none, so their records were reported as
+  `DeliveryDropped` and never received a receipt. Each child now completes its own
+  slice of the shared delivery state. Previously only reachable when the
+  compression-ratio estimate shrank the split target; the halving above makes
+  multi-child splits the normal case.
+- **A batch that had to be split more than once could not be requeued at all.**
+  The second split minted child identities by position, colliding with the first
+  split's siblings, and the accumulator's requeue guard rejected the batch with
+  `BatchLifecycle`, stalling the partition. Split children now carry a unique
+  identity and an explicit link to the batch they were split from, so a split
+  chain of any depth stays consistent with the buffered and incomplete batch
+  bookkeeping.
+- **Records could be delivered out of sequence, or a flush fail with
+  `FlushIncomplete`, on any partition where a batch was requeued.** The idempotent
+  in-flight set was released when a batch was requeued, but Kafka's
+  `inflightBatchesBySequence` tracks every batch that holds a sequence and has not
+  terminally completed, *including one waiting in the accumulator to be retried*.
+  The drain gate (`shouldStopDrainBatchesForPartition`) compares a retried batch
+  against that set, so releasing early made the batch measure itself against
+  other, higher sequences and defer indefinitely while fresh batches kept going
+  out — the broker saw the partition's sequence run backwards. The registration
+  now survives a requeue; a split hands it from parent to children the way
+  `RecordAccumulator.splitAndReenqueue` does; and the two paths that abandon
+  batches instead of re-dispatching them (a flush with no accumulator to hand them
+  back to, an abort that discards buffered work) release it explicitly. Most
+  visible on the split path above, which produced 309 `OutOfOrderSequenceNumber`
+  responses per run.
+- **A partition could stop making progress after a split even though its batches
+  were still buffered**, surfacing as `FlushIncomplete` with records left unsent.
+  Only one produce request is started per partition per selection, and the drain
+  gate admits only the batch holding the partition's first in-flight sequence; the
+  selection picked whichever batch the drain returned first, which after a split
+  re-enqueues several children at once could be a higher-sequence sibling. The
+  gate then deferred that pick every cycle while the batch that would unblock the
+  partition was never selected. Selection now takes the lowest base sequence,
+  matching Kafka's deque head.
+- **The producer parity benchmark dropped buffer-wait time from exactly the
+  records that waited longest.** It took its per-record latency timestamp inside
+  the send loop, and a `Backpressure` result did not advance the record counter,
+  so the retry captured a fresh timestamp. Java has no such gap:
+  `ProducerPerformance` captures `sendStartMs` once and `KafkaProducer.send`
+  blocks inside that window when the accumulator is full. Benchmark-only; no
+  client behaviour changed.
+- **Published producer byte-rate figures compared two different lines.** kacrab's
+  own `MiB/s` scenario line was quoted against Java's `MB/sec` line. Both tools
+  compute `bytes / elapsed / (1024 * 1024)` on their `records sent, ... MB/sec`
+  line, so that is the comparable one; read from it, the 10 KiB throughput lead is
+  +15% rather than the +25-30% previously published. The 10 B lead is +35%.
+
+### Performance
+
+- **The producer no longer pays a broker round trip for a split that splits
+  nothing.** The first split of an accumulator batch targets `batch.size` — the
+  size the accumulator already packed the batch to — so regrouping against it
+  hands back a single child holding every record the parent held, which the broker
+  rejects for the same reason. Java discovers this by sending the identical child
+  and waiting; the grouping is local, so kacrab checks it instead and halves on
+  the spot until the batch really divides. The floor terminates the loop: at
+  `max(largest record, 1)` a second record can never share a group with the first,
+  so a batch of two or more records always yields two or more groups.
+
+Measured against a real broker — 20,000 x 4 KiB into a one-partition topic with
+`max.message.bytes=65536`, producer at `batch.size=262144`, medians of 5
+interleaved kacrab/Java pairs with the topic recreated before every pass:
+
+| | kacrab | Java |
+| --- | ---: | ---: |
+| throughput | **59,347 rec/s (232 MB/s)** | 26,881 rec/s (105 MB/s) |
+| average latency | **109 ms** | 194 ms |
+| produce requests | **3,173** | 3,492 |
+| batch splits | **952** | 1,270 |
+| retries / errors | 0 / 0 | 0 / 0 |
+
+Before this release the same workload delivered nothing. kacrab led in all 5
+pairs; its slowest round (39,062 rec/s) still beat Java's fastest (30,816 rec/s).
+The default scenarios are unaffected — they never reach the split path — and were
+re-measured to confirm it: 45.4 MB/s at 5M x 10 B and 524 MB/s at 100K x 10 KiB,
+against Java's 34.8 and 435.
 
 ## 0.2.0 — 2026-07-07
 

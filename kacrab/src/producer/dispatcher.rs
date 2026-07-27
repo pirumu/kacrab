@@ -33,7 +33,8 @@ use tokio::{
 use super::batch::encode_record_batch_with_producer_state_at_offset_into;
 use super::{
     accumulator::{
-        RECORD_BATCH_OVERHEAD_BYTES, ReadyBatch, SharedAccumulator, estimate_record_batch_bytes,
+        BufferedPartition, RECORD_BATCH_OVERHEAD_BYTES, ReadyBatch, SharedAccumulator,
+        estimate_record_batch_bytes,
     },
     api::{ConsumerGroupMetadata, OffsetAndMetadata, TopicPartition},
     batch::{
@@ -1244,6 +1245,7 @@ impl ProducerDispatcher {
         if batches.is_empty() {
             return Ok(Vec::new());
         }
+        self.sweep_colocated_head_batches(accumulator, &mut batches);
         if let Some(batch) = self.expired_batch(&batches, now) {
             return Err(ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
@@ -1286,6 +1288,10 @@ impl ProducerDispatcher {
                     };
                     if self.metrics_are_enabled() {
                         self.metrics.record_requeue();
+                        // One increment per split event, never `split.len()`: Kafka
+                        // Sender.completeBatch discards the int returned by
+                        // RecordAccumulator.splitAndReenqueue and records the constant 1.0.
+                        self.metrics.record_batch_split();
                     }
                     accumulator.requeue_front(split)?;
                     return Ok(Vec::new());
@@ -1424,6 +1430,58 @@ impl ProducerDispatcher {
         }
     }
 
+    /// Sweep the head batch of every other buffered partition led by a broker that
+    /// is already receiving this dispatch.
+    ///
+    /// Java splits dispatch in two: `RecordAccumulator.ready` picks the *nodes* that
+    /// have at least one sendable batch, then `drainBatchesForOneNode` takes the head
+    /// batch of **every** partition that node leads, with no per-partition readiness
+    /// check. A half-full batch whose linger has not expired therefore rides along on
+    /// a request that was going out anyway — one fewer linger wait per record, at no
+    /// extra round trip. Draining only the individually ready partitions (as
+    /// `drain_ready` does) is the missing half of that.
+    ///
+    /// Deliberately conservative: partitions whose leader cannot be resolved from the
+    /// metadata this dispatch already needs are left buffered, and a topic with an
+    /// unassigned-partition batch in the drain is skipped entirely, because
+    /// `route_for_batch` only picks that batch's partition later — sweeping could
+    /// otherwise put two batches for one partition into a single request and break
+    /// idempotent sequence ordering. Oversized requests stay
+    /// `broker_request_placement_for_batch`'s job: it splits a broker's batches
+    /// across as many requests as `max.request.size` requires, so a swept batch can
+    /// only add a request, never overflow one.
+    ///
+    /// Callers must invoke this *before* any per-partition selection or in-flight
+    /// bookkeeping, never after: swept batches have to pass through the same
+    /// reservation, stop-drain and delivery-timeout gates as drained ones. In
+    /// [`Self::dispatch_ready`] that means before the delivery-timeout check; in the
+    /// sender loop it means before `select_dispatchable_batches`.
+    pub(crate) fn sweep_colocated_head_batches(
+        &self,
+        accumulator: &SharedAccumulator,
+        batches: &mut Vec<ReadyBatch>,
+    ) {
+        let candidates = accumulator.buffered_partitions();
+        if candidates.is_empty() {
+            return;
+        }
+        // Cached metadata only, never `metadata_for_topics`: that would put a refresh
+        // wait and a network fetch in front of batches that are already ready to go —
+        // the opposite of what this is for. A steady-state producer has the snapshot
+        // cached (it needed it to partition and to route the previous request); a cold
+        // or stale cache just skips the sweep and leaves the dispatch untouched, and
+        // `dispatch_batches` still does the real, blocking resolution right after.
+        let topics = unique_topics(batches);
+        let Some(metadata) = self.wire.cached_metadata_for(&topics) else {
+            return;
+        };
+        let sweep = colocated_sweep_partitions(&metadata, batches, candidates);
+        if sweep.is_empty() {
+            return;
+        }
+        batches.extend(accumulator.drain_front_unconditional(&sweep));
+    }
+
     /// Dispatch already-drained ready batches.
     ///
     /// This owned-batch path lets callers keep multiple produce requests in
@@ -1436,10 +1494,36 @@ impl ProducerDispatcher {
         if batches.is_empty() {
             return Ok(Vec::new());
         }
-        let enqueue_ticket = self.enqueue_sequencer.reserve_ticket();
-        match self.dispatch_drained(batches, now, enqueue_ticket).await {
-            DispatchOutcome::Delivered(result) => result,
-            DispatchOutcome::Requeue(_batches) => Err(ProducerError::FlushIncomplete),
+        let mut batches = batches;
+        let mut now = now;
+        loop {
+            let enqueue_ticket = self.enqueue_sequencer.reserve_ticket();
+            match self.dispatch_drained(batches, now, enqueue_ticket).await {
+                DispatchOutcome::Delivered(result) => return result,
+                // Unroutable: the caller owns these batches and there is no accumulator
+                // to hand them back to, so the flush is genuinely incomplete. They are
+                // abandoned here, so release their sequences — a requeue keeps its
+                // registration precisely because the batch is expected to come back, and
+                // one that never does would gate the partition forever.
+                DispatchOutcome::Requeue(batches) => {
+                    self.release_abandoned_idempotent_inflight(&batches).await;
+                    return Err(ProducerError::FlushIncomplete);
+                },
+                // A `MESSAGE_TOO_LARGE` split is transparent to the caller: routing is
+                // fine and the children are ready to send immediately. Dispatch them here
+                // instead of dropping them — dropping lost every record in the split and
+                // surfaced as a bare `FlushIncomplete`.
+                DispatchOutcome::RequeueSplit(split) => {
+                    if let Some(error) = self
+                        .check_delivery_timeout_before_retry(&split, false)
+                        .await
+                    {
+                        return Err(error);
+                    }
+                    batches = split;
+                    now = Instant::now();
+                },
+            }
         }
     }
 
@@ -1458,7 +1542,9 @@ impl ProducerDispatcher {
             .await
         {
             DispatchOutcome::Delivered(result) => result,
-            DispatchOutcome::Requeue(batches) => {
+            // Both go back to the accumulator so no record is lost. The caller retries;
+            // a split child is ready immediately, an unroutable batch waits for metadata.
+            DispatchOutcome::Requeue(batches) | DispatchOutcome::RequeueSplit(batches) => {
                 accumulator.requeue_front(batches)?;
                 Err(ProducerError::FlushIncomplete)
             },
@@ -1487,19 +1573,36 @@ impl ProducerDispatcher {
         }
     }
 
-    /// Terminal completion of a dispatch (anything but a requeue): drop its batches
-    /// from the in-flight set (Kafka `removeInFlightBatch`) and re-attempt
-    /// `maybeResolveSequences` for each touched partition, which now succeeds for
-    /// any partition that has fully drained.
+    /// Terminal completion of a dispatch: drop its batches from the in-flight set
+    /// (Kafka `removeInFlightBatch`) and re-attempt `maybeResolveSequences` for each
+    /// touched partition, which now succeeds for any partition that has fully drained.
     async fn release_idempotent_inflight_after_terminal(&self, inflight: &[(String, i32, i32)]) {
+        self.remove_idempotent_inflight(inflight).await;
+        self.resolve_idempotent_partitions(inflight).await;
+    }
+
+    /// Drop base sequences from the in-flight set without running
+    /// `maybeResolveSequences`. Split hand-over needs the two halves apart: the first
+    /// child reuses the parent's own base sequence, so the parent must be removed
+    /// before the children register, and the resolve must run only after.
+    async fn remove_idempotent_inflight(&self, inflight: &[(String, i32, i32)]) {
+        if !self.idempotence.enabled || inflight.is_empty() {
+            return;
+        }
+        let mut state = self.producer_state.lock().await;
+        for (topic, partition, base_sequence) in inflight {
+            state.remove_inflight_sequence(topic, *partition, *base_sequence);
+        }
+    }
+
+    /// Kafka `maybeResolveSequences` for every partition touched by `inflight`, run
+    /// once the set reflects the batches that are really still outstanding.
+    async fn resolve_idempotent_partitions(&self, inflight: &[(String, i32, i32)]) {
         if !self.idempotence.enabled || inflight.is_empty() {
             return;
         }
         let transactional = self.idempotence.transactional_id.is_some();
         let mut state = self.producer_state.lock().await;
-        for (topic, partition, base_sequence) in inflight {
-            state.remove_inflight_sequence(topic, *partition, *base_sequence);
-        }
         let mut resolved = AHashSet::new();
         for (topic, partition, _) in inflight {
             if !resolved.insert((topic.as_str(), *partition)) {
@@ -1513,6 +1616,15 @@ impl ProducerDispatcher {
                 ambiguous,
             );
         }
+    }
+
+    /// Batches that carry a sequence but will never be dispatched again (a flush that
+    /// hands them to nobody, an abort that discards them): release their sequences so
+    /// they stop gating the partition. Every other requeue keeps its registration.
+    pub(crate) async fn release_abandoned_idempotent_inflight(&self, batches: &[ReadyBatch]) {
+        let inflight = idempotent_inflight_of(batches);
+        self.release_idempotent_inflight_after_terminal(&inflight)
+            .await;
     }
 
     pub(crate) async fn dispatch_drained(
@@ -1537,9 +1649,33 @@ impl ProducerDispatcher {
         // are not skipped, then advance — idempotent if the enqueue path already advanced.
         self.enqueue_sequencer.wait_turn(enqueue_ticket).await;
         self.enqueue_sequencer.advance_past(enqueue_ticket);
-        if !matches!(outcome, DispatchOutcome::Requeue(_)) {
-            self.release_idempotent_inflight_after_terminal(&inflight)
-                .await;
+        // Kafka's `inflightBatchesBySequence` does NOT mean "on the wire": it holds every
+        // batch that has been stamped with a sequence and has not terminally completed,
+        // including one sitting in the accumulator waiting to be retried. That is what
+        // makes the drain gate work — a retried batch is compared against a set that
+        // contains itself, so it is the partition's `firstInFlightSequence` exactly when
+        // no lower sequence is still outstanding. Releasing on requeue drops the batch out
+        // of its own comparison, the gate then measures it against higher sequences and
+        // defers it while fresh batches keep going out, and the broker sees the partition's
+        // sequence run backwards (`OUT_OF_ORDER_SEQUENCE_NUMBER`).
+        match &outcome {
+            // Still sequenced, still uncompleted: stays registered. Whoever abandons the
+            // batches instead of re-dispatching them releases the registration.
+            DispatchOutcome::Requeue(_) => {},
+            // Kafka `splitAndReenqueue` + `maybeRemoveAndDeallocateBatch(bigBatch)`: the
+            // parent ceases to exist and its children inherit its sequence range, so hand
+            // the registration over rather than dropping it. Remove first — the first child
+            // reuses the parent's base sequence — and resolve only once the set is correct.
+            DispatchOutcome::RequeueSplit(children) => {
+                let children_inflight = idempotent_inflight_of(children);
+                self.remove_idempotent_inflight(&inflight).await;
+                self.register_idempotent_inflight(&children_inflight).await;
+                self.resolve_idempotent_partitions(&inflight).await;
+            },
+            DispatchOutcome::Delivered(_) => {
+                self.release_idempotent_inflight_after_terminal(&inflight)
+                    .await;
+            },
         }
         outcome
     }
@@ -1706,8 +1842,12 @@ impl ProducerDispatcher {
         };
         if self.metrics_are_enabled() {
             self.metrics.record_requeue();
+            // One increment per split event, never `split.len()`: Kafka
+            // Sender.completeBatch discards the int returned by
+            // RecordAccumulator.splitAndReenqueue and records the constant 1.0.
+            self.metrics.record_batch_split();
         }
-        DispatchOutcome::Requeue(split)
+        DispatchOutcome::RequeueSplit(split)
     }
 
     fn reset_compression_ratio_after_message_too_large(
@@ -3672,7 +3812,16 @@ const fn increment_sequence(sequence: i32, increment: i32) -> i32 {
 #[derive(Debug)]
 pub(crate) enum DispatchOutcome {
     Delivered(Result<Vec<RecordMetadata>>),
+    /// The batches could not be routed — their leaders are unknown or unreachable.
+    /// The sender pauses background dispatch after this, because retrying
+    /// immediately would spin against the same broken metadata.
     Requeue(Vec<ReadyBatch>),
+    /// The batches are the children of a `MESSAGE_TOO_LARGE` split and are ready to
+    /// send right now. Routing is fine; only the size was wrong. The sender must NOT
+    /// pause for this — every split round would otherwise cost a backoff, which is
+    /// what made a low `max.message.bytes` topic take tens of seconds where Java
+    /// takes about one.
+    RequeueSplit(Vec<ReadyBatch>),
 }
 
 /// Outcome of assigning idempotent state to one freshly drained batch.
@@ -4526,6 +4675,48 @@ fn unique_topics(batches: &[ReadyBatch]) -> Vec<String> {
         }
     }
     topics
+}
+
+/// Pick the buffered partitions whose head batch should ride along with `batches`.
+///
+/// A candidate qualifies when its leader is a broker that is already receiving a
+/// batch from this dispatch (Kafka's "node is ready" gate) and it contributes no
+/// batch of its own yet, so each partition still carries at most one *extra* batch
+/// into the request.
+fn colocated_sweep_partitions(
+    metadata: &crate::wire::ClusterMetadata,
+    batches: &[ReadyBatch],
+    candidates: Vec<BufferedPartition>,
+) -> Vec<BufferedPartition> {
+    let mut drained: AHashSet<(&str, i32)> = AHashSet::new();
+    let mut unassigned_topics: AHashSet<&str> = AHashSet::new();
+    let mut leaders: AHashSet<i32> = AHashSet::new();
+    for batch in batches {
+        // Partition still unassigned: `route_for_batch` runs the partitioner later,
+        // so any partition of this topic could turn out to be the one it picks.
+        if batch.partition < 0 {
+            let _inserted = unassigned_topics.insert(batch.topic.as_str());
+            continue;
+        }
+        let _inserted = drained.insert((batch.topic.as_str(), batch.partition));
+        if let Some(leader) = metadata.leader_for(&batch.topic, batch.partition) {
+            let _inserted = leaders.insert(leader.node_id);
+        }
+    }
+    if leaders.is_empty() {
+        return Vec::new();
+    }
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate.partition() >= 0
+                && !unassigned_topics.contains(candidate.topic())
+                && !drained.contains(&(candidate.topic(), candidate.partition()))
+                && metadata
+                    .leader_for(candidate.topic(), candidate.partition())
+                    .is_some_and(|leader| leaders.contains(&leader.node_id))
+        })
+        .collect()
 }
 
 fn split_message_too_large_batches(

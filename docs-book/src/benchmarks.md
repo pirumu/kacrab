@@ -14,31 +14,60 @@ Measured against native Apache Kafka 4.3.0 single-node KRaft on the same machine
 through the public producer API at the **default** Kafka-compatible config
 (`acks=all`, `enable.idempotence=true`, no compression):
 
-| Metric (5M × 10B, 16 partitions, 2026-07-02) | kacrab | Java `kafka-producer-perf-test` |
+Medians of 5 interleaved kacrab/Java pairs, 2026-07-27. Both `MB/s` columns come
+from the same summary line, computed identically on both sides (Java divides by
+`1024 * 1024` and labels it `MB/sec`; kacrab's port matches).
+
+| Metric (5M × 10B, 16 partitions) | kacrab | Java `kafka-producer-perf-test` |
 |---|---:|---:|
-| Throughput | ~4.79–4.86M rec/s (≈46.3 MiB/s) | 3.80–3.84M rec/s |
-| Latency avg | ~1.7 ms | ~0.38 ms |
-| Latency p99 | ~13 ms | ~3 ms |
+| Throughput | **5.00M rec/s (47.6 MB/s)** | 3.70M rec/s (35.3 MB/s) |
+| Latency avg | 0.61 ms | **0.35 ms** |
+| Latency p50 / p95 / p99 | 0 / 5 / 6 ms | **0 / 1 / 2 ms** |
+| Latency max | **12 ms** | 127 ms |
 | retries / errors | 0 / 0 | 0 / 0 |
 
 | Metric (100K × 10 KiB, 3 partitions, default `batch.size`) | kacrab | Java |
 |---|---:|---:|
-| Throughput | ~542–570 MB/s (55.5–58.4K rec/s) | 417–453 MB/s (42.7–46.4K rec/s) |
-| Latency avg / p99 | ~36 ms / ~78 ms | ~43 ms / ~92 ms |
+| Throughput | **49.5K rec/s (483 MB/s)** | 43.0K rec/s (420 MB/s) |
+| Latency avg | **40.5 ms** | 43.1 ms |
+| Latency p50 / p95 / p99 | **39 / 48** / 85 ms | 41 / 64 / **83** ms |
+| Latency max | **92 ms** | 133 ms |
+
+The two scenarios above never come near a broker limit, so no batch is ever
+rejected and the split path is untested by them. Driven deliberately — a
+one-partition topic with `max.message.bytes=65536` against a producer at
+`batch.size=262144`, so every full batch is rejected with `MESSAGE_TOO_LARGE` —
+the gap is much wider, because kacrab spends one broker round trip per batch
+fewer than Java. Java's first split of an accumulator batch targets `batch.size`,
+the size the accumulator already packed the batch to, so it re-sends a single
+child holding every record and waits for the broker to reject it again before it
+starts halving. kacrab checks the grouping locally and halves on the spot.
+
+| Metric (20K × 4 KiB, 1 partition, `max.message.bytes` < `batch.size`) | kacrab | Java |
+|---|---:|---:|
+| Throughput | **59.3K rec/s (232 MB/s)** | 26.9K rec/s (105 MB/s) |
+| Latency avg | **109 ms** | 194 ms |
+| Produce requests | **3,173** | 3,492 |
+| Batch splits | **952** | 1,270 |
+| retries / errors | 0 / 0 | 0 / 0 |
+
+Before 0.3.0 this workload delivered nothing at all: the split regrouped each
+rejected batch into a child of the same size for the broker to reject again, and
+every record failed with `DeliveryTimeout`.
 
 | Resource (same 10B workload, `/usr/bin/time -l`, 2026-06-28) | kacrab | Java | Java overhead |
 |---|---:|---:|---:|
 | Peak RSS | ~68 MiB | ~268 MiB | **~3.9×** |
 | Total CPU (user+sys) | ~2.7 s | ~4.1 s | **~1.5×** |
 
-## Where the +25–28% comes from
+## Where the throughput lead comes from
 
 Throughput here is **broker-bound**: both clients spend most of the run waiting
 on `acks=all` round trips, so cheaper per-record CPU barely moves the needle.
 kacrab's records/sec edge comes from keeping the broker's write path busier —
 a deeper per-partition pipeline plus coalescing one ready batch from every
 partition into each produce request (on 10 KiB records, where each batch holds a
-single record, that coalescing is the entire difference between ~540 MB/s and
+single record, that coalescing is the entire difference between ~480 MB/s and
 one-record-per-round-trip collapse). The native-vs-JVM win also shows up in
 efficiency: ~4× less resident memory (no JVM heap/metaspace) and ~1.5× less CPU
 per record. The Java CPU figure also includes one-time JVM startup + JIT warmup
@@ -53,15 +82,26 @@ that amortizes over a long-lived producer; the peak-RSS gap is steady-state.
 
 ## The latency tradeoff
 
-Java keeps a lower typical latency; kacrab trades it for pipeline depth.
+> **The two clients are not at the same offered load.** Both run flat out, so each
+> measures latency at its own saturation point — and kacrab is ~35% further up the
+> throughput curve. Pinned to Java's own rate (`KACRAB_BENCH_THROUGHPUT`), kacrab
+> wins or ties every latency metric: **0.11 ms avg, 0/1/2 ms p50/p95/p99, 3 ms
+> p99.9, 4 ms max** against Java's **0.32 / 0/1/2 / 5 / 131-140** (5M × 10B,
+> 16 partitions, interleaved pairs, 2026-07-27) — while keeping the throughput
+> headroom on top. Read the tables above as a saturation comparison, not a latency
+> one.
 
-- At `max.in.flight=5` kacrab fills the per-partition pipeline (higher p99 on a
-  single low-RTT broker, where the extra depth only adds queue latency). At
-  `max.in.flight=1` its p99 drops to ~2 ms at the same throughput.
-- Depth pays off the other way under a broker pause: at depth 5 a GC/fsync pause
-  on one in-flight request lets the others drain (p99.9 ~10 ms); at depth 1 the
-  single slot blocks (p99.9 ~100 ms). The gap shrinks in production — broker off
-  the client machine, real network RTT.
+Two notes on the shape of the distribution:
+
+- Java's maxima of 126-140 ms are JVM client pauses, not broker pauses: kacrab
+  against the same broker in the same interleaved runs stays under 16 ms. kacrab's
+  latency band is wider in the body but bounded at the tail; Java's is tighter in
+  the body with rare far outliers.
+- **A claim previously made here was wrong.** This section stated that
+  `max.in.flight=1` drops kacrab's p99 to ~2 ms at unchanged throughput. Measured:
+  **260 ms avg / 493 ms p99 at 28% lower throughput.** Depth 1 lets the accumulator
+  pile up behind the single busy slot (~7200 records per request instead of
+  ~1900). The default depth of 5 is the best setting measured.
 
 ## The consumer head-to-head
 
