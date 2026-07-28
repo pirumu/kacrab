@@ -403,3 +403,172 @@ async fn real_kafka_abort_then_next_transaction_commits_cleanly() {
         "read_committed sees exactly the post-abort transaction's record"
     );
 }
+
+/// Create `topic` with per-topic `config` overrides (same transport rules as
+/// [`create_topic`]).
+fn create_topic_with_config(topic: &str, partitions: u32, config: &[(&str, &str)]) {
+    let mut command = env::var("KACRAB_KAFKA_BIN").map_or_else(
+        |_error| {
+            let mut command = Command::new("docker");
+            let _args = command
+                .args(["exec", "kacrab-kafka", "/opt/kafka/bin/kafka-topics.sh"])
+                .args(["--bootstrap-server", "localhost:9092"]);
+            command
+        },
+        |bin| {
+            let mut command = Command::new(format!("{bin}/kafka-topics.sh"));
+            let _args = command.args(["--bootstrap-server", &bootstrap()]);
+            command
+        },
+    );
+    let _args = command
+        .args(["--create", "--topic", topic])
+        .args(["--partitions", &partitions.to_string()])
+        .args(["--replication-factor", "1"]);
+    for (key, value) in config {
+        let _arg = command.args(["--config", &format!("{key}={value}")]);
+    }
+    let status = command.status().expect("kafka-topics.sh should run");
+    assert!(status.success(), "topic creation failed for {topic}");
+}
+
+/// Regression: `send_offsets_to_transaction` called while transactional sends
+/// are still in flight must NOT drop them. The dispatch path used to fail every
+/// in-flight batch with `InvalidTransactionState("previous transaction
+/// operation is pending and must be retried")` while `commit_transaction` still
+/// returned `Ok` — a "successfully committed" transaction whose data topic was
+/// completely empty (silent data loss, verified broker-side with
+/// kafka-dump-log). Produce dispatches now wait for the pending operation, so
+/// every delivery must resolve `Ok` and every record must be visible under
+/// `read_committed` after the commit.
+#[tokio::test]
+#[ignore = "requires the broker from docker-compose.kafka.yml"]
+async fn real_kafka_send_offsets_with_inflight_sends_loses_nothing() {
+    let suffix = unique_suffix();
+    let topic_out = format!("kacrab-txn-inflight-{suffix}");
+    let topic_src = format!("kacrab-txn-inflight-src-{suffix}");
+    let group = format!("kacrab-txn-inflight-group-{suffix}");
+    let transactional_id = format!("kacrab-txn-inflight-id-{suffix}");
+    create_topic(&topic_out, 1);
+    // The offsets topic must exist too: TxnOffsetCommit answers a retriable
+    // UNKNOWN_TOPIC_OR_PARTITION for a missing topic, which retries until
+    // max.block.ms and would fail this test for the wrong reason.
+    create_topic(&topic_src, 1);
+
+    let producer = transactional_producer(&transactional_id, "kacrab-txn-inflight-test").await;
+    producer.init_transactions().await.expect("init");
+    producer.begin_transaction().expect("begin");
+
+    // Fire the sends and do NOT await them: the deliveries must still be in
+    // flight when send_offsets_to_transaction begins its pending operation.
+    let deliveries: Vec<_> = (0..3)
+        .map(|index| {
+            producer
+                .send(
+                    ProducerRecord::new(topic_out.clone(), 0)
+                        .value(Bytes::from(format!("inflight-{index}"))),
+                )
+                .expect("send should enqueue")
+        })
+        .collect();
+    producer
+        .send_offsets_to_transaction(
+            [(TopicPartition::new(topic_src, 0), OffsetAndMetadata::new(1))],
+            kacrab::producer::ConsumerGroupMetadata::new(group),
+        )
+        .await
+        .expect("send_offsets_to_transaction");
+    producer.commit_transaction().await.expect("commit");
+
+    for (index, delivery) in deliveries.into_iter().enumerate() {
+        let receipt = delivery.await.unwrap_or_else(|error| {
+            panic!("delivery {index} was dropped by the fixed bug: {error}")
+        });
+        assert_eq!(receipt.partition, 0);
+    }
+
+    let committed_view =
+        read_values(&topic_out, "read_committed", |values| values.len() >= 3).await;
+    assert_eq!(
+        committed_view,
+        vec![
+            "inflight-0".to_owned(),
+            "inflight-1".to_owned(),
+            "inflight-2".to_owned()
+        ],
+        "every record sent before send_offsets_to_transaction must survive the commit"
+    );
+}
+
+/// Regression: a transactional batch that fails terminally must poison the
+/// transaction (Kafka `Sender.failBatch` ->
+/// `maybeTransitionToAbortableError`) so `commit_transaction` FAILS instead of
+/// committing a transaction that silently lost a record. The broker rejects the
+/// oversized record with `MESSAGE_TOO_LARGE` (it passes the client-side
+/// max.request.size check but exceeds the topic's max.message.bytes), the
+/// single-record batch cannot split, and the terminal failure must (a) fail
+/// that delivery, (b) fail the commit, (c) still allow an abort, after which
+/// (d) the next transaction on the same producer commits cleanly.
+#[tokio::test]
+#[ignore = "requires the broker from docker-compose.kafka.yml"]
+async fn real_kafka_terminal_batch_failure_poisons_commit() {
+    let suffix = unique_suffix();
+    let topic = format!("kacrab-txn-poison-{suffix}");
+    let transactional_id = format!("kacrab-txn-poison-id-{suffix}");
+    create_topic_with_config(&topic, 1, &[("max.message.bytes", "4096")]);
+
+    let producer = transactional_producer(&transactional_id, "kacrab-txn-poison-test").await;
+    producer.init_transactions().await.expect("init");
+    producer.begin_transaction().expect("begin poisoned txn");
+
+    let small = producer
+        .send(
+            ProducerRecord::new(topic.clone(), 0).value(Bytes::from_static(b"poisoned-txn-small")),
+        )
+        .expect("small send should enqueue");
+    let _small_receipt = small.await.expect("small record reaches the log");
+
+    let oversized = producer
+        .send(ProducerRecord::new(topic.clone(), 0).value(Bytes::from(vec![0u8; 64 * 1024])))
+        .expect("oversized send passes the client-side max.request.size check");
+    let oversized_result = oversized.await;
+    assert!(
+        oversized_result.is_err(),
+        "the broker's max.message.bytes must reject the oversized record"
+    );
+
+    let commit = producer.commit_transaction().await;
+    match commit {
+        Err(ProducerError::Transaction { error, .. }) => assert_eq!(
+            error,
+            ErrorCode::MessageTooLarge,
+            "the commit failure names the batch's terminal error"
+        ),
+        other => panic!("commit after a terminally failed batch must fail, got {other:?}"),
+    }
+
+    producer
+        .abort_transaction()
+        .await
+        .expect("abort clears the poisoned transaction");
+
+    producer.begin_transaction().expect("begin recovery txn");
+    let recovered = producer
+        .send(ProducerRecord::new(topic.clone(), 0).value(Bytes::from_static(b"post-abort")))
+        .expect("send after recovery");
+    let _receipt = recovered.await.expect("recovery record reaches the log");
+    producer
+        .commit_transaction()
+        .await
+        .expect("recovery commit");
+
+    let committed_view = read_values(&topic, "read_committed", |values| {
+        values.iter().any(|value| value == "post-abort")
+    })
+    .await;
+    assert_eq!(
+        committed_view,
+        vec!["post-abort".to_owned()],
+        "read_committed sees only the recovery record — the poisoned transaction aborted"
+    );
+}
