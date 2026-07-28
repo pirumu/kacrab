@@ -1560,7 +1560,25 @@ impl ProducerDispatcher {
                         .deliver_successful_batches(&mut batches, receipts)
                         .await;
                 },
-                Err(DispatchError::Requeue) => return DispatchOutcome::Requeue(batches),
+                Err(DispatchError::Requeue) => {
+                    // A requeue must not cycle forever: a topic whose metadata
+                    // never resolves (e.g. it does not exist and auto-create is
+                    // off) requeued unboundedly — the delivery future neither
+                    // resolved nor timed out for tens of minutes. Expire the
+                    // batches by delivery.timeout.ms like every retry path
+                    // (Java expires accumulator batches unconditionally).
+                    if let Some(error) = self
+                        .check_delivery_timeout_before_retry(&batches, false)
+                        .await
+                    {
+                        self.record_metrics(ProducerMetrics::record_error);
+                        self.poison_transaction_after_terminal_produce_failure(&error)
+                            .await;
+                        fail_deliveries(&mut batches, &error);
+                        return DispatchOutcome::Delivered(Err(error));
+                    }
+                    return DispatchOutcome::Requeue(batches);
+                },
                 Err(DispatchError::SplitAndRequeue { topic, partition }) => {
                     return self
                         .message_too_large_split_outcome(batches, topic, partition)
@@ -3242,13 +3260,23 @@ impl ProducerDispatcher {
         }
     }
 
+    /// The configured `delivery.timeout.ms` bound, for callers outside the
+    /// dispatch loop (the sender's prepare-requeue path) that must expire
+    /// batches by the same deadline as every retry arm.
+    pub(crate) const fn delivery_timeout_bound(&self) -> Duration {
+        self.delivery_timeout
+    }
+
     /// Kafka fails the WHOLE transaction when any transactional batch fails
     /// terminally (`Sender.failBatch` -> `maybeTransitionToAbortableError`):
     /// without this, `commit_transaction` reports success for a transaction
     /// whose records never reached the log. Client-side failures carry no
     /// broker code, so `INVALID_TXN_STATE` stands in; only an abort (or the
     /// transaction never having opened) clears the poison.
-    async fn poison_transaction_after_terminal_produce_failure(&self, error: &ProducerError) {
+    pub(crate) async fn poison_transaction_after_terminal_produce_failure(
+        &self,
+        error: &ProducerError,
+    ) {
         if self.idempotence.transactional_id.is_none() {
             return;
         }

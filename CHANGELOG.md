@@ -304,6 +304,18 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **Producing to a topic whose metadata never resolves hung the delivery future
+  forever.** With auto-create disabled, a send to a nonexistent topic neither
+  succeeded nor failed: the sender's prepare path requeued the unroutable batch
+  unboundedly (observed for tens of minutes; both CI base-broker legs once hit
+  their 30-minute job timeout on exactly this), and neither `delivery.timeout.ms`
+  nor `max.block.ms` ever fired. Requeue paths now expire batches by
+  `delivery.timeout.ms` like every retry arm — the delivery fails with
+  `DeliveryTimeout` naming the unroutable topic, transactional expiry poisons
+  the transaction so a commit cannot succeed past a dropped record, and only
+  still-live batches go back to the accumulator. Pinned by a real-broker
+  regression test that bounds the failure end to end.
+
 - **`send_offsets_to_transaction` silently dropped transactional sends that were
   still in flight — `commit_transaction` then reported success for an empty
   transaction.** The produce dispatch path failed any batch that arrived while a

@@ -761,3 +761,53 @@ async fn real_kafka_idempotent_burst_delivers_exactly_once() {
         );
     }
 }
+
+/// Regression: producing to a topic that does not exist (auto-create is off on
+/// every compose fixture) must fail the delivery with `DeliveryTimeout` once
+/// `delivery.timeout.ms` elapses. The unroutable batch used to requeue
+/// unboundedly — the delivery future neither resolved nor errored for tens of
+/// minutes (both CI base-broker legs hit their 30-minute job timeout on
+/// exactly this) — because the requeue path never checked the delivery
+/// deadline that every retry path enforces.
+#[tokio::test]
+#[ignore = "requires local Kafka from docker-compose.kafka.yml"]
+async fn real_kafka_missing_topic_send_fails_after_delivery_timeout() {
+    let bootstrap = bootstrap_addr();
+    let topic = format!("kacrab-missing-{}", unique_suffix());
+
+    let producer = Producer::builder()
+        .set("bootstrap.servers", bootstrap.to_string())
+        .set("client.id", "kacrab-missing-topic-test")
+        .set("request.timeout.ms", "2000")
+        .set("linger.ms", "0")
+        .set("delivery.timeout.ms", "5000")
+        .build()
+        .await
+        .expect("producer should connect to local Kafka");
+
+    let started = std::time::Instant::now();
+    let delivery = producer
+        .send(ProducerRecord::new(topic.clone(), 0).value(Bytes::from_static(b"never-lands")))
+        .expect("send should enqueue");
+    let result = tokio::time::timeout(Duration::from_mins(1), delivery)
+        .await
+        .expect("the delivery future must resolve — an unbounded hang is the fixed bug");
+    let elapsed = started.elapsed();
+    match result {
+        Err(ProducerError::DeliveryTimeout {
+            topic: failed_topic,
+            partition,
+        }) => {
+            assert_eq!(
+                failed_topic, topic,
+                "the timeout names the unroutable topic"
+            );
+            assert_eq!(partition, 0);
+        },
+        other => panic!("expected DeliveryTimeout for the missing topic, got {other:?}"),
+    }
+    assert!(
+        elapsed >= Duration::from_secs(5),
+        "the failure must honor delivery.timeout.ms, not fail eagerly: {elapsed:?}"
+    );
+}
