@@ -26,6 +26,10 @@ name = "wire_pipeline"
 harness = false
 
 [[bench]]
+name = "wire_read_frame"
+harness = false
+
+[[bench]]
 name = "producer_dispatcher"
 harness = false
 

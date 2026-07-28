@@ -50,8 +50,8 @@ pub(crate) struct BufferPools {
 impl BufferPools {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
-            read: Arc::new(BufferPool::new(capacity)),
-            write: Arc::new(BufferPool::new(capacity)),
+            read: Arc::new(BufferPool::new(capacity, TailPolicy::ReclaimOnAcquire)),
+            write: Arc::new(BufferPool::new(capacity, TailPolicy::ReplaceOnRelease)),
         }
     }
 
@@ -85,9 +85,32 @@ impl BufferPools {
     }
 }
 
+/// What a pool does with a released buffer that no longer has class capacity —
+/// in practice the tail left behind by `split_to(len).freeze()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TailPolicy {
+    /// Park the tail as-is and reclaim its allocation on the next `acquire`, which
+    /// succeeds once the frame it was split from has been dropped.
+    ///
+    /// Used by the read pool. Response frames are decoded by their requester and
+    /// dropped; nothing ever turns one back into a `BytesMut`, so the tail can hold
+    /// a share of the allocation until the pool wants it back. This is what stops
+    /// the read path allocating a fresh class-sized buffer on *every* frame.
+    ReclaimOnAcquire,
+    /// Swap the tail for a fresh class-sized buffer.
+    ///
+    /// Used by the write pool, where the allocation is not the pool's to keep: the
+    /// producer recovers its write buffers out of the frozen record `Bytes` with
+    /// `Bytes::try_into_mut`, which succeeds only while nothing else owns the
+    /// allocation. Parking the tail would pin it and defeat that recovery
+    /// permanently, so the tail is dropped and the pool is refilled instead.
+    ReplaceOnRelease,
+}
+
 #[derive(Debug)]
 struct BufferPool {
     per_class_capacity: usize,
+    tail_policy: TailPolicy,
     buckets: Vec<BufferBucket>,
     acquired: AtomicUsize,
     reused: AtomicUsize,
@@ -108,7 +131,7 @@ struct PoolStats {
 }
 
 impl BufferPool {
-    fn new(per_class_capacity: usize) -> Self {
+    fn new(per_class_capacity: usize, tail_policy: TailPolicy) -> Self {
         let mut buckets = Vec::with_capacity(BUFFER_SIZE_CLASSES.len());
         for class_capacity in BUFFER_SIZE_CLASSES {
             buckets.push(BufferBucket {
@@ -118,6 +141,7 @@ impl BufferPool {
         }
         Self {
             per_class_capacity,
+            tail_policy,
             buckets,
             acquired: AtomicUsize::new(0),
             reused: AtomicUsize::new(0),
@@ -137,8 +161,15 @@ impl BufferPool {
         let Some(mut buffer) = buffer else {
             return BytesMut::with_capacity(bucket.class_capacity);
         };
-        let _previous = self.reused.fetch_add(1, Ordering::Relaxed);
         buffer.clear();
+        // A buffer released after `split_to` still points at the tail of an
+        // allocation the frozen frame owns, so it only regains class capacity once
+        // that frame is dropped. Reclaim it here: `try_reclaim` succeeds exactly
+        // when this handle is the sole owner, which is the case the pool can reuse.
+        if !buffer.try_reclaim(bucket.class_capacity) {
+            return BytesMut::with_capacity(bucket.class_capacity);
+        }
+        let _previous = self.reused.fetch_add(1, Ordering::Relaxed);
         buffer
     }
 
@@ -153,7 +184,9 @@ impl BufferPool {
             return;
         };
         buffer.clear();
-        if buffer.capacity() != bucket.class_capacity {
+        if self.tail_policy == TailPolicy::ReplaceOnRelease
+            && buffer.capacity() != bucket.class_capacity
+        {
             buffer = BytesMut::with_capacity(bucket.class_capacity);
         }
         if bucket.queue.push(buffer).is_ok() {
@@ -185,11 +218,11 @@ mod tests {
         reason = "Unit test fixtures fail fastest with contextual unwrap/expect calls."
     )]
 
-    use super::{BufferPool, LARGEST_BUFFER_CLASS, SMALLEST_BUFFER_CLASS};
+    use super::{BufferPool, LARGEST_BUFFER_CLASS, SMALLEST_BUFFER_CLASS, TailPolicy};
 
     #[test]
     fn pool_reuses_buffers_from_matching_size_class() {
-        let pool = BufferPool::new(2);
+        let pool = BufferPool::new(2, TailPolicy::ReclaimOnAcquire);
         let buffer = pool.acquire(128);
         assert_eq!(buffer.capacity(), SMALLEST_BUFFER_CLASS);
         pool.release(buffer);
@@ -204,7 +237,7 @@ mod tests {
 
     #[test]
     fn pool_does_not_retain_buffers_above_largest_size_class() {
-        let pool = BufferPool::new(2);
+        let pool = BufferPool::new(2, TailPolicy::ReclaimOnAcquire);
         let oversized = pool.acquire(LARGEST_BUFFER_CLASS.saturating_add(1));
         pool.release(oversized);
 
@@ -215,23 +248,62 @@ mod tests {
     }
 
     #[test]
-    fn pool_replaces_split_off_empty_buffers_before_reuse() {
-        let pool = BufferPool::new(2);
+    fn pool_reclaims_split_off_buffer_once_the_frame_is_dropped() {
+        let pool = BufferPool::new(2, TailPolicy::ReclaimOnAcquire);
         let mut buffer = pool.acquire(128);
         buffer.resize(128, 0);
-        let _frozen = buffer.split_to(128).freeze();
+        let frozen = buffer.split_to(128).freeze();
         assert!(buffer.capacity() < SMALLEST_BUFFER_CLASS);
 
         pool.release(buffer);
+        drop(frozen);
         let reused = pool.acquire(128);
 
+        // The tail reclaimed the whole class-sized allocation instead of the pool
+        // allocating a replacement for it at release time.
         assert_eq!(reused.capacity(), SMALLEST_BUFFER_CLASS);
         assert_eq!(pool.stats().reused, 1);
+        assert_eq!(pool.stats().released, 1);
+    }
+
+    #[test]
+    fn pool_does_not_reuse_a_split_off_buffer_while_its_frame_is_alive() {
+        let pool = BufferPool::new(2, TailPolicy::ReclaimOnAcquire);
+        let mut buffer = pool.acquire(128);
+        buffer.resize(128, 0);
+        let frozen = buffer.split_to(128).freeze();
+
+        pool.release(buffer);
+        let fresh = pool.acquire(128);
+
+        // The frame still owns the allocation, so the tail cannot be reclaimed and
+        // must not be counted as a reuse; the caller still gets class capacity.
+        assert_eq!(fresh.capacity(), SMALLEST_BUFFER_CLASS);
+        assert_eq!(pool.stats().reused, 0);
+        assert_eq!(frozen.len(), 128);
+    }
+
+    #[test]
+    fn write_pool_replaces_a_shared_tail_so_the_frame_stays_recoverable() {
+        let pool = BufferPool::new(2, TailPolicy::ReplaceOnRelease);
+        let mut buffer = pool.acquire(128);
+        buffer.resize(128, 0);
+        let frozen = buffer.split_to(128).freeze();
+
+        pool.release(buffer);
+        let replacement = pool.acquire(128);
+
+        // Parking the tail would keep the frozen frame shared for as long as the
+        // pool held it, and the producer recovers its write buffers with
+        // `Bytes::try_into_mut`, which needs sole ownership.
+        assert_eq!(replacement.capacity(), SMALLEST_BUFFER_CLASS);
+        assert_eq!(pool.stats().released, 1);
+        assert!(frozen.try_into_mut().is_ok());
     }
 
     #[test]
     fn pool_falls_back_when_bucket_table_is_missing_class() {
-        let mut pool = BufferPool::new(1);
+        let mut pool = BufferPool::new(1, TailPolicy::ReclaimOnAcquire);
         pool.buckets.clear();
 
         let buffer = pool.acquire(128);
