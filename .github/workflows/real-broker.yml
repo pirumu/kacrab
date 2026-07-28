@@ -250,6 +250,14 @@ jobs:
         continue-on-error: ${{ matrix.leg.experimental }}
         run: cargo test -p kacrab --all-features --test real_kafka_producer -- --ignored --test-threads=1 --nocapture
 
+      # Transactional producer suite: send_offsets_to_transaction (KIP-98
+      # consume-transform-produce), zombie fencing, and abort-then-commit
+      # reuse — all classic transaction APIs every matrix broker serves.
+      - name: Producer transactions suite
+        id: producer_txn
+        continue-on-error: ${{ matrix.leg.experimental }}
+        run: cargo test -p kacrab --all-features --test real_kafka_producer_txn -- --ignored --test-threads=1 --nocapture
+
       # `real_kafka_consumer_protocol_kip848` is the one test in this file that
       # needs a broker API the old legs do not have: ConsumerGroupHeartbeat
       # arrived at v0 (early access) in 3.9 and v1 in 4.0, and 3.6 does not
@@ -326,6 +334,7 @@ jobs:
             echo "| suite | outcome |"
             echo "| --- | --- |"
             echo "| producer | ${{ steps.producer.outcome }} |"
+            echo "| producer (transactions) | ${{ steps.producer_txn.outcome }} |"
             echo "| consumer (classic) | ${{ steps.consumer.outcome }} |"
             echo "| compression (round-trip) | ${{ steps.compression_core.outcome }} |"
             echo "| compression (full) | ${{ steps.compression_full.outcome }} |"
@@ -341,6 +350,7 @@ jobs:
         if: >-
           failure()
           || steps.producer.outcome == 'failure'
+          || steps.producer_txn.outcome == 'failure'
           || steps.consumer.outcome == 'failure'
           || steps.compression_core.outcome == 'failure'
           || steps.admin_smoke.outcome == 'failure'
