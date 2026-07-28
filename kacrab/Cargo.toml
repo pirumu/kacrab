@@ -159,6 +159,10 @@ name = "real_kafka_consumer"
 required-features = ["producer", "consumer", "admin"]
 
 [[test]]
+name = "real_kafka_consumer_ops"
+required-features = ["producer", "consumer", "admin"]
+
+[[test]]
 name = "real_kafka_gssapi"
 required-features = ["gssapi"]
 
