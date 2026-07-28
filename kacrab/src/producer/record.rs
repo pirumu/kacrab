@@ -1010,9 +1010,6 @@ pub(crate) fn clone_producer_error_for_delivery(error: &ProducerError) -> Produc
         },
         ProducerError::DispatchTask(message) => ProducerError::DispatchTask(message.clone()),
         ProducerError::DeliveryDropped => ProducerError::DeliveryDropped,
-        ProducerError::UnsupportedOperation(operation) => {
-            ProducerError::UnsupportedOperation(operation)
-        },
         ProducerError::TelemetryDisabled => ProducerError::TelemetryDisabled,
         ProducerError::Telemetry { operation, error } => ProducerError::Telemetry {
             operation,

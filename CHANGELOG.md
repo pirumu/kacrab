@@ -80,6 +80,14 @@ release date and links to relevant pull requests or issues.
   `ApiKey::ControlledShutdown` for the one place the key is still needed: the
   legacy request-header v0 rule that `ControlledShutdown` v0 frames use.
 
+- **`ProducerError::UnsupportedOperation` is gone.** No code path in the crate
+  ever constructed it — the only three mentions were the variant itself and the
+  two hand-written clone/`match` arms that copied it around. It was a public
+  variant users had to keep a `match` arm for to describe a state that could not
+  occur. The internal `CachedProducerError::UnsupportedOperation` twin in the
+  transaction dispatcher goes with it; the `From<&ProducerError>` fallback arm
+  already covered every remaining error.
+
 ### Added
 
 - **Share consumer (KIP-932), behind the new `share-consumer` feature.**

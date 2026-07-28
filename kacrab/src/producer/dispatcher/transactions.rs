@@ -156,7 +156,6 @@ pub(crate) enum CachedProducerError {
     InvalidCloseTimeout {
         timeout_ms: i64,
     },
-    UnsupportedOperation(&'static str),
     DispatchTask(String),
 }
 
@@ -185,7 +184,6 @@ impl CachedProducerError {
             Self::InvalidCloseTimeout { timeout_ms } => {
                 ProducerError::InvalidCloseTimeout { timeout_ms }
             },
-            Self::UnsupportedOperation(operation) => ProducerError::UnsupportedOperation(operation),
             Self::DispatchTask(message) => ProducerError::DispatchTask(message),
         }
     }
@@ -222,7 +220,6 @@ impl From<&ProducerError> for CachedProducerError {
             ProducerError::InvalidCloseTimeout { timeout_ms } => Self::InvalidCloseTimeout {
                 timeout_ms: *timeout_ms,
             },
-            ProducerError::UnsupportedOperation(operation) => Self::UnsupportedOperation(operation),
             _ => Self::DispatchTask(format!("cached transaction operation failed: {error}")),
         }
     }

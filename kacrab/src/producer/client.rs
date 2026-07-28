@@ -1879,9 +1879,6 @@ fn producer_error_for_callback(error: &ProducerError) -> Option<ProducerError> {
         },
         ProducerError::DispatchTask(message) => Some(ProducerError::DispatchTask(message.clone())),
         ProducerError::DeliveryDropped => Some(ProducerError::DeliveryDropped),
-        ProducerError::UnsupportedOperation(operation) => {
-            Some(ProducerError::UnsupportedOperation(operation))
-        },
         ProducerError::TelemetryDisabled => Some(ProducerError::TelemetryDisabled),
         ProducerError::Telemetry { operation, error } => Some(ProducerError::Telemetry {
             operation,

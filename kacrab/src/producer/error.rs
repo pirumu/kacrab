@@ -147,9 +147,6 @@ pub enum ProducerError {
     /// `SendFuture` handle was dropped before a broker receipt was produced.
     #[error("producer delivery was dropped before completion")]
     DeliveryDropped,
-    /// Public API exists for Kafka compatibility, but the backend is not wired yet.
-    #[error("producer operation is not supported yet: {0}")]
-    UnsupportedOperation(&'static str),
     /// Client telemetry APIs were called while `enable.metrics.push=false`.
     #[error("telemetry is not enabled; set config `enable.metrics.push` to `true`")]
     TelemetryDisabled,
