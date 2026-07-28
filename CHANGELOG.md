@@ -80,6 +80,15 @@ release date and links to relevant pull requests or issues.
   `ApiKey::ControlledShutdown` for the one place the key is still needed: the
   legacy request-header v0 rule that `ControlledShutdown` v0 frames use.
 
+- **The last three admin methods taking a positional `bool` now take an options
+  struct like every one of their siblings.** `describe_client_quotas`,
+  `alter_client_quotas`, and `update_features` ended in a bare `true`/`false` at
+  the call site with nothing naming it, while the other seventeen admin methods
+  with a flag take a `…Options` value. They now take
+  `DescribeClientQuotasOptions { strict }`, `AlterClientQuotasOptions
+  { validate_only }`, and `UpdateFeaturesOptions { validate_only }`. Pass
+  `Options::default()` where the flag was `false`.
+
 - **`producer::RecordHeaders` and its `producer::Headers` alias are gone.** The
   type was ~180 lines of exported, self-tested collection that nothing in kacrab
   ever constructed: `ProducerRecord::headers` is a `Vec<RecordHeader>`, and

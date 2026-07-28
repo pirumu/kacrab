@@ -26,14 +26,14 @@ use std::{
 
 use kacrab::admin::{
     AclBinding, AclBindingFilter, AclOperation, AclPatternType, AclPermissionType, AclResourceType,
-    AdminClient, AdminError, AlterConfigOp, AlterConfigsOptions, ClientQuotaAlteration,
-    ClientQuotaEntity, ClientQuotaFilterComponent, ClientQuotaMatch, ClientQuotaOp, ConfigResource,
-    CreatePartitionsOptions, CreateTopicsOptions, DescribeConsumerGroupsOptions,
-    DescribeTopicsOptions, ElectionType, FeatureUpdate, FeatureUpdateUpgradeType,
-    ListConsumerGroupOffsetsOptions, ListConsumerGroupsOptions, ListTopicsOptions,
-    ListTransactionsOptions, MemberToRemove, NewPartitions, NewTopic, OffsetAndMetadata,
-    OffsetSpec, ResourceType, ScramCredentialDeletion, ScramCredentialUpsertion, ScramMechanism,
-    TopicPartition,
+    AdminClient, AdminError, AlterClientQuotasOptions, AlterConfigOp, AlterConfigsOptions,
+    ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilterComponent, ClientQuotaMatch,
+    ClientQuotaOp, ConfigResource, CreatePartitionsOptions, CreateTopicsOptions,
+    DescribeClientQuotasOptions, DescribeConsumerGroupsOptions, DescribeTopicsOptions,
+    ElectionType, FeatureUpdate, FeatureUpdateUpgradeType, ListConsumerGroupOffsetsOptions,
+    ListConsumerGroupsOptions, ListTopicsOptions, ListTransactionsOptions, MemberToRemove,
+    NewPartitions, NewTopic, OffsetAndMetadata, OffsetSpec, ResourceType, ScramCredentialDeletion,
+    ScramCredentialUpsertion, ScramMechanism, TopicPartition, UpdateFeaturesOptions,
 };
 
 #[tokio::test]
@@ -344,7 +344,7 @@ async fn real_kafka_admin_extended() {
                     value: Some(1_048_576.0),
                 }],
             }],
-            false,
+            AlterClientQuotasOptions::default(),
         )
         .await
         .expect("alter_client_quotas");
@@ -358,7 +358,7 @@ async fn real_kafka_admin_extended() {
                     entity_type: ClientQuotaEntity::USER.to_owned(),
                     match_type: ClientQuotaMatch::Exact(format!("quota-user-{suffix}")),
                 }],
-                false,
+                DescribeClientQuotasOptions::default(),
             )
             .await
             .expect("describe_client_quotas");
@@ -383,7 +383,7 @@ async fn real_kafka_admin_extended() {
                     value: None,
                 }],
             }],
-            false,
+            AlterClientQuotasOptions::default(),
         )
         .await
         .expect("alter_client_quotas remove");
@@ -536,7 +536,9 @@ async fn real_kafka_admin_extended() {
                     2,
                     FeatureUpdateUpgradeType::Upgrade,
                 )],
-                true,
+                UpdateFeaturesOptions {
+                    validate_only: true,
+                },
             )
             .await,
     );

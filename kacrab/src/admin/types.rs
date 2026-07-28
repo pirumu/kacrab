@@ -985,6 +985,14 @@ impl FeatureUpdate {
     }
 }
 
+/// Options for
+/// [`update_features`](super::AdminClient::update_features).
+#[derive(Debug, Clone, Default)]
+pub struct UpdateFeaturesOptions {
+    /// Validate the request on the broker without finalizing the changes.
+    pub validate_only: bool,
+}
+
 /// The kind of resource an ACL applies to, mirroring Kafka's `ResourceType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AclResourceType {
@@ -1277,6 +1285,23 @@ pub struct ClientQuotaFilterComponent {
     pub entity_type: String,
     /// How to match the entity name.
     pub match_type: ClientQuotaMatch,
+}
+
+/// Options for
+/// [`describe_client_quotas`](super::AdminClient::describe_client_quotas).
+#[derive(Debug, Clone, Default)]
+pub struct DescribeClientQuotasOptions {
+    /// Match only entities whose entity types exactly equal the filter set
+    /// (Java `strict`, default off, which also matches supersets).
+    pub strict: bool,
+}
+
+/// Options for
+/// [`alter_client_quotas`](super::AdminClient::alter_client_quotas).
+#[derive(Debug, Clone, Default)]
+pub struct AlterClientQuotasOptions {
+    /// Validate the request on the broker without applying the changes.
+    pub validate_only: bool,
 }
 
 /// A described quota entity and its quota values, returned by
