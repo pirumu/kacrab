@@ -321,7 +321,11 @@ pub struct RecordMetadata {
     pub leader_id: i32,
     /// Absolute broker offset for this record, or `-1` when `acks=0`.
     pub offset: i64,
-    /// Broker append timestamp, or `-1` when unavailable/create-time is used.
+    /// The record's timestamp: the broker's log-append time when the topic uses
+    /// `LogAppendTime`, otherwise the record's create time (user-set, or the
+    /// send-time stamp the producer assigned) — matching Java's
+    /// `RecordMetadata.timestamp()`. `-1` only when no timestamp is known
+    /// (e.g. a failed delivery's sentinel).
     pub timestamp_ms: i64,
     /// Serialized key size in bytes, or `-1` when the key is null/unknown.
     pub serialized_key_size: i32,
@@ -382,6 +386,11 @@ struct DeliveryState {
 struct RecordDeliveryMetadata {
     serialized_key_size: i32,
     serialized_value_size: i32,
+    /// The record's create-time timestamp (user-set or stamped at send), or
+    /// `-1` when unknown. Echoed into the receipt when the broker reports no
+    /// log-append time — the Java client returns exactly this value from
+    /// `RecordMetadata.timestamp()` on create-time topics.
+    timestamp_ms: i64,
 }
 
 impl Default for DeliveryState {
@@ -946,6 +955,11 @@ fn receipt_for_record(
     }
     receipt.serialized_key_size = record_metadata.serialized_key_size;
     receipt.serialized_value_size = record_metadata.serialized_value_size;
+    // No log-append time from the broker means the topic is create-time: echo
+    // the record's own timestamp like Java's RecordMetadata.timestamp().
+    if receipt.timestamp_ms < 0 && record_metadata.timestamp_ms >= 0 {
+        receipt.timestamp_ms = record_metadata.timestamp_ms;
+    }
     receipt
 }
 
@@ -1000,6 +1014,7 @@ impl RecordDeliveryMetadata {
         Self {
             serialized_key_size: -1,
             serialized_value_size: -1,
+            timestamp_ms: -1,
         }
     }
 }
@@ -1009,6 +1024,7 @@ impl From<&ProducerRecord> for RecordDeliveryMetadata {
         Self {
             serialized_key_size: serialized_size(record.key.as_ref()),
             serialized_value_size: serialized_size(record.value.as_ref()),
+            timestamp_ms: record.timestamp_ms.unwrap_or(-1),
         }
     }
 }
