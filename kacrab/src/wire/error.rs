@@ -3,8 +3,13 @@
 use kacrab_protocol::{
     ProtocolError, frame,
     generated::{ApiKey, ErrorCode},
+    version::ApiVersionRange,
 };
 use thiserror::Error;
+
+/// First Apache Kafka release that answers [`ApiKey::ApiVersions`] v3, the
+/// version kacrab pins for its capability handshake (KIP-511).
+pub(crate) const MIN_SUPPORTED_KAFKA_RELEASE: &str = "2.4";
 
 /// Errors from the runtime wire/session layer.
 #[derive(Debug, Error)]
@@ -104,9 +109,43 @@ pub enum WireError {
     /// version, so it is rendered via `Display` rather than a `#[source]` chain.)
     #[error("random byte generation failed: {0}")]
     RandomBytes(getrandom::Error),
-    /// Broker does not support a mutually compatible API version.
-    #[error("no compatible API version for {0:?}")]
-    UnsupportedApiVersion(ApiKey),
+    /// Broker does not support a mutually compatible version of an API.
+    ///
+    /// Carries enough detail to act on without reading kacrab's source: which
+    /// API failed to negotiate, the version range kacrab can speak, and either
+    /// the range the broker advertised or the fact that the broker did not
+    /// advertise the API at all. The two cases mean different things — an
+    /// absent key is usually a broker that predates the API, while disjoint
+    /// ranges are a broker that dropped (or has not yet added) the versions
+    /// kacrab speaks — so [`Self::UnsupportedApiVersion`] renders them
+    /// differently rather than collapsing both into "unsupported".
+    #[error(fmt = fmt_unsupported_api_version)]
+    UnsupportedApiVersion {
+        /// API whose version could not be negotiated.
+        api_key: ApiKey,
+        /// Versions kacrab can speak for this API, already narrowed by any
+        /// caller-supplied maximum.
+        client: ApiVersionRange,
+        /// Versions the broker advertised for this API, or `None` when the
+        /// broker's `ApiVersions` response did not list the API key.
+        broker: Option<ApiVersionRange>,
+    },
+    /// Broker rejected the pinned `ApiVersions` handshake version, so it
+    /// predates Apache Kafka 2.4 and cannot negotiate capabilities with kacrab.
+    ///
+    /// kacrab deliberately does not retry the handshake at v0 the way Java's
+    /// client does; the supported floor is Kafka 2.4. Reconnecting cannot fix
+    /// an old broker, so this is classified as a fatal setup error and reported
+    /// immediately instead of looping under reconnect backoff until
+    /// `request.timeout.ms`.
+    #[error(
+        "broker does not support ApiVersions v{version}; kacrab requires Apache Kafka \
+         {MIN_SUPPORTED_KAFKA_RELEASE} or newer"
+    )]
+    IncompatibleBroker {
+        /// `ApiVersions` version kacrab sent in the handshake.
+        version: i16,
+    },
     /// Response correlation id did not match the in-flight request.
     #[error("correlation id mismatch: expected {expected}, got {actual}")]
     CorrelationIdMismatch {
@@ -119,11 +158,12 @@ pub enum WireError {
 
 impl WireError {
     /// Whether this is a terminal connection-setup failure — TLS or SASL
-    /// handshake/authentication — that reconnecting cannot fix. Callers should
-    /// fail fast with the real cause instead of looping under reconnect
-    /// backoff until they time out, matching Java's non-retriable
-    /// `SaslAuthenticationException` / `SslAuthenticationException` /
-    /// `IllegalSaslStateException` semantics.
+    /// handshake/authentication, or a broker too old to negotiate with — that
+    /// reconnecting cannot fix. Callers should fail fast with the real cause
+    /// instead of looping under reconnect backoff until they time out, matching
+    /// Java's non-retriable `SaslAuthenticationException` /
+    /// `SslAuthenticationException` / `IllegalSaslStateException` /
+    /// `UnsupportedVersionException` semantics.
     #[must_use]
     pub(crate) const fn is_fatal_setup(&self) -> bool {
         matches!(
@@ -137,9 +177,147 @@ impl WireError {
                 | Self::SaslHandshake(_)
                 | Self::SaslAuthentication(_)
                 | Self::SaslServerSignatureMismatch
+                | Self::IncompatibleBroker { .. }
+        )
+    }
+}
+
+/// Render [`WireError::UnsupportedApiVersion`] so the reader learns which API
+/// failed, what kacrab asked for, what the broker offers, and which side needs
+/// to move. thiserror's `fmt =` hook is used instead of a format string because
+/// the three outcomes (API absent, broker too old, broker too new) need
+/// different wording.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    clippy::ref_option,
+    reason = "Signature is dictated by thiserror's `#[error(fmt = ...)]` hook, which passes every \
+              field by reference."
+)]
+fn fmt_unsupported_api_version(
+    api_key: &ApiKey,
+    client: &ApiVersionRange,
+    broker: &Option<ApiVersionRange>,
+    formatter: &mut std::fmt::Formatter<'_>,
+) -> std::fmt::Result {
+    write!(
+        formatter,
+        "no compatible {api_key:?} API version (key {key}): kacrab supports \
+         v{client_min}..=v{client_max}",
+        key = *api_key as i16,
+        client_min = client.min_version,
+        client_max = client.max_version,
+    )?;
+    let Some(broker) = *broker else {
+        return write!(
+            formatter,
+            ", broker does not advertise this API; needs a broker that supports {api_key:?} \
+             v{client_min} or newer",
+            client_min = client.min_version,
+        );
+    };
+    write!(
+        formatter,
+        ", broker supports v{broker_min}..=v{broker_max}; ",
+        broker_min = broker.min_version,
+        broker_max = broker.max_version,
+    )?;
+    if broker.max_version < client.min_version {
+        write!(
+            formatter,
+            "needs a broker that supports {api_key:?} v{client_min} or newer",
+            client_min = client.min_version,
+        )
+    } else {
+        write!(
+            formatter,
+            "kacrab speaks {api_key:?} v{client_max} at most, so kacrab needs upgrading",
+            client_max = client.max_version,
         )
     }
 }
 
 /// Result alias for wire operations.
 pub type Result<T> = std::result::Result<T, WireError>;
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::missing_assert_message,
+        reason = "Unit test fixtures read fastest without redundant assertion messages."
+    )]
+
+    use kacrab_protocol::{generated::ApiKey, version::ApiVersionRange};
+
+    use super::WireError;
+
+    const fn range(min_version: i16, max_version: i16) -> ApiVersionRange {
+        ApiVersionRange {
+            min_version,
+            max_version,
+        }
+    }
+
+    /// An incompatibility must be actionable from the message alone: which API,
+    /// what kacrab speaks, what the broker offers, and what has to change.
+    #[test]
+    fn unsupported_api_version_names_api_and_both_ranges() {
+        let absent = WireError::UnsupportedApiVersion {
+            api_key: ApiKey::Metadata,
+            client: range(0, 13),
+            broker: None,
+        };
+        assert_eq!(
+            absent.to_string(),
+            "no compatible Metadata API version (key 3): kacrab supports v0..=v13, broker does \
+             not advertise this API; needs a broker that supports Metadata v0 or newer"
+        );
+
+        let broker_too_old = WireError::UnsupportedApiVersion {
+            api_key: ApiKey::Produce,
+            client: range(3, 13),
+            broker: Some(range(0, 2)),
+        };
+        assert_eq!(
+            broker_too_old.to_string(),
+            "no compatible Produce API version (key 0): kacrab supports v3..=v13, broker supports \
+             v0..=v2; needs a broker that supports Produce v3 or newer"
+        );
+
+        let broker_too_new = WireError::UnsupportedApiVersion {
+            api_key: ApiKey::Metadata,
+            client: range(0, 9),
+            broker: Some(range(10, 13)),
+        };
+        assert_eq!(
+            broker_too_new.to_string(),
+            "no compatible Metadata API version (key 3): kacrab supports v0..=v9, broker supports \
+             v10..=v13; kacrab speaks Metadata v9 at most, so kacrab needs upgrading"
+        );
+    }
+
+    /// The handshake failure must name the Apache Kafka release floor, since
+    /// "`ApiVersions` v3" alone tells a user nothing about which broker to run.
+    #[test]
+    fn incompatible_broker_names_the_required_kafka_release() {
+        assert_eq!(
+            WireError::IncompatibleBroker { version: 3 }.to_string(),
+            "broker does not support ApiVersions v3; kacrab requires Apache Kafka 2.4 or newer"
+        );
+    }
+
+    /// Fail fast on an incompatible broker; keep retrying everything the
+    /// reconnect loop can still recover from.
+    #[test]
+    fn incompatible_broker_is_a_fatal_setup_error() {
+        assert!(WireError::IncompatibleBroker { version: 3 }.is_fatal_setup());
+        assert!(!WireError::ConnectionClosed.is_fatal_setup());
+        assert!(
+            !WireError::UnsupportedApiVersion {
+                api_key: ApiKey::Metadata,
+                client: range(0, 13),
+                broker: None,
+            }
+            .is_fatal_setup()
+        );
+    }
+}

@@ -121,6 +121,30 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **A broker older than Apache Kafka 2.4 hung the client instead of saying so.**
+  kacrab pins its `ApiVersions` handshake to v3 (KIP-511, so the broker logs the
+  client's identity), and a pre-2.4 broker cannot parse it — it answers
+  `UNSUPPORTED_VERSION`. That error was not classified as a fatal setup failure, so
+  the connection loop treated it as transient and cycled connect → handshake →
+  reconnect backoff until `request.timeout.ms` expired, then reported a bare
+  "request timed out" that named neither the broker nor the incompatibility.
+
+  kacrab does not downgrade the handshake to v0 the way Java's client does — 2.4 is
+  the supported floor — so a rejected handshake now fails fast with
+  `WireError::IncompatibleBroker`: `broker does not support ApiVersions v3; kacrab
+  requires Apache Kafka 2.4 or newer`. Other `ApiVersions` error codes are still
+  retried as before.
+
+  Incompatibility errors on ordinary requests are actionable too now.
+  `WireError::UnsupportedApiVersion` used to render as `no compatible API version
+  for Metadata`, leaving the reader to guess which versions were in play. It now
+  carries the API, the range kacrab speaks, and the range the broker advertised —
+  and distinguishes a broker that never advertised the API from one whose range
+  does not overlap kacrab's, because those need different fixes: `no compatible
+  Produce API version (key 0): kacrab supports v3..=v13, broker supports v0..=v2;
+  needs a broker that supports Produce v3 or newer`. The variant changed from a
+  tuple to a struct (`api_key`, `client`, `broker`) to carry it.
+
 - **`FindCoordinator` was always sent in its v4+ form, so every broker older than
   3.0 failed coordinator discovery.** The consumer, producer, and admin clients all
   filled `coordinator_keys` — the batched array KIP-699 added in v4 — while the

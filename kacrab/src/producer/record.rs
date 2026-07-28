@@ -1096,8 +1096,17 @@ fn clone_wire_error_for_delivery(error: &WireError) -> Option<WireError> {
             error: *error,
         }),
         WireError::RandomBytes(error) => Some(WireError::RandomBytes(*error)),
-        WireError::UnsupportedApiVersion(api_key) => {
-            Some(WireError::UnsupportedApiVersion(*api_key))
+        WireError::UnsupportedApiVersion {
+            api_key,
+            client,
+            broker,
+        } => Some(WireError::UnsupportedApiVersion {
+            api_key: *api_key,
+            client: *client,
+            broker: *broker,
+        }),
+        WireError::IncompatibleBroker { version } => {
+            Some(WireError::IncompatibleBroker { version: *version })
         },
         WireError::CorrelationIdMismatch { expected, actual } => {
             Some(WireError::CorrelationIdMismatch {
