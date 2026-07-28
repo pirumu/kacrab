@@ -131,7 +131,7 @@ async fn real_kafka_share_consumer_implicit_acknowledgement() {
     // coordinator's own schedule (the Java `kafka-share-groups.sh --offsets`
     // CLI reports the same value at the same moment), so pinning it to a number
     // here would be asserting broker timing, not kacrab behaviour. That the
-    // records really were accepted is what the second consumer above proves.
+    // records really were accepted is what the second consumer below proves.
     let partition = TopicPartition::new(topic.clone(), 0);
     let offsets = admin
         .list_share_group_offsets(&group, vec![partition.clone()])

@@ -397,10 +397,10 @@ async fn run_per_record_tracked_send_loop(
         run.reporting_interval,
         false,
     ));
-    // KACRAB_BENCH_SYNC_SEND=1 routes through the synchronous send
-    // (send_with_callback_now, no per-record .await, no sender mutex). The record's
-    // partition is assigned by the REAL sticky partitioner via try_assign_partition_now
-    // (sync, non-blocking); the ~1-in-900 rotation records fall back to the async path.
+    // KACRAB_BENCH_SYNC_SEND=1 only turns on the buffer-spin report printed after the
+    // loop; it does NOT select a send path. `send_with_callback` is synchronous
+    // unconditionally now (see the comment on the call below), so there is nothing left
+    // to switch between.
     let sync_send = env::var("KACRAB_BENCH_SYNC_SEND").is_ok();
     // Resolved ONCE, never inside the loop: a per-record `env::var` costs ~28% of
     // small-record throughput on macOS because `getenv` takes a global libc lock
