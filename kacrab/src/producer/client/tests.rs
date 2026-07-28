@@ -2365,3 +2365,41 @@ async fn resolve_bootstrap_brokers_reports_dns_errors() {
         Err(ProducerError::Wire(_))
     ));
 }
+
+#[tokio::test]
+async fn wait_until_drained_parks_until_the_last_record_is_appended() {
+    let pending = Arc::new(AtomicUsize::new(2));
+    let drained = Arc::new(tokio::sync::Notify::new());
+    let waiter_pending = Arc::clone(&pending);
+    let waiter_drained = Arc::clone(&drained);
+    let waiter = tokio::spawn(async move {
+        super::wait_until_drained(&waiter_pending, &waiter_drained).await;
+    });
+
+    // One record appended still leaves the queue non-empty: the waiter must stay
+    // parked rather than returning early or spinning.
+    super::release_slow_send(&pending, &drained);
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+
+    super::release_slow_send(&pending, &drained);
+
+    tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("drain notify should wake the waiter")
+        .expect("waiter task");
+    assert_eq!(pending.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn wait_until_drained_returns_immediately_on_an_empty_queue() {
+    let pending = AtomicUsize::new(0);
+    let drained = tokio::sync::Notify::new();
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        super::wait_until_drained(&pending, &drained),
+    )
+    .await
+    .expect("an empty queue must not park");
+}
