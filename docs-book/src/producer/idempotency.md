@@ -148,6 +148,51 @@ to each batch.
 > (`InitProducerId` → `begin` → `send` → `commit` → delivery receipt). See the
 > `real_kafka_producer` test in [Verification](../verification.md).
 
+## Exactly-once consume-transform-produce
+
+The end-to-end EOS pattern reads from one topic, transforms, writes to
+another, and commits the *consumer's* offsets inside the *producer's*
+transaction — so a crash replays from the last committed offset and the
+outputs either all exist or none do:
+
+```rust,ignore
+producer.begin_transaction()?;
+let batch = consumer.poll(timeout).await?;
+let mut offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
+for record in &batch {
+    producer.send(transform(record))?;
+    // Commit the offset AFTER each record: last processed offset + 1.
+    offsets.insert(
+        record.topic_partition(),
+        OffsetAndMetadata::new(record.offset + 1),
+    );
+}
+producer
+    .send_offsets_to_transaction(offsets, consumer.group_metadata())
+    .await?;
+producer.commit_transaction().await?;
+```
+
+Three rules make or break it:
+
+- **Turn consumer auto-commit off** (`enable.auto.commit=false`). Auto-commit
+  goes through the ordinary `OffsetCommit` path *outside* the transaction: if
+  the transaction aborts, the offsets have already advanced and the aborted
+  records are never reprocessed — silent data loss with no error anywhere.
+  Only `send_offsets_to_transaction` makes the offset commit atomic with the
+  outputs.
+- **Read downstream with `isolation.level=read_committed`** so consumers never
+  observe records from aborted transactions (the client filters them using the
+  broker's aborted-transaction list; control markers are never surfaced).
+- **Sends need not be awaited before `send_offsets_to_transaction`** —
+  `commit_transaction` flushes and fails if any delivery failed. A terminally
+  failed transactional batch poisons the transaction: the commit errors, and
+  only `abort_transaction` (which also bumps the epoch) clears it.
+
+The `transactions` example runs this pipeline against a real broker and
+self-checks abort invisibility; `real_kafka_producer_txn` pins the atomic
+offset commit, fencing, and abort-then-commit reuse in CI.
+
 ## Field notes
 
 Everything in this chapter runs at the **default** config — that is the point:

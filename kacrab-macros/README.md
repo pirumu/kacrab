@@ -30,7 +30,7 @@ not the protocol generator.
 
 ```toml
 [dependencies]
-kacrab = { version = "0.1", features = ["macros"] }
+kacrab = { version = "0.4", features = ["macros"] }
 ```
 
 ## Author

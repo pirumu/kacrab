@@ -23,12 +23,12 @@ provider (`rustls` + `aws-lc-rs`) is C/assembly, and the optional `zstd`,
 
 ```toml
 [dependencies]
-kacrab = { version = "0.3", features = ["producer", "consumer", "admin"] }
+kacrab = { version = "0.4", features = ["producer", "consumer", "admin"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
 The crate compiles almost nothing by default (`default = []`) — a bare
-`kacrab = "0.3"` gives you no producer, consumer, or admin API. Opt into the
+`kacrab = "0.4"` gives you no producer, consumer, or admin API. Opt into the
 surfaces you use:
 
 - `producer` — the producer API.
@@ -66,7 +66,9 @@ surfaces you use:
   KIP-429) and the KIP-848 server-side protocol; topic-id-keyed fetch (KIP-516,
   up to v18), incremental fetch sessions (KIP-227), truncation detection
   (KIP-320), `commit_sync`/`commit_async`/auto-commit, background heartbeat,
-  static membership, typed deserializers, interceptors, and `metrics()`.
+  static membership, `isolation.level=read_committed` with client-side
+  aborted-transaction filtering, typed deserializers, interceptors, and
+  `metrics()`.
 - `admin` — the full Apache Kafka 4.3.0 `Admin` operation surface (62
   operations): topics, configs (incremental), ACLs, groups & offsets,
   transactions, delegation tokens, quotas, SCRAM, reassignments, KRaft quorum,
@@ -113,8 +115,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Transactions use the same producer (`transactional.id` +
-`init_transactions`/`begin_transaction`/`commit_transaction`). Serializers are
-a compile-time Rust trait (`ProducerSerializer<T>` via
+`init_transactions`/`begin_transaction`/`commit_transaction`), including full
+exactly-once consume-transform-produce: `send_offsets_to_transaction` commits
+the consumer's offsets atomically with the outputs, aborted transactions are
+invisible to `isolation.level=read_committed` consumers, and a terminally
+failed transactional batch fails the commit instead of silently dropping data
+(see the [EOS chapter](https://pirumu.github.io/kacrab/producer/idempotency.html#exactly-once-consume-transform-produce)).
+Serializers are a compile-time Rust trait (`ProducerSerializer<T>` via
 `build_with_serializers`), not `key.serializer` class names.
 
 ## Consumer
