@@ -23,7 +23,7 @@ provider (`rustls` + `aws-lc-rs`) is C/assembly, and the optional `zstd`,
 
 ```toml
 [dependencies]
-kacrab = { version = "0.4", features = ["producer", "consumer", "admin"] }
+kacrab = { version = "0.4", features = ["producer", "consumer", "admin", "aws-lc-rs-tls"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
@@ -34,7 +34,15 @@ surfaces you use:
 - `producer` — the producer API.
 - `consumer` — the consumer API; pulls in the `compression` codecs (fetched
   batches must decompress) and `regex` for pattern subscription.
+- `share-consumer` — the KIP-932 share consumer (queue-shaped consumption with
+  per-record `Accept`/`Release`/`Reject`); implies `consumer`.
 - `admin` — the `AdminClient` API.
+- `aws-lc-rs-tls` / `pure-rust-tls` — the TLS crypto provider, named
+  explicitly. `aws-lc-rs-tls` is the documented default and what CI exercises;
+  `pure-rust-tls` puts `rustls` on `ring` and drops `aws-lc-sys` (it also drops
+  local `OAUTHBEARER` JWT-assertion signing rather than pull in `rsa` and
+  RUSTSEC-2023-0071). A `PLAINTEXT`-only build names neither; configuring TLS
+  with neither fails at config validation with a clear error.
 - `gzip`, `snappy`, `lz4` — pure-Rust record-batch compression codecs (no C
   toolchain).
 - `zstd` — compression via the C `libzstd` (`zstd-sys`); needs a C compiler at
@@ -69,14 +77,19 @@ surfaces you use:
   static membership, `isolation.level=read_committed` with client-side
   aborted-transaction filtering, typed deserializers, interceptors, and
   `metrics()`.
+- `consumer::ShareConsumer` (feature `share-consumer`) — the KIP-932 share
+  consumer: share-group membership and acquisition, per-record acknowledgement
+  (`Accept`/`Release`/`Reject`), delivery-count tracking for poison messages,
+  and more consumers than partitions.
 - `admin` — the full Apache Kafka 4.3.0 `Admin` operation surface (62
   operations): topics, configs (incremental), ACLs, groups & offsets,
   transactions, delegation tokens, quotas, SCRAM, reassignments, KRaft quorum,
   and the 4.x share/streams group families.
 
-Every client surface — producer, consumer, admin, every SASL mechanism and TLS
-mode, every compression codec, 3-broker failover — is verified end-to-end
-against real Apache Kafka 4.3.0 brokers. On the same broker and defaults,
+Every client surface — producer, consumer, share consumer, admin, every SASL
+mechanism and TLS mode, every compression codec, 3-broker failover — is
+verified end-to-end against real Apache Kafka brokers in CI, across a
+3.6.2/3.9.0/4.0.0/4.3.0 version matrix. On the same broker and defaults,
 producer throughput measures +25-28% over the Java client at ~4x less memory,
 and consumer throughput 1.9-4x at ~16-20x less memory; methodology and caveats
 in the [benchmarks chapter](https://pirumu.github.io/kacrab/benchmarks.html).
@@ -185,6 +198,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## Broker Compatibility
+
+Minimum **Apache Kafka 2.4**: an older broker cannot answer the `ApiVersions`
+v3 handshake and is rejected on connect with a typed error naming the
+requirement, not a reconnect loop. Verified in CI against real **3.6.2, 3.9.0,
+4.0.0, and 4.3.0** brokers; schemas are generated from 4.3.0 and newer brokers
+negotiate down under Kafka's own compatibility model. No request version is
+hardcoded — every API is negotiated per connection from the broker's
+`ApiVersions` response, and feature floors gate on what the broker
+*advertises* (KIP-848 groups need `ConsumerGroupHeartbeat`, in practice 3.9+;
+the share consumer needs the KIP-932 APIs, 4.3+). Details:
+[broker compatibility](https://pirumu.github.io/kacrab/broker-compatibility.html).
 
 ## Java Compatibility
 

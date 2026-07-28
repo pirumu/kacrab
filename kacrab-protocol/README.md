@@ -14,11 +14,16 @@ batches, compression, framing, and version negotiation for `kacrab`.
   encoding helpers.
 - `frame` owns request/response frame helpers.
 - `record` owns Kafka record batch v2 encoding and decoding.
+- `crc` owns CRC32C (Castagnoli) checksum compute and validation for record
+  batches.
 - `compression` owns gzip, snappy, lz4, and zstd codec dispatch behind feature
   flags.
 - `version` resolves supported API and header versions.
-- `generated` contains committed output from `kacrab-codegen`; do not edit it
-  by hand.
+- `error` is the top-level protocol error, a thin facade over the per-module
+  error types.
+- `generated` contains committed output from `kacrab-codegen` — message
+  structs, the Kafka error-code table, and per-message `encoded_len`; do not
+  edit it by hand.
 
 ## Features
 
