@@ -1,11 +1,17 @@
 name: real-broker
 
-# Runs the ignored `real_kafka_*` integration suites against live Apache Kafka
-# 4.3.0 containers from the repo's docker-compose files. These suites are the
+# Runs the ignored `real_kafka_*` integration suites against live Kafka
+# containers from the repo's docker-compose files. These suites are the
 # only coverage for the consumer's broker-I/O path (client/coordinator/
 # next_gen are excluded from the unit-coverage gate because they cannot be
 # driven against a dead broker), so without this workflow a green CI says
 # nothing about that path.
+#
+# The `base` job is a matrix over broker releases — 3.6.2 / 3.9.0 / 4.0.0 /
+# 4.3.0 — because kacrab's protocol schemas are generated from the Java client
+# 4.3.0 and every older broker is reached by ApiVersions negotiation. Only a
+# real old broker proves that negotiation works; see the "Broker version
+# matrix" section below for what runs where and why.
 #
 # Each job gets its own runner VM, so the composes' host-port choices never
 # collide across jobs. The broker is started before the Rust toolchain/build
@@ -18,6 +24,52 @@ name: real-broker
 # The auth-listener suites (SASL / TLS / GSSAPI) live in
 # real-broker-auth.yml on a weekly schedule — they exercise handshake code
 # that rarely changes and need heavier fixtures (KDC, cert generation).
+#
+#
+# ## Broker version matrix
+#
+# Every compose file already reads `${KAFKA_IMAGE:-apache/kafka:4.3.0}`; this
+# workflow is what finally sets it.
+#
+# Suites, split into two tiers (checklist P1.2):
+#
+#   core — producer, the classic-protocol consumer tests, one compression
+#          round-trip, admin smoke. Runs on EVERY leg. These use only APIs that
+#          existed well before 3.6, so they are the surface the README
+#          compatibility table will eventually make a claim about.
+#   full — core plus KIP-848 (`group.protocol=consumer`, broker >= 4.0) and the
+#          share-consumer suite (KIP-932, broker >= 4.2). Runs on 4.3.0 only,
+#          because those APIs simply do not exist on the older legs. The
+#          `admin-extended` and `cluster` jobs are part of this tier too and stay
+#          pinned to 4.3.0 (see their own comments).
+#
+# Wall time: the suites run `--test-threads=1` (they share one broker and name
+# topics with millisecond nonces, so parallel runs collide), which makes each
+# leg a full serial pass. Four legs is four times the wall clock, so pull
+# requests get two legs — newest and oldest, where a negotiation break would
+# show up first — and the complete matrix runs on push-to-master, on the nightly
+# schedule, and on demand.
+#
+# ### Old legs are non-blocking, on purpose — this is temporary
+#
+# The old-broker legs carry `continue-on-error` and CANNOT fail a PR yet.
+# They are evidence-gathering: nobody has written the per-surface floor table
+# (checklist P0.2 / P3.1), so there is no agreed answer to "should this test
+# pass on 3.6?" and a red leg would be noise rather than a regression signal.
+# Two failures are already known and reproduced locally against real brokers:
+#
+#   - `real_kafka_admin_smoke` fails on 3.6.2 with `UnsupportedApiVersion` for
+#     ListConfigResources (API 74 — it does not exist before 3.7).
+#   - The same test fails on 3.9.0 and 4.0.0 with `UnsupportedFieldVersion
+#     { api_key: 74, field: "resource_types", version: 0 }`: those brokers
+#     advertise API 74 at v0 only, and `resource_types` arrived in v1. That is
+#     the same bug class PR #11 fixed for FindCoordinator / ListOffsets /
+#     SyncGroup / Fetch, in a call site it did not reach.
+#
+# Once P1.3 lands per-test `#[min_broker(..)]` gating and P3.1 publishes the
+# floor table, DELETE the `experimental` flag from the matrix legs below and let
+# these legs block like any other job. Leaving them permanently non-blocking
+# would make the whole matrix decorative.
 
 on:
   push:
@@ -33,12 +85,19 @@ on:
       - "**/*.md"
       - "LICENSE-*"
       - ".github/workflows/docs.yml"
+  # Nightly full matrix: catches drift in the old-broker legs that PRs skip.
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: real-broker-${{ github.ref }}
+  # Scheduled and push runs share `github.ref` on master, so the event name is
+  # part of the key — otherwise the nightly full matrix would cancel (or be
+  # cancelled by) a merge landing at the same time.
+  group: real-broker-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -46,17 +105,80 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  legs:
+    name: pick broker legs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      legs: ${{ steps.pick.outputs.legs }}
+    steps:
+      # The single source of truth for the matrix. Each leg carries everything
+      # the `base` job needs to differ:
+      #
+      #   image       broker image to run. `apache/kafka` publishes no tag older
+      #               than 3.7, so 3.6 comes from Bitnami — and from
+      #               `bitnamilegacy/`, not `bitnami/`: the 3.6 tags were removed
+      #               from the original repo when Bitnami moved its back
+      #               catalogue in 2025. Same image, current name. These four
+      #               images are exactly the ones the ApiVersions fixtures were
+      #               captured from (kacrab/tests/fixtures/api_versions/README.md).
+      #   compose     Bitnami configures the broker through `KAFKA_CFG_*` rather
+      #               than the `KAFKA_*` shape the Apache image reads, so 3.6 gets
+      #               its own compose file instead of an overlay (an overlay can
+      #               only add keys, never drop the ones that would no longer
+      #               apply).
+      #   suite       core | full — see the header.
+      #   path_shim   whether `/opt/kafka` and `/var/lib/kafka` have to be
+      #               symlinked into the container before the suites run.
+      #   experimental  whether failures are non-blocking (see the header).
+      #   pr          whether this leg runs on pull requests.
+      - name: Select legs for this event
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          all='[
+            {"label":"4.3.0","image":"apache/kafka:4.3.0","compose":"docker-compose.kafka.yml","suite":"full","path_shim":false,"experimental":false,"pr":true},
+            {"label":"4.0.0","image":"apache/kafka:4.0.0","compose":"docker-compose.kafka.yml","suite":"core","path_shim":false,"experimental":true,"pr":false},
+            {"label":"3.9.0","image":"apache/kafka:3.9.0","compose":"docker-compose.kafka.yml","suite":"core","path_shim":false,"experimental":true,"pr":false},
+            {"label":"3.6.2","image":"bitnamilegacy/kafka:3.6.2","compose":"docker-compose.kafka-bitnami.yml","suite":"core","path_shim":true,"experimental":true,"pr":true}
+          ]'
+          if [ "$EVENT" = "pull_request" ]; then
+            legs=$(printf '%s' "$all" | jq -c '[.[] | select(.pr)]')
+          else
+            legs=$(printf '%s' "$all" | jq -c '.')
+          fi
+          echo "legs=$legs" >> "$GITHUB_OUTPUT"
+          printf 'legs for %s: %s\n' "$EVENT" "$legs"
+
   base:
-    name: base broker (producer · consumer · share consumer · compression · admin smoke)
+    name: base broker ${{ matrix.leg.label }} (${{ matrix.leg.suite }})
+    needs: legs
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Belt and suspenders with the per-suite `continue-on-error` below: that one
+    # keeps every suite running so one break does not hide the rest, this one
+    # covers the steps around them (a broker that never goes healthy on an old
+    # image must not turn a PR red either).
+    continue-on-error: ${{ matrix.leg.experimental }}
+    strategy:
+      # An old leg breaking must not cancel 4.3.0, which is the leg that gates.
+      fail-fast: false
+      matrix:
+        leg: ${{ fromJSON(needs.legs.outputs.legs) }}
+    env:
+      # Read by every `docker compose` invocation below; the compose files all
+      # default to apache/kafka:4.3.0 when it is unset.
+      KAFKA_IMAGE: ${{ matrix.leg.image }}
+      COMPOSE_FILE_KAFKA: ${{ matrix.leg.compose }}
     steps:
       - uses: actions/checkout@v4
 
       # Boot the broker in the background; image pull + KRaft format run
       # while the toolchain installs and the tests compile.
       - name: Start Kafka (background)
-        run: docker compose -f docker-compose.kafka.yml up -d
+        run: docker compose -f "$COMPOSE_FILE_KAFKA" up -d
 
       # gssapi (libgssapi) needs libkrb5; --all-features pulls it in.
       - name: System dependencies
@@ -72,8 +194,26 @@ jobs:
 
       - name: Wait for broker health
         run: |
-          docker compose -f docker-compose.kafka.yml up -d --wait kafka
+          docker compose -f "$COMPOSE_FILE_KAFKA" up -d --wait kafka
           docker wait kacrab-kafka-init
+
+      # The suites shell out to `/opt/kafka/bin/*.sh` inside the broker container
+      # and dump log segments from `/var/lib/kafka/data` — the Apache image's
+      # layout. Bitnami ships KAFKA_HOME at /opt/bitnami/kafka and its data dir at
+      # /bitnami/kafka/data (the one directory that image leaves writable for its
+      # uid-1001 user, so the volume has to stay there). Symlink rather than teach
+      # the test files about image layouts: the tests describe kacrab's behaviour,
+      # not Docker packaging.
+      - name: Apache path layout shim
+        if: matrix.leg.path_shim
+        run: |
+          docker exec -u 0 kacrab-kafka sh -c \
+            'ln -sfn /opt/bitnami/kafka /opt/kafka && ln -sfn /bitnami/kafka /var/lib/kafka'
+          # Prove the shim before any suite depends on it, and record what this
+          # broker actually advertises next to the fixture that claims to match.
+          docker exec kacrab-kafka /opt/kafka/bin/kafka-broker-api-versions.sh \
+            --bootstrap-server localhost:9092 > api-versions.txt
+          head -5 api-versions.txt
 
       # The first consumer-group operation on a fresh broker creates the
       # 50-partition __consumer_offsets topic, which is slow enough to flake
@@ -88,38 +228,128 @@ jobs:
                --group kacrab-ci-warmup --timeout-ms 10000 --max-messages 1 \
                >/dev/null 2>&1 || true"
 
+      # --- core suite: every leg -----------------------------------------
+      #
+      # Every step from here on is filtered by test name rather than by editing
+      # the test files, so the tier split lives in one place and the suites stay
+      # runnable in full from a developer's shell.
+      #
       # Suites share one broker and name topics with millisecond nonces, so
       # they must run single-threaded (parallel runs collide with
       # TopicAlreadyExists).
       - name: Producer suite
+        id: producer
+        continue-on-error: ${{ matrix.leg.experimental }}
         run: cargo test -p kacrab --all-features --test real_kafka_producer -- --ignored --test-threads=1 --nocapture
 
-      - name: Consumer suite
-        run: cargo test -p kacrab --all-features --test real_kafka_consumer -- --ignored --test-threads=1 --nocapture
+      # `real_kafka_consumer_protocol_kip848` is the one test in this file that
+      # needs a broker API the old legs do not have: ConsumerGroupHeartbeat
+      # arrived at v0 (early access) in 3.9 and v1 in 4.0, and 3.6 does not
+      # advertise it at all. Everything else here is the classic group protocol
+      # — JoinGroup/SyncGroup/Heartbeat/OffsetCommit/OffsetFetch/ListOffsets,
+      # all of which 3.6 serves at versions inside kacrab's range. Verified
+      # locally: 13/13 pass against bitnamilegacy/kafka:3.6.2.
+      - name: Consumer suite (classic protocol)
+        id: consumer
+        continue-on-error: ${{ matrix.leg.experimental }}
+        run: |
+          cargo test -p kacrab --all-features --test real_kafka_consumer -- \
+            --ignored --test-threads=1 --nocapture \
+            --skip real_kafka_consumer_protocol_kip848
 
-      # Share groups (KIP-932) are broker-side machinery — acquisition locks,
-      # delivery counts, redelivery — so this suite is the only coverage of the
-      # share consumer's behaviour, not just its wire encoding.
-      - name: Share consumer suite
-        run: cargo test -p kacrab --all-features --test real_kafka_share_consumer -- --ignored --test-threads=1 --nocapture
-
-      - name: Compression round-trip suite
-        run: cargo test -p kacrab --all-features --test real_kafka_compression -- --ignored --test-threads=1 --nocapture
+      # Compression is a client-side record-batch concern that every broker in
+      # the matrix stores unchanged, so the produce->store->CLI-consume round
+      # trip is core. The CLI-produces->kacrab-decodes half is 4.3.0-only for
+      # wall time, not compatibility: it is four more console-producer round
+      # trips for the same codecs.
+      - name: Compression round-trip suite (core)
+        id: compression_core
+        if: matrix.leg.suite == 'core'
+        continue-on-error: ${{ matrix.leg.experimental }}
+        run: |
+          cargo test -p kacrab --all-features --test real_kafka_compression -- \
+            --ignored --test-threads=1 --nocapture \
+            real_kafka_compression_roundtrips_every_codec
 
       # Only the smoke half runs here; real_kafka_admin_extended needs the
       # authorizer broker from docker-compose.kafka-admin.yml (admin-extended
-      # job below).
+      # job below). This is the core test known to fail on every leg below
+      # 4.1 today — see the ListConfigResources note in the header.
       - name: Admin smoke suite
+        id: admin_smoke
+        continue-on-error: ${{ matrix.leg.experimental }}
         run: cargo test -p kacrab --all-features --test real_kafka_admin -- --ignored --test-threads=1 --nocapture real_kafka_admin_smoke
 
+      # --- full suite: 4.3.0 only ----------------------------------------
+
+      # KIP-848 needs ConsumerGroupHeartbeat v1 (broker >= 4.0); it is the test
+      # the core leg skips above.
+      - name: Consumer suite (KIP-848 protocol)
+        id: consumer_kip848
+        if: matrix.leg.suite == 'full'
+        run: |
+          cargo test -p kacrab --all-features --test real_kafka_consumer -- \
+            --ignored --test-threads=1 --nocapture \
+            real_kafka_consumer_protocol_kip848
+
+      # Share groups (KIP-932) are broker-side machinery — acquisition locks,
+      # delivery counts, redelivery — so this suite is the only coverage of the
+      # share consumer's behaviour, not just its wire encoding. ShareFetch is
+      # not advertised at all before 4.2, so this tier is 4.3.0-only.
+      - name: Share consumer suite
+        id: share
+        if: matrix.leg.suite == 'full'
+        run: cargo test -p kacrab --all-features --test real_kafka_share_consumer -- --ignored --test-threads=1 --nocapture
+
+      - name: Compression round-trip suite (full)
+        id: compression_full
+        if: matrix.leg.suite == 'full'
+        run: cargo test -p kacrab --all-features --test real_kafka_compression -- --ignored --test-threads=1 --nocapture
+
+      # The per-suite outcomes are the actual product of the old legs: which
+      # surfaces survive which broker is the raw material for the floor table.
+      # Put them in the run summary so nobody has to open four job logs.
+      - name: Suite outcomes
+        if: always()
+        run: |
+          {
+            echo "### broker ${{ matrix.leg.image }} — ${{ matrix.leg.suite }} suite"
+            echo
+            echo "| suite | outcome |"
+            echo "| --- | --- |"
+            echo "| producer | ${{ steps.producer.outcome }} |"
+            echo "| consumer (classic) | ${{ steps.consumer.outcome }} |"
+            echo "| compression (round-trip) | ${{ steps.compression_core.outcome }} |"
+            echo "| compression (full) | ${{ steps.compression_full.outcome }} |"
+            echo "| admin smoke | ${{ steps.admin_smoke.outcome }} |"
+            echo "| consumer (KIP-848) | ${{ steps.consumer_kip848.outcome }} |"
+            echo "| share consumer | ${{ steps.share.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # `failure()` alone would never fire on the experimental legs — their
+      # suite steps swallow their own failure — and those are exactly the legs
+      # whose broker logs explain what happened. Name the suites instead.
       - name: Broker logs on failure
-        if: failure()
+        if: >-
+          failure()
+          || steps.producer.outcome == 'failure'
+          || steps.consumer.outcome == 'failure'
+          || steps.compression_core.outcome == 'failure'
+          || steps.admin_smoke.outcome == 'failure'
         run: docker logs kacrab-kafka --tail 300
 
   admin-extended:
     name: admin broker (ACLs · quotas · SCRAM · txn)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Not matrixed. docker-compose.kafka-admin.yml depends on 4.3.0 broker
+    # defaults — share and streams group features are formatted on at that
+    # release, and the suite drives unstable APIs behind them — so pointing this
+    # fixture at an older image does not produce an older-broker signal, it
+    # produces a broker missing the features the suite is about. Per-op version
+    # gating (checklist P1.3) is what unlocks matrixing this job.
+    env:
+      KAFKA_IMAGE: apache/kafka:4.3.0
     steps:
       - uses: actions/checkout@v4
 
@@ -151,6 +381,12 @@ jobs:
     name: 3-broker cluster (dispatch · leader failover)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Not matrixed: part of the full tier (checklist P1.2). The suite is about
+    # dispatch and leader failover across three brokers, which is orthogonal to
+    # version negotiation, and tripling the container count on every leg buys
+    # the compatibility table nothing.
+    env:
+      KAFKA_IMAGE: apache/kafka:4.3.0
     steps:
       - uses: actions/checkout@v4
 
