@@ -1908,6 +1908,7 @@ fn sequenced_batch(topic: &str, partition: i32, base_sequence: i32) -> super::Re
             producer_epoch: 3,
         },
         base_sequence,
+        transactional: false,
     });
     batch
 }

@@ -859,6 +859,8 @@ impl Consumer {
                     &self.subscription,
                     self.config.max_poll_records,
                     fetch::crc_check(&self.config),
+                    self.config.isolation_level
+                        == crate::consumer::config::IsolationLevel::ReadCommitted,
                 )?;
 
                 // Pipeline the next fetch (Java's network thread): dry
@@ -893,6 +895,8 @@ impl Consumer {
                         &self.subscription,
                         self.config.max_poll_records,
                         fetch::crc_check(&self.config),
+                        self.config.isolation_level
+                            == crate::consumer::config::IsolationLevel::ReadCommitted,
                     )?;
                     if !drained.is_empty() {
                         return Ok(self.deliver(drained));
@@ -2283,6 +2287,7 @@ mod tests {
                 partition: fetched.clone(),
                 fetch_position: FetchPosition::new(0, None),
                 records: Bytes::from_static(b"raw"),
+                aborted: std::collections::VecDeque::new(),
             }],
             resets: vec![reset.clone()],
             stale: vec![TopicPartition::new("t", 2)],
