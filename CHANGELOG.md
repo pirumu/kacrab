@@ -120,7 +120,21 @@ release date and links to relevant pull requests or issues.
   `ProducerError::Config` and `ConsumerError::Config` also mark their payload
   `#[source]`, so `source()` returns the underlying `ConfigError` (downcastable),
   matching `AdminError::Config`. `WireError` and the producer's `MetricsError`
-  are deliberately left for a separate pass.
+  are deliberately left for a separate pass — both are settled below.
+
+- **`WireError` is sealed with `#[non_exhaustive]`.** This is the separate pass
+  promised above, and it closes out the public error enums: `ProducerError`,
+  `ConsumerError`, `AdminError`, `ConfigError` and the `kacrab-protocol` error
+  types were already sealed, and the producer's `MetricsError` stopped being
+  public API entirely (see the metrics-registry entry above), so `WireError` was
+  the last one an added variant could break. New failure modes arrive with new
+  Kafka protocol surface — every capability, SASL mechanism and TLS backend the
+  crate grows can add one — so this was the enum most likely to need it.
+
+  A `match` on `WireError` now needs a `_ =>` arm. Matching or constructing an
+  individual variant is unaffected: `#[non_exhaustive]` on an enum constrains
+  exhaustive matching, not construction, and no variant carries the attribute
+  itself.
 
 - **The public admin and config types are now `#[non_exhaustive]`.** The crate had
   exactly three `#[non_exhaustive]` attributes in it, none of them on the admin

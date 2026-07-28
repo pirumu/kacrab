@@ -12,7 +12,11 @@ use thiserror::Error;
 pub(crate) const MIN_SUPPORTED_KAFKA_RELEASE: &str = "2.4";
 
 /// Errors from the runtime wire/session layer.
+///
+/// `#[non_exhaustive]`: new failure modes arrive with new Kafka protocol
+/// surface, so downstream `match`es must carry a wildcard arm.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum WireError {
     /// TCP or socket IO failed.
     #[error("wire IO failed: {0}")]
