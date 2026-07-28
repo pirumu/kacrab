@@ -1,0 +1,104 @@
+name: kacrab-kafka-bench
+
+# Single-broker KRaft fixture equivalent to docker-compose.kafka.yml, but built
+# on Bitnami's image family instead of `apache/kafka`.
+#
+# Why a second file rather than an overlay: `apache/kafka` publishes no tag
+# older than 3.7, so the broker-version matrix in .github/workflows/real-broker.yml
+# has to reach for Bitnami to cover 3.6. Bitnami configures the broker through
+# `KAFKA_CFG_*` variables, not the `KAFKA_*` shape the Apache image reads, and a
+# compose overlay can only add keys — it cannot drop the Apache-shaped ones, which
+# would then sit in the environment doing nothing and reading as if they applied.
+# Every setting below is the same setting as in docker-compose.kafka.yml, spelled
+# the way this image reads it.
+#
+# `bitnamilegacy/kafka:3.6.2` — not `bitnami/kafka:3.6.2`: Bitnami moved its
+# back-catalogue to the `bitnamilegacy` namespace in 2025 and the 3.6 tags were
+# removed from the original repo. Same image, current name. The `ApiVersions`
+# fixture provenance table (kacrab/tests/fixtures/api_versions/README.md) records
+# the same substitution and the `docker run` this file's environment derives from.
+#
+# The paths are Bitnami's, not the Apache image's, and they are left that way on
+# purpose. `/opt/bitnami/kafka` is this image's KAFKA_HOME and
+# `/bitnami/kafka/data` its data dir — the one directory the image ships
+# group-writable for its uid-1001 `kafka` user, so a fresh named volume mounted
+# there inherits perms the broker can actually write. (Pointing log.dirs at
+# /var/lib/kafka/data instead does not work: this image's run.sh formats storage
+# as root but drops to `kafka` — a hardcoded constant in kafka-env.sh, not an
+# overridable variable — before starting the broker, which then dies with
+# AccessDeniedException on the root-owned volume.)
+#
+# The real_kafka_* suites shell out to `/opt/kafka/bin/*.sh` and dump segments
+# from `/var/lib/kafka/data`, so the workflow symlinks both Apache-image paths
+# onto these after the health gate rather than teaching the test files about
+# image layouts.
+
+services:
+  kafka:
+    image: ${KAFKA_IMAGE:-bitnamilegacy/kafka:3.6.2}
+    container_name: kacrab-kafka
+    ports:
+      - "${KAFKA_HOST_PORT:-9092}:9092"
+    environment:
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_KRAFT_CLUSTER_ID: ${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,INTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:${KAFKA_HOST_PORT:-9092},INTERNAL://kafka:29092
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CFG_LOG_DIRS: /bitnami/kafka/data
+      KAFKA_CFG_NUM_PARTITIONS: ${KAFKA_BENCH_PARTITIONS:-3}
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_CFG_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CFG_LOG_RETENTION_HOURS: 1
+      KAFKA_CFG_LOG_SEGMENT_BYTES: 1073741824
+      # No share-coordinator settings: KIP-932 does not exist before 4.2, and the
+      # share suites do not run on this fixture (see the workflow's core suite).
+    volumes:
+      - kafka-bitnami-data:/bitnami/kafka/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/bitnami/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 30s
+
+  kafka-init:
+    image: ${KAFKA_IMAGE:-bitnamilegacy/kafka:3.6.2}
+    container_name: kacrab-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - sh
+      - -lc
+      - |
+        /opt/bitnami/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka:29092 \
+          --create \
+          --if-not-exists \
+          --topic "${KAFKA_BENCH_TOPIC:-kacrab-bench}" \
+          --partitions "${KAFKA_BENCH_PARTITIONS:-3}" \
+          --replication-factor 1
+        /opt/bitnami/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka:29092 \
+          --describe \
+          --topic "${KAFKA_BENCH_TOPIC:-kacrab-bench}"
+    environment:
+      KAFKA_BENCH_TOPIC: ${KAFKA_BENCH_TOPIC:-kacrab-bench}
+      KAFKA_BENCH_PARTITIONS: ${KAFKA_BENCH_PARTITIONS:-3}
+    restart: "no"
+
+volumes:
+  kafka-bitnami-data:
