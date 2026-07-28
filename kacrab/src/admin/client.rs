@@ -842,8 +842,10 @@ impl AdminClient {
         else {
             return Ok(None);
         };
-        // GROUP_ID_NOT_FOUND here means the group is a classic group.
-        if ErrorCode::from(group.error_code) == ErrorCode::GroupIdNotFound {
+        // GROUP_ID_NOT_FOUND means the group is a classic group;
+        // UNSUPPORTED_VERSION means this broker advertises the API but has no
+        // KIP-848 coordinator behind it. Both send the caller to DescribeGroups.
+        if consumer_group_describe_needs_classic_fallback(group.error_code) {
             return Ok(None);
         }
         check_code(group_id, group.error_code, group.error_message.as_ref())?;
@@ -3847,6 +3849,30 @@ fn is_coordinator_error(error_code: i16) -> bool {
     )
 }
 
+/// Whether a per-group `ConsumerGroupDescribe` error code means "ask
+/// `DescribeGroups` instead" rather than "this describe failed".
+///
+/// Two codes say that, and both mean the new group coordinator cannot answer
+/// for this group:
+///
+/// * `GROUP_ID_NOT_FOUND` — the new coordinator does not know the group, so it is a classic group
+///   and only `DescribeGroups` can describe it.
+/// * `UNSUPPORTED_VERSION` — the broker advertises `ConsumerGroupDescribe` (API 69) but the KIP-848
+///   coordinator that backs it is not enabled, which is the default on 3.7 through 4.0
+///   (`group.coordinator.rebalance.protocols` without `consumer`). Those brokers answer the request
+///   per group with this code instead of refusing the API version, so the `UnsupportedApiVersion`
+///   arm at the send site never sees them. Java treats both the same way — see
+///   `DescribeConsumerGroupsHandler.handleError`, which retries the group through `DescribeGroups`
+///   on `UNSUPPORTED_VERSION`.
+///
+/// Every other code is a real error and is reported.
+fn consumer_group_describe_needs_classic_fallback(error_code: i16) -> bool {
+    matches!(
+        ErrorCode::from(error_code),
+        ErrorCode::GroupIdNotFound | ErrorCode::UnsupportedVersion
+    )
+}
+
 /// Map a broker error code on a single result to an [`AdminError::Broker`],
 /// treating `NONE` as success.
 fn check_code(target: &str, error_code: i16, message: Option<&KafkaString>) -> Result<()> {
@@ -4385,6 +4411,32 @@ mod tests {
         assert_eq!(topics.len(), 1);
         assert_eq!(topics[0].name.as_str(), "orders");
         assert_eq!(topics[0].topic_id, topic_id);
+    }
+
+    /// Brokers 3.7 through 4.0 advertise `ConsumerGroupDescribe` (API 69) but
+    /// answer per group with `UNSUPPORTED_VERSION` when the KIP-848 coordinator
+    /// is not enabled — the default there. That never reaches the
+    /// `UnsupportedApiVersion` arm at the send site, so without this the
+    /// describe surfaced the raw broker error instead of falling back to
+    /// `DescribeGroups` the way Java does.
+    #[test]
+    fn consumer_group_describe_falls_back_on_both_unsupported_shapes() {
+        assert!(consumer_group_describe_needs_classic_fallback(i16::from(
+            ErrorCode::GroupIdNotFound
+        )));
+        assert!(consumer_group_describe_needs_classic_fallback(i16::from(
+            ErrorCode::UnsupportedVersion
+        )));
+        // Anything else stays a real error — a fallback would hide it.
+        assert!(!consumer_group_describe_needs_classic_fallback(i16::from(
+            ErrorCode::None
+        )));
+        assert!(!consumer_group_describe_needs_classic_fallback(i16::from(
+            ErrorCode::GroupAuthorizationFailed
+        )));
+        assert!(!consumer_group_describe_needs_classic_fallback(i16::from(
+            ErrorCode::NotCoordinator
+        )));
     }
 
     #[test]
