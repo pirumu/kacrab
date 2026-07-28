@@ -143,6 +143,10 @@ name = "real_kafka_admin"
 required-features = ["admin"]
 
 [[test]]
+name = "real_kafka_admin_behavior"
+required-features = ["producer", "consumer", "admin"]
+
+[[test]]
 name = "real_kafka_admin_token"
 required-features = ["admin"]
 
@@ -156,6 +160,10 @@ required-features = ["producer", "gzip", "snappy", "lz4", "zstd"]
 
 [[test]]
 name = "real_kafka_consumer"
+required-features = ["producer", "consumer", "admin"]
+
+[[test]]
+name = "real_kafka_consumer_ops"
 required-features = ["producer", "consumer", "admin"]
 
 [[test]]
