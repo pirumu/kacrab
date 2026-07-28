@@ -2701,6 +2701,7 @@ impl ProducerDispatcher {
             return Ok(ProducerBatchPrep::Ready(Some(ProducerBatchState {
                 identity,
                 base_sequence,
+                transactional: self.idempotence.transactional_id.is_some(),
             })));
         }
         let identity = self.producer_identity(route.leader_id).await?;
@@ -2735,6 +2736,7 @@ impl ProducerDispatcher {
                 return Ok(ProducerBatchPrep::Ready(Some(ProducerBatchState {
                     identity,
                     base_sequence,
+                    transactional: false,
                 })));
             },
             Err(error) => return Err(error),
@@ -2743,6 +2745,7 @@ impl ProducerDispatcher {
         Ok(ProducerBatchPrep::Ready(Some(ProducerBatchState {
             identity,
             base_sequence,
+            transactional: self.idempotence.transactional_id.is_some(),
         })))
     }
 

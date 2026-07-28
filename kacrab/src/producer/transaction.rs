@@ -16,6 +16,12 @@ pub struct ProducerBatchState {
     pub identity: ProducerIdentity,
     /// Base sequence for the first record in this batch.
     pub base_sequence: i32,
+    /// Whether the batch belongs to a transactional producer. Sets bit 4 of
+    /// the record-batch attributes (KIP-98 `isTransactional`) so the broker
+    /// associates the data with the ongoing transaction — without it, commit
+    /// and abort markers are written but govern nothing, and an aborted
+    /// transaction's records stay visible to `read_committed` readers.
+    pub transactional: bool,
 }
 
 /// Kafka `TransactionManager.State` equivalent.

@@ -1590,6 +1590,7 @@ mod tests {
             self.producer_state = Some(ProducerBatchState {
                 identity: TEST_PRODUCER_IDENTITY,
                 base_sequence,
+                transactional: false,
             });
             self
         }
