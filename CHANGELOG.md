@@ -145,6 +145,14 @@ release date and links to relevant pull requests or issues.
   where Kafka's own client also raises `UnsupportedVersionException`, or are already
   version-aware.
 
+- **`ListOffsets` always carried `timeout_ms`, which only exists from v10.** Both the
+  consumer's offset lookups (`beginning_offsets`, `end_offsets`, `offsets_for_times`,
+  and the `auto.offset.reset` path) and `Admin::list_offsets` filled the KIP-1075
+  remote-storage timeout unconditionally, so any broker negotiating v9 or lower —
+  every release before the field existed — rejected the request outright. The field
+  is ignorable, so it is now dropped for the versions that do not carry it, exactly
+  as Kafka's own encoder does.
+
 - **`list_consumer_groups` reported share, streams, and connect groups as consumer
   groups.** The broker's `ListGroups` response carries every group it coordinates
   whatever its protocol, and Java's `listConsumerGroups` filters that response down
