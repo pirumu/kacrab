@@ -46,9 +46,8 @@ pub use self::{
     error::{ProducerError, Result},
     interceptor::{ClusterResource, InterceptorConfigs, ProducerInterceptor},
     metrics::{
-        KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
-        MetricValue, Metrics, MetricsError, ProducerMetricValue, ProducerMetricsSnapshot, SensorId,
-        SensorRecordingLevel,
+        KafkaMetric, MetricName, MetricReporter, MetricValue, ProducerMetricValue,
+        ProducerMetricsSnapshot,
     },
     partitioner::{ProducerPartitioner, RoundRobinPartitioner},
     record::{DeliveryCallback, Header, ProducerRecord, RecordHeader, RecordMetadata, SendFuture},

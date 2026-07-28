@@ -8,6 +8,13 @@
 //! totals) and fold in the wire buffer-pool counters. They are shared behind an
 //! `Arc` so the background heartbeat task records into the same aggregate the
 //! facade reads.
+//!
+//! These stay plain atomics rather than reusing the producer's sensor registry
+//! ([`producer::metrics::Metrics`](crate::producer)). That registry exists to
+//! publish Kafka-named windowed statistics (`Rate`, `Avg`, `Max`) and keeps its
+//! state behind a `Mutex`; the counters here are monotonic totals read once per
+//! `metrics()` call and written on every `poll`, so a shared lock would buy
+//! nothing and cost a lock acquisition on the poll path.
 
 use std::sync::{
     Arc,

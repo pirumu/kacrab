@@ -15,13 +15,27 @@
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use super::registry::{MetricName, Metrics, SensorId};
+use super::registry::{MetricName, Metrics, SensorId, metric_name, metric_name_with_tags};
 
 const CLIENT_GROUP: &str = "producer-metrics";
 const TOPIC_GROUP: &str = "producer-topic-metrics";
+
+/// How long a topic's sensors survive without a record before eviction.
+///
+/// Kafka's `Metrics` expire-sensor task uses one hour of inactivity; matching it
+/// keeps a topic's metrics readable long enough to cover a scrape interval, an
+/// alert window, and a quiet period, while still bounding a producer that writes
+/// to a rotating or unbounded set of topic names.
+const TOPIC_SENSOR_INACTIVE_EXPIRATION: Duration = Duration::from_hours(1);
+
+/// How often the eviction scan runs, mirroring the period of Kafka's task.
+///
+/// The scan is `O(sensors)`, so it is amortised onto topic lookups rather than
+/// run per record.
+const EXPIRE_SCAN_INTERVAL_MS: u64 = 30_000;
 
 fn now_ms() -> u64 {
     u64::try_from(
@@ -43,6 +57,8 @@ struct RegistryInner {
     metrics: Metrics,
     client: ClientSensors,
     topics: HashMap<String, TopicSensors>,
+    /// When [`RegistryInner::expire_idle_topics`] last swept.
+    last_expire_ms: u64,
 }
 
 /// Client-level (`producer-metrics`) sensor handles.
@@ -87,6 +103,7 @@ impl Default for SenderMetricsRegistry {
                 metrics,
                 client,
                 topics: HashMap::new(),
+                last_expire_ms: now_ms(),
             }),
         }
     }
@@ -256,13 +273,38 @@ impl ClientSensors {
 }
 
 impl RegistryInner {
-    fn topic_sensors(&mut self, topic: &str) -> TopicSensors {
+    fn topic_sensors(&mut self, topic: &str, now_ms: u64) -> TopicSensors {
+        self.expire_idle_topics(now_ms);
         if let Some(sensors) = self.topics.get(topic) {
             return *sensors;
         }
         let sensors = TopicSensors::register(&mut self.metrics, topic);
         let _previous = self.topics.insert(topic.to_owned(), sensors);
         sensors
+    }
+
+    /// Drop the sensors, metrics, and map entry of every topic that has not been
+    /// recorded to for [`TOPIC_SENSOR_INACTIVE_EXPIRATION`].
+    ///
+    /// Without this the registry only grows: `topics` gains an entry — and the
+    /// metric map five per-topic metrics — for every topic name the producer has
+    /// ever sent to, and nothing ever removes them. A producer whose topic names
+    /// are unbounded (dated, per-tenant, per-partition-key) leaks for the life of
+    /// the process, and the leak is invisible because the metrics themselves look
+    /// healthy.
+    fn expire_idle_topics(&mut self, now_ms: u64) {
+        if now_ms.saturating_sub(self.last_expire_ms) < EXPIRE_SCAN_INTERVAL_MS {
+            return;
+        }
+        self.last_expire_ms = now_ms;
+        if self.metrics.expire_sensors_at_ms(now_ms) == 0 {
+            return;
+        }
+        // Each `TopicSensors` holds five sensor ids that expire together, so one
+        // is enough to tell whether the topic survived the sweep.
+        let metrics = &self.metrics;
+        self.topics
+            .retain(|_topic, sensors| metrics.sensor_exists(sensors.records_sent));
     }
 }
 
@@ -355,7 +397,7 @@ impl SenderMetricsRegistry {
         for (sensor, value) in client {
             let _ignored = inner.metrics.record_at_ms(sensor, value, now);
         }
-        let topic_sensors = inner.topic_sensors(topic);
+        let topic_sensors = inner.topic_sensors(topic, now);
         let topic_records = [
             (topic_sensors.records_sent, records),
             (topic_sensors.bytes, bytes),
@@ -449,7 +491,7 @@ impl SenderMetricsRegistry {
         let client = inner.client.record_errors;
         let _ignored = inner.metrics.record_at_ms(client, 1.0, now);
         if let Some(topic) = topic {
-            let sensor = inner.topic_sensors(topic).record_errors;
+            let sensor = inner.topic_sensors(topic, now).record_errors;
             let _ignored = inner.metrics.record_at_ms(sensor, 1.0, now);
         }
     }
@@ -464,7 +506,7 @@ impl SenderMetricsRegistry {
         let client = inner.client.record_retries;
         let _ignored = inner.metrics.record_at_ms(client, 1.0, now);
         if let Some(topic) = topic {
-            let sensor = inner.topic_sensors(topic).record_retries;
+            let sensor = inner.topic_sensors(topic, now).record_retries;
             let _ignored = inner.metrics.record_at_ms(sensor, 1.0, now);
         }
     }
@@ -530,8 +572,8 @@ fn meter(
     total_desc: &str,
 ) -> SensorId {
     let sensor = metrics.sensor(sensor_name);
-    let rate = metrics.metric_name(rate_name, CLIENT_GROUP, rate_desc);
-    let total = metrics.metric_name(total_name, CLIENT_GROUP, total_desc);
+    let rate = metric_name(rate_name, CLIENT_GROUP, rate_desc);
+    let total = metric_name(total_name, CLIENT_GROUP, total_desc);
     expect_metric_registered(metrics.sensor_add_meter(sensor, rate, total));
     sensor
 }
@@ -549,8 +591,8 @@ fn avg_max(
     max_desc: &str,
 ) -> SensorId {
     let sensor = metrics.sensor(sensor_name);
-    let avg = metrics.metric_name(avg_name, CLIENT_GROUP, avg_desc);
-    let max = metrics.metric_name(max_name, CLIENT_GROUP, max_desc);
+    let avg = metric_name(avg_name, CLIENT_GROUP, avg_desc);
+    let max = metric_name(max_name, CLIENT_GROUP, max_desc);
     expect_metric_registered(metrics.sensor_add_avg(sensor, avg));
     expect_metric_registered(metrics.sensor_add_max(sensor, max));
     sensor
@@ -558,7 +600,7 @@ fn avg_max(
 
 fn avg_only(metrics: &mut Metrics, sensor_name: &str, avg_name: &str, avg_desc: &str) -> SensorId {
     let sensor = metrics.sensor(sensor_name);
-    let avg = metrics.metric_name(avg_name, CLIENT_GROUP, avg_desc);
+    let avg = metric_name(avg_name, CLIENT_GROUP, avg_desc);
     expect_metric_registered(metrics.sensor_add_avg(sensor, avg));
     sensor
 }
@@ -570,7 +612,7 @@ fn value_only(
     value_desc: &str,
 ) -> SensorId {
     let sensor = metrics.sensor(sensor_name);
-    let value = metrics.metric_name(value_name, CLIENT_GROUP, value_desc);
+    let value = metric_name(value_name, CLIENT_GROUP, value_desc);
     expect_metric_registered(metrics.sensor_add_value(sensor, value));
     sensor
 }
@@ -588,10 +630,12 @@ fn topic_meter(
     total_name: &str,
     total_desc: &str,
 ) -> SensorId {
-    let sensor = metrics.sensor(format!("topic.{topic}.{sensor_suffix}"));
-    let rate = metrics.metric_name_with_tags(rate_name, TOPIC_GROUP, rate_desc, [("topic", topic)]);
-    let total =
-        metrics.metric_name_with_tags(total_name, TOPIC_GROUP, total_desc, [("topic", topic)]);
+    let sensor = metrics.sensor_with_expiration(
+        format!("topic.{topic}.{sensor_suffix}"),
+        TOPIC_SENSOR_INACTIVE_EXPIRATION,
+    );
+    let rate = metric_name_with_tags(rate_name, TOPIC_GROUP, rate_desc, [("topic", topic)]);
+    let total = metric_name_with_tags(total_name, TOPIC_GROUP, total_desc, [("topic", topic)]);
     expect_metric_registered(metrics.sensor_add_meter(sensor, rate, total));
     sensor
 }
@@ -603,8 +647,11 @@ fn topic_avg(
     avg_name: &str,
     avg_desc: &str,
 ) -> SensorId {
-    let sensor = metrics.sensor(format!("topic.{topic}.{sensor_suffix}"));
-    let avg = metrics.metric_name_with_tags(avg_name, TOPIC_GROUP, avg_desc, [("topic", topic)]);
+    let sensor = metrics.sensor_with_expiration(
+        format!("topic.{topic}.{sensor_suffix}"),
+        TOPIC_SENSOR_INACTIVE_EXPIRATION,
+    );
+    let avg = metric_name_with_tags(avg_name, TOPIC_GROUP, avg_desc, [("topic", topic)]);
     expect_metric_registered(metrics.sensor_add_avg(sensor, avg));
     sensor
 }
@@ -613,7 +660,55 @@ fn topic_avg(
 mod tests {
     #![allow(clippy::float_cmp, reason = "Metric totals are exact integer sums.")]
 
-    use super::SenderMetricsRegistry;
+    use super::{
+        EXPIRE_SCAN_INTERVAL_MS, SenderMetricsRegistry, TOPIC_SENSOR_INACTIVE_EXPIRATION, now_ms,
+    };
+
+    const ORDERS_SEND_TOTAL: &str = "producer-topic-metrics:record-send-total:topic=orders";
+    const AUDIT_SEND_TOTAL: &str = "producer-topic-metrics:record-send-total:topic=audit";
+
+    #[test]
+    fn idle_topic_sensors_and_their_metrics_are_evicted() {
+        let registry = SenderMetricsRegistry::default();
+        registry.record_batch("orders", 1, 100, 1.0);
+        assert!(
+            registry.kafka_metrics().contains_key(ORDERS_SEND_TOTAL),
+            "the topic's metrics should exist right after a batch"
+        );
+
+        // The eviction scan is amortised onto topic lookups rather than run per
+        // record, so drive one at a timestamp past both the scan interval and the
+        // inactivity window. Reaching into `inner` is what lets the test supply a
+        // clock without production code carrying a test-only time source.
+        let inactive_ms =
+            u64::try_from(TOPIC_SENSOR_INACTIVE_EXPIRATION.as_millis()).unwrap_or(u64::MAX);
+        let later = now_ms()
+            .saturating_add(inactive_ms)
+            .saturating_add(EXPIRE_SCAN_INTERVAL_MS);
+        let mut inner = registry
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _sensors = inner.topic_sensors("audit", later);
+        assert!(
+            !inner.topics.contains_key("orders"),
+            "the evicted topic must also leave the topic map, not just the registry"
+        );
+        drop(inner);
+
+        let metrics = registry.kafka_metrics();
+        assert!(
+            !metrics.contains_key(ORDERS_SEND_TOTAL),
+            "an idle topic's metrics should be gone"
+        );
+        assert!(
+            metrics.contains_key(AUDIT_SEND_TOTAL),
+            "a topic touched during the sweep should survive it"
+        );
+        // Client-level sensors are registered without an expiration.
+        assert!(metrics.contains_key("producer-metrics:record-send-total"));
+        assert!(metrics.contains_key("producer-metrics:buffer-available-bytes"));
+    }
 
     #[test]
     fn exposes_java_named_client_and_topic_metrics() {

@@ -13,10 +13,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-pub use registry::{
-    KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
-    MetricValue, Metrics, MetricsError, SensorId, SensorRecordingLevel,
-};
+pub use registry::{KafkaMetric, MetricName, MetricReporter, MetricValue};
 pub(crate) use sender_registry::SenderMetricsRegistry;
 
 /// Typed value for a named producer metric.
@@ -32,80 +29,224 @@ pub enum ProducerMetricValue {
     Ratio(f64),
 }
 
-/// Point-in-time producer metrics for operational diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[non_exhaustive]
-pub struct ProducerMetricsSnapshot {
+/// Field type for one metric kind.
+macro_rules! producer_metric_ty {
+    (Count) => {
+        u64
+    };
+    (Gauge) => {
+        usize
+    };
+    (Duration) => {
+        Duration
+    };
+    (Ratio) => {
+        f64
+    };
+}
+
+/// `ProducerMetricsSnapshot::ZERO` value for one metric kind.
+macro_rules! producer_metric_zero {
+    (Count) => {
+        0
+    };
+    (Gauge) => {
+        0
+    };
+    (Duration) => {
+        Duration::ZERO
+    };
+    (Ratio) => {
+        0.0
+    };
+}
+
+/// `delta_since` rule for one metric kind.
+///
+/// `Count` and `Duration` are monotonic accumulators, so they subtract the
+/// baseline (saturating, because a baseline above the current value means the
+/// caller mixed up two producers rather than that time ran backwards). `Gauge`
+/// and `Ratio` are point-in-time readings with no meaningful difference, so the
+/// baseline is ignored and the current value is reported as-is.
+macro_rules! producer_metric_delta {
+    (Count, $current:expr, $baseline:expr) => {
+        $current.saturating_sub($baseline)
+    };
+    (Duration, $current:expr, $baseline:expr) => {
+        $current.saturating_sub($baseline)
+    };
+    (Gauge, $current:expr, $_baseline:expr) => {
+        $current
+    };
+    (Ratio, $current:expr, $_baseline:expr) => {
+        $current
+    };
+}
+
+/// Declare the producer's stable metric surface exactly once.
+///
+/// Each row is `#[doc] name: Kind = "OTLP description";`, and the kind decides
+/// four things at once: the snapshot field type, its [`ZERO`] value, the
+/// [`ProducerMetricValue`] variant it reads back as, and the [`delta_since`]
+/// rule. From that one table this generates [`ProducerMetricsSnapshot`] itself
+/// plus every list that used to be kept in sync by hand: `ZERO`, `delta_since`,
+/// `metric`, `as_metric_map`, `is_internal_metric_name`, and
+/// `producer_metric_description`.
+///
+/// Adding a metric is therefore a one-line edit, and a metric that is *not* in
+/// the table does not exist: there is no way to grow the snapshot struct without
+/// also growing every reader of it, which is exactly what the six hand-kept
+/// lists this replaces could not guarantee.
+///
+/// [`ZERO`]: ProducerMetricsSnapshot::ZERO
+/// [`delta_since`]: ProducerMetricsSnapshot::delta_since
+macro_rules! producer_metric_table {
+    ($($(#[$field_meta:meta])* $field:ident: $kind:ident = $description:literal;)+) => {
+        /// Point-in-time producer metrics for operational diagnostics.
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        #[non_exhaustive]
+        pub struct ProducerMetricsSnapshot {
+            $($(#[$field_meta])* pub $field: producer_metric_ty!($kind),)+
+        }
+
+        impl ProducerMetricsSnapshot {
+            /// An all-zero snapshot.
+            ///
+            /// This type is `#[non_exhaustive]`, so downstream crates cannot build one with a
+            /// struct expression. `ZERO` is usable in const context as their baseline value.
+            pub const ZERO: Self = Self {
+                $($field: producer_metric_zero!($kind),)+
+            };
+
+            /// Return the difference between this snapshot and an earlier `baseline`.
+            ///
+            /// The two field kinds are treated differently, which is the part that is easy to
+            /// get wrong:
+            ///
+            /// - **Monotonic counters** (every `Count` and `Duration` metric: the `*_count`,
+            ///   `*_bytes`, `records_appended`, and `*_total_latency` fields) are
+            ///   `saturating_sub(baseline)`, so a baseline above the current value clamps to
+            ///   zero instead of wrapping.
+            /// - **Gauges and instantaneous values** (every `Gauge` and `Ratio` metric) are
+            ///   point-in-time readings, not accumulators, so the baseline is ignored and the
+            ///   current value is reported as-is.
+            ///
+            /// The rule is a property of each metric's kind in the table, so a new metric
+            /// cannot be added without choosing one.
+            #[must_use]
+            pub const fn delta_since(&self, baseline: &Self) -> Self {
+                Self {
+                    $($field: producer_metric_delta!($kind, self.$field, baseline.$field),)+
+                }
+            }
+
+            /// Return one named metric value from this snapshot.
+            #[must_use]
+            pub fn metric(&self, name: &str) -> Option<ProducerMetricValue> {
+                $(if name == stringify!($field) { return Some(ProducerMetricValue::$kind(self.$field)); })+
+                None
+            }
+
+            /// Return a read-only-by-value registry of stable producer metrics.
+            #[must_use]
+            pub fn as_metric_map(&self) -> BTreeMap<&'static str, ProducerMetricValue> {
+                BTreeMap::from([
+                    $((stringify!($field), ProducerMetricValue::$kind(self.$field)),)+
+                ])
+            }
+
+            /// Return whether `name` is one of the metrics this snapshot owns.
+            ///
+            /// Derived from [`Self::metric`] rather than from a second name list, so the two
+            /// answers cannot disagree.
+            pub(crate) fn is_internal_metric_name(name: &str) -> bool {
+                Self::ZERO.metric(name).is_some()
+            }
+        }
+
+        /// OTLP description for one stable producer metric name.
+        fn producer_metric_description(name: &str) -> &'static str {
+            $(if name == stringify!($field) { return $description; })+
+            ""
+        }
+    };
+}
+
+producer_metric_table! {
     /// Records accepted into the producer accumulator.
-    pub records_appended: u64,
+    records_appended: Count = "records accepted into the producer accumulator";
     /// Produce requests sent to brokers.
-    pub produce_request_count: u64,
+    produce_request_count: Count = "produce requests sent to brokers";
     /// Encoded produce request bytes sent to brokers.
-    pub produce_request_bytes: u64,
+    produce_request_bytes: Count = "encoded produce request bytes sent to brokers";
     /// Serialized record batches sent in produce requests.
-    pub produce_batch_count: u64,
+    produce_batch_count: Count = "record batches sent in produce requests";
     /// Encoded record batch bytes sent in produce requests.
-    pub produce_batch_bytes: u64,
+    produce_batch_bytes: Count = "encoded record batch bytes sent in produce requests";
     /// Encoded record batch payload bytes grouped into produce requests.
-    pub produce_request_payload_bytes: u64,
+    produce_request_payload_bytes: Count =
+        "encoded record batch payload bytes grouped into produce requests";
     /// Produce request grouping splits forced by the max request size limit.
-    pub produce_request_split_count: u64,
+    produce_request_split_count: Count =
+        "produce request grouping splits forced by max request size";
     /// Record batch splits forced by a broker `MESSAGE_TOO_LARGE` response.
-    pub record_batch_split_count: u64,
+    record_batch_split_count: Count =
+        "record batch splits forced by a broker MESSAGE_TOO_LARGE response";
     /// Records included in produce requests sent to brokers.
-    pub produce_record_count: u64,
+    produce_record_count: Count = "records included in produce requests";
     /// Retry attempts after retryable produce failures.
-    pub produce_retry_count: u64,
+    produce_retry_count: Count = "retry attempts after retryable produce failures";
     /// Produce responses or dispatches that reported an error.
-    pub produce_error_count: u64,
+    produce_error_count: Count = "produce responses or dispatches that reported an error";
     /// Batches requeued because metadata/routing was not yet complete.
-    pub requeue_count: u64,
+    requeue_count: Count = "batches requeued because routing was incomplete";
     /// Backpressure stalls while enqueueing produce requests to broker sessions.
-    pub in_flight_stall_count: u64,
+    in_flight_stall_count: Count = "backpressure stalls while enqueueing produce requests";
     /// Bytes currently buffered in the accumulator.
-    pub queue_depth_bytes: usize,
+    queue_depth_bytes: Gauge = "bytes currently buffered in the accumulator";
     /// Records currently buffered in the accumulator.
-    pub queue_depth_records: usize,
+    queue_depth_records: Gauge = "records currently buffered in the accumulator";
     /// Producer buffer memory currently available for new batch reservations.
-    pub buffer_available_bytes: usize,
+    buffer_available_bytes: Gauge = "producer buffer memory available for new batch reservations";
     /// API tasks currently blocked waiting for producer buffer memory.
-    pub waiting_threads: usize,
+    waiting_threads: Gauge = "API tasks blocked waiting for producer buffer memory";
     /// Batches currently buffered or in flight.
-    pub incomplete_batches: usize,
+    incomplete_batches: Gauge = "batches currently buffered or in flight";
     /// Producer dispatch tasks currently in flight.
-    pub in_flight_dispatches: usize,
+    in_flight_dispatches: Gauge = "producer dispatch tasks currently in flight";
     /// Average drained batch fill ratio, capped at `1.0`.
-    pub average_batch_fill_ratio: f64,
+    average_batch_fill_ratio: Ratio = "average drained batch fill ratio";
     /// Average encoded/uncompressed batch compression ratio.
-    pub average_compression_ratio: f64,
+    average_compression_ratio: Ratio = "average encoded/uncompressed batch compression ratio";
     /// Number of explicit flush calls.
-    pub flush_count: u64,
+    flush_count: Count = "explicit flush calls";
     /// Total wall-clock latency spent in flush calls.
-    pub flush_total_latency: Duration,
+    flush_total_latency: Duration = "total wall-clock latency spent in flush calls";
     /// Number of successful API-thread metadata wait operations.
-    pub metadata_wait_count: u64,
+    metadata_wait_count: Count = "metadata wait operations";
     /// Total wall-clock latency spent waiting for metadata in API calls.
-    pub metadata_wait_total_latency: Duration,
+    metadata_wait_total_latency: Duration = "total latency spent waiting for metadata";
     /// Number of `init_transactions` calls.
-    pub transaction_init_count: u64,
+    transaction_init_count: Count = "init_transactions calls";
     /// Total wall-clock latency spent in `init_transactions`.
-    pub transaction_init_total_latency: Duration,
+    transaction_init_total_latency: Duration = "total latency spent in init_transactions";
     /// Number of `begin_transaction` calls.
-    pub transaction_begin_count: u64,
+    transaction_begin_count: Count = "begin_transaction calls";
     /// Total wall-clock latency spent in `begin_transaction`.
-    pub transaction_begin_total_latency: Duration,
+    transaction_begin_total_latency: Duration = "total latency spent in begin_transaction";
     /// Number of `send_offsets_to_transaction` calls with non-empty offsets.
-    pub send_offsets_to_transaction_count: u64,
+    send_offsets_to_transaction_count: Count = "send_offsets_to_transaction calls";
     /// Total wall-clock latency spent in `send_offsets_to_transaction`.
-    pub send_offsets_to_transaction_total_latency: Duration,
+    send_offsets_to_transaction_total_latency: Duration =
+        "total latency spent in send_offsets_to_transaction";
     /// Number of `commit_transaction` calls.
-    pub transaction_commit_count: u64,
+    transaction_commit_count: Count = "commit_transaction calls";
     /// Total wall-clock latency spent in `commit_transaction`.
-    pub transaction_commit_total_latency: Duration,
+    transaction_commit_total_latency: Duration = "total latency spent in commit_transaction";
     /// Number of `abort_transaction` calls.
-    pub transaction_abort_count: u64,
+    transaction_abort_count: Count = "abort_transaction calls";
     /// Total wall-clock latency spent in `abort_transaction`.
-    pub transaction_abort_total_latency: Duration,
+    transaction_abort_total_latency: Duration = "total latency spent in abort_transaction";
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -118,318 +259,6 @@ pub(crate) struct ProducerQueueMetrics {
 }
 
 impl ProducerMetricsSnapshot {
-    /// An all-zero snapshot.
-    ///
-    /// This type is `#[non_exhaustive]`, so downstream crates cannot build one with a
-    /// struct expression. `ZERO` is usable in const context as their baseline value.
-    pub const ZERO: Self = Self {
-        records_appended: 0,
-        produce_request_count: 0,
-        produce_request_bytes: 0,
-        produce_batch_count: 0,
-        produce_batch_bytes: 0,
-        produce_request_payload_bytes: 0,
-        produce_request_split_count: 0,
-        record_batch_split_count: 0,
-        produce_record_count: 0,
-        produce_retry_count: 0,
-        produce_error_count: 0,
-        requeue_count: 0,
-        in_flight_stall_count: 0,
-        queue_depth_bytes: 0,
-        queue_depth_records: 0,
-        buffer_available_bytes: 0,
-        waiting_threads: 0,
-        incomplete_batches: 0,
-        in_flight_dispatches: 0,
-        average_batch_fill_ratio: 0.0,
-        average_compression_ratio: 0.0,
-        flush_count: 0,
-        flush_total_latency: Duration::ZERO,
-        metadata_wait_count: 0,
-        metadata_wait_total_latency: Duration::ZERO,
-        transaction_init_count: 0,
-        transaction_init_total_latency: Duration::ZERO,
-        transaction_begin_count: 0,
-        transaction_begin_total_latency: Duration::ZERO,
-        send_offsets_to_transaction_count: 0,
-        send_offsets_to_transaction_total_latency: Duration::ZERO,
-        transaction_commit_count: 0,
-        transaction_commit_total_latency: Duration::ZERO,
-        transaction_abort_count: 0,
-        transaction_abort_total_latency: Duration::ZERO,
-    };
-
-    /// Return the difference between this snapshot and an earlier `baseline`.
-    ///
-    /// The two field kinds are treated differently, which is the part that is easy to
-    /// get wrong:
-    ///
-    /// - **Monotonic counters** (every `*_count`, `*_bytes`, `records_appended`, and the
-    ///   `*_total_latency` durations) are `saturating_sub(baseline)`, so a baseline above the
-    ///   current value clamps to zero instead of wrapping.
-    /// - **Gauges and instantaneous values** (`queue_depth_bytes`, `queue_depth_records`,
-    ///   `buffer_available_bytes`, `waiting_threads`, `incomplete_batches`, `in_flight_dispatches`,
-    ///   `average_batch_fill_ratio`, `average_compression_ratio`) are point-in-time readings, not
-    ///   accumulators, so the baseline is ignored and the current value is reported as-is.
-    ///
-    /// The body is an exhaustive struct literal on purpose: this type is
-    /// `#[non_exhaustive]`, so only code inside this crate can write one, and a newly
-    /// added field is a compile error here instead of a silent zero in every caller.
-    #[must_use]
-    pub const fn delta_since(&self, baseline: &Self) -> Self {
-        Self {
-            records_appended: self
-                .records_appended
-                .saturating_sub(baseline.records_appended),
-            produce_request_count: self
-                .produce_request_count
-                .saturating_sub(baseline.produce_request_count),
-            produce_request_bytes: self
-                .produce_request_bytes
-                .saturating_sub(baseline.produce_request_bytes),
-            produce_batch_count: self
-                .produce_batch_count
-                .saturating_sub(baseline.produce_batch_count),
-            produce_batch_bytes: self
-                .produce_batch_bytes
-                .saturating_sub(baseline.produce_batch_bytes),
-            produce_request_payload_bytes: self
-                .produce_request_payload_bytes
-                .saturating_sub(baseline.produce_request_payload_bytes),
-            produce_request_split_count: self
-                .produce_request_split_count
-                .saturating_sub(baseline.produce_request_split_count),
-            record_batch_split_count: self
-                .record_batch_split_count
-                .saturating_sub(baseline.record_batch_split_count),
-            produce_record_count: self
-                .produce_record_count
-                .saturating_sub(baseline.produce_record_count),
-            produce_retry_count: self
-                .produce_retry_count
-                .saturating_sub(baseline.produce_retry_count),
-            produce_error_count: self
-                .produce_error_count
-                .saturating_sub(baseline.produce_error_count),
-            requeue_count: self.requeue_count.saturating_sub(baseline.requeue_count),
-            in_flight_stall_count: self
-                .in_flight_stall_count
-                .saturating_sub(baseline.in_flight_stall_count),
-            queue_depth_bytes: self.queue_depth_bytes,
-            queue_depth_records: self.queue_depth_records,
-            buffer_available_bytes: self.buffer_available_bytes,
-            waiting_threads: self.waiting_threads,
-            incomplete_batches: self.incomplete_batches,
-            in_flight_dispatches: self.in_flight_dispatches,
-            average_batch_fill_ratio: self.average_batch_fill_ratio,
-            average_compression_ratio: self.average_compression_ratio,
-            flush_count: self.flush_count.saturating_sub(baseline.flush_count),
-            flush_total_latency: self
-                .flush_total_latency
-                .saturating_sub(baseline.flush_total_latency),
-            metadata_wait_count: self
-                .metadata_wait_count
-                .saturating_sub(baseline.metadata_wait_count),
-            metadata_wait_total_latency: self
-                .metadata_wait_total_latency
-                .saturating_sub(baseline.metadata_wait_total_latency),
-            transaction_init_count: self
-                .transaction_init_count
-                .saturating_sub(baseline.transaction_init_count),
-            transaction_init_total_latency: self
-                .transaction_init_total_latency
-                .saturating_sub(baseline.transaction_init_total_latency),
-            transaction_begin_count: self
-                .transaction_begin_count
-                .saturating_sub(baseline.transaction_begin_count),
-            transaction_begin_total_latency: self
-                .transaction_begin_total_latency
-                .saturating_sub(baseline.transaction_begin_total_latency),
-            send_offsets_to_transaction_count: self
-                .send_offsets_to_transaction_count
-                .saturating_sub(baseline.send_offsets_to_transaction_count),
-            send_offsets_to_transaction_total_latency: self
-                .send_offsets_to_transaction_total_latency
-                .saturating_sub(baseline.send_offsets_to_transaction_total_latency),
-            transaction_commit_count: self
-                .transaction_commit_count
-                .saturating_sub(baseline.transaction_commit_count),
-            transaction_commit_total_latency: self
-                .transaction_commit_total_latency
-                .saturating_sub(baseline.transaction_commit_total_latency),
-            transaction_abort_count: self
-                .transaction_abort_count
-                .saturating_sub(baseline.transaction_abort_count),
-            transaction_abort_total_latency: self
-                .transaction_abort_total_latency
-                .saturating_sub(baseline.transaction_abort_total_latency),
-        }
-    }
-
-    /// Return one named metric value from this snapshot.
-    #[must_use]
-    pub fn metric(&self, name: &str) -> Option<ProducerMetricValue> {
-        match name {
-            "records_appended" => Some(ProducerMetricValue::Count(self.records_appended)),
-            "produce_request_count" => Some(ProducerMetricValue::Count(self.produce_request_count)),
-            "produce_request_bytes" => Some(ProducerMetricValue::Count(self.produce_request_bytes)),
-            "produce_batch_count" => Some(ProducerMetricValue::Count(self.produce_batch_count)),
-            "produce_batch_bytes" => Some(ProducerMetricValue::Count(self.produce_batch_bytes)),
-            "produce_request_payload_bytes" => Some(ProducerMetricValue::Count(
-                self.produce_request_payload_bytes,
-            )),
-            "produce_request_split_count" => {
-                Some(ProducerMetricValue::Count(self.produce_request_split_count))
-            },
-            "record_batch_split_count" => {
-                Some(ProducerMetricValue::Count(self.record_batch_split_count))
-            },
-            "produce_record_count" => Some(ProducerMetricValue::Count(self.produce_record_count)),
-            "produce_retry_count" => Some(ProducerMetricValue::Count(self.produce_retry_count)),
-            "produce_error_count" => Some(ProducerMetricValue::Count(self.produce_error_count)),
-            "requeue_count" => Some(ProducerMetricValue::Count(self.requeue_count)),
-            "in_flight_stall_count" => Some(ProducerMetricValue::Count(self.in_flight_stall_count)),
-            "queue_depth_bytes" => Some(ProducerMetricValue::Gauge(self.queue_depth_bytes)),
-            "queue_depth_records" => Some(ProducerMetricValue::Gauge(self.queue_depth_records)),
-            "buffer_available_bytes" => {
-                Some(ProducerMetricValue::Gauge(self.buffer_available_bytes))
-            },
-            "waiting_threads" => Some(ProducerMetricValue::Gauge(self.waiting_threads)),
-            "incomplete_batches" => Some(ProducerMetricValue::Gauge(self.incomplete_batches)),
-            "in_flight_dispatches" => Some(ProducerMetricValue::Gauge(self.in_flight_dispatches)),
-            "average_batch_fill_ratio" => {
-                Some(ProducerMetricValue::Ratio(self.average_batch_fill_ratio))
-            },
-            "average_compression_ratio" => {
-                Some(ProducerMetricValue::Ratio(self.average_compression_ratio))
-            },
-            "flush_count" => Some(ProducerMetricValue::Count(self.flush_count)),
-            "flush_total_latency" => Some(ProducerMetricValue::Duration(self.flush_total_latency)),
-            "metadata_wait_count" => Some(ProducerMetricValue::Count(self.metadata_wait_count)),
-            "metadata_wait_total_latency" => Some(ProducerMetricValue::Duration(
-                self.metadata_wait_total_latency,
-            )),
-            "transaction_init_count" => {
-                Some(ProducerMetricValue::Count(self.transaction_init_count))
-            },
-            "transaction_init_total_latency" => Some(ProducerMetricValue::Duration(
-                self.transaction_init_total_latency,
-            )),
-            "transaction_begin_count" => {
-                Some(ProducerMetricValue::Count(self.transaction_begin_count))
-            },
-            "transaction_begin_total_latency" => Some(ProducerMetricValue::Duration(
-                self.transaction_begin_total_latency,
-            )),
-            "send_offsets_to_transaction_count" => Some(ProducerMetricValue::Count(
-                self.send_offsets_to_transaction_count,
-            )),
-            "send_offsets_to_transaction_total_latency" => Some(ProducerMetricValue::Duration(
-                self.send_offsets_to_transaction_total_latency,
-            )),
-            "transaction_commit_count" => {
-                Some(ProducerMetricValue::Count(self.transaction_commit_count))
-            },
-            "transaction_commit_total_latency" => Some(ProducerMetricValue::Duration(
-                self.transaction_commit_total_latency,
-            )),
-            "transaction_abort_count" => {
-                Some(ProducerMetricValue::Count(self.transaction_abort_count))
-            },
-            "transaction_abort_total_latency" => Some(ProducerMetricValue::Duration(
-                self.transaction_abort_total_latency,
-            )),
-            _ => None,
-        }
-    }
-
-    /// Return a read-only-by-value registry of stable producer metrics.
-    #[must_use]
-    pub fn as_metric_map(&self) -> BTreeMap<&'static str, ProducerMetricValue> {
-        [
-            "records_appended",
-            "produce_request_count",
-            "produce_request_bytes",
-            "produce_batch_count",
-            "produce_batch_bytes",
-            "produce_request_payload_bytes",
-            "produce_request_split_count",
-            "record_batch_split_count",
-            "produce_record_count",
-            "produce_retry_count",
-            "produce_error_count",
-            "requeue_count",
-            "in_flight_stall_count",
-            "queue_depth_bytes",
-            "queue_depth_records",
-            "buffer_available_bytes",
-            "waiting_threads",
-            "incomplete_batches",
-            "in_flight_dispatches",
-            "average_batch_fill_ratio",
-            "average_compression_ratio",
-            "flush_count",
-            "flush_total_latency",
-            "metadata_wait_count",
-            "metadata_wait_total_latency",
-            "transaction_init_count",
-            "transaction_init_total_latency",
-            "transaction_begin_count",
-            "transaction_begin_total_latency",
-            "send_offsets_to_transaction_count",
-            "send_offsets_to_transaction_total_latency",
-            "transaction_commit_count",
-            "transaction_commit_total_latency",
-            "transaction_abort_count",
-            "transaction_abort_total_latency",
-        ]
-        .into_iter()
-        .filter_map(|name| self.metric(name).map(|value| (name, value)))
-        .collect()
-    }
-
-    pub(crate) fn is_internal_metric_name(name: &str) -> bool {
-        matches!(
-            name,
-            "records_appended"
-                | "produce_request_count"
-                | "produce_request_bytes"
-                | "produce_batch_count"
-                | "produce_batch_bytes"
-                | "produce_request_payload_bytes"
-                | "produce_request_split_count"
-                | "record_batch_split_count"
-                | "produce_record_count"
-                | "produce_retry_count"
-                | "produce_error_count"
-                | "requeue_count"
-                | "in_flight_stall_count"
-                | "queue_depth_bytes"
-                | "queue_depth_records"
-                | "buffer_available_bytes"
-                | "waiting_threads"
-                | "incomplete_batches"
-                | "in_flight_dispatches"
-                | "average_batch_fill_ratio"
-                | "average_compression_ratio"
-                | "flush_count"
-                | "flush_total_latency"
-                | "metadata_wait_count"
-                | "metadata_wait_total_latency"
-                | "transaction_init_count"
-                | "transaction_init_total_latency"
-                | "transaction_begin_count"
-                | "transaction_begin_total_latency"
-                | "send_offsets_to_transaction_count"
-                | "send_offsets_to_transaction_total_latency"
-                | "transaction_commit_count"
-                | "transaction_commit_total_latency"
-                | "transaction_abort_count"
-                | "transaction_abort_total_latency"
-        )
-    }
-
     /// Serialize this snapshot as an uncompressed OTLP `MetricsData` protobuf payload.
     ///
     /// Count metrics are exported as cumulative monotonic `Sum` metrics. Gauge,
@@ -532,55 +361,6 @@ fn encode_kafka_metric(
             );
         });
     });
-}
-
-fn producer_metric_description(name: &str) -> &'static str {
-    match name {
-        "records_appended" => "records accepted into the producer accumulator",
-        "produce_request_count" => "produce requests sent to brokers",
-        "produce_request_bytes" => "encoded produce request bytes sent to brokers",
-        "produce_batch_count" => "record batches sent in produce requests",
-        "produce_batch_bytes" => "encoded record batch bytes sent in produce requests",
-        "produce_request_payload_bytes" => {
-            "encoded record batch payload bytes grouped into produce requests"
-        },
-        "produce_request_split_count" => {
-            "produce request grouping splits forced by max request size"
-        },
-        "record_batch_split_count" => {
-            "record batch splits forced by a broker MESSAGE_TOO_LARGE response"
-        },
-        "produce_record_count" => "records included in produce requests",
-        "produce_retry_count" => "retry attempts after retryable produce failures",
-        "produce_error_count" => "produce responses or dispatches that reported an error",
-        "requeue_count" => "batches requeued because routing was incomplete",
-        "in_flight_stall_count" => "backpressure stalls while enqueueing produce requests",
-        "queue_depth_bytes" => "bytes currently buffered in the accumulator",
-        "queue_depth_records" => "records currently buffered in the accumulator",
-        "buffer_available_bytes" => "producer buffer memory available for new batch reservations",
-        "waiting_threads" => "API tasks blocked waiting for producer buffer memory",
-        "incomplete_batches" => "batches currently buffered or in flight",
-        "in_flight_dispatches" => "producer dispatch tasks currently in flight",
-        "average_batch_fill_ratio" => "average drained batch fill ratio",
-        "average_compression_ratio" => "average encoded/uncompressed batch compression ratio",
-        "flush_count" => "explicit flush calls",
-        "flush_total_latency" => "total wall-clock latency spent in flush calls",
-        "metadata_wait_count" => "metadata wait operations",
-        "metadata_wait_total_latency" => "total latency spent waiting for metadata",
-        "transaction_init_count" => "init_transactions calls",
-        "transaction_init_total_latency" => "total latency spent in init_transactions",
-        "transaction_begin_count" => "begin_transaction calls",
-        "transaction_begin_total_latency" => "total latency spent in begin_transaction",
-        "send_offsets_to_transaction_count" => "send_offsets_to_transaction calls",
-        "send_offsets_to_transaction_total_latency" => {
-            "total latency spent in send_offsets_to_transaction"
-        },
-        "transaction_commit_count" => "commit_transaction calls",
-        "transaction_commit_total_latency" => "total latency spent in commit_transaction",
-        "transaction_abort_count" => "abort_transaction calls",
-        "transaction_abort_total_latency" => "total latency spent in abort_transaction",
-        _ => "",
-    }
 }
 
 const fn producer_metric_unit(value: ProducerMetricValue) -> &'static str {
@@ -1220,811 +1000,64 @@ mod tests {
         reason = "Unit test fixtures fail fastest with contextual unwrap/expect calls."
     )]
 
-    use std::{
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
+    use std::time::Duration;
 
     use super::{
-        KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
-        MetricValue, Metrics, MetricsError, ProducerMetricValue, ProducerMetrics,
-        ProducerMetricsSnapshot, ProducerQueueMetrics, SensorRecordingLevel,
+        ProducerMetricValue, ProducerMetrics, ProducerMetricsSnapshot, ProducerQueueMetrics,
+        producer_metric_description,
     };
 
-    #[test]
-    fn metric_name_identity_matches_java_name_group_and_tags_only() {
-        let first = MetricName::new("request-rate", "producer-metrics")
-            .with_description("first description")
-            .tag("client-id", "a");
-        let second = MetricName::new("request-rate", "producer-metrics")
-            .with_description("different description")
-            .tag("client-id", "a");
-
-        assert_eq!(first, second);
-        assert_eq!(first.name(), "request-rate");
-        assert_eq!(first.group(), "producer-metrics");
-        assert_eq!(first.description(), "first description");
-        assert_eq!(first.tags().get("client-id").map(String::as_str), Some("a"));
+    /// Every field of [`ProducerMetricsSnapshot`], read back out of its derived
+    /// `Debug` output.
+    ///
+    /// The snapshot is `#[non_exhaustive]`, so a test cannot destructure it to
+    /// force a compile error on a new field, and Rust has no field reflection.
+    /// The pretty `Debug` shape (`Name {\n    field: value,\n    ...\n}`) is the
+    /// one place the *actual* field list is observable at runtime, which is what
+    /// makes this an exhaustiveness check rather than another hand-kept list.
+    fn snapshot_field_names() -> Vec<String> {
+        format!("{:#?}", ProducerMetricsSnapshot::ZERO)
+            .lines()
+            .filter_map(|line| line.trim().split_once(": "))
+            .map(|(field, _value)| field.to_owned())
+            .collect()
     }
 
     #[test]
-    fn metric_name_merges_default_tags_and_explicit_tags_like_java() {
-        let metrics = Metrics::new()
-            .with_default_tag("client-id", "producer-a")
-            .with_default_tag("thread-id", "sender-1");
-
-        let metric = metrics.metric_name_with_tags(
-            "request-rate",
-            "producer-metrics",
-            "request rate",
-            [("client-id", "producer-b"), ("topic", "orders")],
-        );
-
-        assert_eq!(metric.name(), "request-rate");
-        assert_eq!(metric.group(), "producer-metrics");
-        assert_eq!(metric.description(), "request rate");
-        assert_eq!(
-            metric.tags().get("client-id").map(String::as_str),
-            Some("producer-b")
-        );
-        assert_eq!(
-            metric.tags().get("thread-id").map(String::as_str),
-            Some("sender-1")
-        );
-        assert_eq!(
-            metric.tags().get("topic").map(String::as_str),
-            Some("orders")
-        );
-    }
-
-    #[test]
-    fn metric_name_template_instance_validates_runtime_tags_like_java() {
-        let metrics = Metrics::new().with_default_tag("client-id", "producer-a");
-        let template = MetricNameTemplate::new(
-            "record-send-rate",
-            "producer-topic-metrics",
-            "record send rate",
-            ["client-id", "topic"],
-        );
-
-        let metric_name = metrics
-            .metric_instance(&template, [("topic", "orders")])
-            .expect("template tags match defaults plus runtime tags");
-
-        assert_eq!(metric_name.name(), "record-send-rate");
-        assert_eq!(metric_name.group(), "producer-topic-metrics");
-        assert_eq!(metric_name.description(), "record send rate");
-        assert_eq!(
-            metric_name.tags().get("client-id").map(String::as_str),
-            Some("producer-a")
-        );
-        assert_eq!(
-            metric_name.tags().get("topic").map(String::as_str),
-            Some("orders")
-        );
-
-        let same_identity = MetricNameTemplate::new(
-            "record-send-rate",
-            "producer-topic-metrics",
-            "different description",
-            ["topic", "client-id"],
-        );
-        assert_eq!(template, same_identity);
-
-        let mismatch = metrics
-            .metric_instance(&template, [("partition", "0")])
-            .expect_err("runtime tags must match template tags");
-        assert!(matches!(mismatch, MetricsError::InvalidMetricConfig { .. }));
-    }
-
-    #[test]
-    fn metrics_reporter_lifecycle_matches_java_add_remove_and_close() {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let mut metrics = Metrics::new();
-        metrics.add_reporter(RecordingReporter {
-            events: Arc::clone(&events),
-        });
-        let metric_name = metrics.metric_name("count", "producer-metrics", "request count");
-
-        metrics
-            .add_metric(metric_name.clone(), || MetricValue::Number(3.0))
-            .expect("metric should register");
-        assert_metric_value(&metrics, &metric_name, 3.0);
-        let removed = metrics.remove_metric(&metric_name).expect("removed metric");
-        assert_eq!(removed.metric_name(), &metric_name);
-        metrics.close();
-
-        let events = events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        assert_eq!(
-            events,
-            vec![
-                "init:0".to_owned(),
-                "change:count".to_owned(),
-                "remove:count".to_owned(),
-                "close".to_owned(),
-            ]
-        );
-    }
-
-    #[test]
-    fn add_metric_if_absent_returns_existing_metric_without_reporter_change_like_java() {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let mut metrics = Metrics::new();
-        metrics.add_reporter(RecordingReporter {
-            events: Arc::clone(&events),
-        });
-        let metric_name = metrics.metric_name("count", "producer-metrics", "request count");
-
-        let first = metrics.add_metric_if_absent(metric_name.clone(), || MetricValue::Number(1.0));
-        let second = metrics.add_metric_if_absent(metric_name.clone(), || MetricValue::Number(2.0));
-
-        assert!((first.metric_value() - 1.0).abs() < f64::EPSILON);
-        assert!((second.metric_value() - 1.0).abs() < f64::EPSILON);
-        assert_metric_value(&metrics, &metric_name, 1.0);
-        let events = events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        assert_eq!(events, vec!["init:0".to_owned(), "change:count".to_owned()]);
-    }
-
-    #[test]
-    fn remove_metric_if_present_is_noop_for_missing_metric_like_java() {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let mut metrics = Metrics::new();
-        metrics.add_reporter(RecordingReporter {
-            events: Arc::clone(&events),
-        });
-        let missing = metrics.metric_name("missing", "producer-metrics", "");
-
-        let removed = metrics.remove_metric_if_present(&missing);
-
-        assert!(removed.is_none());
-        let events = events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        assert_eq!(events, vec!["init:0".to_owned()]);
-    }
-
-    #[test]
-    fn sensor_records_to_stats_and_parent_sensors_like_java() {
-        let mut metrics = Metrics::new();
-        let parent = metrics.sensor("parent");
-        let child = metrics.sensor_with_parents("child", SensorRecordingLevel::Info, [parent]);
-        let child_metric = metrics.metric_name("child-total", "producer-metrics", "");
-        let parent_metric = metrics.metric_name("parent-total", "producer-metrics", "");
-
-        metrics
-            .sensor_add_total(child, child_metric.clone())
-            .expect("child metric");
-        metrics
-            .sensor_add_total(parent, parent_metric.clone())
-            .expect("parent metric");
-        metrics.record(child, 2.5).expect("record child");
-        metrics.record(child, 1.5).expect("record child");
-
-        assert_eq!(metrics.sensor_name(child).expect("sensor name"), "child");
-        assert_metric_value(&metrics, &child_metric, 4.0);
-        assert_metric_value(&metrics, &parent_metric, 4.0);
-    }
-
-    #[test]
-    fn sensor_record_once_uses_java_record_default_value() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("request-count");
-        let metric_name = metrics.metric_name("request-count-total", "producer-metrics", "");
-
-        metrics
-            .sensor_add_total(sensor, metric_name.clone())
-            .expect("total metric");
-        metrics.record_once(sensor).expect("default record");
-        metrics.record_once(sensor).expect("default record");
-
-        assert_metric_value(&metrics, &metric_name, 2.0);
-    }
-
-    #[test]
-    fn sensor_has_metrics_reports_registered_stats_like_java() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("sensor");
-        let first = metrics.metric_name("name1", "group1", "description1");
-        let second = metrics.metric_name("name2", "group2", "description2");
-
-        assert!(!metrics.sensor_has_metrics(sensor).expect("sensor exists"));
-
-        metrics
-            .sensor_add_total(sensor, first)
-            .expect("first metric");
-        assert!(metrics.sensor_has_metrics(sensor).expect("sensor exists"));
-
-        metrics
-            .sensor_add_count(sensor, second)
-            .expect("second metric");
-        assert!(metrics.sensor_has_metrics(sensor).expect("sensor exists"));
-    }
-
-    #[test]
-    fn sensor_metrics_returns_sensor_metric_list_copy_like_java() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("sensor");
-        let first = metrics.metric_name("name1", "group1", "description1");
-        let second = metrics.metric_name("name2", "group2", "description2");
-
+    fn every_snapshot_field_is_a_named_metric_with_a_description() {
+        let fields = snapshot_field_names();
         assert!(
-            metrics
-                .sensor_metrics(sensor)
-                .expect("sensor exists")
-                .is_empty()
+            fields.len() >= 35,
+            "Debug parsing found only {} fields, so this test is not checking anything",
+            fields.len()
         );
 
-        metrics
-            .sensor_add_total(sensor, first.clone())
-            .expect("first metric");
-        metrics
-            .sensor_add_count(sensor, second.clone())
-            .expect("second metric");
+        for field in &fields {
+            assert!(
+                ProducerMetricsSnapshot::ZERO.metric(field).is_some(),
+                "snapshot field '{field}' is not readable through metric()"
+            );
+            assert!(
+                ProducerMetricsSnapshot::is_internal_metric_name(field),
+                "snapshot field '{field}' is not recognised as an internal metric name"
+            );
+            assert!(
+                !producer_metric_description(field).is_empty(),
+                "snapshot field '{field}' has no OTLP description"
+            );
+        }
 
-        let sensor_metrics = metrics.sensor_metrics(sensor).expect("sensor exists");
-        let names = sensor_metrics
-            .iter()
-            .map(|metric| metric.metric_name().clone())
+        let metric_map = ProducerMetricsSnapshot::ZERO.as_metric_map();
+        let mapped = metric_map
+            .keys()
+            .map(|name| (*name).to_owned())
             .collect::<Vec<_>>();
-        assert_eq!(names, vec![first, second]);
-        assert!((sensor_metrics[0].metric_value() - 0.0).abs() < f64::EPSILON);
-        metrics.record_once(sensor).expect("default record");
-        assert!((sensor_metrics[0].metric_value() - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn sensor_expiration_tracks_last_record_time_like_java() {
-        let mut metrics = Metrics::new();
-        let default_sensor = metrics.sensor("default-sensor");
-        let expiring_sensor = metrics.sensor_with_expiration(
-            "expiring-sensor",
-            SensorRecordingLevel::Info,
-            Duration::from_mins(1),
-            [],
-        );
-        let total = metrics.metric_name("total", "producer-metrics", "");
-
-        metrics
-            .sensor_add_total(expiring_sensor, total.clone())
-            .expect("total metric");
-
-        assert!(
-            !metrics
-                .sensor_has_expired_at_ms(default_sensor, u64::MAX)
-                .expect("default sensor exists")
-        );
-        assert!(
-            !metrics
-                .sensor_has_expired_at_ms(expiring_sensor, 60_000)
-                .expect("expiring sensor exists")
-        );
-        assert!(
-            metrics
-                .sensor_has_expired_at_ms(expiring_sensor, 60_001)
-                .expect("expiring sensor exists")
-        );
-
-        metrics
-            .record_at_ms(expiring_sensor, 2.0, 30_000)
-            .expect("record with timestamp");
-        assert_metric_value(&metrics, &total, 2.0);
-        assert!(
-            !metrics
-                .sensor_has_expired_at_ms(expiring_sensor, 90_000)
-                .expect("expiring sensor exists")
-        );
-        assert!(
-            metrics
-                .sensor_has_expired_at_ms(expiring_sensor, 90_001)
-                .expect("expiring sensor exists")
-        );
-    }
-
-    #[test]
-    fn expire_sensors_removes_expired_sensors_metrics_and_children_like_java() {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let mut metrics = Metrics::new();
-        metrics.add_reporter(RecordingReporter {
-            events: Arc::clone(&events),
-        });
-        let parent = metrics.sensor_with_expiration(
-            "parent",
-            SensorRecordingLevel::Info,
-            Duration::from_mins(1),
-            [],
-        );
-        let child = metrics.sensor_with_parents("child", SensorRecordingLevel::Info, [parent]);
-        let survivor = metrics.sensor_with_expiration(
-            "survivor",
-            SensorRecordingLevel::Info,
-            Duration::from_mins(2),
-            [],
-        );
-        let parent_metric = metrics.metric_name("parent-total", "producer-metrics", "");
-        let child_metric = metrics.metric_name("child-total", "producer-metrics", "");
-        let survivor_metric = metrics.metric_name("survivor-total", "producer-metrics", "");
-
-        metrics
-            .sensor_add_total(parent, parent_metric.clone())
-            .expect("parent metric");
-        metrics
-            .sensor_add_total(child, child_metric.clone())
-            .expect("child metric");
-        metrics
-            .sensor_add_total(survivor, survivor_metric.clone())
-            .expect("survivor metric");
-
-        let removed = metrics.expire_sensors_at_ms(60_001);
-
-        assert_eq!(removed, 2);
-        assert!(metrics.metric(&parent_metric).is_none());
-        assert!(metrics.metric(&child_metric).is_none());
-        assert!(metrics.metric(&survivor_metric).is_some());
-        assert!(matches!(
-            metrics.sensor_has_metrics(parent),
-            Err(MetricsError::UnknownSensor { .. })
-        ));
-        assert!(matches!(
-            metrics.sensor_has_metrics(child),
-            Err(MetricsError::UnknownSensor { .. })
-        ));
-        assert!(metrics.sensor_has_metrics(survivor).expect("survivor"));
-
-        let events = events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let mut expected = fields;
+        expected.sort();
         assert_eq!(
-            events,
-            vec![
-                "init:0".to_owned(),
-                "change:parent-total".to_owned(),
-                "change:child-total".to_owned(),
-                "change:survivor-total".to_owned(),
-                "remove:parent-total".to_owned(),
-                "remove:child-total".to_owned(),
-            ]
+            mapped, expected,
+            "as_metric_map must expose exactly the snapshot fields"
         );
-    }
-
-    #[test]
-    fn sensor_value_stat_keeps_latest_recorded_value_like_java() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("request-size");
-        let metric_name = metrics.metric_name("request-size-value", "producer-metrics", "");
-
-        metrics
-            .sensor_add_value(sensor, metric_name.clone())
-            .expect("value metric");
-        metrics.record(sensor, 2.0).expect("record value");
-        metrics.record(sensor, 7.0).expect("record value");
-
-        assert_metric_value(&metrics, &metric_name, 7.0);
-    }
-
-    #[test]
-    fn sensor_avg_stat_reports_nan_until_records_then_average_like_java() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("request-size");
-        let metric_name = metrics.metric_name("request-size-avg", "producer-metrics", "");
-
-        metrics
-            .sensor_add_avg(sensor, metric_name.clone())
-            .expect("avg metric");
-        assert!(
-            metrics
-                .metric(&metric_name)
-                .unwrap()
-                .metric_value()
-                .is_nan()
-        );
-
-        metrics.record(sensor, 2.0).expect("record avg");
-        metrics.record(sensor, 4.0).expect("record avg");
-        metrics.record(sensor, 9.0).expect("record avg");
-
-        assert_metric_value(&metrics, &metric_name, 5.0);
-    }
-
-    #[test]
-    fn sensor_min_max_stats_report_nan_until_records_like_java() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("request-size");
-        let min_metric = metrics.metric_name("request-size-min", "producer-metrics", "");
-        let max_metric = metrics.metric_name("request-size-max", "producer-metrics", "");
-
-        metrics
-            .sensor_add_min(sensor, min_metric.clone())
-            .expect("min metric");
-        metrics
-            .sensor_add_max(sensor, max_metric.clone())
-            .expect("max metric");
-        assert!(metrics.metric(&min_metric).unwrap().metric_value().is_nan());
-        assert!(metrics.metric(&max_metric).unwrap().metric_value().is_nan());
-
-        metrics.record(sensor, 7.0).expect("record extrema");
-        metrics.record(sensor, 2.0).expect("record extrema");
-        metrics.record(sensor, 9.0).expect("record extrema");
-        metrics.record(sensor, 4.0).expect("record extrema");
-
-        assert_metric_value(&metrics, &min_metric, 2.0);
-        assert_metric_value(&metrics, &max_metric, 9.0);
-    }
-
-    #[test]
-    fn sensor_count_stat_counts_record_calls_like_java_cumulative_count() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("request-count");
-        let metric_name = metrics.metric_name("request-count-total", "producer-metrics", "");
-
-        metrics
-            .sensor_add_count(sensor, metric_name.clone())
-            .expect("count metric");
-        metrics.record(sensor, 7.0).expect("record count");
-        metrics.record(sensor, 2.0).expect("record count");
-        metrics.record(sensor, 9.0).expect("record count");
-
-        assert_metric_value(&metrics, &metric_name, 3.0);
-    }
-
-    #[test]
-    fn sensor_rate_stat_uses_java_window_size_rule() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("request-size");
-        let metric_name = metrics.metric_name("request-size-rate", "producer-metrics", "");
-
-        metrics
-            .sensor_add_rate(sensor, metric_name.clone())
-            .expect("rate metric");
-        metrics
-            .record_at_ms(sensor, 30.0, 1_000)
-            .expect("record rate value");
-
-        assert_metric_value_at_ms(&metrics, &metric_name, 1_000, 1.0);
-    }
-
-    #[test]
-    fn rate_quota_check_uses_supplied_time_like_java() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("request-size");
-        let metric_name = metrics.metric_name("request-size-rate", "producer-metrics", "");
-
-        metrics
-            .sensor_add_rate_with_config(
-                sensor,
-                metric_name.clone(),
-                MetricConfig::new().with_quota(MetricQuota::upper_bound(0.5)),
-            )
-            .expect("rate metric");
-        metrics
-            .record_with_quota_check_at_ms(sensor, 30.0, 1_000, false)
-            .expect("record rate value without quota check");
-
-        assert!(matches!(
-            metrics.check_sensor_quotas_at_ms(sensor, 1_000),
-            Err(MetricsError::QuotaViolation {
-                metric_name: violated,
-                value,
-                bound,
-            }) if violated == metric_name
-                && (value - 1.0).abs() < f64::EPSILON
-                && (bound - 0.5).abs() < f64::EPSILON
-        ));
-        metrics
-            .check_sensor_quotas_at_ms(sensor, 61_000)
-            .expect("expired rate sample should pass quota at supplied time");
-    }
-
-    #[test]
-    fn token_bucket_quota_refills_continuously_like_java() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("client-quota");
-        let metric_name = metrics.metric_name("tokens", "producer-metrics", "");
-        let config = MetricConfig::new()
-            .with_quota(MetricQuota::upper_bound(5.0))
-            .with_time_window_ms(1_000)
-            .with_samples(2)
-            .expect("valid samples");
-
-        metrics
-            .sensor_add_token_bucket_with_config(sensor, metric_name.clone(), config)
-            .expect("token bucket metric");
-
-        metrics
-            .record_with_quota_check_at_ms(sensor, 7.0, 1_000, false)
-            .expect("record over burst without immediate quota check");
-        let violation = metrics
-            .check_sensor_quotas_at_ms(sensor, 1_000)
-            .expect_err("bucket should be exhausted");
-        assert!(matches!(
-            violation,
-            MetricsError::QuotaViolation {
-                metric_name: violated,
-                value,
-                bound,
-            } if violated == metric_name
-                && (value + 2.0).abs() < f64::EPSILON
-                && (bound - 5.0).abs() < f64::EPSILON
-        ));
-
-        metrics
-            .check_sensor_quotas_at_ms(sensor, 1_400)
-            .expect("bucket should refill back to zero after 400ms");
-        assert_metric_value_at_ms(&metrics, &metric_name, 1_400, 0.0);
-    }
-
-    #[test]
-    fn boolean_frequencies_report_normalized_distribution_like_java() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("request-success");
-        let false_metric = metrics.metric_name("request-failure-frequency", "producer-metrics", "");
-        let true_metric = metrics.metric_name("request-success-frequency", "producer-metrics", "");
-
-        metrics
-            .sensor_add_boolean_frequencies(
-                sensor,
-                Some(false_metric.clone()),
-                Some(true_metric.clone()),
-            )
-            .expect("boolean frequencies");
-        metrics
-            .record_at_ms(sensor, 1.0, 1_000)
-            .expect("record true value");
-        metrics
-            .record_at_ms(sensor, 0.0, 2_000)
-            .expect("record false value");
-        metrics
-            .record_at_ms(sensor, 1.0, 3_000)
-            .expect("record true value");
-
-        assert_metric_value_at_ms(&metrics, &false_metric, 3_000, 1.0 / 3.0);
-        assert_metric_value_at_ms(&metrics, &true_metric, 3_000, 2.0 / 3.0);
-    }
-
-    #[test]
-    fn sensor_meter_registers_rate_and_total_like_java_meter() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("request-size");
-        let rate_metric = metrics.metric_name("request-size-rate", "producer-metrics", "");
-        let total_metric = metrics.metric_name("request-size-total", "producer-metrics", "");
-
-        metrics
-            .sensor_add_meter(sensor, rate_metric.clone(), total_metric.clone())
-            .expect("meter metrics");
-        metrics
-            .record_at_ms(sensor, 30.0, 1_000)
-            .expect("record meter value");
-        metrics
-            .record_at_ms(sensor, 15.0, 31_000)
-            .expect("record meter value");
-
-        assert_metric_value(&metrics, &total_metric, 45.0);
-        assert_metric_value_at_ms(&metrics, &rate_metric, 31_000, 1.5);
-    }
-
-    #[test]
-    fn sensor_add_duplicate_metric_on_same_sensor_is_noop_like_java() {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let mut metrics = Metrics::new();
-        metrics.add_reporter(RecordingReporter {
-            events: Arc::clone(&events),
-        });
-        let sensor = metrics.sensor("request-size");
-        let metric_name = metrics.metric_name("request-size-total", "producer-metrics", "");
-
-        metrics
-            .sensor_add_total(sensor, metric_name.clone())
-            .expect("first metric");
-        metrics.record(sensor, 2.0).expect("record total");
-        metrics
-            .sensor_add_total(sensor, metric_name.clone())
-            .expect("duplicate metric should be a no-op");
-        metrics.record(sensor, 3.0).expect("record total");
-
-        assert_metric_value(&metrics, &metric_name, 5.0);
-        let events = events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        assert_eq!(
-            events,
-            vec!["init:0".to_owned(), "change:request-size-total".to_owned()]
-        );
-    }
-
-    #[test]
-    fn sensor_check_quotas_reports_upper_and_lower_violations_like_java() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("quota-sensor");
-        let total_metric = metrics.metric_name("credits-total", "producer-metrics", "");
-        let value_metric = metrics.metric_name("credits-value", "producer-metrics", "");
-
-        metrics
-            .sensor_add_total_with_quota(
-                sensor,
-                total_metric.clone(),
-                MetricQuota::upper_bound(2.0),
-            )
-            .expect("upper quota metric");
-        metrics
-            .sensor_add_value_with_quota(sensor, value_metric, MetricQuota::lower_bound(0.0))
-            .expect("lower quota metric");
-
-        metrics
-            .record_at_ms(sensor, 1.0, 1)
-            .expect("record in bounds");
-        metrics
-            .check_sensor_quotas_at_ms(sensor, 1)
-            .expect("quota should pass");
-
-        metrics
-            .record_with_quota_check_at_ms(sensor, 2.0, 2, false)
-            .expect("record above upper bound");
-        let upper_violation = metrics
-            .check_sensor_quotas_at_ms(sensor, 2)
-            .expect_err("quota should fail");
-        assert!(matches!(
-            upper_violation,
-            MetricsError::QuotaViolation {
-                metric_name,
-                value,
-                bound,
-            } if metric_name == total_metric
-                && (value - 3.0).abs() < f64::EPSILON
-                && (bound - 2.0).abs() < f64::EPSILON
-        ));
-
-        let value_only = metrics.sensor("value-only-quota-sensor");
-        let value_only_metric = metrics.metric_name("credits-value-only", "producer-metrics", "");
-        metrics
-            .sensor_add_value_with_quota(
-                value_only,
-                value_only_metric.clone(),
-                MetricQuota::lower_bound(0.0),
-            )
-            .expect("lower quota metric");
-        metrics
-            .record_with_quota_check_at_ms(value_only, -1.0, 3, false)
-            .expect("record below lower bound");
-        let lower_violation = metrics
-            .check_sensor_quotas_at_ms(value_only, 3)
-            .expect_err("quota should fail");
-        assert!(matches!(
-            lower_violation,
-            MetricsError::QuotaViolation {
-                metric_name,
-                value,
-                bound,
-            } if metric_name == value_only_metric
-                && (value + 1.0).abs() < f64::EPSILON
-                && bound.abs() < f64::EPSILON
-        ));
-    }
-
-    #[test]
-    fn metric_config_defaults_and_chaining_match_java_shape() {
-        let default_config = MetricConfig::new();
-
-        assert_eq!(default_config.quota(), None);
-        assert_eq!(default_config.samples(), 2);
-        assert_eq!(default_config.event_window(), u64::MAX);
-        assert_eq!(default_config.time_window_ms(), 30_000);
-        assert!(default_config.tags().is_empty());
-        assert_eq!(default_config.record_level(), SensorRecordingLevel::Info);
-
-        let config = MetricConfig::new()
-            .with_quota(MetricQuota::lower_bound(1.5))
-            .with_event_window(42)
-            .with_time_window_ms(750)
-            .with_tag("client-id", "producer-a")
-            .with_record_level(SensorRecordingLevel::Debug)
-            .with_samples(3)
-            .expect("valid samples");
-
-        assert_eq!(config.quota(), Some(MetricQuota::lower_bound(1.5)));
-        assert_eq!(config.samples(), 3);
-        assert_eq!(config.event_window(), 42);
-        assert_eq!(config.time_window_ms(), 750);
-        assert_eq!(
-            config.tags().get("client-id").map(String::as_str),
-            Some("producer-a")
-        );
-        assert_eq!(config.record_level(), SensorRecordingLevel::Debug);
-        assert!(MetricConfig::new().with_samples(0).is_err());
-    }
-
-    #[test]
-    fn updating_metric_config_is_reflected_in_sensor_quota_checks_like_java() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("quota-config-sensor");
-        let metric_name = metrics.metric_name("credits", "producer-metrics", "");
-
-        metrics
-            .sensor_add_total_with_config(
-                sensor,
-                metric_name.clone(),
-                MetricConfig::new().with_quota(MetricQuota::upper_bound(5.0)),
-            )
-            .expect("quota metric");
-        metrics
-            .record_with_quota_check_at_ms(sensor, 10.0, 1, false)
-            .expect("record above original bound");
-        assert!(matches!(
-            metrics.check_sensor_quotas_at_ms(sensor, 2),
-            Err(MetricsError::QuotaViolation {
-                metric_name: violated,
-                value,
-                bound,
-            }) if violated == metric_name
-                && (value - 10.0).abs() < f64::EPSILON
-                && (bound - 5.0).abs() < f64::EPSILON
-        ));
-
-        metrics
-            .metric(&metric_name)
-            .expect("registered metric")
-            .set_metric_config(MetricConfig::new().with_quota(MetricQuota::upper_bound(10.0)));
-
-        metrics
-            .check_sensor_quotas_at_ms(sensor, 3)
-            .expect("updated quota should pass");
-    }
-
-    #[test]
-    fn record_with_quota_check_enforces_after_recording_like_java() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("checked-record-sensor");
-        let metric_name = metrics.metric_name("credits-total", "producer-metrics", "");
-
-        metrics
-            .sensor_add_total_with_quota(sensor, metric_name.clone(), MetricQuota::upper_bound(5.0))
-            .expect("quota metric");
-        metrics
-            .record_with_quota_check_at_ms(sensor, 3.0, 1, true)
-            .expect("record in bounds");
-        let violation = metrics
-            .record_with_quota_check_at_ms(sensor, 4.0, 2, true)
-            .expect_err("record should violate quota");
-
-        assert!(matches!(
-            violation,
-            MetricsError::QuotaViolation {
-                metric_name: violated,
-                value,
-                bound,
-            } if violated == metric_name
-                && (value - 7.0).abs() < f64::EPSILON
-                && (bound - 5.0).abs() < f64::EPSILON
-        ));
-        assert_metric_value(&metrics, &metric_name, 7.0);
-
-        metrics
-            .record_with_quota_check_at_ms(sensor, 10.0, 3, false)
-            .expect("quota check disabled");
-        assert_metric_value(&metrics, &metric_name, 17.0);
-    }
-
-    #[test]
-    fn sensor_recording_level_filters_lower_priority_records_like_java() {
-        let mut metrics = Metrics::new().with_recording_level(SensorRecordingLevel::Info);
-        let debug_sensor = metrics.sensor("debug");
-        let metric_name = metrics.metric_name("debug-total", "producer-metrics", "");
-        metrics
-            .sensor_set_recording_level(debug_sensor, SensorRecordingLevel::Debug)
-            .expect("debug level");
-        metrics
-            .sensor_add_total(debug_sensor, metric_name.clone())
-            .expect("debug metric");
-        metrics.record(debug_sensor, 1.0).expect("record debug");
-
-        assert_metric_value(&metrics, &metric_name, 0.0);
     }
 
     #[test]
@@ -2057,41 +1090,6 @@ mod tests {
             snapshot.metric("average_compression_ratio"),
             Some(ProducerMetricValue::Ratio(0.625))
         );
-    }
-
-    #[test]
-    fn remove_sensor_removes_child_sensors_and_metrics_like_java() {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let mut metrics = Metrics::new();
-        metrics.add_reporter(RecordingReporter {
-            events: Arc::clone(&events),
-        });
-        let parent = metrics.sensor("parent");
-        let child = metrics.sensor_with_parents("child", SensorRecordingLevel::Info, [parent]);
-        let parent_metric = metrics.metric_name("parent-total", "producer-metrics", "");
-        let child_metric = metrics.metric_name("child-total", "producer-metrics", "");
-        metrics
-            .sensor_add_total(parent, parent_metric.clone())
-            .expect("parent metric");
-        metrics
-            .sensor_add_total(child, child_metric.clone())
-            .expect("child metric");
-
-        assert!(metrics.remove_sensor("parent"));
-
-        assert!(metrics.metric(&parent_metric).is_none());
-        assert!(metrics.metric(&child_metric).is_none());
-        assert!(metrics.sensor("parent") != parent);
-        assert!(matches!(
-            metrics.record(child, 1.0),
-            Err(MetricsError::UnknownSensor { sensor }) if sensor == child
-        ));
-        let events = events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        assert!(events.contains(&"remove:parent-total".to_owned()));
-        assert!(events.contains(&"remove:child-total".to_owned()));
     }
 
     #[test]
@@ -2215,55 +1213,5 @@ mod tests {
             (delta.average_compression_ratio - current.average_compression_ratio).abs()
                 < f64::EPSILON
         );
-    }
-
-    #[derive(Debug)]
-    struct RecordingReporter {
-        events: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl MetricReporter for RecordingReporter {
-        fn init(&self, metrics: &[KafkaMetric]) {
-            self.push(format!("init:{}", metrics.len()));
-        }
-
-        fn metric_change(&self, metric: &KafkaMetric) {
-            self.push(format!("change:{}", metric.metric_name().name()));
-        }
-
-        fn metric_removal(&self, metric: &KafkaMetric) {
-            self.push(format!("remove:{}", metric.metric_name().name()));
-        }
-
-        fn close(&self) {
-            self.push("close".to_owned());
-        }
-    }
-
-    impl RecordingReporter {
-        fn push(&self, event: String) {
-            self.events
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(event);
-        }
-    }
-
-    fn assert_metric_value(metrics: &Metrics, metric_name: &MetricName, expected: f64) {
-        let value = metrics.metric(metric_name).unwrap().metric_value();
-        assert!((value - expected).abs() < f64::EPSILON);
-    }
-
-    fn assert_metric_value_at_ms(
-        metrics: &Metrics,
-        metric_name: &MetricName,
-        time_ms: u64,
-        expected: f64,
-    ) {
-        let value = metrics
-            .metric(metric_name)
-            .unwrap()
-            .metric_value_at_ms(time_ms);
-        assert!((value - expected).abs() < f64::EPSILON);
     }
 }
