@@ -19,12 +19,14 @@ use kacrab_protocol::generated::{
     ConsumerGroupHeartbeatResponseData, ErrorCode, JoinGroupResponseData,
 };
 use kacrab_protocol::{
-    KafkaString, frame,
+    KafkaString, KafkaUuid, frame,
     generated::{
         ApiKey, ApiVersion, ApiVersionsResponseData, FindCoordinatorRequestData,
         FindCoordinatorResponseData, MetadataResponseBroker, MetadataResponseData,
-        MetadataResponsePartition, MetadataResponseTopic, ProduceRequestData, ProduceResponseData,
-        RequestHeaderData, ResponseHeaderData, SaslAuthenticateRequestData,
+        MetadataResponsePartition, MetadataResponseTopic, OffsetFetchRequestData,
+        OffsetFetchRequestGroup, OffsetFetchRequestTopics, OffsetFetchResponseData,
+        OffsetFetchResponsePartition, OffsetFetchResponseTopic, ProduceRequestData,
+        ProduceResponseData, RequestHeaderData, ResponseHeaderData, SaslAuthenticateRequestData,
         SaslAuthenticateResponseData, SaslHandshakeRequestData, SaslHandshakeResponseData,
     },
     version::{request_header_version, response_header_version},
@@ -267,6 +269,108 @@ async fn wire_client_sends_singular_find_coordinator_key_to_pre_batched_broker()
     assert_eq!(response.node_id, 9);
     assert_eq!(response.port, 9092);
     assert!(response.coordinators.is_empty());
+    assert_eq!(broker.join().await, 2);
+}
+
+/// `OffsetFetch` only grew the batched `groups` array in v8 (broker 3.0). A
+/// broker that negotiates v7 or lower must be sent the flat
+/// `group_id`/`topics` form instead — the admin client passes its client-side
+/// ceiling (v10), so the request has to be rewritten for the version the
+/// connection actually negotiated, or the encoder rejects it and
+/// `list_consumer_group_offsets` dies on every broker older than 3.0.
+#[tokio::test]
+async fn wire_client_sends_flat_offset_fetch_group_to_pre_batched_broker() {
+    let broker = MockBroker::serve_many(vec![
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![
+                    ApiVersion {
+                        api_key: ApiKey::ApiVersions as i16,
+                        min_version: 0,
+                        max_version: 4,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                    ApiVersion {
+                        api_key: ApiKey::OffsetFetch as i16,
+                        min_version: 1,
+                        max_version: 7,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                ..ApiVersionsResponseData::default()
+            };
+            response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+        }),
+        Box::new(|mut request| {
+            let header_version = request_header_version(ApiKey::OffsetFetch as i16, 7);
+            let header = RequestHeaderData::read(&mut request, header_version)
+                .expect("offset fetch request header should use negotiated version");
+            assert_eq!(header.request_api_version, 7);
+            let fetch = OffsetFetchRequestData::read(&mut request, 7)
+                .expect("offset fetch body should use negotiated version");
+            assert_eq!(fetch.group_id, KafkaString::from("group-a".to_owned()));
+            assert!(fetch.groups.is_empty());
+            assert!(fetch.require_stable);
+            let topics = fetch.topics.expect("flat topics");
+            assert_eq!(topics.len(), 1);
+            assert_eq!(topics[0].name, KafkaString::from("orders".to_owned()));
+            assert_eq!(topics[0].partition_indexes, vec![3]);
+            let response = OffsetFetchResponseData {
+                topics: vec![OffsetFetchResponseTopic {
+                    name: KafkaString::from("orders".to_owned()),
+                    partitions: vec![OffsetFetchResponsePartition {
+                        partition_index: 3,
+                        committed_offset: 42,
+                        committed_leader_epoch: 7,
+                        metadata: Some(KafkaString::from("meta".to_owned())),
+                        error_code: 0,
+                        _unknown_tagged_fields: Vec::new(),
+                    }],
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                ..OffsetFetchResponseData::default()
+            };
+            response_frame(ApiKey::OffsetFetch, 7, header.correlation_id, &response)
+        }),
+    ])
+    .await;
+    let client = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(7, broker.addr())],
+    );
+    let request = OffsetFetchRequestData {
+        groups: vec![OffsetFetchRequestGroup {
+            group_id: KafkaString::from("group-a".to_owned()),
+            member_id: None,
+            member_epoch: -1,
+            topics: Some(vec![OffsetFetchRequestTopics {
+                name: KafkaString::from("orders".to_owned()),
+                topic_id: KafkaUuid::ZERO,
+                partition_indexes: vec![3],
+                _unknown_tagged_fields: Vec::new(),
+            }]),
+            _unknown_tagged_fields: Vec::new(),
+        }],
+        require_stable: true,
+        ..OffsetFetchRequestData::default()
+    };
+
+    let response: OffsetFetchResponseData = client
+        .send_to_broker(
+            7,
+            ApiKey::OffsetFetch,
+            kacrab_protocol::version::client_api_info(ApiKey::OffsetFetch).max_version,
+            &request,
+        )
+        .await
+        .unwrap();
+
+    assert!(response.groups.is_empty());
+    assert_eq!(response.topics.len(), 1);
+    assert_eq!(response.topics[0].partitions[0].committed_offset, 42);
     assert_eq!(broker.join().await, 2);
 }
 
@@ -2608,6 +2712,12 @@ impl ApiVersions for ShareGroupHeartbeatResponseData {
     fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
         self.write(buf, version)
             .expect("share group heartbeat response");
+    }
+}
+
+impl ApiVersions for OffsetFetchResponseData {
+    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
+        self.write(buf, version).expect("offset fetch response");
     }
 }
 

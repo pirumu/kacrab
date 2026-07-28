@@ -54,7 +54,8 @@ use kacrab_protocol::{
         OffsetCommitRequestTopic, OffsetCommitResponseData, OffsetDeleteRequestData,
         OffsetDeleteRequestPartition, OffsetDeleteRequestTopic, OffsetDeleteResponseData,
         OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
-        OffsetFetchResponseData, ReassignablePartition, ReassignableTopic,
+        OffsetFetchResponseData, OffsetFetchResponseGroup, OffsetFetchResponsePartitions,
+        OffsetFetchResponseTopics, ReassignablePartition, ReassignableTopic,
         RemoveRaftVoterRequestData, RemoveRaftVoterResponseData, RenewDelegationTokenRequestData,
         RenewDelegationTokenResponseData, ShareGroupDescribeRequestData,
         ShareGroupDescribeResponseData, StreamsGroupDescribeRequestData,
@@ -1014,11 +1015,8 @@ impl AdminClient {
                 },
             )
             .await?;
-        let group = response
-            .groups
-            .into_iter()
-            .find(|group| group.group_id.as_str() == group_id)
-            .ok_or_else(|| AdminError::MissingResult {
+        let group =
+            offset_fetch_group(response, group_id).ok_or_else(|| AdminError::MissingResult {
                 target: group_id.to_owned(),
             })?;
         check_code(group_id, group.error_code, None)?;
@@ -3274,6 +3272,61 @@ fn all_group_listings(groups: &[ListedGroup]) -> Vec<ConsumerGroupListing> {
     groups.iter().map(group_listing).collect()
 }
 
+/// Read the offsets answered for `group_id` out of either `OffsetFetch` response
+/// shape.
+///
+/// v8+ answers with the batched `groups` array, keyed by the requested group id.
+/// v1-7 answers with a single group in the top-level `error_code`/`topics`
+/// fields and leaves the array empty (`offset_fetch_response.rs` only decodes
+/// `groups` from v8), so that flat form is folded into the same entry —
+/// the request only ever carries one group, so the requested group is the group
+/// that was answered. Mirrors Java's `OffsetFetchResponse.group(groupId)`.
+///
+/// Returns `None` only when a batched response does not name `group_id`, which
+/// is the coordinator answering a group nobody asked about (Java raises
+/// `IllegalArgumentException`); an empty flat answer is a real, empty result.
+///
+/// v1 has no top-level `error_code` at all — a group-level error arrives on
+/// every partition instead — so the synthesized group carries `0` there. Nothing
+/// is lost: the caller checks each partition's error code as well.
+fn offset_fetch_group(
+    response: OffsetFetchResponseData,
+    group_id: &str,
+) -> Option<OffsetFetchResponseGroup> {
+    if !response.groups.is_empty() {
+        return response
+            .groups
+            .into_iter()
+            .find(|group| group.group_id.as_str() == group_id);
+    }
+    Some(OffsetFetchResponseGroup {
+        group_id: group_id.to_owned().into(),
+        error_code: response.error_code,
+        topics: response
+            .topics
+            .into_iter()
+            .map(|topic| OffsetFetchResponseTopics {
+                name: topic.name,
+                topic_id: KafkaUuid::ZERO,
+                partitions: topic
+                    .partitions
+                    .into_iter()
+                    .map(|partition| OffsetFetchResponsePartitions {
+                        partition_index: partition.partition_index,
+                        committed_offset: partition.committed_offset,
+                        committed_leader_epoch: partition.committed_leader_epoch,
+                        metadata: partition.metadata,
+                        error_code: partition.error_code,
+                        _unknown_tagged_fields: Vec::new(),
+                    })
+                    .collect(),
+                _unknown_tagged_fields: Vec::new(),
+            })
+            .collect(),
+        _unknown_tagged_fields: Vec::new(),
+    })
+}
+
 /// Build [`OffsetAndMetadata`] from an `OffsetFetch` partition result, dropping
 /// the sentinel `-1` leader epoch and empty metadata.
 fn build_offset(
@@ -3311,19 +3364,18 @@ fn group_offset_fetch_topics(
         {
             topic.partition_indexes.push(partition.partition);
         } else {
-            // As with OffsetCommit, newer OffsetFetch versions key by topic id
-            // and reject a stale name; only send the name when the id is unknown.
+            // Which key goes on the wire is a per-version choice — `OffsetFetch`
+            // v10 keys topics by id and refuses a name, every version below it
+            // keys by name and refuses an id — and the version is only known
+            // once the connection has negotiated it. Fill both and let
+            // `wire::message` clear the one the negotiated version does not
+            // carry.
             let topic_id = topic_ids
                 .get(&partition.topic)
                 .copied()
                 .unwrap_or(KafkaUuid::ZERO);
-            let name = if topic_id == KafkaUuid::ZERO {
-                partition.topic.clone().into()
-            } else {
-                KafkaString::default()
-            };
             topics.push(OffsetFetchRequestTopics {
-                name,
+                name: partition.topic.clone().into(),
                 topic_id,
                 partition_indexes: vec![partition.partition],
                 _unknown_tagged_fields: Vec::new(),
@@ -3839,6 +3891,8 @@ fn parse_bootstrap_server(server: &str) -> Result<(String, u16)> {
 
 #[cfg(test)]
 mod tests {
+    use kacrab_protocol::generated::{OffsetFetchResponsePartition, OffsetFetchResponseTopic};
+
     use super::*;
 
     fn listed_group(group_id: &str, protocol_type: &str, group_type: &str) -> ListedGroup {
@@ -4080,6 +4134,103 @@ mod tests {
             .find(|topic| topic.name.as_str() == "orders")
             .expect("orders topic");
         assert_eq!(orders.partition_indexes, vec![0, 1]);
+    }
+
+    /// Which topic key `OffsetFetch` carries is a per-version choice the request
+    /// builder cannot make (v10 keys by id, everything below by name), so it
+    /// fills both and `wire::message` clears the one the negotiated version does
+    /// not carry.
+    #[test]
+    fn group_offset_fetch_topics_carry_both_topic_keys() {
+        let topic_id = KafkaUuid::from_parts(1, 2);
+        let topic_ids = HashMap::from([("orders".to_owned(), topic_id)]);
+
+        let topics = group_offset_fetch_topics(&[TopicPartition::new("orders", 0)], &topic_ids)
+            .expect("partitions present");
+
+        assert_eq!(topics[0].name.as_str(), "orders");
+        assert_eq!(topics[0].topic_id, topic_id);
+    }
+
+    #[test]
+    fn offset_fetch_group_reads_the_batched_response_shape() {
+        let response = OffsetFetchResponseData {
+            groups: vec![
+                OffsetFetchResponseGroup {
+                    group_id: KafkaString::from("other".to_owned()),
+                    error_code: 15,
+                    ..OffsetFetchResponseGroup::default()
+                },
+                OffsetFetchResponseGroup {
+                    group_id: KafkaString::from("orders".to_owned()),
+                    error_code: 0,
+                    topics: vec![OffsetFetchResponseTopics {
+                        name: KafkaString::from("t".to_owned()),
+                        topic_id: KafkaUuid::ZERO,
+                        partitions: vec![OffsetFetchResponsePartitions {
+                            partition_index: 1,
+                            committed_offset: 42,
+                            ..OffsetFetchResponsePartitions::default()
+                        }],
+                        _unknown_tagged_fields: Vec::new(),
+                    }],
+                    _unknown_tagged_fields: Vec::new(),
+                },
+            ],
+            ..OffsetFetchResponseData::default()
+        };
+
+        let group = offset_fetch_group(response, "orders").expect("group");
+
+        assert_eq!(group.error_code, 0);
+        assert_eq!(group.topics[0].partitions[0].committed_offset, 42);
+    }
+
+    /// v1-7 answer with the flat top-level `error_code`/`topics` and leave the
+    /// batched array empty, so the requested group is the group that was
+    /// answered (Java's `OffsetFetchResponse.group`).
+    #[test]
+    fn offset_fetch_group_reads_the_flat_pre_batched_response_shape() {
+        let response = OffsetFetchResponseData {
+            error_code: 25,
+            topics: vec![OffsetFetchResponseTopic {
+                name: KafkaString::from("t".to_owned()),
+                partitions: vec![OffsetFetchResponsePartition {
+                    partition_index: 1,
+                    committed_offset: 42,
+                    committed_leader_epoch: 7,
+                    metadata: Some(KafkaString::from("m".to_owned())),
+                    error_code: 3,
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            ..OffsetFetchResponseData::default()
+        };
+
+        let group = offset_fetch_group(response, "orders").expect("group");
+
+        assert_eq!(group.group_id.as_str(), "orders");
+        assert_eq!(group.error_code, 25);
+        assert_eq!(group.topics[0].name.as_str(), "t");
+        assert_eq!(group.topics[0].partitions[0].committed_offset, 42);
+        assert_eq!(group.topics[0].partitions[0].committed_leader_epoch, 7);
+        assert_eq!(group.topics[0].partitions[0].error_code, 3);
+    }
+
+    #[test]
+    fn offset_fetch_group_reports_a_batched_answer_that_names_another_group() {
+        let response = OffsetFetchResponseData {
+            groups: vec![OffsetFetchResponseGroup {
+                group_id: KafkaString::from("other".to_owned()),
+                ..OffsetFetchResponseGroup::default()
+            }],
+            ..OffsetFetchResponseData::default()
+        };
+
+        assert!(offset_fetch_group(response, "orders").is_none());
+        // An empty flat answer is a real, empty result — not a missing one.
+        assert!(offset_fetch_group(OffsetFetchResponseData::default(), "orders").is_some());
     }
 
     #[test]
