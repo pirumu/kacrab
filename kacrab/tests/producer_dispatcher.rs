@@ -2375,113 +2375,70 @@ async fn kafka_producer_init_transactions_retries_coordinator_load_in_progress_p
     assert_eq!(bootstrap.join().await, 2);
 }
 
+/// Which transaction-completion operation an `end_txn_timeout_can_retry` run
+/// drives.
+///
+/// The commit and abort tests were a 103-line copy differing only in the
+/// `EndTxn.committed` flag the broker asserts, which of the two operations is
+/// called (and which is the one that must *not* displace it), the timeout
+/// message, and the metric counted. Everything else — the coordinator lookup,
+/// the produce, the deliberate 50ms stall inside the `EndTxn` handler, and the
+/// retry — was identical, so a fix to the retry semantics had to be made twice.
+#[derive(Clone, Copy)]
+enum TxnCompletion {
+    Commit,
+    Abort,
+}
+
+impl TxnCompletion {
+    /// The `EndTxn.committed` flag this operation puts on the wire.
+    const fn committed(self) -> bool {
+        matches!(self, Self::Commit)
+    }
+
+    /// The operation that must be rejected while this one is still pending.
+    const fn other(self) -> Self {
+        match self {
+            Self::Commit => Self::Abort,
+            Self::Abort => Self::Commit,
+        }
+    }
+
+    /// The fragment the dispatch-timeout error names this operation by.
+    const fn timeout_message(self) -> &'static str {
+        match self {
+            Self::Commit => "CommitTransaction timed out",
+            Self::Abort => "AbortTransaction timed out",
+        }
+    }
+
+    async fn end(self, producer: &Producer) -> Result<(), kacrab::producer::ProducerError> {
+        match self {
+            Self::Commit => producer.commit_transaction().await,
+            Self::Abort => producer.abort_transaction().await,
+        }
+    }
+
+    /// This operation's completion counter.
+    const fn count(self, metrics: &kacrab::producer::ProducerMetricsSnapshot) -> u64 {
+        match self {
+            Self::Commit => metrics.transaction_commit_count,
+            Self::Abort => metrics.transaction_abort_count,
+        }
+    }
+}
+
 #[tokio::test]
 async fn kafka_producer_commit_timeout_can_retry_same_operation_like_java() {
-    let coordinator = MockBroker::serve_many(vec![
-        Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::InitProducerId as i16);
-            init_producer_id_response_frame(header.correlation_id, 77, 4)
-        }),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::AddPartitionsToTxn as i16);
-            add_partitions_to_txn_response_frame(header.correlation_id)
-        }),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::EndTxn as i16);
-            let end =
-                EndTxnRequestData::read(&mut request, header.request_api_version).expect("end txn");
-            assert!(end.committed);
-            std::thread::sleep(Duration::from_millis(50));
-            end_txn_response_frame_for_request(&header)
-        }),
-    ])
-    .await;
-    let leader_7 = MockBroker::serve_many(vec![
-        Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-            produce_response_frame_for_request(&header, 0, 90)
-        }),
-    ])
-    .await;
-    let bootstrap = MockBroker::serve_many(vec![
-        Box::new(api_versions_response_frame),
-        Box::new({
-            let coordinator = coordinator.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::FindCoordinator as i16);
-                find_coordinator_response_frame(header.correlation_id, 9, coordinator)
-            }
-        }),
-        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
-    ])
-    .await;
-
-    let wire = WireClient::connect_with_brokers(
-        ConnectionConfig::default(),
-        "kacrab-test",
-        [BrokerEndpoint::new(1, bootstrap.addr())],
-    );
-    let producer = Producer::from_parts(
-        wire,
-        ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default()
-                .batch_size(1)
-                .buffer_memory(16 * 1024),
-            max_block: Duration::from_millis(30),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: Some("txn-orders".to_owned()),
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
-            ..test_producer_config()
-        },
-    );
-
-    producer.init_transactions().await.unwrap();
-    producer.begin_transaction().unwrap();
-    let delivery = producer
-        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .unwrap();
-    producer.flush().await.unwrap();
-
-    assert!(matches!(
-        producer
-            .commit_transaction()
-            .await
-            .expect_err("first commit should time out while EndTxn is still in flight"),
-        kacrab::producer::ProducerError::DispatchTask(message)
-            if message.contains("CommitTransaction timed out")
-    ));
-    assert!(matches!(
-        producer
-            .abort_transaction()
-            .await
-            .expect_err("abort must not replace the pending commit result"),
-        kacrab::producer::ProducerError::InvalidTransactionState(message)
-            if message == "previous transaction operation is pending and must be retried"
-    ));
-    producer
-        .commit_transaction()
-        .await
-        .expect("retrying the same commit should await cached EndTxn result");
-
-    assert_eq!(delivery.await.unwrap().offset, 90);
-    assert_eq!(producer.metrics().transaction_commit_count, 1);
-    assert_eq!(bootstrap.join().await, 3);
-    assert_eq!(coordinator.join().await, 4);
-    assert_eq!(leader_7.join().await, 2);
+    end_txn_timeout_can_retry_same_operation(TxnCompletion::Commit).await;
 }
 
 #[tokio::test]
 async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
+    end_txn_timeout_can_retry_same_operation(TxnCompletion::Abort).await;
+}
+
+async fn end_txn_timeout_can_retry_same_operation(completion: TxnCompletion) {
     let coordinator = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new(|mut request| {
@@ -2494,12 +2451,12 @@ async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
             assert_eq!(header.request_api_key, ApiKey::AddPartitionsToTxn as i16);
             add_partitions_to_txn_response_frame(header.correlation_id)
         }),
-        Box::new(|mut request| {
+        Box::new(move |mut request| {
             let header = RequestHeaderData::read(&mut request, 2).expect("request header");
             assert_eq!(header.request_api_key, ApiKey::EndTxn as i16);
             let end =
                 EndTxnRequestData::read(&mut request, header.request_api_version).expect("end txn");
-            assert!(!end.committed);
+            assert_eq!(end.committed, completion.committed());
             std::thread::sleep(Duration::from_millis(50));
             end_txn_response_frame_for_request(&header)
         }),
@@ -2558,28 +2515,29 @@ async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
     producer.flush().await.unwrap();
 
     assert!(matches!(
-        producer
-            .abort_transaction()
+        completion
+            .end(&producer)
             .await
-            .expect_err("first abort should time out while EndTxn is still in flight"),
+            .expect_err("the first attempt should time out while EndTxn is still in flight"),
         kacrab::producer::ProducerError::DispatchTask(message)
-            if message.contains("AbortTransaction timed out")
+            if message.contains(completion.timeout_message())
     ));
     assert!(matches!(
-        producer
-            .commit_transaction()
+        completion
+            .other()
+            .end(&producer)
             .await
-            .expect_err("commit must not replace the pending abort result"),
+            .expect_err("the opposite operation must not replace the pending result"),
         kacrab::producer::ProducerError::InvalidTransactionState(message)
             if message == "previous transaction operation is pending and must be retried"
     ));
-    producer
-        .abort_transaction()
+    completion
+        .end(&producer)
         .await
-        .expect("retrying the same abort should await cached EndTxn result");
+        .expect("retrying the same operation should await the cached EndTxn result");
 
     assert_eq!(delivery.await.unwrap().offset, 90);
-    assert_eq!(producer.metrics().transaction_abort_count, 1);
+    assert_eq!(completion.count(&producer.metrics()), 1);
     assert_eq!(bootstrap.join().await, 3);
     assert_eq!(coordinator.join().await, 4);
     assert_eq!(leader_7.join().await, 2);

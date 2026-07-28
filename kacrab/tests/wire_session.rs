@@ -1764,152 +1764,67 @@ async fn wire_client_runs_tls_with_client_certificate_before_api_versions() {
     assert_eq!(tls.join().await, 2);
 }
 
+/// Which SCRAM mechanism a `wire_client_runs_scram_*` run drives.
+///
+/// The SHA-256 and SHA-512 tests were a 139-line copy differing in four places:
+/// the mechanism name the broker asserts and advertises, the reference-vector
+/// function, and the mechanism the client is configured with. Everything else —
+/// the full `client-first` / `server-first` / `client-final` / `server-final`
+/// exchange, the nonce and salt handling, the server-signature check — was
+/// identical, so a fix to the exchange had to be made twice.
+#[derive(Clone, Copy)]
+enum ScramMechanism {
+    Sha256,
+    Sha512,
+}
+
+impl ScramMechanism {
+    /// The mechanism name as it travels on the wire.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Sha256 => "SCRAM-SHA-256",
+            Self::Sha512 => "SCRAM-SHA-512",
+        }
+    }
+
+    /// The mechanism the client is configured with.
+    const fn config(self) -> kacrab::wire::SaslMechanism {
+        match self {
+            Self::Sha256 => kacrab::wire::SaslMechanism::ScramSha256,
+            Self::Sha512 => kacrab::wire::SaslMechanism::ScramSha512,
+        }
+    }
+
+    /// Reference `(client proof, server signature)` computed independently of
+    /// the client under test.
+    fn vectors(
+        self,
+        password: &[u8],
+        salt: &[u8],
+        iterations: u32,
+        auth_message: &[u8],
+    ) -> (Vec<u8>, Vec<u8>) {
+        match self {
+            Self::Sha256 => scram_sha256_vectors(password, salt, iterations, auth_message),
+            Self::Sha512 => scram_sha512_vectors(password, salt, iterations, auth_message),
+        }
+    }
+}
+
 #[tokio::test]
 async fn wire_client_runs_scram_sha256_and_verifies_server_signature() {
-    let broker = MockBroker::serve_many(vec![
-        Box::new(api_versions_response),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(
-                &mut request,
-                request_header_version(ApiKey::SaslHandshake as i16, 1),
-            )
-            .expect("sasl handshake header");
-            let body =
-                SaslHandshakeRequestData::read(&mut request, 1).expect("sasl handshake body");
-            assert_eq!(body.mechanism.to_string(), "SCRAM-SHA-256");
-            let response = SaslHandshakeResponseData {
-                error_code: 0,
-                mechanisms: vec![KafkaString::from("SCRAM-SHA-256".to_owned())],
-                _unknown_tagged_fields: Vec::new(),
-            };
-            response_frame(ApiKey::SaslHandshake, 1, header.correlation_id, &response)
-        }),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(
-                &mut request,
-                request_header_version(ApiKey::SaslAuthenticate as i16, 2),
-            )
-            .expect("scram first header");
-            let body =
-                SaslAuthenticateRequestData::read(&mut request, 2).expect("scram first body");
-            let client_first = std::str::from_utf8(body.auth_bytes.as_ref()).expect("utf8");
-            assert!(client_first.starts_with("n,,n=alice,r="));
-            let client_first_bare = client_first.strip_prefix("n,,").expect("gs2 header");
-            let client_nonce =
-                scram_attr(client_first_bare, "r").expect("client nonce in first message");
-            let server_first = format!(
-                "r={client_nonce}SERVER,s={},i=4096",
-                general_purpose::STANDARD.encode(b"salt")
-            );
-            let response = SaslAuthenticateResponseData {
-                error_code: 0,
-                error_message: None,
-                auth_bytes: Bytes::from(server_first),
-                session_lifetime_ms: 300_000,
-                _unknown_tagged_fields: Vec::new(),
-            };
-            response_frame(
-                ApiKey::SaslAuthenticate,
-                2,
-                header.correlation_id,
-                &response,
-            )
-        }),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(
-                &mut request,
-                request_header_version(ApiKey::SaslAuthenticate as i16, 2),
-            )
-            .expect("scram final header");
-            let body =
-                SaslAuthenticateRequestData::read(&mut request, 2).expect("scram final body");
-            let client_final = std::str::from_utf8(body.auth_bytes.as_ref()).expect("utf8");
-            let client_final_without_proof = client_final
-                .split(",p=")
-                .next()
-                .expect("client final proof separator");
-            let nonce = scram_attr(client_final_without_proof, "r").expect("nonce");
-            let client_first_bare = {
-                let client_nonce = nonce.strip_suffix("SERVER").expect("server suffix");
-                format!("n=alice,r={client_nonce}")
-            };
-            let server_first = format!(
-                "r={nonce},s={},i=4096",
-                general_purpose::STANDARD.encode(b"salt")
-            );
-            let auth_message =
-                format!("{client_first_bare},{server_first},{client_final_without_proof}");
-            let (expected_proof, server_signature) =
-                scram_sha256_vectors(b"secret", b"salt", 4096, auth_message.as_bytes());
-            let proof = scram_attr(client_final, "p").expect("proof");
-            assert_eq!(proof, general_purpose::STANDARD.encode(expected_proof));
-            let response = SaslAuthenticateResponseData {
-                error_code: 0,
-                error_message: None,
-                auth_bytes: Bytes::from(format!(
-                    "v={}",
-                    general_purpose::STANDARD.encode(server_signature)
-                )),
-                session_lifetime_ms: 300_000,
-                _unknown_tagged_fields: Vec::new(),
-            };
-            response_frame(
-                ApiKey::SaslAuthenticate,
-                2,
-                header.correlation_id,
-                &response,
-            )
-        }),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::ApiVersions as i16);
-            let response = ApiVersionsResponseData {
-                error_code: 0,
-                api_keys: vec![ApiVersion {
-                    api_key: ApiKey::ApiVersions as i16,
-                    min_version: 0,
-                    max_version: 4,
-                    _unknown_tagged_fields: Vec::new(),
-                }],
-                ..ApiVersionsResponseData::default()
-            };
-            response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
-        }),
-    ])
-    .await;
-    let mut config = ConnectionConfig::default();
-    config.security.protocol = kacrab::wire::SecurityProtocol::SaslPlaintext;
-    config.sasl.mechanism = Some(kacrab::wire::SaslMechanism::ScramSha256);
-    config.sasl.jaas_config = Some(
-        "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"alice\" \
-         password=\"secret\";"
-            .to_owned(),
-    );
-    let client = WireClient::connect_with_brokers(
-        config,
-        "kacrab-test",
-        [BrokerEndpoint::new(7, broker.addr())],
-    );
-    let request = kacrab_protocol::generated::ApiVersionsRequestData {
-        client_software_name: KafkaString::from("kacrab".to_owned()),
-        client_software_version: KafkaString::from("0.0.1".to_owned()),
-        _unknown_tagged_fields: Vec::new(),
-    };
-
-    let response: ApiVersionsResponseData = client
-        .send_to_broker(7, ApiKey::ApiVersions, 3, &request)
-        .await
-        .unwrap();
-
-    assert_eq!(response.api_keys[0].max_version, 4);
-    assert_eq!(broker.join().await, 5);
+    scram_verifies_server_signature(ScramMechanism::Sha256).await;
 }
 
 #[tokio::test]
 async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
+    scram_verifies_server_signature(ScramMechanism::Sha512).await;
+}
+
+async fn scram_verifies_server_signature(mechanism: ScramMechanism) {
     let broker = MockBroker::serve_many(vec![
         Box::new(api_versions_response),
-        Box::new(|mut request| {
+        Box::new(move |mut request| {
             let header = RequestHeaderData::read(
                 &mut request,
                 request_header_version(ApiKey::SaslHandshake as i16, 1),
@@ -1917,15 +1832,15 @@ async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
             .expect("sasl handshake header");
             let body =
                 SaslHandshakeRequestData::read(&mut request, 1).expect("sasl handshake body");
-            assert_eq!(body.mechanism.to_string(), "SCRAM-SHA-512");
+            assert_eq!(body.mechanism.to_string(), mechanism.name());
             let response = SaslHandshakeResponseData {
                 error_code: 0,
-                mechanisms: vec![KafkaString::from("SCRAM-SHA-512".to_owned())],
+                mechanisms: vec![KafkaString::from(mechanism.name().to_owned())],
                 _unknown_tagged_fields: Vec::new(),
             };
             response_frame(ApiKey::SaslHandshake, 1, header.correlation_id, &response)
         }),
-        Box::new(|mut request| {
+        Box::new(move |mut request| {
             let header = RequestHeaderData::read(
                 &mut request,
                 request_header_version(ApiKey::SaslAuthenticate as i16, 2),
@@ -1956,7 +1871,7 @@ async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
                 &response,
             )
         }),
-        Box::new(|mut request| {
+        Box::new(move |mut request| {
             let header = RequestHeaderData::read(
                 &mut request,
                 request_header_version(ApiKey::SaslAuthenticate as i16, 2),
@@ -1981,7 +1896,7 @@ async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
             let auth_message =
                 format!("{client_first_bare},{server_first},{client_final_without_proof}");
             let (expected_proof, server_signature) =
-                scram_sha512_vectors(b"secret", b"salt", 4096, auth_message.as_bytes());
+                mechanism.vectors(b"secret", b"salt", 4096, auth_message.as_bytes());
             let proof = scram_attr(client_final, "p").expect("proof");
             assert_eq!(proof, general_purpose::STANDARD.encode(expected_proof));
             let response = SaslAuthenticateResponseData {
@@ -2001,7 +1916,7 @@ async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
                 &response,
             )
         }),
-        Box::new(|mut request| {
+        Box::new(move |mut request| {
             let header = RequestHeaderData::read(&mut request, 2).expect("request header");
             assert_eq!(header.request_api_key, ApiKey::ApiVersions as i16);
             let response = ApiVersionsResponseData {
@@ -2020,7 +1935,7 @@ async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
     .await;
     let mut config = ConnectionConfig::default();
     config.security.protocol = kacrab::wire::SecurityProtocol::SaslPlaintext;
-    config.sasl.mechanism = Some(kacrab::wire::SaslMechanism::ScramSha512);
+    config.sasl.mechanism = Some(mechanism.config());
     config.sasl.jaas_config = Some(
         "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"alice\" \
          password=\"secret\";"
@@ -2042,7 +1957,11 @@ async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
         .await
         .unwrap();
 
-    assert_eq!(response.api_keys[0].max_version, 4);
+    let negotiated = response
+        .api_keys
+        .first()
+        .expect("the broker advertised one ApiVersions entry");
+    assert_eq!(negotiated.max_version, 4);
     assert_eq!(broker.join().await, 5);
 }
 
