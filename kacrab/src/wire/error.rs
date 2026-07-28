@@ -6,6 +6,10 @@ use kacrab_protocol::{
 };
 use thiserror::Error;
 
+/// First Apache Kafka release that answers [`ApiKey::ApiVersions`] v3, the
+/// version kacrab pins for its capability handshake (KIP-511).
+pub(crate) const MIN_SUPPORTED_KAFKA_RELEASE: &str = "2.4";
+
 /// Errors from the runtime wire/session layer.
 #[derive(Debug, Error)]
 pub enum WireError {
@@ -107,6 +111,22 @@ pub enum WireError {
     /// Broker does not support a mutually compatible API version.
     #[error("no compatible API version for {0:?}")]
     UnsupportedApiVersion(ApiKey),
+    /// Broker rejected the pinned `ApiVersions` handshake version, so it
+    /// predates Apache Kafka 2.4 and cannot negotiate capabilities with kacrab.
+    ///
+    /// kacrab deliberately does not retry the handshake at v0 the way Java's
+    /// client does; the supported floor is Kafka 2.4. Reconnecting cannot fix
+    /// an old broker, so this is classified as a fatal setup error and reported
+    /// immediately instead of looping under reconnect backoff until
+    /// `request.timeout.ms`.
+    #[error(
+        "broker does not support ApiVersions v{version}; kacrab requires Apache Kafka \
+         {MIN_SUPPORTED_KAFKA_RELEASE} or newer"
+    )]
+    IncompatibleBroker {
+        /// `ApiVersions` version kacrab sent in the handshake.
+        version: i16,
+    },
     /// Response correlation id did not match the in-flight request.
     #[error("correlation id mismatch: expected {expected}, got {actual}")]
     CorrelationIdMismatch {
@@ -119,11 +139,12 @@ pub enum WireError {
 
 impl WireError {
     /// Whether this is a terminal connection-setup failure — TLS or SASL
-    /// handshake/authentication — that reconnecting cannot fix. Callers should
-    /// fail fast with the real cause instead of looping under reconnect
-    /// backoff until they time out, matching Java's non-retriable
-    /// `SaslAuthenticationException` / `SslAuthenticationException` /
-    /// `IllegalSaslStateException` semantics.
+    /// handshake/authentication, or a broker too old to negotiate with — that
+    /// reconnecting cannot fix. Callers should fail fast with the real cause
+    /// instead of looping under reconnect backoff until they time out, matching
+    /// Java's non-retriable `SaslAuthenticationException` /
+    /// `SslAuthenticationException` / `IllegalSaslStateException` /
+    /// `UnsupportedVersionException` semantics.
     #[must_use]
     pub(crate) const fn is_fatal_setup(&self) -> bool {
         matches!(
@@ -137,9 +158,38 @@ impl WireError {
                 | Self::SaslHandshake(_)
                 | Self::SaslAuthentication(_)
                 | Self::SaslServerSignatureMismatch
+                | Self::IncompatibleBroker { .. }
         )
     }
 }
 
 /// Result alias for wire operations.
 pub type Result<T> = std::result::Result<T, WireError>;
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::missing_assert_message,
+        reason = "Unit test fixtures read fastest without redundant assertion messages."
+    )]
+
+    use super::WireError;
+
+    /// The handshake failure must name the Apache Kafka release floor, since
+    /// "`ApiVersions` v3" alone tells a user nothing about which broker to run.
+    #[test]
+    fn incompatible_broker_names_the_required_kafka_release() {
+        assert_eq!(
+            WireError::IncompatibleBroker { version: 3 }.to_string(),
+            "broker does not support ApiVersions v3; kacrab requires Apache Kafka 2.4 or newer"
+        );
+    }
+
+    /// Fail fast on an incompatible broker; keep retrying everything the
+    /// reconnect loop can still recover from.
+    #[test]
+    fn incompatible_broker_is_a_fatal_setup_error() {
+        assert!(WireError::IncompatibleBroker { version: 3 }.is_fatal_setup());
+        assert!(!WireError::ConnectionClosed.is_fatal_setup());
+    }
+}

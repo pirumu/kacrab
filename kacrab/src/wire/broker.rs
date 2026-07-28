@@ -735,6 +735,16 @@ impl BrokerTask {
         let response = ApiVersionsResponseData::read(&mut response.body, api_version)?;
         let error = ErrorCode::from(response.error_code);
         if error.is_error() {
+            // A broker that cannot parse ApiVersions v3 predates Kafka 2.4.
+            // kacrab does not downgrade the handshake to v0, so name the
+            // requirement and fail fast — `IncompatibleBroker` is fatal setup,
+            // which stops the reconnect loop from burning `request.timeout.ms`
+            // on a broker that will never answer.
+            if error == ErrorCode::UnsupportedVersion {
+                return Err(WireError::IncompatibleBroker {
+                    version: api_version,
+                });
+            }
             return Err(WireError::Kafka(error));
         }
         Ok(BrokerCapabilities::from_response(&response))
@@ -1076,6 +1086,9 @@ fn clone_setup_error(error: &WireError) -> WireError {
         WireError::SaslHandshake(message) => WireError::SaslHandshake(message.clone()),
         WireError::SaslAuthentication(message) => WireError::SaslAuthentication(message.clone()),
         WireError::SaslServerSignatureMismatch => WireError::SaslServerSignatureMismatch,
+        WireError::IncompatibleBroker { version } => {
+            WireError::IncompatibleBroker { version: *version }
+        },
         _ => WireError::ConnectionClosed,
     }
 }
@@ -1622,16 +1635,96 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let _request_len = server.read_i32().await.expect("request length");
             server
-                .write_all(&api_versions_response(0, ErrorCode::UnsupportedVersion))
+                .write_all(&api_versions_response(0, ErrorCode::UnknownServerError))
                 .await
                 .expect("write response");
         });
 
         assert!(matches!(
             task.api_versions(&mut client).await,
-            Err(WireError::Kafka(ErrorCode::UnsupportedVersion))
+            Err(WireError::Kafka(ErrorCode::UnknownServerError))
         ));
         server_task.await.expect("server task");
+    }
+
+    /// A broker older than Apache Kafka 2.4 cannot parse the `ApiVersions` v3
+    /// handshake and answers `UNSUPPORTED_VERSION`. kacrab does not downgrade to
+    /// v0, so this must surface as a named, fatal incompatibility instead of the
+    /// generic `Kafka(UnsupportedVersion)` that the reconnect loop treats as
+    /// retriable.
+    #[tokio::test]
+    async fn api_versions_reports_incompatible_broker_on_unsupported_version() {
+        let (task, client, mut server) = broker_task_with_connected_stream().await;
+        let mut client: BrokerStream = Box::new(client);
+        let server_task = tokio::spawn(async move {
+            let _request_len = server.read_i32().await.expect("request length");
+            server
+                .write_all(&api_versions_response(0, ErrorCode::UnsupportedVersion))
+                .await
+                .expect("write response");
+        });
+
+        let error = task
+            .api_versions(&mut client)
+            .await
+            .expect_err("pre-2.4 broker must fail the handshake");
+        assert_eq!(
+            error.to_string(),
+            "broker does not support ApiVersions v3; kacrab requires Apache Kafka 2.4 or newer"
+        );
+        assert!(
+            error.is_fatal_setup(),
+            "an incompatible broker must not be retried: {error:?}"
+        );
+        server_task.await.expect("server task");
+    }
+
+    /// End-to-end fail-fast: the run loop must give up on a pre-2.4 broker
+    /// immediately instead of cycling reconnect backoff until `request.timeout.ms`
+    /// expires and reporting a bare `Timeout`.
+    #[tokio::test]
+    async fn broker_task_fails_fast_against_a_pre_2_4_broker() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let _server = tokio::spawn(async move {
+            while let Ok((mut socket, _peer)) = listener.accept().await {
+                let _responder = tokio::spawn(async move {
+                    let Ok(_request_len) = socket.read_i32().await else {
+                        return;
+                    };
+                    let _ignored = socket
+                        .write_all(&api_versions_response(0, ErrorCode::UnsupportedVersion))
+                        .await;
+                });
+            }
+        });
+
+        // A long request timeout is the point: the old behaviour looped under
+        // reconnect backoff and only failed once this elapsed.
+        let config = ConnectionConfig::default()
+            .request_timeout(Duration::from_secs(30))
+            .reconnect_backoff_initial(Duration::from_millis(10))
+            .reconnect_backoff_max(Duration::from_millis(20));
+        let handle = BrokerHandle::spawn(
+            BrokerEndpoint::new(7, addr),
+            "client-old-broker".to_owned(),
+            config,
+            Arc::new(BufferPools::new(1)),
+            Arc::new(tokio::sync::Mutex::new(OAuthTokenCache::default())),
+        );
+
+        let request = api_versions_request();
+        let send = handle.send::<_, ApiVersionsResponseData>(ApiKey::ApiVersions, 3, &request);
+        let result = tokio::time::timeout(Duration::from_secs(5), send)
+            .await
+            .expect("request must fail fast, not loop until request.timeout.ms");
+        let error = result.expect_err("pre-2.4 broker must fail the request");
+        assert_eq!(
+            error.to_string(),
+            "broker does not support ApiVersions v3; kacrab requires Apache Kafka 2.4 or newer"
+        );
     }
 
     #[tokio::test]
