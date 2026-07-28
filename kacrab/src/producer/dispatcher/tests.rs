@@ -158,31 +158,27 @@ fn transaction_control_unsupported_version_is_fatal_like_java() {
 }
 
 #[test]
-fn transaction_request_queue_orders_requests_like_java_transaction_manager() {
-    let mut queue = super::TransactionRequestQueue::default();
-    queue.push(super::TransactionRequestKind::EndTxn);
-    queue.push(super::TransactionRequestKind::AddPartitionsOrOffsets);
-    queue.push(super::TransactionRequestKind::EpochBump);
-    queue.push(super::TransactionRequestKind::FindCoordinator);
-    queue.push(super::TransactionRequestKind::InitProducerId);
-    queue.push(super::TransactionRequestKind::AddPartitionsOrOffsets);
+fn outstanding_transaction_requests_clear_one_occurrence_at_a_time() {
+    let mut requests = super::TransactionRequestSet::default();
+    requests.push(super::TransactionRequestKind::AddPartitionsOrOffsets);
+    requests.push(super::TransactionRequestKind::EndTxn);
+    requests.push(super::TransactionRequestKind::AddPartitionsOrOffsets);
 
-    let mut ordered = Vec::new();
-    while let Some(kind) = queue.pop_next() {
-        ordered.push(kind);
-    }
-
+    assert!(requests.remove_first(super::TransactionRequestKind::AddPartitionsOrOffsets));
+    // Two outstanding requests of one kind must survive one completion: a set would
+    // have collapsed them and cleared both.
     assert_eq!(
-        ordered,
+        requests.kinds,
         vec![
-            super::TransactionRequestKind::FindCoordinator,
-            super::TransactionRequestKind::InitProducerId,
-            super::TransactionRequestKind::AddPartitionsOrOffsets,
-            super::TransactionRequestKind::AddPartitionsOrOffsets,
             super::TransactionRequestKind::EndTxn,
-            super::TransactionRequestKind::EpochBump,
+            super::TransactionRequestKind::AddPartitionsOrOffsets,
         ]
     );
+
+    assert!(!requests.remove_first(super::TransactionRequestKind::InitProducerId));
+    assert!(requests.remove_first(super::TransactionRequestKind::AddPartitionsOrOffsets));
+    assert!(requests.remove_first(super::TransactionRequestKind::EndTxn));
+    assert!(requests.kinds.is_empty());
 }
 
 #[test]
@@ -274,23 +270,6 @@ fn transaction_state_transition_matrix_matches_java_transaction_manager() {
             );
         }
     }
-}
-
-#[test]
-fn transaction_request_queue_holds_end_txn_until_batches_drain_like_java() {
-    let mut queue = super::TransactionRequestQueue::default();
-    queue.push(super::TransactionRequestKind::EndTxn);
-    queue.push(super::TransactionRequestKind::EpochBump);
-
-    assert_eq!(queue.next_request(true), None);
-    assert_eq!(
-        queue.next_request(false),
-        Some(super::TransactionRequestKind::EndTxn)
-    );
-    assert_eq!(
-        queue.next_request(false),
-        Some(super::TransactionRequestKind::EpochBump)
-    );
 }
 
 #[test]
@@ -2436,8 +2415,8 @@ async fn acked_pending_transaction_result_allows_next_operation_like_java() {
         Some(TransactionOperation::SendOffsetsToTransaction)
     );
     assert_eq!(
-        state.pending_requests.pop_next(),
-        Some(super::TransactionRequestKind::AddPartitionsOrOffsets)
+        state.pending_requests.kinds,
+        vec![super::TransactionRequestKind::AddPartitionsOrOffsets]
     );
 }
 
@@ -2480,7 +2459,7 @@ async fn acked_pending_transaction_result_allows_non_cached_operation_like_java(
 
     assert_eq!(state.pending_operation, None);
     assert!(state.pending_result.is_none());
-    assert!(state.pending_requests.pop_next().is_none());
+    assert!(state.pending_requests.kinds.is_empty());
 }
 
 #[test]

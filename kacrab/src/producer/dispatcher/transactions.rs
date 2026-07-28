@@ -234,85 +234,27 @@ pub(crate) enum TransactionRequestKind {
     EpochBump,
 }
 
-impl TransactionRequestKind {
-    pub(crate) const fn priority(self) -> u8 {
-        match self {
-            Self::FindCoordinator => 0,
-            Self::InitProducerId => 1,
-            Self::AddPartitionsOrOffsets => 2,
-            Self::EndTxn => 3,
-            Self::EpochBump => 4,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TransactionRequestQueueEntry {
-    pub(crate) kind: TransactionRequestKind,
-    pub(crate) sequence: u64,
-}
-
 #[derive(Debug, Default)]
-pub(crate) struct TransactionRequestQueue {
-    pub(crate) entries: Vec<TransactionRequestQueueEntry>,
-    pub(crate) next_sequence: u64,
+pub(crate) struct TransactionRequestSet {
+    pub(crate) kinds: Vec<TransactionRequestKind>,
 }
 
-impl TransactionRequestQueue {
+impl TransactionRequestSet {
+    /// Track one outstanding request of `kind`. A `Vec` and not a `HashSet`: the same
+    /// kind can legitimately be outstanding twice (a tracked request plus a pending
+    /// operation), and a set would collapse the pair so the first completion cleared
+    /// both.
     pub(crate) fn push(&mut self, kind: TransactionRequestKind) {
-        self.entries.push(TransactionRequestQueueEntry {
-            kind,
-            sequence: self.next_sequence,
-        });
-        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.kinds.push(kind);
     }
 
-    pub(crate) fn pop_next(&mut self) -> Option<TransactionRequestKind> {
-        let index = self.next_index()?;
-        Some(self.entries.remove(index).kind)
-    }
-
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Sender-loop transaction request selection is covered before the async \
-                      dispatcher consumes it directly."
-        )
-    )]
-    pub(crate) fn next_request(
-        &mut self,
-        has_incomplete_batches: bool,
-    ) -> Option<TransactionRequestKind> {
-        let index = self.next_index()?;
-        let kind = self.entries.get(index)?.kind;
-        if kind == TransactionRequestKind::EndTxn && has_incomplete_batches {
-            return None;
-        }
-        Some(self.entries.remove(index).kind)
-    }
-
+    /// Drop one outstanding request of `kind`, reporting whether there was one.
     pub(crate) fn remove_first(&mut self, kind: TransactionRequestKind) -> bool {
-        if self
-            .next_index()
-            .and_then(|index| self.entries.get(index))
-            .is_some_and(|entry| entry.kind == kind)
-        {
-            return self.pop_next().is_some();
-        }
-        let Some(index) = self.entries.iter().position(|entry| entry.kind == kind) else {
+        let Some(index) = self.kinds.iter().position(|entry| *entry == kind) else {
             return false;
         };
-        let _entry = self.entries.remove(index);
+        let _entry = self.kinds.remove(index);
         true
-    }
-
-    pub(crate) fn next_index(&self) -> Option<usize> {
-        self.entries
-            .iter()
-            .enumerate()
-            .min_by_key(|(_index, entry)| (entry.kind.priority(), entry.sequence))
-            .map(|(index, _entry)| index)
     }
 }
 

@@ -41,6 +41,7 @@ use super::{
     batch::{
         encode_record_batch_with_producer_state_at_offset,
         encode_record_batch_with_producer_state_at_offset_into_buffer,
+        uncompressed_record_batch_len,
     },
     compression_ratio::CompressionRatioEstimator,
     config::{
@@ -384,6 +385,20 @@ impl ProducerDispatcher {
 
     fn metrics_are_enabled(&self) -> bool {
         self.metrics_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Record into the producer metrics, or do nothing when metrics are off.
+    ///
+    /// The enabled check belongs with the recorder, not spelled out at every call site:
+    /// there were three dozen `if self.metrics_are_enabled() { self.metrics.record_x(); }`
+    /// blocks, and a site that forgot the guard would silently start accounting for a
+    /// producer that never enabled metrics. `metrics_are_enabled` survives for the few
+    /// places that gate real *work* (encoding a request for its size, sampling a clock)
+    /// rather than a counter bump.
+    fn record_metrics(&self, record: impl FnOnce(&ProducerMetrics)) {
+        if self.metrics_are_enabled() {
+            record(&self.metrics);
+        }
     }
 
     /// Assign idempotent sequences to freshly drained batches. Returns the indices
@@ -1227,9 +1242,7 @@ impl ProducerDispatcher {
         match self.dispatch_drained(batches, now, enqueue_ticket).await {
             DispatchOutcome::Delivered(result) => result,
             DispatchOutcome::Requeue(batches) => {
-                if self.metrics_are_enabled() {
-                    self.metrics.record_requeue();
-                }
+                self.record_metrics(ProducerMetrics::record_requeue);
                 accumulator.requeue_front(batches)?;
                 Ok(Vec::new())
             },
@@ -1638,9 +1651,7 @@ impl ProducerDispatcher {
                     }
                 },
                 Err(DispatchError::Producer(error)) => {
-                    if self.metrics_are_enabled() {
-                        self.metrics.record_error();
-                    }
+                    self.record_metrics(ProducerMetrics::record_error);
                     fail_deliveries(&mut batches, &error);
                     return DispatchOutcome::Delivered(Err(error));
                 },
@@ -1680,22 +1691,20 @@ impl ProducerDispatcher {
             }
             // Terminal produce failure, counted like every other terminal arm of the
             // dispatch loop (this is what the now-deleted `dispatch_ready` copy did).
-            if self.metrics_are_enabled() {
-                self.metrics.record_error();
-            }
+            self.record_metrics(ProducerMetrics::record_error);
             return DispatchOutcome::Delivered(Err(ProducerError::Broker {
                 topic,
                 partition,
                 error: ErrorCode::MessageTooLarge,
             }));
         };
-        if self.metrics_are_enabled() {
-            self.metrics.record_requeue();
+        self.record_metrics(|metrics| {
+            metrics.record_requeue();
             // One increment per split event, never `split.len()`: Kafka
             // Sender.completeBatch discards the int returned by
             // RecordAccumulator.splitAndReenqueue and records the constant 1.0.
-            self.metrics.record_batch_split();
-        }
+            metrics.record_batch_split();
+        });
         DispatchOutcome::RequeueSplit(split)
     }
 
@@ -1734,18 +1743,15 @@ impl ProducerDispatcher {
         ) else {
             return 1.0;
         };
-        let Ok(uncompressed) = encode_record_batch_with_producer_state_at_offset(
-            &batch.records,
-            ProducerCompression::default(),
-            batch.producer_state,
-            0,
-        ) else {
+        let Ok(uncompressed_len) =
+            uncompressed_record_batch_len(&batch.records, batch.producer_state, 0)
+        else {
             return 1.0;
         };
-        if uncompressed.is_empty() {
+        if uncompressed_len == 0 {
             return 1.0;
         }
-        compressed.len() as f32 / uncompressed.len() as f32
+        compressed.len() as f32 / uncompressed_len as f32
     }
 
     async fn deliver_successful_batches(
@@ -1767,15 +1773,11 @@ impl ProducerDispatcher {
         retry: &IdempotentRetry,
     ) -> Option<DispatchOutcome> {
         if *attempts_remaining == 0 {
-            if self.metrics_are_enabled() {
-                self.metrics.record_error_for_topic(Some(&retry.topic));
-            }
+            self.record_metrics(|metrics| metrics.record_error_for_topic(Some(&retry.topic)));
             return Some(DispatchOutcome::Delivered(Err(retry.broker_error())));
         }
         *attempts_remaining = attempts_remaining.saturating_sub(1);
-        if self.metrics_are_enabled() {
-            self.metrics.record_retry_for_topic(Some(&retry.topic));
-        }
+        self.record_metrics(|metrics| metrics.record_retry_for_topic(Some(&retry.topic)));
         if retry.reset_sequence
             && let Err(error) = self
                 .recover_idempotent_partition(
@@ -1789,9 +1791,7 @@ impl ProducerDispatcher {
             return Some(DispatchOutcome::Delivered(Err(error)));
         }
         if let Some(error) = self.wait_before_retry(batches, retry_backoff, false).await {
-            if self.metrics_are_enabled() {
-                self.metrics.record_error_for_topic(Some(&retry.topic));
-            }
+            self.record_metrics(|metrics| metrics.record_error_for_topic(Some(&retry.topic)));
             if let Err(recovery_error) = self
                 .recover_idempotent_partition_after_retry_timeout(batches, retry)
                 .await
@@ -1815,9 +1815,7 @@ impl ProducerDispatcher {
                 .invalidate_topic_partition(&retry.topic, retry.partition);
         }
         if *attempts_remaining == 0 {
-            if self.metrics_are_enabled() {
-                self.metrics.record_error_for_topic(Some(&retry.topic));
-            }
+            self.record_metrics(|metrics| metrics.record_error_for_topic(Some(&retry.topic)));
             self.release_idempotent_partition_after_definite_error(
                 batches,
                 &retry.topic,
@@ -1827,9 +1825,7 @@ impl ProducerDispatcher {
             return Some(DispatchOutcome::Delivered(Err(retry.broker_error())));
         }
         *attempts_remaining = attempts_remaining.saturating_sub(1);
-        if self.metrics_are_enabled() {
-            self.metrics.record_retry_for_topic(Some(&retry.topic));
-        }
+        self.record_metrics(|metrics| metrics.record_retry_for_topic(Some(&retry.topic)));
         // Leader changed for the ongoing retry -> retry immediately (Kafka skips
         // backoff); otherwise back off normally.
         let retry_wait = if retry.metadata_updated {
@@ -1839,9 +1835,7 @@ impl ProducerDispatcher {
             self.wait_before_retry(batches, retry_backoff, false).await
         };
         if let Some(error) = retry_wait {
-            if self.metrics_are_enabled() {
-                self.metrics.record_error_for_topic(Some(&retry.topic));
-            }
+            self.record_metrics(|metrics| metrics.record_error_for_topic(Some(&retry.topic)));
             self.release_idempotent_partition_after_definite_error(
                 batches,
                 &retry.topic,
@@ -1861,15 +1855,11 @@ impl ProducerDispatcher {
         error: ProducerError,
     ) -> Option<ProducerError> {
         if *attempts_remaining == 0 {
-            if self.metrics_are_enabled() {
-                self.metrics.record_error();
-            }
+            self.record_metrics(ProducerMetrics::record_error);
             return Some(error);
         }
         *attempts_remaining = attempts_remaining.saturating_sub(1);
-        if self.metrics_are_enabled() {
-            self.metrics.record_retry();
-        }
+        self.record_metrics(ProducerMetrics::record_retry);
         // A wire/connection failure (e.g. a broker that went down) leaves this
         // dispatch's leader metadata stale -- it still points at the broker that
         // just dropped. Unlike a NotLeader broker response, a connection error
@@ -1887,9 +1877,7 @@ impl ProducerDispatcher {
         // timeout here is an AMBIGUOUS loss (the records may have been written) and
         // must bump the idempotent epoch before the next produce.
         if let Some(error) = self.wait_before_retry(batches, retry_backoff, true).await {
-            if self.metrics_are_enabled() {
-                self.metrics.record_error();
-            }
+            self.record_metrics(ProducerMetrics::record_error);
             return Some(error);
         }
         None
@@ -1912,9 +1900,7 @@ impl ProducerDispatcher {
         error: ErrorCode,
     ) -> Option<ProducerError> {
         if *attempts_remaining == 0 {
-            if self.metrics_are_enabled() {
-                self.metrics.record_error_for_topic(Some(topic));
-            }
+            self.record_metrics(|metrics| metrics.record_error_for_topic(Some(topic)));
             self.release_idempotent_partition_after_definite_error(batches, topic, partition)
                 .await;
             return Some(ProducerError::Broker {
@@ -1924,13 +1910,9 @@ impl ProducerDispatcher {
             });
         }
         *attempts_remaining = attempts_remaining.saturating_sub(1);
-        if self.metrics_are_enabled() {
-            self.metrics.record_retry_for_topic(Some(topic));
-        }
+        self.record_metrics(|metrics| metrics.record_retry_for_topic(Some(topic)));
         if let Some(timeout_error) = self.wait_before_retry(batches, retry_backoff, false).await {
-            if self.metrics_are_enabled() {
-                self.metrics.record_error_for_topic(Some(topic));
-            }
+            self.record_metrics(|metrics| metrics.record_error_for_topic(Some(topic)));
             self.release_idempotent_partition_after_definite_error(batches, topic, partition)
                 .await;
             return Some(timeout_error);
@@ -2039,8 +2021,8 @@ impl ProducerDispatcher {
                     return Err(error);
                 },
             };
-            if placement.split && self.metrics_are_enabled() {
-                self.metrics.record_request_split();
+            if placement.split {
+                self.record_metrics(ProducerMetrics::record_request_split);
             }
             let request_base_offset =
                 match request_batch_base_offset(requests, placement.index, &route) {
@@ -2143,18 +2125,15 @@ impl ProducerDispatcher {
         if self.compression.codec == Compression::None {
             return 1.0;
         }
-        let Ok(uncompressed) = encode_record_batch_with_producer_state_at_offset(
-            &batch.records,
-            ProducerCompression::default(),
-            batch.producer_state,
-            base_offset,
-        ) else {
+        let Ok(uncompressed_len) =
+            uncompressed_record_batch_len(&batch.records, batch.producer_state, base_offset)
+        else {
             return 1.0;
         };
-        if uncompressed.is_empty() {
+        if uncompressed_len == 0 {
             return 1.0;
         }
-        encoded_bytes as f64 / uncompressed.len() as f64
+        encoded_bytes as f64 / uncompressed_len as f64
     }
 
     #[cfg(test)]
@@ -2353,10 +2332,9 @@ impl ProducerDispatcher {
                     if response.throttle_time_ms > 0
                         && let Ok(throttle_ms) = u64::try_from(response.throttle_time_ms)
                     {
-                        if self.metrics_are_enabled() {
-                            self.metrics
-                                .record_throttle_time(Duration::from_millis(throttle_ms));
-                        }
+                        self.record_metrics(|metrics| {
+                            metrics.record_throttle_time(Duration::from_millis(throttle_ms));
+                        });
                         tokio::time::sleep(Duration::from_millis(throttle_ms)).await;
                     }
                     let endpoints = node_endpoint_updates(&response);
@@ -2395,9 +2373,7 @@ impl ProducerDispatcher {
             match request_receipts {
                 Ok(mut request_receipts) => receipts.append(&mut request_receipts),
                 Err(ProduceReceiptError::Broker(error)) if is_leadership_error(error.error) => {
-                    if self.metrics_are_enabled() {
-                        self.metrics.record_error();
-                    }
+                    self.record_metrics(ProducerMetrics::record_error);
                     let metadata_updated = updated_leaders.contains(&TopicPartitionKey {
                         topic: error.topic.clone(),
                         partition: error.partition,
@@ -2420,9 +2396,7 @@ impl ProducerDispatcher {
                 Err(ProduceReceiptError::Broker(error))
                     if self.idempotence.enabled && is_idempotent_retry_error(error.error) =>
                 {
-                    if self.metrics_are_enabled() {
-                        self.metrics.record_error();
-                    }
+                    self.record_metrics(ProducerMetrics::record_error);
                     if self.idempotence.transactional_id.is_some() {
                         self.record_transactional_produce_error(
                             error.error,
@@ -2450,9 +2424,7 @@ impl ProducerDispatcher {
                 Err(ProduceReceiptError::Broker(error))
                     if self.idempotence.transactional_id.is_some() =>
                 {
-                    if self.metrics_are_enabled() {
-                        self.metrics.record_error();
-                    }
+                    self.record_metrics(ProducerMetrics::record_error);
                     self.record_transactional_produce_error(
                         error.error,
                         &error.topic,
@@ -2477,9 +2449,7 @@ impl ProducerDispatcher {
                     });
                 },
                 Err(ProduceReceiptError::Broker(error)) => {
-                    if self.metrics_are_enabled() {
-                        self.metrics.record_error();
-                    }
+                    self.record_metrics(ProducerMetrics::record_error);
                     return Err(DispatchError::Producer(ProducerError::Broker {
                         topic: error.topic,
                         partition: error.partition,
@@ -2487,9 +2457,7 @@ impl ProducerDispatcher {
                     }));
                 },
                 Err(ProduceReceiptError::Producer(error)) => {
-                    if self.metrics_are_enabled() {
-                        self.metrics.record_error();
-                    }
+                    self.record_metrics(ProducerMetrics::record_error);
                     return Err(DispatchError::from(error));
                 },
             }
@@ -4262,11 +4230,9 @@ fn pop_dispatchable_broker_request(
             !request_conflicts_with_in_flight(request, in_flight_routes)
         })?
     } else {
-        if pending.is_empty() {
-            return None;
-        }
         0
     };
+    // `VecDeque::remove` is the empty check: it returns `None` for an out-of-range index.
     pending.remove(dispatch_index)
 }
 

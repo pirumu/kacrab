@@ -58,6 +58,30 @@ pub(crate) fn encode_record_batch_with_producer_state_at_offset(
     )
 }
 
+/// Encoded length this batch would have with compression off, without encoding it.
+///
+/// Producer metrics report `compression-rate` as compressed/uncompressed, so the
+/// uncompressed length is needed once per batch per dispatch whenever metrics and
+/// compression are both on. Serializing a second copy of every batch just to read its
+/// length roughly doubled produce-path serialization CPU; the record-batch header is a
+/// constant and each record's encoded length is a varint sum, so the same number falls
+/// out of arithmetic alone.
+pub(crate) fn uncompressed_record_batch_len(
+    records: &[ProducerRecord],
+    producer_state: Option<ProducerBatchState>,
+    base_offset: i64,
+) -> Result<usize> {
+    let (records, timestamp_base) = producer_records(records);
+    let batch = record_batch(
+        records,
+        ProducerCompression::default(),
+        producer_state,
+        base_offset,
+        timestamp_base,
+    );
+    Ok(batch.uncompressed_encoded_len()?)
+}
+
 #[cfg(test)]
 pub(crate) fn encode_record_batch_with_producer_state_at_offset_into(
     records: &[ProducerRecord],
@@ -235,7 +259,7 @@ mod tests {
 
     use super::{
         REQUEST_RECORD_BATCH_BASE_OFFSET, encode_record_batch_with_producer_state_at_offset,
-        encode_record_batch_with_producer_state_at_offset_into,
+        encode_record_batch_with_producer_state_at_offset_into, uncompressed_record_batch_len,
     };
     use crate::producer::{
         AccumulatorConfig, ProducerBatchState, ProducerCompression, ProducerIdentity,
@@ -408,6 +432,41 @@ mod tests {
             Bytes::from_static(b"null-header")
         );
         assert_eq!(decoded.records[1].headers[0].value, None);
+    }
+
+    #[test]
+    fn uncompressed_record_batch_len_equals_the_encoded_uncompressed_length() {
+        // The metrics path swapped a full second encode for this arithmetic, so it has to
+        // produce the *same* number, not a close one — a divergence would silently skew
+        // every reported compression-rate.
+        for records in [
+            vec![ProducerRecord::new("orders", 0).value(Bytes::from_static(b"v"))],
+            vec![
+                ProducerRecord::new("orders", 0)
+                    .key(Bytes::from_static(b"k"))
+                    .value(Bytes::from_static(
+                        b"a longer value that crosses a varint boundary",
+                    )),
+                ProducerRecord::new("orders", 0).value(Bytes::from_static(b"")),
+                ProducerRecord::new("orders", 0),
+            ],
+        ] {
+            for base_offset in [0_i64, 1, 300] {
+                let encoded = encode_record_batch_with_producer_state_at_offset(
+                    &records,
+                    ProducerCompression::default(),
+                    None,
+                    base_offset,
+                )
+                .expect("uncompressed batch should encode");
+
+                assert_eq!(
+                    uncompressed_record_batch_len(&records, None, base_offset)
+                        .expect("length should compute"),
+                    encoded.len(),
+                );
+            }
+        }
     }
 
     #[cfg(feature = "lz4")]
