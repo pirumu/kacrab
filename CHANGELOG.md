@@ -121,6 +121,19 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **`list_consumer_groups` reported share, streams, and connect groups as consumer
+  groups.** The broker's `ListGroups` response carries every group it coordinates
+  whatever its protocol, and Java's `listConsumerGroups` filters that response down
+  to the consumer protocol (`KafkaAdminClient.maybeAddConsumerGroup` keeps a group
+  only when its protocol type is `consumer` or empty, the latter being a simple
+  consumer group). kacrab kept all of them, so a cluster running KIP-932 share
+  groups or Kafka Streams saw those groups listed as consumer groups — and then
+  failed when they were fed back into a consumer-group operation.
+
+  `list_consumer_groups` now applies the same filter. `list_groups`, the deliberate
+  "any group type" listing, is unchanged and still returns everything; the two now
+  share one broker fan-out instead of holding byte-identical copies of it.
+
 - **A leadership error on one partition dropped the whole cluster metadata cache.**
   `WireClient::invalidate_topic_partition` documented partition-scoped
   invalidation but discarded the entire `ClusterMetadata` snapshot, so a single
