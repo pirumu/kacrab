@@ -158,6 +158,12 @@ release date and links to relevant pull requests or issues.
   a broker negotiating v4 or lower (before 2.5) rejected the request and no member
   could complete a rebalance. Both fields are ignorable and are now dropped below v5.
 
+- **`Fetch` always carried `client.rack`, which only exists from v11.** A consumer
+  configured for rack-aware fetching (KIP-392) sent its `rack_id` at every
+  negotiated `Fetch` version, so a broker older than 2.4 rejected every fetch
+  instead of simply serving from the leader. The field is ignorable and is now
+  dropped below v11, degrading rack-aware fetching to leader fetching.
+
 - **`list_consumer_groups` reported share, streams, and connect groups as consumer
   groups.** The broker's `ListGroups` response carries every group it coordinates
   whatever its protocol, and Java's `listConsumerGroups` filters that response down

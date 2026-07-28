@@ -160,6 +160,27 @@ impl ResponseMessage for ListOffsetsResponseData {
     }
 }
 
+// `Fetch` carries the consumer's `rack_id` only from v11 (KIP-392, rack-aware
+// follower fetching). Kafka marks the field ignorable, so a broker negotiating
+// an older version is sent the fetch without it (see `normalize_fetch_request`)
+// rather than one its encoder rejects. The response is pass-through.
+impl RequestMessage for FetchRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_fetch_request(self, version).write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_fetch_request(self, version).encoded_len(version)
+    }
+}
+
+impl ResponseMessage for FetchResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
 // `SyncGroup` carries the assignor's `protocol_type`/`protocol_name` only from
 // v5, where the coordinator uses them to fence a member speaking a different
 // protocol. Kafka marks both ignorable, so an older negotiated version is sent
@@ -260,7 +281,6 @@ impl_passthrough_message! {
 // KIP-848 consumer group protocol (ConsumerGroupHeartbeat). All are pure
 // pass-through codecs, like the admin block above.
 impl_passthrough_message! {
-    FetchRequestData => FetchResponseData,
     JoinGroupRequestData => JoinGroupResponseData,
     HeartbeatRequestData => HeartbeatResponseData,
     OffsetForLeaderEpochRequestData => OffsetForLeaderEpochResponseData,
@@ -330,6 +350,24 @@ fn normalize_list_offsets_request(
     }
     let mut normalized = request.clone();
     normalized.timeout_ms = 0;
+    Cow::Owned(normalized)
+}
+
+/// First `Fetch` version carrying the consumer's `rack_id` (KIP-392).
+const FETCH_RACK_ID_MIN_VERSION: i16 = 11;
+
+/// Drop the consumer's `rack_id` for a negotiated `Fetch` `version` that does not
+/// carry it.
+///
+/// Kafka marks the field ignorable — a broker too old for rack-aware fetching
+/// serves the leader's partitions as it always did — so `client.rack` degrades to
+/// leader fetching instead of failing the fetch outright.
+fn normalize_fetch_request(request: &FetchRequestData, version: i16) -> Cow<'_, FetchRequestData> {
+    if version >= FETCH_RACK_ID_MIN_VERSION || request.rack_id == KafkaString::default() {
+        return Cow::Borrowed(request);
+    }
+    let mut normalized = request.clone();
+    normalized.rack_id = KafkaString::default();
     Cow::Owned(normalized)
 }
 
@@ -403,7 +441,10 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use kacrab_protocol::{
         KafkaString,
-        generated::{FindCoordinatorRequestData, ListOffsetsRequestData, SyncGroupRequestData},
+        generated::{
+            FetchRequestData, FindCoordinatorRequestData, ListOffsetsRequestData,
+            SyncGroupRequestData,
+        },
     };
 
     use super::RequestMessage;
@@ -576,6 +617,52 @@ mod tests {
             decoded.protocol_name,
             Some(KafkaString::from("range".to_owned()))
         );
+    }
+
+    #[test]
+    fn fetch_request_drops_the_rack_id_below_its_version() {
+        let request = FetchRequestData {
+            replica_id: -1,
+            max_wait_ms: 500,
+            rack_id: KafkaString::from("rack-1".to_owned()),
+            ..FetchRequestData::default()
+        };
+
+        for version in 4..=10 {
+            let mut buf = BytesMut::new();
+            request
+                .write_request(&mut buf, version)
+                .expect("fetch request should encode for the negotiated version");
+            assert_eq!(
+                RequestMessage::encoded_len(&request, version).expect("encoded length"),
+                buf.len()
+            );
+            let mut encoded = buf.freeze();
+            let decoded =
+                FetchRequestData::read(&mut encoded, version).expect("fetch request should decode");
+            assert_eq!(decoded.max_wait_ms, 500);
+            assert_eq!(decoded.rack_id, KafkaString::default());
+        }
+    }
+
+    #[test]
+    fn fetch_request_keeps_the_rack_id_from_its_version() {
+        let request = FetchRequestData {
+            replica_id: -1,
+            max_wait_ms: 500,
+            rack_id: KafkaString::from("rack-1".to_owned()),
+            ..FetchRequestData::default()
+        };
+        let mut buf = BytesMut::new();
+
+        request
+            .write_request(&mut buf, 11)
+            .expect("fetch request should encode");
+
+        let mut encoded = buf.freeze();
+        let decoded =
+            FetchRequestData::read(&mut encoded, 11).expect("fetch request should decode");
+        assert_eq!(decoded.rack_id, KafkaString::from("rack-1".to_owned()));
     }
 
     #[test]
