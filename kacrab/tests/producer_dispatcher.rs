@@ -16,10 +16,11 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
+#[cfg(feature = "lz4")]
+use kacrab::producer::ProducerCompression;
 use kacrab::{
     producer::{
-        Producer, ProducerCompression, ProducerInterceptor, ProducerPartitioner, ProducerRecord,
-        RecordMetadata,
+        Producer, ProducerInterceptor, ProducerPartitioner, ProducerRecord, RecordMetadata,
         internals::{
             AccumulatorConfig, ProducerDispatcher, ProducerIdempotenceConfig,
             ProducerRuntimeConfig, SharedAccumulator,
