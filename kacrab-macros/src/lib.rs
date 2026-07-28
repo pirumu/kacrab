@@ -185,7 +185,7 @@ fn expand_config(input: ConfigInput) -> Result<proc_macro2::TokenStream> {
                 properties: &::kacrab::config::Properties,
                 unknown_key_policy: ::kacrab::config::UnknownKeyPolicy,
             ) -> ::core::result::Result<(#name, ::kacrab::config::WarningReport), ::kacrab::config::ConfigError> {
-                let report = ::kacrab::config::validate_properties(
+                let mut report = ::kacrab::config::validate_properties(
                     #client_tokens,
                     properties,
                     unknown_key_policy,
@@ -193,10 +193,21 @@ fn expand_config(input: ConfigInput) -> Result<proc_macro2::TokenStream> {
                 for (key, _value) in properties.iter() {
                     let key = key.as_str();
                     if !::core::matches!(key, #(#key_matches)|*) {
-                        return ::core::result::Result::Err(::kacrab::config::ConfigError::UnsupportedKey {
-                            client: #client_tokens,
-                            key: key.into(),
-                        });
+                        match unknown_key_policy {
+                            ::kacrab::config::UnknownKeyPolicy::Deny => {
+                                return ::core::result::Result::Err(::kacrab::config::ConfigError::UnsupportedKey {
+                                    client: #client_tokens,
+                                    key: key.into(),
+                                });
+                            },
+                            // Keys absent from the catalog were already warned as unknown by
+                            // `validate_properties`; warning them again here would double-report.
+                            ::kacrab::config::UnknownKeyPolicy::Report => {
+                                if ::kacrab::config::find_config(#client_tokens, key).is_some() {
+                                    report.push_unsupported_key(#client_tokens, key);
+                                }
+                            },
+                        }
                     }
                 }
                 let mut builder = Self::builder();

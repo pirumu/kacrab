@@ -60,13 +60,24 @@ fn show_client_config_facade() -> Result<(), String> {
         producer.enable_idempotence
     );
 
-    let (_producer, report) = config
+    // Lenient parsing: unknown keys and catalogued keys without a typed field
+    // become structured warnings instead of errors, so a config copied from a
+    // Java client can be adopted incrementally. (Strict `producer_config()`
+    // would reject both extra keys below with a `ConfigError`.)
+    let lenient = ClientConfig::new()
+        .set("bootstrap.servers", "127.0.0.1:9092")
+        .set("metrics.sample.window.ms", "30000")
+        .set("some.unknown.key", "value");
+    let (_producer, report) = lenient
         .producer_config_with_warnings(UnknownKeyPolicy::Report)
         .map_err(|error| error.to_string())?;
     println!(
         "warnings collected with report policy: {}",
         report.warnings().len()
     );
+    for warning in report.warnings() {
+        println!("  warning: {}", warning.message);
+    }
     println!();
 
     Ok(())

@@ -121,6 +121,46 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **The gate-label support map is now generated, not hand-maintained.** The
+  feature-aware validation below originally shipped with a hand-written
+  label→feature map in `kacrab/src/config.rs`, one more place config knowledge
+  could drift. `kacrab-codegen` now emits `gate_label_supported` into the
+  generated catalog from the same `GATE_LABEL_FEATURES` table that mints the
+  labels in `classify_status`, and catalog generation fails with
+  `UnmappedGateLabel` on any label missing from that table — so a new gate
+  label cannot reach the runtime as silently-unsupported.
+
+- **`UnknownKeyPolicy::Report` could never actually return a report.** The
+  `kafka_config!`-generated `from_properties` ran an unconditional
+  "every key must have a typed field" loop *after* `validate_properties`, with no
+  branch on the policy. Lenient parsing therefore collected its warnings and then
+  hard-errored with `ConfigError::UnsupportedKey` on the first key without a typed
+  field — so `ClientConfig::producer_config_with_warnings(Report)` and the whole
+  `WarningReport` plumbing behind it were dead code, and lenient mode was in
+  practice stricter than strict mode's own contract.
+
+  The loop now branches: `Deny` errors exactly as before, and `Report` records a
+  `push_unsupported_key` warning and keeps parsing the typed keys. Keys absent from
+  the catalog are left alone there — `validate_properties` has already warned them
+  as unknown, and warning them twice would be its own regression.
+
+- **Strict property validation silently accepted feature-gated security keys.**
+  `validate_properties` matched `UnknownKeyPolicy` with the arms inverted for
+  `ConfigStatus::FeatureGated`/`Future`: lenient (`Report`) mode returned
+  `ConfigError::UnsupportedFeature`, while strict (`Deny`) mode — the mode
+  `ClientConfig::producer_config` and friends use — accepted the key and dropped
+  it. Supplying `ssl.truststore.location` to a build with no TLS provider
+  therefore produced a config that connected without the trust material the
+  caller asked for, and the stricter setting was the one that failed open.
+
+  Gate handling is now feature-aware and policy-independent. A gated key whose
+  backing feature is not compiled is an error in *both* modes; a gated key that
+  is backed by compiled code is accepted with no warning, because it has a typed
+  field and parses downstream. The catalog's gate labels are metadata rather than
+  cargo feature names — `tls-rustls` predates the
+  `aws-lc-rs-tls`/`pure-rust-tls` split and names no feature at all — so they are
+  mapped explicitly, and an unrecognised label fails closed.
+
 - **Two pipelined idempotent retries to one partition could re-send out of
   sequence order.** ([#2]) After a broker disconnect, each in-flight dispatch
   retried inside its own task, and an in-task retry re-enqueues with an

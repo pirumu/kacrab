@@ -10371,3 +10371,20 @@ pub const fn catalog_for(client: ClientKind) -> &'static [ConfigEntry] {
         ClientKind::Admin => ADMIN_CONFIGS,
     }
 }
+/// Reports whether the compiled feature set backs a catalog gate label.
+///
+/// Generated from `GATE_LABEL_FEATURES` in
+/// `kacrab-codegen/src/kafka_config/rust_catalog.rs`; generation fails
+/// on any gate label missing from that table, so the fallback arm only
+/// guards labels that never appear in this catalog.
+#[must_use]
+pub(crate) fn gate_label_supported(label: &str) -> bool {
+    const SASL_SUPPORTED: bool = true;
+    const TLS_RUSTLS_SUPPORTED: bool =
+        cfg!(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"));
+    match label {
+        "sasl" => SASL_SUPPORTED,
+        "tls-rustls" => TLS_RUSTLS_SUPPORTED,
+        _ => false,
+    }
+}

@@ -6,6 +6,13 @@
     reason = "Public config coverage uses table-like assertions and long fixture builders."
 )]
 
+// Only the producer and the TLS-mapping tests build configs through this facade.
+#[cfg(any(
+    feature = "producer",
+    feature = "aws-lc-rs-tls",
+    feature = "pure-rust-tls"
+))]
+use kacrab::config::ClientConfig;
 #[cfg(feature = "producer")]
 use kacrab::producer::{
     ProducerCompression,
@@ -13,9 +20,8 @@ use kacrab::producer::{
 };
 use kacrab::{
     config::{
-        AdminConfig, ByteSize, ClientConfig, ClientKind, ConfigError, ConfigStatus, ConsumerConfig,
-        DurationMs, ProducerConfig, Properties, TcpCongestionControl, UnknownKeyPolicy,
-        catalog_for,
+        AdminConfig, ByteSize, ClientKind, ConfigError, ConfigStatus, ConsumerConfig, DurationMs,
+        ProducerConfig, Properties, TcpCongestionControl, UnknownKeyPolicy, catalog_for,
     },
     wire,
 };
@@ -442,6 +448,9 @@ fn client_config_maps_runtime_socket_overlay_to_wire_connection_config() {
     assert_eq!(config.buffer_pool_capacity, 128);
 }
 
+// `ssl.*` keys are feature-gated in both policies, so this Deny-mode mapping is
+// only reachable when a TLS provider is compiled in.
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 #[test]
 fn client_config_maps_java_security_properties_to_wire_connection_config() {
     let producer = ClientConfig::new()
@@ -535,6 +544,9 @@ fn client_config_maps_java_security_properties_to_wire_connection_config() {
     assert_java_oauth_config(&config);
 }
 
+// `ssl.*` keys are feature-gated in both policies, so this Deny-mode mapping is
+// only reachable when a TLS provider is compiled in.
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 #[test]
 fn consumer_and_admin_configs_map_java_security_properties_to_wire_connection_config() {
     let consumer = ClientConfig::new()
@@ -806,6 +818,7 @@ fn consumer_and_admin_configs_map_java_security_properties_to_wire_connection_co
     assert!((consumer_connection.sasl.login_refresh_window_jitter - 0.10).abs() < f64::EPSILON);
 }
 
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 fn assert_java_tls_config(config: &wire::ConnectionConfig) {
     assert_eq!(
         config.tls.truststore_location.as_deref(),
@@ -854,6 +867,7 @@ fn assert_java_tls_config(config: &wire::ConnectionConfig) {
     );
 }
 
+#[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 fn assert_java_oauth_config(config: &wire::ConnectionConfig) {
     assert_eq!(
         config.sasl.oauthbearer_token_endpoint_url.as_deref(),
