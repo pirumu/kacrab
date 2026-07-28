@@ -273,6 +273,15 @@ jobs:
             --ignored --test-threads=1 --nocapture \
             --skip real_kafka_consumer_protocol_kip848
 
+      # Consumer ops suite: manual assign, seek, pause/resume,
+      # offsets_for_times, headers, static membership, auto.offset.reset, and
+      # enforce_rebalance — all classic-protocol operations every matrix
+      # broker serves.
+      - name: Consumer ops suite
+        id: consumer_ops
+        continue-on-error: ${{ matrix.leg.experimental }}
+        run: cargo test -p kacrab --all-features --test real_kafka_consumer_ops -- --ignored --test-threads=1 --nocapture
+
       # Compression is a client-side record-batch concern that every broker in
       # the matrix stores unchanged, so the produce->store->CLI-consume round
       # trip is core. The CLI-produces->kacrab-decodes half is 4.3.0-only for
@@ -297,6 +306,17 @@ jobs:
         run: cargo test -p kacrab --all-features --test real_kafka_admin -- --ignored --test-threads=1 --nocapture real_kafka_admin_smoke
 
       # --- full suite: 4.3.0 only ----------------------------------------
+
+      # Admin behavior suite: state read back after every mutation (topic
+      # lifecycle, incremental config alter, group-offset alter/delete, live
+      # transaction describes) rather than wire-ok smoke. Full-leg only: the
+      # cluster/quorum/features assertions pin the 4.3.0 single-broker KRaft
+      # fixture's exact shape, which older brokers legitimately answer
+      # differently.
+      - name: Admin behavior suite
+        id: admin_behavior
+        if: matrix.leg.suite == 'full'
+        run: cargo test -p kacrab --all-features --test real_kafka_admin_behavior -- --ignored --test-threads=1 --nocapture
 
       # KIP-848 needs ConsumerGroupHeartbeat v1 (broker >= 4.0); it is the test
       # the core leg skips above.
@@ -336,9 +356,11 @@ jobs:
             echo "| producer | ${{ steps.producer.outcome }} |"
             echo "| producer (transactions) | ${{ steps.producer_txn.outcome }} |"
             echo "| consumer (classic) | ${{ steps.consumer.outcome }} |"
+            echo "| consumer (ops) | ${{ steps.consumer_ops.outcome }} |"
             echo "| compression (round-trip) | ${{ steps.compression_core.outcome }} |"
             echo "| compression (full) | ${{ steps.compression_full.outcome }} |"
             echo "| admin smoke | ${{ steps.admin_smoke.outcome }} |"
+            echo "| admin behavior | ${{ steps.admin_behavior.outcome }} |"
             echo "| consumer (KIP-848) | ${{ steps.consumer_kip848.outcome }} |"
             echo "| share consumer | ${{ steps.share.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -352,8 +374,10 @@ jobs:
           || steps.producer.outcome == 'failure'
           || steps.producer_txn.outcome == 'failure'
           || steps.consumer.outcome == 'failure'
+          || steps.consumer_ops.outcome == 'failure'
           || steps.compression_core.outcome == 'failure'
           || steps.admin_smoke.outcome == 'failure'
+          || steps.admin_behavior.outcome == 'failure'
         run: docker logs kacrab-kafka --tail 300
 
   admin-extended:
