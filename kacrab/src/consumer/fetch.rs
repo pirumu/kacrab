@@ -282,9 +282,13 @@ pub(super) struct FetchContext<'a> {
     pub wire: &'a WireClient,
     pub config: &'a ConsumerRuntimeConfig,
     pub metadata: &'a ClusterMetadata,
-    /// The broker's max long-poll wait for this fetch — `fetch.max.wait.ms`
-    /// clamped to the caller's remaining `poll` budget so a short `poll` timeout
-    /// is honoured.
+    /// How long the broker may hold this fetch waiting for `fetch.min.bytes`.
+    ///
+    /// The consumer passes `fetch.max.wait.ms` unclamped: its fetch runs on a
+    /// background task while `poll` serves buffered records, so a long broker
+    /// wait never delays a `poll` return and clamping it would only make the
+    /// broker answer emptier fetches. The share consumer, whose `ShareFetch` is
+    /// inline, does clamp it against the remaining poll budget.
     pub max_wait_ms: i32,
 }
 

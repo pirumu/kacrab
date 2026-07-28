@@ -324,10 +324,6 @@ pub(super) struct JoinRequest<'a> {
     pub owned: &'a [TopicPartition],
 }
 
-/// Drive the classic `JoinGroup` handshake to completion, retrying as needed: it
-/// adopts the coordinator-assigned member id on `MEMBER_ID_REQUIRED`, and resets
-/// to a fresh member id on `UNKNOWN_MEMBER_ID`/`ILLEGAL_GENERATION`, looping until
-/// the broker accepts the join or returns another error.
 /// Bound for `JoinGroup`/`SyncGroup`: the coordinator legitimately holds
 /// these responses until the rebalance settles (up to the rebalance timeout),
 /// so the plain `request.timeout.ms` (30s) would expire mid-join, and the
@@ -339,6 +335,10 @@ fn rebalance_rpc_timeout(rebalance_timeout_ms: i32) -> std::time::Duration {
     std::time::Duration::from_millis(clamped.saturating_add(5_000))
 }
 
+/// Drive the classic `JoinGroup` handshake to completion, retrying as needed: it
+/// adopts the coordinator-assigned member id on `MEMBER_ID_REQUIRED`, and resets
+/// to a fresh member id on `UNKNOWN_MEMBER_ID`/`ILLEGAL_GENERATION`, looping until
+/// the broker accepts the join or returns another error.
 pub(super) async fn join_group(
     context: &GroupContext<'_>,
     join: &JoinRequest<'_>,

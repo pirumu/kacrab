@@ -547,25 +547,18 @@ impl Consumer {
         // commit could be overwritten by an older one still in the queue.
         self.drain_async_commits().await;
         let (generation_id, member_id) = self.commit_identity();
-        let mut refound = false;
-        let result = loop {
-            let coordinator = self.ensure_coordinator(&group_id).await?;
-            let attempt = coordinator::commit_offsets(
-                &self.wire,
-                &coordinator::CommitTarget {
+        let result = self
+            .with_coordinator_retry(&group_id, |wire, coordinator| {
+                let target = coordinator::CommitTarget {
                     coordinator_id: coordinator,
                     group_id: &group_id,
                     generation_id,
                     member_id: &member_id,
-                },
-                &offsets,
-            )
+                };
+                let offsets = &offsets;
+                async move { coordinator::commit_offsets(&wire, &target, offsets).await }
+            })
             .await;
-            match attempt {
-                Err(error) if !refound && self.note_coordinator_error(&error) => refound = true,
-                outcome => break outcome,
-            }
-        };
         if result.is_ok() {
             self.metrics.record_commit();
             self.interceptors.on_commit(&offsets);
@@ -667,15 +660,13 @@ impl Consumer {
             return Ok(HashMap::new());
         }
         let group_id = self.require_group_id()?;
-        let mut refound = false;
-        loop {
-            let coordinator = self.ensure_coordinator(&group_id).await?;
-            match coordinator::fetch_committed(&self.wire, coordinator, &group_id, partitions).await
-            {
-                Err(error) if !refound && self.note_coordinator_error(&error) => refound = true,
-                outcome => return outcome,
+        self.with_coordinator_retry(&group_id, |wire, coordinator| {
+            let group_id = &group_id;
+            async move {
+                coordinator::fetch_committed(&wire, coordinator, group_id, partitions).await
             }
-        }
+        })
+        .await
     }
 
     /// This consumer's group metadata. For a manual-assignment consumer the
@@ -1165,6 +1156,39 @@ impl Consumer {
         }
     }
 
+    /// Run one coordinator RPC, and run it a second time against a freshly
+    /// discovered coordinator if the first attempt said the coordinator moved.
+    ///
+    /// Retry *once*, not in a loop: `find_coordinator` already retries the
+    /// loading/unavailable codes under `retry.backoff.ms`, so a second failure
+    /// here is a real one and belongs to the caller. The bound also keeps a
+    /// coordinator that answers `NOT_COORDINATOR` for a different reason —
+    /// a fenced generation, say — from becoming an unbounded spin.
+    ///
+    /// `attempt` is a plain `FnMut` returning one concrete future type, and takes
+    /// the wire client by value (a cheap `Arc` clone) rather than by reference.
+    /// An `AsyncFnMut` bound would be higher-ranked over the borrow it returns,
+    /// and a higher-ranked async bound defeats `Send` inference for every caller
+    /// that `tokio::spawn`s a consumer call.
+    async fn with_coordinator_retry<T, F, Fut>(
+        &mut self,
+        group_id: &str,
+        mut attempt: F,
+    ) -> Result<T>
+    where
+        F: FnMut(WireClient, i32) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let mut refound = false;
+        loop {
+            let coordinator = self.ensure_coordinator(group_id).await?;
+            match attempt(self.wire.clone(), coordinator).await {
+                Err(error) if !refound && self.note_coordinator_error(&error) => refound = true,
+                outcome => return outcome,
+            }
+        }
+    }
+
     async fn offsets_at_timestamp(
         &self,
         partitions: &[TopicPartition],
@@ -1650,25 +1674,18 @@ impl Consumer {
         self.drain_async_commits().await;
         let group_id = self.config.group_id.clone();
         let (generation_id, member_id) = self.commit_identity();
-        let mut refound = false;
-        let result = loop {
-            let coordinator = self.ensure_coordinator(&group_id).await?;
-            let attempt = coordinator::commit_offsets(
-                &self.wire,
-                &coordinator::CommitTarget {
+        let result = self
+            .with_coordinator_retry(&group_id, |wire, coordinator| {
+                let target = coordinator::CommitTarget {
                     coordinator_id: coordinator,
                     group_id: &group_id,
                     generation_id,
                     member_id: &member_id,
-                },
-                &offsets,
-            )
+                };
+                let offsets = &offsets;
+                async move { coordinator::commit_offsets(&wire, &target, offsets).await }
+            })
             .await;
-            match attempt {
-                Err(error) if !refound && self.note_coordinator_error(&error) => refound = true,
-                outcome => break outcome,
-            }
-        };
         if result.is_ok() {
             self.metrics.record_commit();
             self.interceptors.on_commit(&offsets);
@@ -1711,7 +1728,7 @@ impl Consumer {
     /// broker reports was truncated below it (KIP-320). Positions confirmed valid
     /// have their recorded epoch advanced so they are not re-validated.
     async fn validate_positions(&mut self, metadata: &ClusterMetadata) -> Result<()> {
-        let mut to_validate: Vec<(TopicPartition, FetchPosition, i32)> = Vec::new();
+        let mut to_validate: Vec<offsets::PositionToValidate> = Vec::new();
         for partition in self.subscription.assigned_partitions() {
             let Some(position) = self.subscription.position(&partition) else {
                 continue;
@@ -1724,7 +1741,11 @@ impl Consumer {
             if let Some(current) = current
                 && current > fenced
             {
-                to_validate.push((partition, position, current));
+                to_validate.push(offsets::PositionToValidate {
+                    partition,
+                    position,
+                    current_leader_epoch: current,
+                });
             }
         }
         if to_validate.is_empty() {
@@ -1754,21 +1775,21 @@ impl Consumer {
     }
 
     async fn reset_positions(&mut self, metadata: &ClusterMetadata) -> Result<()> {
-        let need = self.subscription.partitions_needing_reset();
+        let mut need = self.subscription.partitions_needing_reset();
         if need.is_empty() {
             return Ok(());
         }
         let timestamp = match self.subscription.default_reset() {
             AutoOffsetReset::Earliest => EARLIEST_TIMESTAMP,
             AutoOffsetReset::Latest => LATEST_TIMESTAMP,
+            // `need` is non-empty here — the empty case returned above — so
+            // `auto.offset.reset=none` always has a partition to name.
             AutoOffsetReset::None => {
-                if let Some(partition) = need.first() {
-                    return Err(ConsumerError::NoOffsetForPartition {
-                        topic: partition.topic.clone(),
-                        partition: partition.partition,
-                    });
-                }
-                return Ok(());
+                let partition = need.swap_remove(0);
+                return Err(ConsumerError::NoOffsetForPartition {
+                    topic: partition.topic,
+                    partition: partition.partition,
+                });
             },
         };
         let entries: Vec<(TopicPartition, i64)> = need

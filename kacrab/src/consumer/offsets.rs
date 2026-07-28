@@ -167,22 +167,36 @@ pub(super) fn partition_leader_epoch(
         .filter(|epoch| *epoch >= 0)
 }
 
+/// One position to validate against its leader's epoch history.
+#[derive(Debug, Clone)]
+pub(super) struct PositionToValidate {
+    /// The partition the position belongs to.
+    pub partition: TopicPartition,
+    /// Where the consumer currently sits, and the epoch it was resolved under.
+    pub position: FetchPosition,
+    /// The leader epoch metadata reports as current — newer than the position's,
+    /// which is what made this partition worth validating.
+    pub current_leader_epoch: i32,
+}
+
 /// Validate fetch positions against their leaders via `OffsetForLeaderEpoch`
-/// (KIP-320). Each entry is `(partition, position, current_leader_epoch)`. A
-/// leader whose epoch history ends below our position signals truncation. Errors
-/// for individual partitions are skipped (retried on the next poll).
+/// (KIP-320). A leader whose epoch history ends below our position signals
+/// truncation. Errors for individual partitions are skipped (retried on the next
+/// poll).
 pub(super) async fn validate_offsets(
     wire: &WireClient,
     metadata: &ClusterMetadata,
-    entries: &[(TopicPartition, FetchPosition, i32)],
+    entries: &[PositionToValidate],
 ) -> Result<HashMap<TopicPartition, PositionValidation>> {
     if entries.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let mut by_leader: HashMap<i32, Vec<(TopicPartition, FetchPosition, i32)>> = HashMap::new();
+    let mut by_leader: HashMap<i32, Vec<PositionToValidate>> = HashMap::new();
     for entry in entries {
-        let Some(leader) = partition_leader(metadata, &entry.0.topic, entry.0.partition) else {
+        let Some(leader) =
+            partition_leader(metadata, &entry.partition.topic, entry.partition.partition)
+        else {
             continue;
         };
         by_leader.entry(leader).or_default().push(entry.clone());
@@ -205,18 +219,16 @@ pub(super) async fn validate_offsets(
                     continue;
                 }
                 let tp = TopicPartition::new(topic.topic.as_str().to_owned(), partition.partition);
-                let Some(position) = leader_entries
-                    .iter()
-                    .find(|entry| entry.0 == tp)
-                    .map(|entry| entry.1)
-                else {
+                // One lookup, not two: the entry carries both the position and
+                // the epoch it was validated against.
+                let Some(entry) = leader_entries.iter().find(|entry| entry.partition == tp) else {
                     continue;
                 };
                 let outcome = classify_epoch_end(
                     partition.end_offset,
                     partition.leader_epoch,
-                    position,
-                    entry_current_epoch(&leader_entries, &tp),
+                    entry.position,
+                    entry.current_leader_epoch,
                 );
                 let _previous = out.insert(tp, outcome);
             }
@@ -251,30 +263,16 @@ const fn classify_epoch_end(
     }
 }
 
-/// The `current_leader_epoch` we asked to validate a partition against.
-fn entry_current_epoch(
-    entries: &[(TopicPartition, FetchPosition, i32)],
-    partition: &TopicPartition,
-) -> i32 {
-    entries
-        .iter()
-        .find(|entry| &entry.0 == partition)
-        .map_or(-1, |entry| entry.2)
-}
-
-/// Build `OffsetForLeaderEpoch` topics from `(partition, position, current_epoch)`
-/// entries.
-fn leader_epoch_topics(
-    entries: &[(TopicPartition, FetchPosition, i32)],
-) -> Vec<OffsetForLeaderTopic> {
+/// Build `OffsetForLeaderEpoch` topics from the positions to validate.
+fn leader_epoch_topics(entries: &[PositionToValidate]) -> Vec<OffsetForLeaderTopic> {
     group_by_topic(
-        entries.iter().map(|(partition, position, current_epoch)| {
+        entries.iter().map(|entry| {
             (
-                partition.topic.clone(),
+                entry.partition.topic.clone(),
                 OffsetForLeaderPartition {
-                    partition: partition.partition,
-                    current_leader_epoch: *current_epoch,
-                    leader_epoch: position.leader_epoch.unwrap_or(-1),
+                    partition: entry.partition.partition,
+                    current_leader_epoch: entry.current_leader_epoch,
+                    leader_epoch: entry.position.leader_epoch.unwrap_or(-1),
                     _unknown_tagged_fields: Vec::new(),
                 },
             )
@@ -343,12 +341,16 @@ mod tests {
     #[test]
     fn leader_epoch_topics_group_partitions_and_carry_epochs() {
         let entries = vec![
-            (
-                TopicPartition::new("t", 0),
-                FetchPosition::new(10, Some(4)),
-                6,
-            ),
-            (TopicPartition::new("t", 1), FetchPosition::new(20, None), 6),
+            PositionToValidate {
+                partition: TopicPartition::new("t", 0),
+                position: FetchPosition::new(10, Some(4)),
+                current_leader_epoch: 6,
+            },
+            PositionToValidate {
+                partition: TopicPartition::new("t", 1),
+                position: FetchPosition::new(20, None),
+                current_leader_epoch: 6,
+            },
         ];
         let topics = leader_epoch_topics(&entries);
         assert_eq!(topics.len(), 1);
