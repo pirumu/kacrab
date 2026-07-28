@@ -11,6 +11,25 @@ release date and links to relevant pull requests or issues.
 
 ### Changed — breaking
 
+- **The 26 `Metrics::sensor_add_*` methods collapsed into one
+  `sensor_add_stat(sensor, metric_name, kind, config)`.** The matrix differed
+  only in which statistic it selected and in whether it built the
+  `MetricConfig` from a bare `MetricQuota`, so the statistic is now a value —
+  the new `StatKind` enum — and the config is always passed explicitly.
+  `sensor_add_value`, `sensor_add_avg`, `sensor_add_max`, and `sensor_add_meter`
+  remain as thin wrappers because kacrab's own Kafka-named producer registry
+  calls them; the other 22 are removed. Translate a call by passing the matching
+  `StatKind` and `MetricConfig::new()`, adding `.with_quota(quota)` where you
+  used a `*_with_quota` variant.
+
+  Two behaviours changed with it. `StatKind::TokenBucket { quota }` now carries
+  its quota, because `sensor_add_token_bucket` used to accept a config without
+  one and register a bucket that could never move — `record` returned early and
+  the metric read `f64::MAX` forever, a silent misconfiguration with no error
+  and no way to notice. And `Frequencies.forBooleanValues`
+  (`sensor_add_boolean_frequencies`) is removed along with the frequency stat
+  behind it; nothing in kacrab produced a frequency metric.
+
 - **The TLS crypto provider is now an explicit feature.** `rustls` no longer comes
   with a backend baked in. Pick one: `aws-lc-rs-tls` reproduces the previous
   behaviour, and `pure-rust-tls` puts `rustls` on `ring`, which drops `aws-lc-sys`

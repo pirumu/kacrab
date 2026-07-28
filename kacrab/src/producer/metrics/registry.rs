@@ -565,30 +565,53 @@ struct SensorStat {
     state: SensorStatState,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum SensorStatRecordMode {
+/// The statistic a sensor keeps for one metric, mirroring Kafka's `MeasurableStat`
+/// implementations.
+///
+/// This is the single axis that used to be encoded in 26 near-identical
+/// `sensor_add_*` methods; pass it to [`Metrics::sensor_add_stat`] instead.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StatKind {
+    /// Running sum of every recorded value (Kafka `CumulativeSum`).
     Total,
+    /// The value of the most recent record (Kafka `Value`).
     Value,
+    /// Mean of every recorded value, `NaN` before the first record (Kafka `Avg`).
     Avg,
+    /// Number of `record` calls, ignoring the recorded values (Kafka `CumulativeCount`).
     Count,
+    /// Smallest recorded value, `NaN` before the first record (Kafka `Min`).
     Min,
+    /// Largest recorded value, `NaN` before the first record (Kafka `Max`).
     Max,
+    /// Per-second rate over the config's sample windows (Kafka `Rate`).
     Rate,
-    TokenBucket,
+    /// Token bucket refilling at `quota` tokens per second (Kafka `TokenBucket`).
+    TokenBucket {
+        /// Refill rate in tokens per second. The burst is
+        /// `samples * time_window * bound`, matching Kafka `TokenBucket`.
+        ///
+        /// The quota lives in the variant rather than only in the [`MetricConfig`]
+        /// because a token bucket without one is permanently broken and silently
+        /// so: `record` returns without touching the bucket and `measure` reports
+        /// `f64::MAX`, so the metric registers successfully and then never moves.
+        /// Requiring it here makes that state unrepresentable.
+        quota: MetricQuota,
+    },
 }
 
 #[derive(Debug, Clone)]
 enum SensorStatState {
     Scalar {
         value: Arc<Mutex<f64>>,
-        record_mode: SensorStatRecordMode,
+        kind: StatKind,
     },
     Avg {
         state: Arc<Mutex<AvgSensorStat>>,
     },
     Extrema {
         state: Arc<Mutex<ExtremaSensorStat>>,
-        record_mode: SensorStatRecordMode,
+        kind: StatKind,
     },
     Rate {
         state: Arc<Mutex<WindowedRateStat>>,
@@ -596,10 +619,6 @@ enum SensorStatState {
     },
     TokenBucket {
         state: Arc<Mutex<TokenBucketStat>>,
-        config: Arc<Mutex<MetricConfig>>,
-    },
-    Frequency {
-        state: Arc<Mutex<FrequencyStat>>,
         config: Arc<Mutex<MetricConfig>>,
     },
 }
@@ -626,21 +645,6 @@ struct WindowedRateStat {
 struct TokenBucketStat {
     tokens: f64,
     last_update_ms: u64,
-}
-
-#[derive(Debug)]
-struct FrequencyStat {
-    samples: Vec<FrequencySample>,
-    current: usize,
-    spec: FrequencySpec,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct FrequencySpec {
-    center_value: f64,
-    min: f64,
-    max: f64,
-    buckets: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -763,14 +767,6 @@ impl WindowedSample {
     }
 }
 
-#[derive(Debug, Clone)]
-struct FrequencySample {
-    counts: Vec<f64>,
-    event_count: u64,
-    start_time_ms: u64,
-    last_event_ms: u64,
-}
-
 impl TokenBucketStat {
     fn record(&mut self, config: &MetricConfig, value: f64, time_ms: u64) {
         let Some(quota) = config.quota() else {
@@ -808,168 +804,10 @@ fn millis_to_seconds(time_ms: u64) -> f64 {
     f64::from(u32::try_from(time_ms).unwrap_or(u32::MAX)) / 1000.0
 }
 
-impl FrequencyStat {
-    fn new(spec: FrequencySpec) -> Result<Self, MetricsError> {
-        let FrequencySpec {
-            buckets,
-            min,
-            max,
-            center_value,
-        } = spec;
-        if max < min {
-            return Err(MetricsError::InvalidMetricConfig {
-                reason: format!("maximum value {max} must be greater than minimum value {min}"),
-            });
-        }
-        if buckets < 1 {
-            return Err(MetricsError::InvalidMetricConfig {
-                reason: "must be at least 1 bucket".to_owned(),
-            });
-        }
-        if center_value < min || center_value > max {
-            return Err(MetricsError::InvalidMetricConfig {
-                reason: format!(
-                    "frequency center value {center_value} is not within range [{min},{max}]"
-                ),
-            });
-        }
-        Ok(Self {
-            samples: Vec::new(),
-            current: 0,
-            spec,
-        })
-    }
-
-    fn record(&mut self, config: &MetricConfig, value: f64, time_ms: u64) {
-        self.ensure_current_sample(time_ms);
-        if self
-            .samples
-            .get(self.current)
-            .is_some_and(|sample| sample.is_complete(config, time_ms))
-        {
-            self.advance(config, time_ms);
-        }
-        let bin = self.to_bin(value);
-        if let Some(sample) = self.samples.get_mut(self.current)
-            && let Some(count) = sample.counts.get_mut(bin)
-        {
-            *count += 1.0;
-            sample.event_count = sample.event_count.saturating_add(1);
-            sample.last_event_ms = time_ms;
-        }
-    }
-
-    fn measure(&mut self, config: &MetricConfig, now_ms: u64) -> f64 {
-        self.purge_obsolete_samples(config, now_ms);
-        let total_count = self
-            .samples
-            .iter()
-            .map(|sample| sample.event_count)
-            .sum::<u64>();
-        if total_count == 0 {
-            return 0.0;
-        }
-        let bin = self.to_bin(self.spec.center_value);
-        let count = self
-            .samples
-            .iter()
-            .filter_map(|sample| sample.counts.get(bin))
-            .sum::<f64>();
-        count / f64::from(u32::try_from(total_count).unwrap_or(u32::MAX))
-    }
-
-    fn ensure_current_sample(&mut self, time_ms: u64) {
-        if self.samples.is_empty() {
-            self.samples
-                .push(FrequencySample::new(self.spec.buckets, time_ms));
-        }
-        if self.current >= self.samples.len() {
-            self.current = self.samples.len().saturating_sub(1);
-        }
-    }
-
-    fn advance(&mut self, config: &MetricConfig, time_ms: u64) {
-        let max_samples = config.samples().saturating_add(1);
-        self.current = self
-            .current
-            .saturating_add(1)
-            .checked_rem(max_samples)
-            .unwrap_or(0);
-        if self.current >= self.samples.len() {
-            self.samples
-                .push(FrequencySample::new(self.spec.buckets, time_ms));
-        } else if let Some(sample) = self.samples.get_mut(self.current) {
-            sample.reset(self.spec.buckets, time_ms);
-        }
-    }
-
-    fn purge_obsolete_samples(&mut self, config: &MetricConfig, now_ms: u64) {
-        let expire_age_ms = u64::try_from(config.samples())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(config.time_window_ms());
-        for sample in &mut self.samples {
-            if now_ms.saturating_sub(sample.last_event_ms) >= expire_age_ms {
-                sample.reset(self.spec.buckets, now_ms);
-            }
-        }
-    }
-
-    fn to_bin(&self, value: f64) -> usize {
-        if self.spec.buckets <= 1 || self.spec.max <= self.spec.min {
-            return 0;
-        }
-        let denominator = self.spec.buckets.saturating_sub(1);
-        let half_bucket_width = (self.spec.max - self.spec.min)
-            / f64::from(u32::try_from(denominator).unwrap_or(u32::MAX))
-            / 2.0;
-        let min = self.spec.min - half_bucket_width;
-        let max = self.spec.max + half_bucket_width;
-        let bucket_width =
-            (max - min) / f64::from(u32::try_from(self.spec.buckets).unwrap_or(u32::MAX));
-        if !bucket_width.is_finite() || value <= min {
-            return 0;
-        }
-        let mut upper = min + bucket_width;
-        for bin in 0..self.spec.buckets.saturating_sub(1) {
-            if value < upper {
-                return bin;
-            }
-            upper += bucket_width;
-        }
-        self.spec.buckets.saturating_sub(1)
-    }
-}
-
-impl FrequencySample {
-    fn new(buckets: usize, time_ms: u64) -> Self {
-        Self {
-            counts: vec![0.0; buckets],
-            event_count: 0,
-            start_time_ms: time_ms,
-            last_event_ms: time_ms,
-        }
-    }
-
-    fn reset(&mut self, buckets: usize, time_ms: u64) {
-        *self = Self::new(buckets, time_ms);
-    }
-
-    const fn is_complete(&self, config: &MetricConfig, time_ms: u64) -> bool {
-        time_ms.saturating_sub(self.start_time_ms) >= config.time_window_ms()
-            || self.event_count >= config.event_window()
-    }
-}
-
 impl SensorStat {
-    fn new(
-        metric_name: MetricName,
-        record_mode: SensorStatRecordMode,
-        config: MetricConfig,
-    ) -> (Self, KafkaMetric) {
-        match record_mode {
-            SensorStatRecordMode::Total
-            | SensorStatRecordMode::Value
-            | SensorStatRecordMode::Count => {
+    fn new(metric_name: MetricName, kind: StatKind, config: MetricConfig) -> (Self, KafkaMetric) {
+        match kind {
+            StatKind::Total | StatKind::Value | StatKind::Count => {
                 let value = Arc::new(Mutex::new(0.0));
                 let metric_value = Arc::clone(&value);
                 let metric = KafkaMetric::new_with_config(metric_name.clone(), config, move || {
@@ -981,12 +819,12 @@ impl SensorStat {
                 (
                     Self {
                         metric_name,
-                        state: SensorStatState::Scalar { value, record_mode },
+                        state: SensorStatState::Scalar { value, kind },
                     },
                     metric,
                 )
             },
-            SensorStatRecordMode::Avg => {
+            StatKind::Avg => {
                 let state = Arc::new(Mutex::new(AvgSensorStat::default()));
                 let metric_state = Arc::clone(&state);
                 let metric = KafkaMetric::new_with_config(metric_name.clone(), config, move || {
@@ -1006,8 +844,8 @@ impl SensorStat {
                     metric,
                 )
             },
-            SensorStatRecordMode::Min | SensorStatRecordMode::Max => {
-                let initial_value = if matches!(record_mode, SensorStatRecordMode::Min) {
+            StatKind::Min | StatKind::Max => {
+                let initial_value = if matches!(kind, StatKind::Min) {
                     f64::MAX
                 } else {
                     f64::NEG_INFINITY
@@ -1029,13 +867,13 @@ impl SensorStat {
                 (
                     Self {
                         metric_name,
-                        state: SensorStatState::Extrema { state, record_mode },
+                        state: SensorStatState::Extrema { state, kind },
                     },
                     metric,
                 )
             },
-            SensorStatRecordMode::Rate => Self::new_rate(metric_name, config),
-            SensorStatRecordMode::TokenBucket => Self::new_token_bucket(metric_name, config),
+            StatKind::Rate => Self::new_rate(metric_name, config),
+            StatKind::TokenBucket { .. } => Self::new_token_bucket(metric_name, config),
         }
     }
 
@@ -1095,56 +933,24 @@ impl SensorStat {
         )
     }
 
-    fn new_frequency(
-        metric_name: MetricName,
-        config: MetricConfig,
-        spec: FrequencySpec,
-    ) -> Result<(Self, KafkaMetric), MetricsError> {
-        let state = Arc::new(Mutex::new(FrequencyStat::new(spec)?));
-        let metric_state = Arc::clone(&state);
-        let config = Arc::new(Mutex::new(config));
-        let metric_config = Arc::clone(&config);
-        let metric = KafkaMetric::new_with_shared_config(
-            metric_name.clone(),
-            Arc::clone(&config),
-            move |now_ms| {
-                let config = metric_config
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                let mut state = metric_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                MetricValue::Number(state.measure(&config, now_ms))
-            },
-        );
-        Ok((
-            Self {
-                metric_name,
-                state: SensorStatState::Frequency { state, config },
-            },
-            metric,
-        ))
-    }
-
     fn record(&self, value: f64, time_ms: u64) {
         match &self.state {
             SensorStatState::Scalar {
                 value: current,
-                record_mode,
+                kind,
             } => {
                 let mut current = current
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match record_mode {
-                    SensorStatRecordMode::Total => *current += value,
-                    SensorStatRecordMode::Value => *current = value,
-                    SensorStatRecordMode::Count => *current += 1.0,
-                    SensorStatRecordMode::Avg
-                    | SensorStatRecordMode::Min
-                    | SensorStatRecordMode::Max
-                    | SensorStatRecordMode::Rate
-                    | SensorStatRecordMode::TokenBucket => {},
+                match kind {
+                    StatKind::Total => *current += value,
+                    StatKind::Value => *current = value,
+                    StatKind::Count => *current += 1.0,
+                    StatKind::Avg
+                    | StatKind::Min
+                    | StatKind::Max
+                    | StatKind::Rate
+                    | StatKind::TokenBucket { .. } => {},
                 }
             },
             SensorStatState::Avg { state } => {
@@ -1154,19 +960,19 @@ impl SensorStat {
                 state.total += value;
                 state.count += 1.0;
             },
-            SensorStatState::Extrema { state, record_mode } => {
+            SensorStatState::Extrema { state, kind } => {
                 let mut state = state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match record_mode {
-                    SensorStatRecordMode::Min => state.value = state.value.min(value),
-                    SensorStatRecordMode::Max => state.value = state.value.max(value),
-                    SensorStatRecordMode::Total
-                    | SensorStatRecordMode::Value
-                    | SensorStatRecordMode::Avg
-                    | SensorStatRecordMode::Count
-                    | SensorStatRecordMode::Rate
-                    | SensorStatRecordMode::TokenBucket => {},
+                match kind {
+                    StatKind::Min => state.value = state.value.min(value),
+                    StatKind::Max => state.value = state.value.max(value),
+                    StatKind::Total
+                    | StatKind::Value
+                    | StatKind::Avg
+                    | StatKind::Count
+                    | StatKind::Rate
+                    | StatKind::TokenBucket { .. } => {},
                 }
                 state.count += 1.0;
             },
@@ -1181,16 +987,6 @@ impl SensorStat {
                 state.record(&config, value, time_ms);
             },
             SensorStatState::TokenBucket { state, config } => {
-                let config = config
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                let mut state = state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state.record(&config, value, time_ms);
-            },
-            SensorStatState::Frequency { state, config } => {
                 let config = config
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1427,521 +1223,116 @@ impl Metrics {
             .map(|state| is_sensor_expired(state, now_ms))
     }
 
-    /// Add a total statistic to a sensor.
+    /// Register `metric_name` on `sensor`, computed by `kind`.
+    ///
+    /// This is the one entry point for every sensor statistic. It replaced 26
+    /// `sensor_add_*` methods that differed only in the [`StatKind`] they passed
+    /// and in whether they built the [`MetricConfig`] from a bare quota; the
+    /// wrappers kept below exist only because the internal
+    /// [`SenderMetricsRegistry`](super::SenderMetricsRegistry) calls them by name.
     ///
     /// # Errors
     ///
     /// Returns an error when the sensor is missing, or when the metric name is
     /// already registered to a different metric. Re-adding a metric already on
     /// this sensor is a no-op.
-    pub fn sensor_add_total(
+    pub fn sensor_add_stat(
         &mut self,
         sensor: SensorId,
         metric_name: MetricName,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_total_with_config(sensor, metric_name, MetricConfig::new())
-    }
-
-    /// Add a total statistic with a metric config to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_total_with_config(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
+        kind: StatKind,
         config: MetricConfig,
     ) -> Result<(), MetricsError> {
-        self.sensor_add_stat(sensor, metric_name, SensorStatRecordMode::Total, config)
-    }
-
-    /// Add a total statistic with a quota to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_total_with_quota(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        quota: MetricQuota,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_total_with_config(
-            sensor,
-            metric_name,
-            MetricConfig::new().with_quota(quota),
-        )
+        // A token bucket reads its refill rate and burst out of the config quota,
+        // so `StatKind::TokenBucket` carries one and it wins over whatever the
+        // caller's config happened to hold. Without this a caller could pass
+        // `MetricConfig::new()` and register a bucket that never moves.
+        let config = match kind {
+            StatKind::TokenBucket { quota } => config.with_quota(quota),
+            StatKind::Total
+            | StatKind::Value
+            | StatKind::Avg
+            | StatKind::Count
+            | StatKind::Min
+            | StatKind::Max
+            | StatKind::Rate => config,
+        };
+        if self
+            .sensor_state(sensor)?
+            .stats
+            .iter()
+            .any(|stat| stat.metric_name == metric_name)
+        {
+            return Ok(());
+        }
+        let (stat, metric) = SensorStat::new(metric_name.clone(), kind, config);
+        self.add_kafka_metric(metric_name, metric)?;
+        self.sensor_mut(sensor)?.stats.push(stat);
+        Ok(())
     }
 
     /// Add a latest-value statistic to a sensor.
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
+    /// As [`Self::sensor_add_stat`].
     pub fn sensor_add_value(
         &mut self,
         sensor: SensorId,
         metric_name: MetricName,
     ) -> Result<(), MetricsError> {
-        self.sensor_add_value_with_config(sensor, metric_name, MetricConfig::new())
-    }
-
-    /// Add a latest-value statistic with a metric config to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_value_with_config(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        config: MetricConfig,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_stat(sensor, metric_name, SensorStatRecordMode::Value, config)
-    }
-
-    /// Add a latest-value statistic with a quota to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_value_with_quota(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        quota: MetricQuota,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_value_with_config(
-            sensor,
-            metric_name,
-            MetricConfig::new().with_quota(quota),
-        )
+        self.sensor_add_stat(sensor, metric_name, StatKind::Value, MetricConfig::new())
     }
 
     /// Add an average statistic to a sensor.
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
+    /// As [`Self::sensor_add_stat`].
     pub fn sensor_add_avg(
         &mut self,
         sensor: SensorId,
         metric_name: MetricName,
     ) -> Result<(), MetricsError> {
-        self.sensor_add_avg_with_config(sensor, metric_name, MetricConfig::new())
-    }
-
-    /// Add an average statistic with a metric config to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_avg_with_config(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        config: MetricConfig,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_stat(sensor, metric_name, SensorStatRecordMode::Avg, config)
-    }
-
-    /// Add an average statistic with a quota to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_avg_with_quota(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        quota: MetricQuota,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_avg_with_config(sensor, metric_name, MetricConfig::new().with_quota(quota))
-    }
-
-    /// Add a cumulative count statistic to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_count(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_count_with_config(sensor, metric_name, MetricConfig::new())
-    }
-
-    /// Add a cumulative count statistic with a metric config to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_count_with_config(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        config: MetricConfig,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_stat(sensor, metric_name, SensorStatRecordMode::Count, config)
-    }
-
-    /// Add a cumulative count statistic with a quota to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_count_with_quota(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        quota: MetricQuota,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_count_with_config(
-            sensor,
-            metric_name,
-            MetricConfig::new().with_quota(quota),
-        )
-    }
-
-    /// Add a Kafka `Rate` statistic to a sensor using seconds as the unit.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_rate(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_rate_with_config(sensor, metric_name, MetricConfig::new())
-    }
-
-    /// Add a Kafka `Rate` statistic with a metric config.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_rate_with_config(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        config: MetricConfig,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_stat(sensor, metric_name, SensorStatRecordMode::Rate, config)
-    }
-
-    /// Add a Kafka `TokenBucket` statistic to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_token_bucket(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_token_bucket_with_config(sensor, metric_name, MetricConfig::new())
-    }
-
-    /// Add a Kafka `TokenBucket` statistic with a metric config.
-    ///
-    /// The quota bound is the refill rate in tokens per second. The effective
-    /// burst is `samples * time_window * bound`, matching Kafka `TokenBucket`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_token_bucket_with_config(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        config: MetricConfig,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_stat(
-            sensor,
-            metric_name,
-            SensorStatRecordMode::TokenBucket,
-            config,
-        )
-    }
-
-    /// Add Kafka `Frequencies.forBooleanValues(falseMetric, trueMetric)`.
-    ///
-    /// Pass `None` for either metric name to skip that side. At least one
-    /// metric name must be present, matching Kafka's null-name validation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, both metric names are absent,
-    /// or a metric name is already registered to a different metric. Re-adding a
-    /// metric already on this sensor is a no-op.
-    pub fn sensor_add_boolean_frequencies(
-        &mut self,
-        sensor: SensorId,
-        false_metric_name: Option<MetricName>,
-        true_metric_name: Option<MetricName>,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_boolean_frequencies_with_config(
-            sensor,
-            false_metric_name,
-            true_metric_name,
-            MetricConfig::new(),
-        )
-    }
-
-    /// Add Kafka `Frequencies.forBooleanValues` with a metric config.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, both metric names are absent,
-    /// or a metric name is already registered to a different metric. Re-adding a
-    /// metric already on this sensor is a no-op.
-    pub fn sensor_add_boolean_frequencies_with_config(
-        &mut self,
-        sensor: SensorId,
-        false_metric_name: Option<MetricName>,
-        true_metric_name: Option<MetricName>,
-        config: MetricConfig,
-    ) -> Result<(), MetricsError> {
-        if false_metric_name.is_none() && true_metric_name.is_none() {
-            return Err(MetricsError::InvalidMetricConfig {
-                reason: "must specify at least one metric name".to_owned(),
-            });
-        }
-        if let Some(metric_name) = false_metric_name {
-            self.sensor_add_frequency_with_config(
-                sensor,
-                metric_name,
-                config.clone(),
-                FrequencySpec {
-                    buckets: 2,
-                    min: 0.0,
-                    max: 1.0,
-                    center_value: 0.0,
-                },
-            )?;
-        }
-        if let Some(metric_name) = true_metric_name {
-            self.sensor_add_frequency_with_config(
-                sensor,
-                metric_name,
-                config,
-                FrequencySpec {
-                    buckets: 2,
-                    min: 0.0,
-                    max: 1.0,
-                    center_value: 1.0,
-                },
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Add a Kafka `Meter` compound statistic: cumulative total plus rate.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when either metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_meter(
-        &mut self,
-        sensor: SensorId,
-        rate_metric_name: MetricName,
-        total_metric_name: MetricName,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_meter_with_config(
-            sensor,
-            rate_metric_name,
-            total_metric_name,
-            MetricConfig::new(),
-        )
-    }
-
-    /// Add a Kafka `Meter` compound statistic with a metric config.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when either metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_meter_with_config(
-        &mut self,
-        sensor: SensorId,
-        rate_metric_name: MetricName,
-        total_metric_name: MetricName,
-        config: MetricConfig,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_total_with_config(sensor, total_metric_name, config.clone())?;
-        self.sensor_add_rate_with_config(sensor, rate_metric_name, config)
-    }
-
-    /// Add a minimum statistic to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_min(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_min_with_config(sensor, metric_name, MetricConfig::new())
-    }
-
-    /// Add a minimum statistic with a metric config to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_min_with_config(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        config: MetricConfig,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_stat(sensor, metric_name, SensorStatRecordMode::Min, config)
-    }
-
-    /// Add a minimum statistic with a quota to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_min_with_quota(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        quota: MetricQuota,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_min_with_config(sensor, metric_name, MetricConfig::new().with_quota(quota))
+        self.sensor_add_stat(sensor, metric_name, StatKind::Avg, MetricConfig::new())
     }
 
     /// Add a maximum statistic to a sensor.
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
+    /// As [`Self::sensor_add_stat`].
     pub fn sensor_add_max(
         &mut self,
         sensor: SensorId,
         metric_name: MetricName,
     ) -> Result<(), MetricsError> {
-        self.sensor_add_max_with_config(sensor, metric_name, MetricConfig::new())
+        self.sensor_add_stat(sensor, metric_name, StatKind::Max, MetricConfig::new())
     }
 
-    /// Add a maximum statistic with a metric config to a sensor.
+    /// Add a Kafka `Meter` compound statistic: cumulative total plus rate.
     ///
     /// # Errors
     ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_max_with_config(
+    /// As [`Self::sensor_add_stat`], for either metric name.
+    pub fn sensor_add_meter(
         &mut self,
         sensor: SensorId,
-        metric_name: MetricName,
-        config: MetricConfig,
+        rate_metric_name: MetricName,
+        total_metric_name: MetricName,
     ) -> Result<(), MetricsError> {
-        self.sensor_add_stat(sensor, metric_name, SensorStatRecordMode::Max, config)
-    }
-
-    /// Add a maximum statistic with a quota to a sensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the sensor is missing, or when the metric name is
-    /// already registered to a different metric. Re-adding a metric already on
-    /// this sensor is a no-op.
-    pub fn sensor_add_max_with_quota(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        quota: MetricQuota,
-    ) -> Result<(), MetricsError> {
-        self.sensor_add_max_with_config(sensor, metric_name, MetricConfig::new().with_quota(quota))
-    }
-
-    fn sensor_add_stat(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        record_mode: SensorStatRecordMode,
-        config: MetricConfig,
-    ) -> Result<(), MetricsError> {
-        if self
-            .sensor_state(sensor)?
-            .stats
-            .iter()
-            .any(|stat| stat.metric_name == metric_name)
-        {
-            return Ok(());
-        }
-        let (stat, metric) = SensorStat::new(metric_name.clone(), record_mode, config);
-        self.add_kafka_metric(metric_name, metric)?;
-        self.sensor_mut(sensor)?.stats.push(stat);
-        Ok(())
-    }
-
-    fn sensor_add_frequency_with_config(
-        &mut self,
-        sensor: SensorId,
-        metric_name: MetricName,
-        config: MetricConfig,
-        spec: FrequencySpec,
-    ) -> Result<(), MetricsError> {
-        if self
-            .sensor_state(sensor)?
-            .stats
-            .iter()
-            .any(|stat| stat.metric_name == metric_name)
-        {
-            return Ok(());
-        }
-        let (stat, metric) = SensorStat::new_frequency(metric_name.clone(), config, spec)?;
-        self.add_kafka_metric(metric_name, metric)?;
-        self.sensor_mut(sensor)?.stats.push(stat);
-        Ok(())
+        self.sensor_add_stat(
+            sensor,
+            total_metric_name,
+            StatKind::Total,
+            MetricConfig::new(),
+        )?;
+        self.sensor_add_stat(
+            sensor,
+            rate_metric_name,
+            StatKind::Rate,
+            MetricConfig::new(),
+        )
     }
 
     /// Record a sensor value and propagate it to parent sensors.
@@ -2390,7 +1781,7 @@ mod tests {
 
     use super::{
         KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
-        MetricValue, Metrics, MetricsError, SensorRecordingLevel,
+        MetricValue, Metrics, MetricsError, SensorRecordingLevel, StatKind,
     };
 
     #[derive(Debug, Default, Clone)]
@@ -2511,18 +1902,22 @@ mod tests {
         let meter_total = metrics.metric_name("m-total", "g", "meter total");
 
         metrics.sensor_add_max(sensor, max.clone()).expect("max");
-        metrics.sensor_add_min(sensor, min.clone()).expect("min");
+        metrics
+            .sensor_add_stat(sensor, min.clone(), StatKind::Min, MetricConfig::new())
+            .expect("min");
         metrics.sensor_add_avg(sensor, avg.clone()).expect("avg");
         metrics
-            .sensor_add_total(sensor, total.clone())
+            .sensor_add_stat(sensor, total.clone(), StatKind::Total, MetricConfig::new())
             .expect("total");
         metrics
-            .sensor_add_count(sensor, count.clone())
+            .sensor_add_stat(sensor, count.clone(), StatKind::Count, MetricConfig::new())
             .expect("count");
         metrics
             .sensor_add_value(sensor, value.clone())
             .expect("value");
-        metrics.sensor_add_rate(sensor, rate).expect("rate");
+        metrics
+            .sensor_add_stat(sensor, rate, StatKind::Rate, MetricConfig::new())
+            .expect("rate");
         metrics
             .sensor_add_meter(sensor, meter_rate, meter_total.clone())
             .expect("meter");
@@ -2551,31 +1946,77 @@ mod tests {
         let q_value = metrics.metric_name("qv", "g", "value w/ quota");
         let c_max = metrics.metric_name("cmax", "g", "max w/ config");
         let tb = metrics.metric_name("tb", "g", "token bucket");
-        let f_false = metrics.metric_name("ff", "g", "false freq");
-        let f_true = metrics.metric_name("ft", "g", "true freq");
-
         metrics
-            .sensor_add_value_with_quota(sensor, q_value, MetricQuota::upper_bound(100.0))
+            .sensor_add_stat(
+                sensor,
+                q_value,
+                StatKind::Value,
+                MetricConfig::new().with_quota(MetricQuota::upper_bound(100.0)),
+            )
             .expect("value w/ quota");
         metrics
-            .sensor_add_max_with_config(sensor, c_max, MetricConfig::new().with_event_window(8))
+            .sensor_add_stat(
+                sensor,
+                c_max,
+                StatKind::Max,
+                MetricConfig::new().with_event_window(8),
+            )
             .expect("max w/ config");
         metrics
-            .sensor_add_min_with_quota(
+            .sensor_add_stat(
                 sensor,
                 metrics.metric_name("qmin", "g", "min quota"),
-                MetricQuota::lower_bound(0.0),
+                StatKind::Min,
+                MetricConfig::new().with_quota(MetricQuota::lower_bound(0.0)),
             )
             .expect("min w/ quota");
         metrics
-            .sensor_add_token_bucket(sensor, tb)
+            .sensor_add_stat(
+                sensor,
+                tb,
+                StatKind::TokenBucket {
+                    quota: MetricQuota::upper_bound(10.0),
+                },
+                MetricConfig::new(),
+            )
             .expect("token bucket");
-        metrics
-            .sensor_add_boolean_frequencies(sensor, Some(f_false), Some(f_true))
-            .expect("frequencies");
 
         metrics.record(sensor, 1.0).expect("record");
         metrics.check_sensor_quotas(sensor).expect("within quota");
+    }
+
+    #[test]
+    fn token_bucket_takes_its_quota_from_the_stat_kind_not_the_config() {
+        // The removed `sensor_add_token_bucket` accepted a quota-free config and
+        // registered a bucket that could never move: `TokenBucketStat::record`
+        // returns early without a quota and `measure` reports `f64::MAX`, so the
+        // metric looked registered and read as a constant forever. The quota now
+        // travels with `StatKind::TokenBucket`, so a quota-free config — passed
+        // deliberately here — cannot reproduce that state.
+        let mut metrics = Metrics::new();
+        let sensor = metrics.sensor("client-quota");
+        let name = metrics.metric_name("tb", "g", "token bucket");
+
+        metrics
+            .sensor_add_stat(
+                sensor,
+                name.clone(),
+                StatKind::TokenBucket {
+                    quota: MetricQuota::upper_bound(5.0),
+                },
+                MetricConfig::new(),
+            )
+            .expect("token bucket");
+
+        let metric = metrics.metric(&name).expect("registered").clone();
+        assert_eq!(
+            metric.metric_config().quota(),
+            Some(MetricQuota::upper_bound(5.0))
+        );
+
+        metrics.record_at_ms(sensor, 1.0, 1_000).expect("record");
+        // One second of refill at 5 tokens/s, minus the single token recorded.
+        assert_eq!(metric.metric_value_at_ms(1_000), 4.0);
     }
 
     #[test]

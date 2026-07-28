@@ -15,7 +15,7 @@ use std::{
 use bytes::{Bytes, BytesMut};
 pub use registry::{
     KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
-    MetricValue, Metrics, MetricsError, SensorId, SensorRecordingLevel,
+    MetricValue, Metrics, MetricsError, SensorId, SensorRecordingLevel, StatKind,
 };
 pub(crate) use sender_registry::SenderMetricsRegistry;
 
@@ -1011,7 +1011,7 @@ mod tests {
     use super::{
         KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
         MetricValue, Metrics, MetricsError, ProducerMetricValue, ProducerMetrics,
-        ProducerMetricsSnapshot, ProducerQueueMetrics, SensorRecordingLevel,
+        ProducerMetricsSnapshot, ProducerQueueMetrics, SensorRecordingLevel, StatKind,
         producer_metric_description,
     };
 
@@ -1236,10 +1236,20 @@ mod tests {
         let parent_metric = metrics.metric_name("parent-total", "producer-metrics", "");
 
         metrics
-            .sensor_add_total(child, child_metric.clone())
+            .sensor_add_stat(
+                child,
+                child_metric.clone(),
+                StatKind::Total,
+                MetricConfig::new(),
+            )
             .expect("child metric");
         metrics
-            .sensor_add_total(parent, parent_metric.clone())
+            .sensor_add_stat(
+                parent,
+                parent_metric.clone(),
+                StatKind::Total,
+                MetricConfig::new(),
+            )
             .expect("parent metric");
         metrics.record(child, 2.5).expect("record child");
         metrics.record(child, 1.5).expect("record child");
@@ -1256,7 +1266,12 @@ mod tests {
         let metric_name = metrics.metric_name("request-count-total", "producer-metrics", "");
 
         metrics
-            .sensor_add_total(sensor, metric_name.clone())
+            .sensor_add_stat(
+                sensor,
+                metric_name.clone(),
+                StatKind::Total,
+                MetricConfig::new(),
+            )
             .expect("total metric");
         metrics.record_once(sensor).expect("default record");
         metrics.record_once(sensor).expect("default record");
@@ -1274,12 +1289,12 @@ mod tests {
         assert!(!metrics.sensor_has_metrics(sensor).expect("sensor exists"));
 
         metrics
-            .sensor_add_total(sensor, first)
+            .sensor_add_stat(sensor, first, StatKind::Total, MetricConfig::new())
             .expect("first metric");
         assert!(metrics.sensor_has_metrics(sensor).expect("sensor exists"));
 
         metrics
-            .sensor_add_count(sensor, second)
+            .sensor_add_stat(sensor, second, StatKind::Count, MetricConfig::new())
             .expect("second metric");
         assert!(metrics.sensor_has_metrics(sensor).expect("sensor exists"));
     }
@@ -1299,10 +1314,10 @@ mod tests {
         );
 
         metrics
-            .sensor_add_total(sensor, first.clone())
+            .sensor_add_stat(sensor, first.clone(), StatKind::Total, MetricConfig::new())
             .expect("first metric");
         metrics
-            .sensor_add_count(sensor, second.clone())
+            .sensor_add_stat(sensor, second.clone(), StatKind::Count, MetricConfig::new())
             .expect("second metric");
 
         let sensor_metrics = metrics.sensor_metrics(sensor).expect("sensor exists");
@@ -1329,7 +1344,12 @@ mod tests {
         let total = metrics.metric_name("total", "producer-metrics", "");
 
         metrics
-            .sensor_add_total(expiring_sensor, total.clone())
+            .sensor_add_stat(
+                expiring_sensor,
+                total.clone(),
+                StatKind::Total,
+                MetricConfig::new(),
+            )
             .expect("total metric");
 
         assert!(
@@ -1389,13 +1409,28 @@ mod tests {
         let survivor_metric = metrics.metric_name("survivor-total", "producer-metrics", "");
 
         metrics
-            .sensor_add_total(parent, parent_metric.clone())
+            .sensor_add_stat(
+                parent,
+                parent_metric.clone(),
+                StatKind::Total,
+                MetricConfig::new(),
+            )
             .expect("parent metric");
         metrics
-            .sensor_add_total(child, child_metric.clone())
+            .sensor_add_stat(
+                child,
+                child_metric.clone(),
+                StatKind::Total,
+                MetricConfig::new(),
+            )
             .expect("child metric");
         metrics
-            .sensor_add_total(survivor, survivor_metric.clone())
+            .sensor_add_stat(
+                survivor,
+                survivor_metric.clone(),
+                StatKind::Total,
+                MetricConfig::new(),
+            )
             .expect("survivor metric");
 
         let removed = metrics.expire_sensors_at_ms(60_001);
@@ -1478,7 +1513,12 @@ mod tests {
         let max_metric = metrics.metric_name("request-size-max", "producer-metrics", "");
 
         metrics
-            .sensor_add_min(sensor, min_metric.clone())
+            .sensor_add_stat(
+                sensor,
+                min_metric.clone(),
+                StatKind::Min,
+                MetricConfig::new(),
+            )
             .expect("min metric");
         metrics
             .sensor_add_max(sensor, max_metric.clone())
@@ -1502,7 +1542,12 @@ mod tests {
         let metric_name = metrics.metric_name("request-count-total", "producer-metrics", "");
 
         metrics
-            .sensor_add_count(sensor, metric_name.clone())
+            .sensor_add_stat(
+                sensor,
+                metric_name.clone(),
+                StatKind::Count,
+                MetricConfig::new(),
+            )
             .expect("count metric");
         metrics.record(sensor, 7.0).expect("record count");
         metrics.record(sensor, 2.0).expect("record count");
@@ -1518,7 +1563,12 @@ mod tests {
         let metric_name = metrics.metric_name("request-size-rate", "producer-metrics", "");
 
         metrics
-            .sensor_add_rate(sensor, metric_name.clone())
+            .sensor_add_stat(
+                sensor,
+                metric_name.clone(),
+                StatKind::Rate,
+                MetricConfig::new(),
+            )
             .expect("rate metric");
         metrics
             .record_at_ms(sensor, 30.0, 1_000)
@@ -1534,9 +1584,10 @@ mod tests {
         let metric_name = metrics.metric_name("request-size-rate", "producer-metrics", "");
 
         metrics
-            .sensor_add_rate_with_config(
+            .sensor_add_stat(
                 sensor,
                 metric_name.clone(),
+                StatKind::Rate,
                 MetricConfig::new().with_quota(MetricQuota::upper_bound(0.5)),
             )
             .expect("rate metric");
@@ -1565,13 +1616,19 @@ mod tests {
         let sensor = metrics.sensor("client-quota");
         let metric_name = metrics.metric_name("tokens", "producer-metrics", "");
         let config = MetricConfig::new()
-            .with_quota(MetricQuota::upper_bound(5.0))
             .with_time_window_ms(1_000)
             .with_samples(2)
             .expect("valid samples");
 
         metrics
-            .sensor_add_token_bucket_with_config(sensor, metric_name.clone(), config)
+            .sensor_add_stat(
+                sensor,
+                metric_name.clone(),
+                StatKind::TokenBucket {
+                    quota: MetricQuota::upper_bound(5.0),
+                },
+                config,
+            )
             .expect("token bucket metric");
 
         metrics
@@ -1595,34 +1652,6 @@ mod tests {
             .check_sensor_quotas_at_ms(sensor, 1_400)
             .expect("bucket should refill back to zero after 400ms");
         assert_metric_value_at_ms(&metrics, &metric_name, 1_400, 0.0);
-    }
-
-    #[test]
-    fn boolean_frequencies_report_normalized_distribution_like_java() {
-        let mut metrics = Metrics::new();
-        let sensor = metrics.sensor("request-success");
-        let false_metric = metrics.metric_name("request-failure-frequency", "producer-metrics", "");
-        let true_metric = metrics.metric_name("request-success-frequency", "producer-metrics", "");
-
-        metrics
-            .sensor_add_boolean_frequencies(
-                sensor,
-                Some(false_metric.clone()),
-                Some(true_metric.clone()),
-            )
-            .expect("boolean frequencies");
-        metrics
-            .record_at_ms(sensor, 1.0, 1_000)
-            .expect("record true value");
-        metrics
-            .record_at_ms(sensor, 0.0, 2_000)
-            .expect("record false value");
-        metrics
-            .record_at_ms(sensor, 1.0, 3_000)
-            .expect("record true value");
-
-        assert_metric_value_at_ms(&metrics, &false_metric, 3_000, 1.0 / 3.0);
-        assert_metric_value_at_ms(&metrics, &true_metric, 3_000, 2.0 / 3.0);
     }
 
     #[test]
@@ -1657,11 +1686,21 @@ mod tests {
         let metric_name = metrics.metric_name("request-size-total", "producer-metrics", "");
 
         metrics
-            .sensor_add_total(sensor, metric_name.clone())
+            .sensor_add_stat(
+                sensor,
+                metric_name.clone(),
+                StatKind::Total,
+                MetricConfig::new(),
+            )
             .expect("first metric");
         metrics.record(sensor, 2.0).expect("record total");
         metrics
-            .sensor_add_total(sensor, metric_name.clone())
+            .sensor_add_stat(
+                sensor,
+                metric_name.clone(),
+                StatKind::Total,
+                MetricConfig::new(),
+            )
             .expect("duplicate metric should be a no-op");
         metrics.record(sensor, 3.0).expect("record total");
 
@@ -1684,14 +1723,20 @@ mod tests {
         let value_metric = metrics.metric_name("credits-value", "producer-metrics", "");
 
         metrics
-            .sensor_add_total_with_quota(
+            .sensor_add_stat(
                 sensor,
                 total_metric.clone(),
-                MetricQuota::upper_bound(2.0),
+                StatKind::Total,
+                MetricConfig::new().with_quota(MetricQuota::upper_bound(2.0)),
             )
             .expect("upper quota metric");
         metrics
-            .sensor_add_value_with_quota(sensor, value_metric, MetricQuota::lower_bound(0.0))
+            .sensor_add_stat(
+                sensor,
+                value_metric,
+                StatKind::Value,
+                MetricConfig::new().with_quota(MetricQuota::lower_bound(0.0)),
+            )
             .expect("lower quota metric");
 
         metrics
@@ -1721,10 +1766,11 @@ mod tests {
         let value_only = metrics.sensor("value-only-quota-sensor");
         let value_only_metric = metrics.metric_name("credits-value-only", "producer-metrics", "");
         metrics
-            .sensor_add_value_with_quota(
+            .sensor_add_stat(
                 value_only,
                 value_only_metric.clone(),
-                MetricQuota::lower_bound(0.0),
+                StatKind::Value,
+                MetricConfig::new().with_quota(MetricQuota::lower_bound(0.0)),
             )
             .expect("lower quota metric");
         metrics
@@ -1784,9 +1830,10 @@ mod tests {
         let metric_name = metrics.metric_name("credits", "producer-metrics", "");
 
         metrics
-            .sensor_add_total_with_config(
+            .sensor_add_stat(
                 sensor,
                 metric_name.clone(),
+                StatKind::Total,
                 MetricConfig::new().with_quota(MetricQuota::upper_bound(5.0)),
             )
             .expect("quota metric");
@@ -1821,7 +1868,12 @@ mod tests {
         let metric_name = metrics.metric_name("credits-total", "producer-metrics", "");
 
         metrics
-            .sensor_add_total_with_quota(sensor, metric_name.clone(), MetricQuota::upper_bound(5.0))
+            .sensor_add_stat(
+                sensor,
+                metric_name.clone(),
+                StatKind::Total,
+                MetricConfig::new().with_quota(MetricQuota::upper_bound(5.0)),
+            )
             .expect("quota metric");
         metrics
             .record_with_quota_check_at_ms(sensor, 3.0, 1, true)
@@ -1857,7 +1909,12 @@ mod tests {
             .sensor_set_recording_level(debug_sensor, SensorRecordingLevel::Debug)
             .expect("debug level");
         metrics
-            .sensor_add_total(debug_sensor, metric_name.clone())
+            .sensor_add_stat(
+                debug_sensor,
+                metric_name.clone(),
+                StatKind::Total,
+                MetricConfig::new(),
+            )
             .expect("debug metric");
         metrics.record(debug_sensor, 1.0).expect("record debug");
 
@@ -1908,10 +1965,20 @@ mod tests {
         let parent_metric = metrics.metric_name("parent-total", "producer-metrics", "");
         let child_metric = metrics.metric_name("child-total", "producer-metrics", "");
         metrics
-            .sensor_add_total(parent, parent_metric.clone())
+            .sensor_add_stat(
+                parent,
+                parent_metric.clone(),
+                StatKind::Total,
+                MetricConfig::new(),
+            )
             .expect("parent metric");
         metrics
-            .sensor_add_total(child, child_metric.clone())
+            .sensor_add_stat(
+                child,
+                child_metric.clone(),
+                StatKind::Total,
+                MetricConfig::new(),
+            )
             .expect("child metric");
 
         assert!(metrics.remove_sensor("parent"));

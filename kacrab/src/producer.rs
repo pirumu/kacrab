@@ -48,7 +48,7 @@ pub use self::{
     metrics::{
         KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
         MetricValue, Metrics, MetricsError, ProducerMetricValue, ProducerMetricsSnapshot, SensorId,
-        SensorRecordingLevel,
+        SensorRecordingLevel, StatKind,
     },
     partitioner::{ProducerPartitioner, RoundRobinPartitioner},
     record::{DeliveryCallback, Header, ProducerRecord, RecordHeader, RecordMetadata, SendFuture},
