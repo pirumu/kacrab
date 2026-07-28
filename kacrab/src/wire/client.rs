@@ -291,7 +291,7 @@ impl WireClient {
             },
         });
         self.update_broker_registry(&metadata).await?;
-        self.store_metadata(Arc::clone(&metadata))?;
+        self.store_metadata(&topics, Arc::clone(&metadata))?;
         self.mark_topics_used(&topics);
         Ok(metadata)
     }
@@ -430,12 +430,21 @@ impl WireClient {
         Ok(())
     }
 
-    fn store_metadata(&self, metadata: Arc<ClusterMetadata>) -> Result<()> {
+    /// Fold a metadata response into the cache.
+    ///
+    /// `requested_topics` is the topic list the refresh actually asked for: the
+    /// response only speaks for those topics, so every other cached topic is
+    /// retained rather than evicted.
+    fn store_metadata(
+        &self,
+        requested_topics: &[String],
+        metadata: Arc<ClusterMetadata>,
+    ) -> Result<()> {
         self.inner
             .metadata
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .store(metadata, Instant::now())?;
+            .store(requested_topics, metadata, Instant::now())?;
         Ok(())
     }
 
@@ -699,12 +708,16 @@ mod tests {
             }],
         });
 
-        client.store_metadata(Arc::clone(&metadata)).unwrap();
+        client
+            .store_metadata(&["orders".to_owned()], Arc::clone(&metadata))
+            .unwrap();
 
         assert!(client.cached_metadata_for(&["orders".to_owned()]).is_none());
 
         let client = WireClient::connect_with_brokers(ConnectionConfig::default(), "client-a", []);
-        client.store_metadata(metadata).unwrap();
+        client
+            .store_metadata(&["orders".to_owned()], metadata)
+            .unwrap();
         assert!(
             client
                 .cached_metadata_for(&["payments".to_owned()])
@@ -725,29 +738,32 @@ mod tests {
             )],
         );
         client
-            .store_metadata(Arc::new(ClusterMetadata {
-                cluster_id: Some("cluster-a".to_owned()),
-                controller_id: 7,
-                brokers: vec![BrokerMetadata {
-                    node_id: 7,
-                    host: "localhost".to_owned(),
-                    port: 9092,
-                    rack: None,
-                }],
-                topics: vec![TopicMetadata {
-                    name: "orders".to_owned(),
-                    topic_id: KafkaUuid::ZERO,
-                    is_internal: false,
-                    partitions: vec![PartitionMetadata {
-                        partition_index: 0,
-                        leader_id: 7,
-                        leader_epoch: 1,
-                        replica_nodes: vec![7],
-                        isr_nodes: vec![7],
-                        offline_replicas: Vec::new(),
+            .store_metadata(
+                &["orders".to_owned()],
+                Arc::new(ClusterMetadata {
+                    cluster_id: Some("cluster-a".to_owned()),
+                    controller_id: 7,
+                    brokers: vec![BrokerMetadata {
+                        node_id: 7,
+                        host: "localhost".to_owned(),
+                        port: 9092,
+                        rack: None,
                     }],
-                }],
-            }))
+                    topics: vec![TopicMetadata {
+                        name: "orders".to_owned(),
+                        topic_id: KafkaUuid::ZERO,
+                        is_internal: false,
+                        partitions: vec![PartitionMetadata {
+                            partition_index: 0,
+                            leader_id: 7,
+                            leader_epoch: 1,
+                            replica_nodes: vec![7],
+                            isr_nodes: vec![7],
+                            offline_replicas: Vec::new(),
+                        }],
+                    }],
+                }),
+            )
             .unwrap();
 
         assert!(client.cached_metadata_for(&["orders".to_owned()]).is_none());
@@ -768,9 +784,10 @@ mod tests {
         let orders = "orders".to_owned();
         let payments = "payments".to_owned();
         client
-            .store_metadata(Arc::new(cluster_metadata_with_topics(&[
-                "orders", "payments",
-            ])))
+            .store_metadata(
+                &[orders.clone(), payments.clone()],
+                Arc::new(cluster_metadata_with_topics(&["orders", "payments"])),
+            )
             .unwrap();
         client.mark_topics_used(&[orders.clone(), payments.clone()]);
 

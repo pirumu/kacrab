@@ -242,8 +242,29 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
-- **Two admin group operations were broken on every broker older than Apache
-  Kafka 4.1, in opposite directions.**
+- **A metadata refresh for one topic evicted every other topic from the cache.**
+  `metadata_for_topics` asks the broker only for the topics it needs, but the
+  response then *replaced* the whole cached snapshot — so resolving `orders`
+  threw away the routing, leader epochs, and idle bookkeeping for every other
+  topic the client had already resolved. Each of those topics then had to make
+  its own round trip to get back what it already had, and on a client with many
+  topics the cache could churn indefinitely without ever being stale.
+
+  Metadata responses are now merged the way Kafka merges them
+  (`Metadata.handleMetadataResponse` → `MetadataSnapshot.mergeWith`): topics the
+  response carries are replaced, topics the *request* never named are retained
+  with their existing metadata, and a requested topic the response leaves out is
+  treated as deleted and evicted. Brokers, controller, and cluster id always come
+  from the newest response.
+
+  Three pieces of bookkeeping had to move with it. `metadata.max.age.ms` is now
+  scored per topic, so a refresh for one topic cannot renew another topic's age;
+  pending leadership invalidations are settled only for the topics the response
+  actually carried, instead of all of them; and the equivalent-response backoff
+  is judged on what the response carried rather than on whole-snapshot equality,
+  matching Java's `equivalentResponseCount` — a topic quietly expiring out of the
+  merged view is not new information and must not reset the backoff, while a
+  requested topic disappearing is.
 
   `alter_consumer_group_offsets` committed nothing.
   `OffsetCommit` v10 (KIP-1140) swapped the topic key from `name` to `topic_id`,

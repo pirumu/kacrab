@@ -8,7 +8,7 @@ use std::{
 
 use kacrab_protocol::generated::ErrorCode;
 
-use super::{ClusterMetadata, MetadataTopicState, MetadataTopicStatus};
+use super::{ClusterMetadata, MetadataTopicState, MetadataTopicStatus, TopicMetadata};
 use crate::wire::{
     BrokerEndpoint, ConnectionConfig, MetadataRecoveryStrategy,
     backoff::{BackoffPolicy, BackoffState},
@@ -45,6 +45,11 @@ pub(crate) struct MetadataManager {
     config: ConnectionConfig,
     snapshot: Option<MetadataSnapshot>,
     topic_last_used: HashMap<String, Instant>,
+    /// When each cached topic was last carried by a metadata response. The
+    /// snapshot is merged per topic, so `metadata.max.age.ms` has to be scored
+    /// per topic too — otherwise a refresh for one topic would keep every other
+    /// topic's stale entry alive forever.
+    topic_updated_at: HashMap<String, Instant>,
     /// Partitions whose cached leadership is known to be wrong after a
     /// leadership error, keyed by topic. Kafka's `Metadata` RPC is topic-keyed,
     /// so any entry here forces a refetch of *that topic* — never of the whole
@@ -74,6 +79,7 @@ impl MetadataManager {
             config,
             snapshot: None,
             topic_last_used: HashMap::new(),
+            topic_updated_at: HashMap::new(),
             stale_partitions: HashMap::new(),
             topic_errors: HashMap::new(),
             invalid_topics: HashSet::new(),
@@ -91,21 +97,64 @@ impl MetadataManager {
         }
     }
 
+    /// Fold a metadata response into the cached snapshot.
+    ///
+    /// `requested_topics` is the topic list the refresh actually asked the
+    /// broker for. A `Metadata` response only speaks for the topics it was asked
+    /// about, so overwriting the snapshot with it would evict every topic the
+    /// refresh happened not to name — one produce to `orders` would drop the
+    /// routing for every other topic the client had already resolved. Kafka
+    /// merges instead: `Metadata.handleMetadataResponse`
+    /// (`clients/src/main/java/org/apache/kafka/clients/Metadata.java`, Apache
+    /// Kafka 4.3.0) hands a partial update to `MetadataSnapshot.mergeWith` with
+    /// the retain predicate
+    /// `(topic, isInternal) -> !topics.contains(topic) && retainTopic(topic, isInternal, nowMs)`,
+    /// where `topics` is what the response carried. Topics in the response are
+    /// replaced; every other still-retained topic survives untouched. Brokers,
+    /// controller and cluster id always come from the newest response, exactly
+    /// as `mergeWith` takes `newNodes`/`newController` wholesale.
+    ///
+    /// The one deviation is how a deletion arrives. Java sees a deleted topic as
+    /// an error entry *inside* the response, which puts its name in `topics` and
+    /// so drops it from the merge. [`map_metadata`](super::map_metadata) rejects
+    /// a response carrying any topic-level error outright, so the only deletion
+    /// signal that ever reaches `store` is a *requested* topic the response left
+    /// out — and that is evicted rather than retained.
     pub(crate) fn store(
         &mut self,
+        requested_topics: &[String],
         metadata: Arc<ClusterMetadata>,
         now: Instant,
     ) -> crate::wire::Result<()> {
-        let equivalent_response = self
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.metadata.as_ref() == metadata.as_ref());
+        let requested: HashSet<&str> = requested_topics.iter().map(String::as_str).collect();
+        let equivalent_response = self.response_is_equivalent(&requested, &metadata);
+        let retained = self.retained_topics(&requested, &metadata, now);
+        {
+            // Only the topics this response carried were re-resolved, so only
+            // their invalidations are settled. A retained topic keeps the one it
+            // was holding; an evicted topic leaves the snapshot entirely, and
+            // dropping its entry here stops the map growing without bound.
+            let retained_names: HashSet<&str> =
+                retained.iter().map(|topic| topic.name.as_str()).collect();
+            self.stale_partitions
+                .retain(|topic, _partitions| retained_names.contains(topic.as_str()));
+        }
+        // Each topic the response carried restarts its own `metadata.max.age.ms`
+        // window; a retained topic keeps the age it already had.
+        for topic in &metadata.topics {
+            let _previous = self.topic_updated_at.insert(topic.name.clone(), now);
+        }
+        let metadata = if retained.is_empty() {
+            metadata
+        } else {
+            let mut merged = Arc::unwrap_or_clone(metadata);
+            merged.topics.extend(retained);
+            Arc::new(merged)
+        };
         self.topic_last_used
             .retain(|topic, _last_used| metadata.topic(topic).is_some());
-        // Every pending invalidation is settled by this snapshot: topics the
-        // response carries are freshly routed, and topics it omits are no longer
-        // in the snapshot at all, so `cached_for` misses them on topic presence.
-        self.stale_partitions.clear();
+        self.topic_updated_at
+            .retain(|topic, _updated_at| metadata.topic(topic).is_some());
         self.snapshot = Some(MetadataSnapshot {
             metadata,
             updated_at: now,
@@ -121,6 +170,72 @@ impl MetadataManager {
             self.next_refresh_allowed_at = None;
         }
         Ok(())
+    }
+
+    /// Cached topics this response leaves untouched and that are still worth
+    /// keeping — Kafka's `mergeWith` retain predicate (see [`store`](Self::store)).
+    ///
+    /// `retainTopic` is Java's "is this topic still in the client's working
+    /// set", which for the producer is `ProducerMetadata`'s idle expiry; the
+    /// local equivalent is `metadata.max.idle.ms` against `topic_last_used`.
+    /// Age is deliberately not part of it: an age-expired topic stays in the
+    /// snapshot and is refetched by its own next lookup, the same way Kafka
+    /// treats `metadata.max.age.ms` as a refresh trigger rather than an eviction.
+    fn retained_topics(
+        &self,
+        requested: &HashSet<&str>,
+        response: &ClusterMetadata,
+        now: Instant,
+    ) -> Vec<TopicMetadata> {
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return Vec::new();
+        };
+        snapshot
+            .metadata
+            .topics
+            .iter()
+            .filter(|topic| {
+                response.topic(&topic.name).is_none()
+                    && !requested.contains(topic.name.as_str())
+                    && self.topic_is_active(&topic.name, now)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Whether this response told us nothing the cache did not already hold.
+    ///
+    /// Scored on what the response carried rather than on the merged snapshot,
+    /// because Kafka scores it the same way: `equivalentResponseCount` is
+    /// incremented per update and reset from `updateLatestMetadata`, which only
+    /// ever inspects partitions the response contained. Retaining or expiring a
+    /// topic the response never mentioned is therefore not "news" and must not
+    /// clear the backoff — otherwise one idle topic falling out of the snapshot
+    /// would let an otherwise-identical response poll the broker at full rate.
+    /// A *requested* topic the response dropped is news, since it evicts a
+    /// cached topic.
+    fn response_is_equivalent(
+        &self,
+        requested: &HashSet<&str>,
+        response: &ClusterMetadata,
+    ) -> bool {
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return false;
+        };
+        let cached = snapshot.metadata.as_ref();
+        if cached.cluster_id != response.cluster_id
+            || cached.controller_id != response.controller_id
+            || cached.brokers != response.brokers
+        {
+            return false;
+        }
+        response
+            .topics
+            .iter()
+            .all(|topic| cached.topic(&topic.name) == Some(topic))
+            && !requested
+                .iter()
+                .any(|topic| cached.topic(topic).is_some() && response.topic(topic).is_none())
     }
 
     /// Age of the currently cached metadata snapshot, or `None` when no
@@ -148,7 +263,8 @@ impl MetadataManager {
         let all_present_and_fresh = topics.into_iter().all(|topic| {
             let topic = topic.as_ref();
             snapshot.metadata.topic(topic).is_some()
-                && self.topic_is_fresh(topic, now)
+                && self.topic_is_active(topic, now)
+                && self.topic_is_current(topic, now)
                 && !self.topic_has_stale_partition(topic)
         });
         if !all_present_and_fresh {
@@ -382,9 +498,20 @@ impl MetadataManager {
             .is_some_and(|partitions| !partitions.is_empty())
     }
 
-    fn topic_is_fresh(&self, topic: &str, now: Instant) -> bool {
+    /// Whether the topic is still in the client's working set — Kafka's
+    /// `retainTopic`, expressed as `metadata.max.idle.ms` since the last lookup.
+    fn topic_is_active(&self, topic: &str, now: Instant) -> bool {
         self.topic_last_used.get(topic).is_some_and(|last_used| {
             now.duration_since(*last_used) <= self.config.metadata_max_idle
+        })
+    }
+
+    /// Whether the topic's own metadata is younger than `metadata.max.age.ms`.
+    /// Scored per topic because [`store`](Self::store) merges per topic: a
+    /// refresh for one topic must not renew another topic's age.
+    fn topic_is_current(&self, topic: &str, now: Instant) -> bool {
+        self.topic_updated_at.get(topic).is_some_and(|updated_at| {
+            now.duration_since(*updated_at) <= self.config.metadata_max_age
         })
     }
 }
@@ -425,7 +552,11 @@ mod tests {
             [broker_endpoint(1)],
         );
         manager
-            .store(Arc::new(metadata_with_topic("orders", 1, 1)), start)
+            .store(
+                &requested(&["orders"]),
+                Arc::new(metadata_with_topic("orders", 1, 1)),
+                start,
+            )
             .unwrap();
         manager.mark_topics_used(["orders"], start);
 
@@ -451,7 +582,11 @@ mod tests {
             [broker_endpoint(1)],
         );
         manager
-            .store(Arc::new(metadata_with_topic("orders", 1, 1)), start)
+            .store(
+                &requested(&["orders"]),
+                Arc::new(metadata_with_topic("orders", 1, 1)),
+                start,
+            )
             .unwrap();
         manager.mark_topics_used(["orders"], start);
 
@@ -557,7 +692,11 @@ mod tests {
         assert_eq!(manager.refresh_delay(start + first_delay), Duration::ZERO);
 
         manager
-            .store(Arc::new(metadata_with_topic("orders", 1, 1)), start)
+            .store(
+                &requested(&["orders"]),
+                Arc::new(metadata_with_topic("orders", 1, 1)),
+                start,
+            )
             .unwrap();
         assert_eq!(manager.refresh_delay(start), Duration::ZERO);
     }
@@ -573,10 +712,16 @@ mod tests {
         );
         let metadata = Arc::new(metadata_with_topic("orders", 1, 1));
 
-        manager.store(Arc::clone(&metadata), start).unwrap();
+        manager
+            .store(&requested(&["orders"]), Arc::clone(&metadata), start)
+            .unwrap();
         assert_eq!(manager.refresh_delay(start), Duration::ZERO);
         manager
-            .store(Arc::clone(&metadata), start + Duration::from_millis(1))
+            .store(
+                &requested(&["orders"]),
+                Arc::clone(&metadata),
+                start + Duration::from_millis(1),
+            )
             .unwrap();
         assert!(manager.refresh_delay(start + Duration::from_millis(1)) > Duration::ZERO);
 
@@ -597,7 +742,11 @@ mod tests {
         let start = Instant::now();
         let mut manager = MetadataManager::new(ConnectionConfig::default(), [broker_endpoint(1)]);
         manager
-            .store(Arc::new(metadata_with_topic("orders", 1, 3)), start)
+            .store(
+                &requested(&["orders"]),
+                Arc::new(metadata_with_topic("orders", 1, 3)),
+                start,
+            )
             .unwrap();
         manager.mark_topics_used(["orders"], start);
 
@@ -649,6 +798,7 @@ mod tests {
         );
         manager
             .store(
+                &requested(&["orders", "payments"]),
                 Arc::new(metadata_with_topics(&["orders", "payments"], 1, 1)),
                 start,
             )
@@ -672,6 +822,7 @@ mod tests {
 
         manager
             .store(
+                &requested(&["orders", "payments"]),
                 Arc::new(metadata_with_topics(&["orders", "payments"], 2, 2)),
                 start,
             )
@@ -693,7 +844,11 @@ mod tests {
             [broker_endpoint(1)],
         );
         manager
-            .store(Arc::new(metadata_with_topics(&["orders"], 1, 3)), start)
+            .store(
+                &requested(&["orders"]),
+                Arc::new(metadata_with_topics(&["orders"], 1, 3)),
+                start,
+            )
             .unwrap();
         manager.mark_topics_used(["orders"], start);
 
@@ -725,6 +880,226 @@ mod tests {
             manager.cached_for(["orders"], start).is_some(),
             "every invalidated partition learned its new leader in place"
         );
+    }
+
+    #[test]
+    fn manager_store_keeps_topics_the_refresh_never_asked_for() {
+        let start = Instant::now();
+        let mut manager = MetadataManager::new(
+            ConnectionConfig::default()
+                .metadata_max_age(Duration::from_mins(5))
+                .metadata_max_idle(Duration::from_mins(5)),
+            [broker_endpoint(1)],
+        );
+        manager
+            .store(
+                &requested(&["orders", "payments"]),
+                Arc::new(metadata_with_topics(&["orders", "payments"], 1, 1)),
+                start,
+            )
+            .unwrap();
+        manager.mark_topics_used(["orders", "payments"], start);
+
+        // `payments` has not expired, so a refresh triggered by `orders` asks the
+        // broker for `orders` alone and the response carries nothing else.
+        manager
+            .store(
+                &requested(&["orders"]),
+                Arc::new(metadata_with_topics(&["orders"], 1, 7)),
+                start + Duration::from_millis(1),
+            )
+            .unwrap();
+        manager.mark_topics_used(["orders"], start + Duration::from_millis(1));
+
+        let cached = manager
+            .cached_for(["orders", "payments"], start + Duration::from_millis(2))
+            .expect("a single-topic refresh must not evict every other topic");
+        assert_eq!(
+            leader_epoch(&cached, "orders"),
+            Some(7),
+            "the refreshed topic takes the response's metadata"
+        );
+        assert_eq!(
+            leader_epoch(&cached, "payments"),
+            Some(1),
+            "the untouched topic keeps the metadata it was cached with"
+        );
+    }
+
+    #[test]
+    fn manager_store_evicts_a_requested_topic_the_response_omits() {
+        let start = Instant::now();
+        let mut manager = MetadataManager::new(
+            ConnectionConfig::default()
+                .metadata_max_age(Duration::from_mins(5))
+                .metadata_max_idle(Duration::from_mins(5)),
+            [broker_endpoint(1)],
+        );
+        manager
+            .store(
+                &requested(&["orders", "payments"]),
+                Arc::new(metadata_with_topics(&["orders", "payments"], 1, 1)),
+                start,
+            )
+            .unwrap();
+        manager.mark_topics_used(["orders", "payments"], start);
+
+        // The refresh asked for both topics and the broker answered with only
+        // one: `payments` no longer exists.
+        manager
+            .store(
+                &requested(&["orders", "payments"]),
+                Arc::new(metadata_with_topics(&["orders"], 1, 2)),
+                start,
+            )
+            .unwrap();
+
+        assert!(
+            manager.cached_for(["orders"], start).is_some(),
+            "the surviving topic stays cached"
+        );
+        assert!(
+            manager.cached_for(["payments"], start).is_none(),
+            "a requested topic missing from the response is deleted, not retained"
+        );
+    }
+
+    #[test]
+    fn manager_partial_refresh_settles_only_the_topics_it_carried() {
+        let start = Instant::now();
+        let mut manager = MetadataManager::new(
+            ConnectionConfig::default()
+                .metadata_max_age(Duration::from_mins(5))
+                .metadata_max_idle(Duration::from_mins(5)),
+            [broker_endpoint(1)],
+        );
+        manager
+            .store(
+                &requested(&["orders", "payments"]),
+                Arc::new(metadata_with_topics(&["orders", "payments"], 1, 1)),
+                start,
+            )
+            .unwrap();
+        manager.mark_topics_used(["orders", "payments"], start);
+
+        manager.invalidate_topic_partition("orders", 0);
+        manager.invalidate_topic_partition("payments", 0);
+
+        manager
+            .store(
+                &requested(&["orders"]),
+                Arc::new(metadata_with_topics(&["orders"], 1, 2)),
+                start,
+            )
+            .unwrap();
+
+        assert!(
+            manager.cached_for(["orders"], start).is_some(),
+            "the refreshed topic's invalidation is settled by the response"
+        );
+        assert!(
+            manager.cached_for(["payments"], start).is_none(),
+            "a topic the response never carried keeps its pending invalidation"
+        );
+    }
+
+    #[test]
+    fn manager_retained_topic_keeps_its_own_metadata_max_age() {
+        let start = Instant::now();
+        let mut manager = MetadataManager::new(
+            ConnectionConfig::default()
+                .metadata_max_age(Duration::from_millis(10))
+                .metadata_max_idle(Duration::from_mins(5)),
+            [broker_endpoint(1)],
+        );
+        manager
+            .store(
+                &requested(&["orders", "payments"]),
+                Arc::new(metadata_with_topics(&["orders", "payments"], 1, 1)),
+                start,
+            )
+            .unwrap();
+        manager.mark_topics_used(["orders", "payments"], start);
+
+        manager
+            .store(
+                &requested(&["orders"]),
+                Arc::new(metadata_with_topics(&["orders"], 1, 2)),
+                start + Duration::from_millis(9),
+            )
+            .unwrap();
+
+        let now = start + Duration::from_millis(11);
+        assert!(
+            manager.cached_for(["orders"], now).is_some(),
+            "the refreshed topic restarts its own max-age window"
+        );
+        assert!(
+            manager.cached_for(["payments"], now).is_none(),
+            "a retained topic must not inherit the refreshed topic's age"
+        );
+    }
+
+    #[test]
+    fn manager_backs_off_partial_refresh_that_repeats_cached_topic_metadata() {
+        let start = Instant::now();
+        let mut manager = MetadataManager::new(
+            ConnectionConfig::default()
+                .metadata_max_age(Duration::from_mins(5))
+                .metadata_max_idle(Duration::from_mins(5))
+                .metadata_refresh_backoff_initial(Duration::from_millis(10))
+                .metadata_refresh_backoff_max(Duration::from_millis(40)),
+            [broker_endpoint(1)],
+        );
+        manager
+            .store(
+                &requested(&["orders", "payments"]),
+                Arc::new(metadata_with_topics(&["orders", "payments"], 1, 1)),
+                start,
+            )
+            .unwrap();
+        manager.mark_topics_used(["orders", "payments"], start);
+        assert_eq!(manager.refresh_delay(start), Duration::ZERO);
+
+        // The response repeats what `orders` was already cached with; that the
+        // merged view also drops nothing is beside the point — Kafka scores
+        // equivalence on the metadata the response actually carried.
+        manager
+            .store(
+                &requested(&["orders"]),
+                Arc::new(metadata_with_topics(&["orders"], 1, 1)),
+                start,
+            )
+            .unwrap();
+        assert!(
+            manager.refresh_delay(start) > Duration::ZERO,
+            "a partial refresh that learns nothing new must back off"
+        );
+
+        manager
+            .store(
+                &requested(&["orders"]),
+                Arc::new(metadata_with_topics(&["orders"], 1, 2)),
+                start,
+            )
+            .unwrap();
+        assert_eq!(
+            manager.refresh_delay(start),
+            Duration::ZERO,
+            "a partial refresh that carries new metadata clears the backoff"
+        );
+    }
+
+    fn leader_epoch(metadata: &ClusterMetadata, topic: &str) -> Option<i32> {
+        metadata
+            .topic(topic)
+            .and_then(|topic| topic.partitions.first())
+            .map(|partition| partition.leader_epoch)
+    }
+
+    /// The topic list a metadata refresh actually asked the broker for.
+    fn requested(topics: &[&str]) -> Vec<String> {
+        topics.iter().map(|topic| (*topic).to_owned()).collect()
     }
 
     fn broker_endpoint(node_id: i32) -> BrokerEndpoint {
