@@ -22,11 +22,10 @@
 
 use bytes::{Bytes, BytesMut};
 use kacrab::wire::{BrokerCapabilities, WireError};
-use kacrab_protocol::version::ApiVersionRange;
 use kacrab_protocol::{
     frame,
     generated::{ApiKey, ApiVersionsResponseData},
-    version::client_api_info,
+    version::{ApiVersionRange, client_api_info},
 };
 
 /// `ApiVersions` version used for both capture and replay. The handshake in
