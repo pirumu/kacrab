@@ -35,8 +35,8 @@ use tokio::task::JoinHandle;
 use super::{
     assignor::{self, MemberSubscription},
     capabilities,
-    config::{AutoOffsetReset, ConsumerRuntimeConfig, GroupProtocol},
-    coordinator,
+    config::{AutoOffsetReset, ConsumerRuntimeConfig, GroupProtocol, clamp_ms},
+    coordinator::{self, is_coordinator_moved},
     error::{ConsumerError, Result},
     fetch,
     interceptor::{ConsumerInterceptor, ConsumerInterceptors, InterceptorConfigs},
@@ -46,6 +46,7 @@ use super::{
     offsets::{self, EARLIEST_TIMESTAMP, LATEST_TIMESTAMP},
     record::{ConsumerRecords, OffsetAndTimestamp},
     subscription::{FetchPosition, SubscriptionState},
+    topics::{topic_id_for_name, topic_name_for_id},
 };
 use crate::{
     common::{ConsumerGroupMetadata, OffsetAndMetadata, TopicPartition},
@@ -173,26 +174,6 @@ const fn is_rebalance_in_progress(error: &ConsumerError) -> bool {
             error: ErrorCode::RebalanceInProgress,
             ..
         }
-    )
-}
-
-/// Whether an error means the group coordinator moved or is unavailable, so the
-/// cached coordinator must be dropped and re-discovered (`FindCoordinator`).
-/// Wire-level timeouts and connection failures count: a dead coordinator can
-/// never send `NOT_COORDINATOR` — it just times out — so treating only Kafka
-/// codes as "moved" pins a dead incarnation forever (Java marks the
-/// coordinator unknown on any coordinator request failure).
-const fn is_coordinator_moved(error: &ConsumerError) -> bool {
-    matches!(
-        error,
-        ConsumerError::Broker {
-            error: ErrorCode::NotCoordinator
-                | ErrorCode::CoordinatorNotAvailable
-                | ErrorCode::CoordinatorLoadInProgress,
-            ..
-        } | ConsumerError::Wire(
-            WireError::Timeout | WireError::ConnectionClosed | WireError::Io(_)
-        )
     )
 }
 
@@ -1824,29 +1805,6 @@ impl Consumer {
         }
         Ok(())
     }
-}
-
-/// Clamp a duration to a millisecond `i32` for wire timeout fields.
-fn clamp_ms(duration: Duration) -> i32 {
-    i32::try_from(duration.as_millis()).unwrap_or(i32::MAX)
-}
-
-/// Resolve a KIP-848 assignment topic id to its name via cluster metadata.
-fn topic_name_for_id(metadata: &ClusterMetadata, topic_id: KafkaUuid) -> Option<String> {
-    metadata
-        .topics
-        .iter()
-        .find(|topic| topic.topic_id == topic_id)
-        .map(|topic| topic.name.clone())
-}
-
-/// Resolve a topic name to its id for the heartbeat's owned set (`None` when the
-/// broker reported no stable id).
-fn topic_id_for_name(metadata: &ClusterMetadata, name: &str) -> Option<KafkaUuid> {
-    metadata
-        .topic(name)
-        .map(|topic| topic.topic_id)
-        .filter(|topic_id| *topic_id != KafkaUuid::ZERO)
 }
 
 /// The background heartbeat task: while joined, send a `Heartbeat` every

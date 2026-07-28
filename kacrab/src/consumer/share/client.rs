@@ -36,12 +36,14 @@ use crate::{
     consumer::{
         capabilities,
         client::resolve_bootstrap_brokers,
-        coordinator,
+        config::{clamp_i32, clamp_ms},
+        coordinator::{self, is_coordinator_moved},
         error::{ConsumerError, Result},
         fetch::idle_backoff,
         membership::{AssignedTopic, EPOCH_JOINING, EPOCH_LEAVING, GroupMemberState},
         metrics::{ConsumerMetrics, ConsumerMetricsSnapshot},
         offsets::partition_leader,
+        topics::{topic_id_for_name, topic_name_for_id},
     },
     wire::{ClusterMetadata, WireClient, WireError},
 };
@@ -650,12 +652,7 @@ impl ShareConsumer {
             Err(error) => {
                 // A dead coordinator never answers `NOT_COORDINATOR`; it just
                 // times out, so re-discover it rather than pinning a dead one.
-                if matches!(
-                    error,
-                    ConsumerError::Wire(
-                        WireError::Timeout | WireError::ConnectionClosed | WireError::Io(_)
-                    )
-                ) {
+                if is_coordinator_moved(&error) {
                     self.coordinator_id = None;
                 }
                 return Err(error);
@@ -1287,21 +1284,6 @@ fn partition_acknowledge_outcomes(
         .collect()
 }
 
-fn topic_name_for_id(metadata: &ClusterMetadata, topic_id: KafkaUuid) -> Option<String> {
-    metadata
-        .topics
-        .iter()
-        .find(|topic| topic.topic_id == topic_id)
-        .map(|topic| topic.name.clone())
-}
-
-fn topic_id_for_name(metadata: &ClusterMetadata, name: &str) -> Option<KafkaUuid> {
-    metadata
-        .topic(name)
-        .map(|topic| topic.topic_id)
-        .filter(|id| !id.is_nil())
-}
-
 fn topic_names_by_id(metadata: &ClusterMetadata) -> HashMap<KafkaUuid, String> {
     metadata
         .topics
@@ -1322,14 +1304,6 @@ fn topic_ids_by_partition(
                 .map(|topic_id| (partition.clone(), topic_id))
         })
         .collect()
-}
-
-fn clamp_ms(duration: Duration) -> i32 {
-    i32::try_from(duration.as_millis()).unwrap_or(i32::MAX)
-}
-
-fn clamp_i32(value: usize) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 #[cfg(test)]

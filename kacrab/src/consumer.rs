@@ -33,6 +33,7 @@ mod record;
 #[cfg(feature = "share-consumer")]
 mod share;
 mod subscription;
+mod topics;
 
 #[cfg(feature = "share-consumer")]
 pub use self::share::{

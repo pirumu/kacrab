@@ -176,8 +176,16 @@ impl ConsumerRuntimeConfig {
     }
 }
 
-fn clamp_i32(value: impl TryInto<i32>) -> i32 {
+/// Narrow a config-derived count to the `i32` a wire field takes, saturating
+/// rather than wrapping — the Kafka fields these feed are all "at most", so the
+/// clamp is a ceiling, not a truncation.
+pub(super) fn clamp_i32(value: impl TryInto<i32>) -> i32 {
     value.try_into().unwrap_or(i32::MAX)
+}
+
+/// Clamp a duration to a millisecond `i32` for wire timeout fields.
+pub(super) fn clamp_ms(duration: Duration) -> i32 {
+    clamp_i32(duration.as_millis())
 }
 
 fn invalid(key: &'static str, value: &str) -> ConsumerError {

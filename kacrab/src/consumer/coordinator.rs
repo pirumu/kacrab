@@ -37,6 +37,30 @@ use crate::{
 
 /// `FindCoordinator` key type for a consumer group coordinator.
 const COORDINATOR_KEY_TYPE_GROUP: i8 = 0;
+
+/// Whether an error means the group coordinator moved or is unavailable, so the
+/// cached coordinator must be dropped and re-discovered (`FindCoordinator`).
+/// Wire-level timeouts and connection failures count: a dead coordinator can
+/// never send `NOT_COORDINATOR` — it just times out — so treating only Kafka
+/// codes as "moved" pins a dead incarnation forever (Java marks the
+/// coordinator unknown on any coordinator request failure).
+///
+/// Shared with the share consumer, whose coordinator is found and lost the same
+/// way; the codes reach it through the heartbeat outcome rather than through an
+/// `Err`, so its own copy used to list only the wire arm.
+pub(super) const fn is_coordinator_moved(error: &ConsumerError) -> bool {
+    matches!(
+        error,
+        ConsumerError::Broker {
+            error: ErrorCode::NotCoordinator
+                | ErrorCode::CoordinatorNotAvailable
+                | ErrorCode::CoordinatorLoadInProgress,
+            ..
+        } | ConsumerError::Wire(
+            WireError::Timeout | WireError::ConnectionClosed | WireError::Io(_)
+        )
+    )
+}
 /// Highest `OffsetCommit` version to negotiate; v10 switched to topic ids.
 const OFFSET_COMMIT_MAX_VERSION: i16 = 9;
 /// Highest `OffsetFetch` version to negotiate; v8 switched to the `groups` form.
