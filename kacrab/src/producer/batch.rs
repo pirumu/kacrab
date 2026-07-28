@@ -192,7 +192,7 @@ fn producer_records(records: &[ProducerRecord]) -> (Vec<Record>, RecordBatchTime
                 offset_delta: i32::try_from(index).unwrap_or(i32::MAX),
                 key: record.key.clone(),
                 value: record.value.clone(),
-                headers: clone_record_headers(record),
+                headers: record.headers.clone(),
             }
         })
         .collect();
@@ -203,10 +203,6 @@ fn producer_records(records: &[ProducerRecord]) -> (Vec<Record>, RecordBatchTime
             max_timestamp,
         },
     )
-}
-
-fn clone_record_headers(record: &ProducerRecord) -> Vec<kacrab_protocol::record::RecordHeader> {
-    record.headers.clone()
 }
 
 #[derive(Debug, Clone, Copy)]
