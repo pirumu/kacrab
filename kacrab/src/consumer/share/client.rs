@@ -22,7 +22,7 @@ use kacrab_protocol::{
 
 use super::{
     config::{ShareAcknowledgementMode, ShareRuntimeConfig, share_api_version},
-    membership::{EPOCH_JOINING, EPOCH_LEAVING, ShareGroupState, ShareHeartbeatRequest, heartbeat},
+    membership::{ShareHeartbeatRequest, heartbeat},
     record::{AcknowledgeType, ShareRecord, ShareRecords},
     session::{
         Acknowledgements, ShareFetchOutcome, ShareFetchPlan, ShareSession, TopicIdPartition,
@@ -39,6 +39,7 @@ use crate::{
         coordinator,
         error::{ConsumerError, Result},
         fetch::idle_backoff,
+        membership::{AssignedTopic, EPOCH_JOINING, EPOCH_LEAVING, GroupMemberState},
         metrics::{ConsumerMetrics, ConsumerMetricsSnapshot},
         offsets::partition_leader,
     },
@@ -119,7 +120,7 @@ pub struct ShareConsumer {
     /// Topics this consumer subscribed to; empty until `subscribe`.
     subscribed_topics: Vec<String>,
     /// Membership state; `None` until the first heartbeat is attempted.
-    group: Option<ShareGroupState>,
+    group: Option<GroupMemberState>,
     /// When the last `ShareGroupHeartbeat` was sent.
     last_heartbeat: Option<Instant>,
     /// The partitions the coordinator assigned. Unlike a consumer group this is
@@ -622,7 +623,7 @@ impl ShareConsumer {
         // any heartbeat, fetch or acknowledgement is framed.
         capabilities::require_share_group(&self.wire, coordinator)?;
         if self.group.is_none() {
-            self.group = Some(ShareGroupState::new(self.config.base.heartbeat_interval)?);
+            self.group = Some(GroupMemberState::new(self.config.base.heartbeat_interval)?);
         }
         let (member_id, member_epoch) = self
             .group
@@ -666,13 +667,7 @@ impl ShareConsumer {
         match outcome.error {
             ErrorCode::None => {
                 if let Some(state) = self.group.as_mut() {
-                    state.member_epoch = outcome.member_epoch;
-                    if outcome.heartbeat_interval > Duration::ZERO {
-                        state.heartbeat_interval = outcome.heartbeat_interval;
-                    }
-                    if let Some(id) = outcome.member_id.filter(|id| !id.is_empty()) {
-                        state.member_id = id;
-                    }
+                    state.adopt(&outcome);
                 }
                 if let Some(assignment) = outcome.assignment {
                     let metadata = self
@@ -694,7 +689,7 @@ impl ShareConsumer {
             // The coordinator forgot us — start over with a fresh member id,
             // which is also a fresh share-session identity.
             ErrorCode::UnknownMemberId => {
-                self.group = Some(ShareGroupState::new(self.config.base.heartbeat_interval)?);
+                self.group = Some(GroupMemberState::new(self.config.base.heartbeat_interval)?);
                 self.forget_acquisitions();
             },
             code if code.is_retriable() => {
@@ -715,7 +710,7 @@ impl ShareConsumer {
     fn apply_assignment(
         &mut self,
         metadata: &ClusterMetadata,
-        assignment: &[crate::consumer::next_gen::AssignedTopic],
+        assignment: &[AssignedTopic],
     ) {
         let mut target = Vec::new();
         for topic in assignment {

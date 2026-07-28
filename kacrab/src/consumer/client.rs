@@ -41,9 +41,8 @@ use super::{
     fetch,
     interceptor::{ConsumerInterceptor, ConsumerInterceptors, InterceptorConfigs},
     metrics::{ConsumerMetrics, ConsumerMetricsSnapshot},
-    next_gen::{
-        self, AssignedTopic, EPOCH_JOINING, EPOCH_LEAVING, HeartbeatRequest, ModernGroupState,
-    },
+    membership::{AssignedTopic, EPOCH_JOINING, EPOCH_LEAVING, GroupMemberState},
+    next_gen::{self, HeartbeatRequest},
     offsets::{self, EARLIEST_TIMESTAMP, LATEST_TIMESTAMP},
     record::{ConsumerRecords, OffsetAndTimestamp},
     subscription::{FetchPosition, SubscriptionState},
@@ -94,7 +93,7 @@ pub struct Consumer {
     /// When the pattern's matched-topic set was last refreshed from metadata.
     last_pattern_refresh: Option<Instant>,
     /// KIP-848 membership state, present only under `group.protocol=consumer`.
-    modern_group: Option<ModernGroupState>,
+    modern_group: Option<GroupMemberState>,
     /// When the last KIP-848 `ConsumerGroupHeartbeat` was sent.
     last_modern_heartbeat: Option<Instant>,
     /// Per-broker incremental fetch sessions (KIP-227).
@@ -1443,7 +1442,7 @@ impl Consumer {
         // refresh below and before any heartbeat is framed.
         capabilities::require_consumer_protocol(&self.wire, coordinator)?;
         if self.modern_group.is_none() {
-            self.modern_group = Some(ModernGroupState::new(self.config.heartbeat_interval)?);
+            self.modern_group = Some(GroupMemberState::new(self.config.heartbeat_interval)?);
         }
 
         // Resolve topic ids for the reconciliation and the owned set we report.
@@ -1485,13 +1484,7 @@ impl Consumer {
         match outcome.error {
             ErrorCode::None => {
                 if let Some(state) = self.modern_group.as_mut() {
-                    state.member_epoch = outcome.member_epoch;
-                    if outcome.heartbeat_interval > Duration::ZERO {
-                        state.heartbeat_interval = outcome.heartbeat_interval;
-                    }
-                    if let Some(id) = outcome.member_id.filter(|id| !id.is_empty()) {
-                        state.member_id = id;
-                    }
+                    state.adopt(&outcome);
                 }
                 self.needs_rejoin.store(false, Ordering::SeqCst);
                 if let Some(assignment) = outcome.assignment {
@@ -1510,7 +1503,7 @@ impl Consumer {
             },
             // The coordinator forgot us — start over with a fresh member id.
             ErrorCode::UnknownMemberId => {
-                self.modern_group = Some(ModernGroupState::new(self.config.heartbeat_interval)?);
+                self.modern_group = Some(GroupMemberState::new(self.config.heartbeat_interval)?);
                 self.subscription.assign(&[]);
                 self.needs_rejoin.store(true, Ordering::SeqCst);
             },

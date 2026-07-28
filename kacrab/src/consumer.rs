@@ -25,6 +25,7 @@ mod deserializer;
 mod error;
 mod fetch;
 mod interceptor;
+mod membership;
 mod metrics;
 mod next_gen;
 mod offsets;
