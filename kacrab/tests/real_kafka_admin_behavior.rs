@@ -71,12 +71,22 @@ async fn real_kafka_admin_topic_lifecycle_takes_effect() {
         .expect("create_topics");
 
     // `create_topics` returns when the controller commits the record; leaders are
-    // elected when the broker replays it, so poll until every partition reports one.
+    // elected when the broker replays it, so poll until every partition reports
+    // one. The metadata snapshot can also transiently miss the topic entirely
+    // right after creation (UNKNOWN_TOPIC_OR_PARTITION) — that is "not yet",
+    // not a failure, exactly like the post-delete poll below treats it.
     let desc = poll_until("3 partitions with elected leaders", || async {
-        let described = admin
+        let described = match admin
             .describe_topics(vec![topic.clone()], DescribeTopicsOptions::default())
             .await
-            .expect("describe_topics");
+        {
+            Ok(described) => described,
+            Err(AdminError::Wire(WireError::MetadataTopic {
+                error: ErrorCode::UnknownTopicOrPartition,
+                ..
+            })) => return None,
+            Err(other) => panic!("describe_topics after create: unexpected error {other:?}"),
+        };
         described
             .into_iter()
             .next()
@@ -782,15 +792,24 @@ async fn real_kafka_admin_elect_leaders_is_noop_success_on_single_broker() {
         )
         .await
         .expect("create_topics");
-    // Wait for the leader so the election request races nothing.
+    // Wait for the leader so the election request races nothing. A metadata
+    // snapshot can transiently miss the fresh topic (UNKNOWN_TOPIC_OR_PARTITION)
+    // — keep polling, that is "not yet".
     let _led = poll_until("partition leader elected", || async {
-        admin
+        match admin
             .describe_topics(vec![topic.clone()], DescribeTopicsOptions::default())
             .await
-            .expect("describe_topics")
-            .into_iter()
-            .next()
-            .filter(|d| d.partitions.iter().all(|p| p.leader.is_some()))
+        {
+            Ok(described) => described
+                .into_iter()
+                .next()
+                .filter(|d| d.partitions.iter().all(|p| p.leader.is_some())),
+            Err(AdminError::Wire(WireError::MetadataTopic {
+                error: ErrorCode::UnknownTopicOrPartition,
+                ..
+            })) => None,
+            Err(other) => panic!("describe_topics after create: unexpected error {other:?}"),
+        }
     })
     .await;
 

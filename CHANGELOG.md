@@ -304,6 +304,16 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **Classic-group join burned all its retries in milliseconds on a freshly
+  started cluster.** The rejoin loop retried `NOT_COORDINATOR` and
+  `REBALANCE_IN_PROGRESS` with no backoff: on a fresh broker, `FindCoordinator`
+  answers instantly while the group coordinator is still loading
+  `__consumer_offsets`, so `JoinGroup` keeps answering `NOT_COORDINATOR` for a
+  while and all ten attempts completed within milliseconds — the join failed on
+  a broker that was seconds from ready (reproduced 3/3 on fresh single-broker
+  clusters). Rejoin attempts now sleep `retry.backoff.ms` (with the standard
+  exponential policy) between rounds, matching the Java client's paced rejoin.
+
 - **Producing to a topic whose metadata never resolves hung the delivery future
   forever.** With auto-create disabled, a send to a nonexistent topic neither
   succeeded nor failed: the sender's prepare path requeued the unroutable batch

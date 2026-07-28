@@ -1291,8 +1291,17 @@ impl Consumer {
         // coordinator answer REBALANCE_IN_PROGRESS; a coordinator move answers
         // NOT_COORDINATOR. Both rejoin and retry — the latter after re-finding the
         // coordinator (`coordinator_id` is looked up fresh each iteration).
+        // Retries back off by retry.backoff.ms: on a freshly started cluster
+        // FindCoordinator answers instantly while the group coordinator is still
+        // loading `__consumer_offsets`, so JoinGroup keeps answering
+        // NOT_COORDINATOR for a while — without the sleep all attempts burn in
+        // milliseconds and the join fails on a broker that is seconds from ready.
         let mut attempts = 0_u32;
+        let mut retry_backoff = crate::wire::BackoffState::new(self.config.retry_backoff_policy());
         let (assigned, cooperative, coordinator) = loop {
+            if attempts > 0 {
+                tokio::time::sleep(retry_backoff.next_delay()?).await;
+            }
             attempts = attempts.saturating_add(1);
             let coordinator = self.ensure_coordinator(&group_id).await?;
             let context = coordinator::GroupContext {
