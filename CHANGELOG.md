@@ -212,6 +212,31 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **Two admin group operations were broken on every broker older than Apache
+  Kafka 4.1, in opposite directions.**
+
+  `alter_consumer_group_offsets` committed nothing.
+  `OffsetCommit` v10 (KIP-1140) swapped the topic key from `name` to `topic_id`,
+  and kacrab dropped the name as soon as cluster metadata resolved an id for the
+  topic — which it almost always does. Below v10 there is no `topic_id` field on
+  the wire, so those brokers received a commit for the empty topic name and
+  answered `UNKNOWN_TOPIC_OR_PARTITION` with an empty target. The request now
+  carries both keys and `wire::message` clears whichever one the *negotiated*
+  version does not speak, the same contract `OffsetFetch` and `Produce` already
+  use — the version is not known when the request is built, so neither key can be
+  chosen up front.
+
+  `describe_consumer_groups` surfaced a raw `UNSUPPORTED_VERSION` instead of
+  falling back. Brokers 3.7 through 4.0 advertise `ConsumerGroupDescribe`
+  (API 69) but answer it per group with that error code when the KIP-848 group
+  coordinator is not enabled — the default there. kacrab only fell back to
+  `DescribeGroups` when version negotiation itself refused the API, so the
+  error-code form escaped to the caller. Both forms now fall back, matching
+  Java's `DescribeConsumerGroupsHandler`.
+
+  Verified against real brokers: `bitnamilegacy/kafka:3.6.2`,
+  `apache/kafka:3.9.0`, and `apache/kafka:4.3.0`.
+
 - **`TypedProducer` no longer demands `K: Sync, V: Sync`.** Both parameters appear
   only inside `PhantomData<fn(K, V)>` — nothing in the type or its methods ever
   shares a `K` or a `V` across threads — so the bound constrained nothing while
