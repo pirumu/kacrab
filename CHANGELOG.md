@@ -302,6 +302,18 @@ release date and links to relevant pull requests or issues.
   rustdoc lists the two as type aliases of one struct rather than as two
   structs.
 
+### Changed
+
+- **`RecordMetadata::timestamp_ms` now matches Java's
+  `RecordMetadata.timestamp()` on create-time topics.** It used to report `-1`
+  whenever the broker sent no log-append time — i.e. for every `CreateTime`
+  topic, the common case. The receipt now echoes the record's own timestamp:
+  the user-set value exactly, or the wall-clock stamp the producer assigned at
+  append (which is also exactly what the wire encodes, so the receipt and the
+  log always agree). `LogAppendTime` topics keep reporting the broker's append
+  time; `-1` remains only for genuinely unknown timestamps (failed-delivery
+  sentinels, `acks=0` records that never carried one).
+
 ### Fixed
 
 - **Classic-group join burned all its retries in milliseconds on a freshly

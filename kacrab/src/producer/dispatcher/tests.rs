@@ -3478,7 +3478,12 @@ async fn complete_deliveries_skips_missing_receivers_and_missing_receipts() {
             .linger(Duration::from_secs(1)),
     );
     let delivery = accumulator
-        .append_for_delivery(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .append_for_delivery(
+            ProducerRecord::new("orders", 0)
+                .value(Bytes::from_static(b"a"))
+                .try_timestamp_ms(1_234)
+                .expect("explicit timestamp"),
+        )
         .expect("append for delivery");
     let mut batches = accumulator.drain_ready(Instant::now());
     let receipt = RecordMetadata {
@@ -3492,7 +3497,16 @@ async fn complete_deliveries_skips_missing_receivers_and_missing_receipts() {
     };
     complete_deliveries(&mut batches, std::slice::from_ref(&receipt));
 
-    assert_eq!(delivery.await.expect("delivered receipt"), receipt);
+    // The broker receipt carried no log-append time, so the delivered receipt
+    // echoes the record's own create-time timestamp (Java parity).
+    let delivered = delivery.await.expect("delivered receipt");
+    assert_eq!(
+        delivered,
+        RecordMetadata {
+            timestamp_ms: 1_234,
+            ..receipt
+        }
+    );
 }
 
 #[tokio::test]

@@ -121,8 +121,6 @@ fn create_topic(topic: &str, partitions: u32) {
     assert!(status.success(), "topic creation failed for {topic}");
 }
 
-/// Only the consumer-gated timestamp roundtrip needs wall-clock millis.
-#[cfg(feature = "consumer")]
 fn now_millis() -> i64 {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -260,7 +258,9 @@ async fn real_kafka_aborted_transaction_is_invisible_to_read_committed() {
 /// fresh partition's delivery reports start at offset 0 and advance by exactly
 /// one per record (so a receipt is the record's real log position, not a
 /// fabricated value), and the receipt carries the documented metadata — real
-/// serialized sizes, and `timestamp_ms == -1` for a `CreateTime` topic.
+/// serialized sizes, and for a `CreateTime` topic a `timestamp_ms` echoing the
+/// record's create time (the send-time stamp when the user set none), matching
+/// Java's `RecordMetadata.timestamp()`.
 #[tokio::test]
 #[ignore = "requires the broker from docker-compose.kafka.yml"]
 async fn real_kafka_basic_produce_reports_real_offsets_and_partitions() {
@@ -276,6 +276,7 @@ async fn real_kafka_basic_produce_reports_real_offsets_and_partitions() {
         .expect("producer should connect to local Kafka");
 
     for partition in 0..3_i32 {
+        let before_send_ms = now_millis();
         let receipt = producer
             .send(
                 ProducerRecord::new(topic.clone(), partition)
@@ -304,9 +305,12 @@ async fn real_kafka_basic_produce_reports_real_offsets_and_partitions() {
             i32::try_from(format!("first-{partition}").len()).unwrap(),
             "value size matches the payload"
         );
-        assert_eq!(
-            receipt.timestamp_ms, -1,
-            "CreateTime topics report -1 per the RecordMetadata contract"
+        let after_send_ms = now_millis();
+        assert!(
+            (before_send_ms..=after_send_ms).contains(&receipt.timestamp_ms),
+            "a CreateTime receipt echoes the send-time stamp (Java parity): {before_send_ms} <= \
+             {} <= {after_send_ms}",
+            receipt.timestamp_ms
         );
     }
 
@@ -551,11 +555,15 @@ async fn real_kafka_headers_and_timestamp_roundtrip() {
         .header_null(Bytes::from_static(b"h-null"))
         .header(Bytes::from_static(b"h1"), Bytes::from_static(b"v2"))
         .header(Bytes::from_static(b"h-empty"), Bytes::new());
-    let _receipt = producer
+    let receipt = producer
         .send(record)
         .expect("send should enqueue")
         .await
         .expect("delivery should complete");
+    assert_eq!(
+        receipt.timestamp_ms, timestamp_ms,
+        "the receipt echoes an explicit create-time timestamp exactly (Java parity)"
+    );
 
     let group = format!("kacrab-headers-{}", unique_suffix());
     let mut consumer = Consumer::from_map([
