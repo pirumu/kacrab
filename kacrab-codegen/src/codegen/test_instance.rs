@@ -8,7 +8,7 @@ use super::{
     error::CodegenErrorKind,
     ident::safe_rust_ident,
     struct_def::StructDef,
-    ty::is_field_nullable,
+    ty::{is_field_nullable, is_field_nullable_in},
     version_check::{version_check_always_true, version_contains_check_with_context},
 };
 use crate::ir::{
@@ -252,17 +252,30 @@ fn nullable_exercises(def: &StructDef<'_>) -> Vec<TokenStream> {
         .collect()
 }
 
+/// The `test_null_optionals` value for one field: `None` when the field can
+/// actually be null at an encoded version, the type's zero value otherwise.
+///
+/// The `None` decision goes through [`is_field_nullable_in`], which implies
+/// [`is_field_nullable`] — the predicate [`super::ty::map_field_type`] uses to
+/// pick the field's Rust type. Testing `nullable_versions` against the struct's
+/// effective range *without* first narrowing by the field's own presence range
+/// (as this once did) breaks that implication: a field present only from v3 but
+/// marked nullable in v0-2 has type `KafkaString`, yet the fixture handed it
+/// `None`.
 fn null_optionals_value(
     field: &FieldSpec,
     effective_versions: &VersionRange,
 ) -> Result<TokenStream, CodegenErrorKind> {
-    if field.nullable_versions.intersects(effective_versions) {
+    if is_field_nullable_in(field, effective_versions) {
         return Ok(quote! { None });
     }
     if field.tag.is_some() {
         return resolve_default(field);
     }
     let value = null_optionals_value_for_type(&field.field_type);
+    // Nullable in its own right but not at any encoded version (e.g.
+    // `ShareFetchResponse.Records`, `"nullableVersions": "0"` on a `1-2`
+    // message): the type is still `Option`, so wrap the non-null value.
     if is_field_nullable(field) {
         return Ok(wrap_non_null_nullable_value(&field.field_type, value));
     }
@@ -295,31 +308,7 @@ fn null_optionals_value_for_type(ft: &FieldType) -> TokenStream {
             quote! { <#id as TestInstance>::test_null_optionals(version) }
         },
         FieldType::Array(inner) => {
-            let inner_val = null_optionals_array_element(inner);
-            quote! { vec![#inner_val] }
-        },
-    }
-}
-
-fn null_optionals_array_element(ft: &FieldType) -> TokenStream {
-    match ft {
-        FieldType::Struct(name) => {
-            let id = Ident::new(name, Span::call_site());
-            quote! { <#id as TestInstance>::test_null_optionals(version) }
-        },
-        FieldType::Bool => quote! { false },
-        FieldType::Int8 => quote! { 0_i8 },
-        FieldType::Int16 => quote! { 0_i16 },
-        FieldType::Int32 => quote! { 0_i32 },
-        FieldType::Int64 => quote! { 0_i64 },
-        FieldType::Uint16 => quote! { 0_u16 },
-        FieldType::Float64 => quote! { 0.0_f64 },
-        FieldType::String => quote! { KafkaString::default() },
-        FieldType::Bytes => quote! { Bytes::new() },
-        FieldType::Uuid => quote! { KafkaUuid::ZERO },
-        FieldType::Records => quote! { Some(Bytes::new()) },
-        FieldType::Array(inner) => {
-            let inner_val = null_optionals_array_element(inner);
+            let inner_val = null_optionals_value_for_type(inner);
             quote! { vec![#inner_val] }
         },
     }
@@ -430,37 +419,12 @@ fn empty_collections_value_for_type(ft: &FieldType) -> TokenStream {
     }
 }
 
+/// Fixture value for `test_multi_element_collections`.
+///
+/// Arrays get two distinct elements — the populated value plus this same
+/// generator one level down — so the round-trip exercises element ordering
+/// rather than a single-element degenerate case.
 fn multi_element_collections_value_for_type(ft: &FieldType) -> TokenStream {
-    match ft {
-        FieldType::Bytes => quote! { Bytes::from_static(b"\x00\xff") },
-        FieldType::Records => quote! { Some(Bytes::new()) },
-        FieldType::Array(inner) => {
-            let first = populated_value_for_type(inner);
-            let second = multi_element_array_element(inner);
-            quote! { vec![#first, #second] }
-        },
-        _ => multi_element_scalar_value_for_type(ft),
-    }
-}
-
-fn multi_element_array_element(ft: &FieldType) -> TokenStream {
-    match ft {
-        FieldType::Struct(name) => {
-            let id = Ident::new(name, Span::call_site());
-            quote! { <#id as TestInstance>::test_multi_element_collections(version) }
-        },
-        FieldType::Array(inner) => {
-            let first = populated_value_for_type(inner);
-            let second = multi_element_array_element(inner);
-            quote! { vec![#first, #second] }
-        },
-        FieldType::Bytes => quote! { Bytes::from_static(b"\x00\xff") },
-        FieldType::Records => quote! { Some(Bytes::new()) },
-        _ => multi_element_scalar_value_for_type(ft),
-    }
-}
-
-fn multi_element_scalar_value_for_type(ft: &FieldType) -> TokenStream {
     match ft {
         FieldType::Bool => quote! { false },
         FieldType::Int8 => quote! { 8_i8 },
@@ -479,7 +443,7 @@ fn multi_element_scalar_value_for_type(ft: &FieldType) -> TokenStream {
         },
         FieldType::Array(inner) => {
             let first = populated_value_for_type(inner);
-            let second = multi_element_array_element(inner);
+            let second = multi_element_collections_value_for_type(inner);
             quote! { vec![#first, #second] }
         },
     }
@@ -516,21 +480,7 @@ fn tagged_fields_value_for_type(ft: &FieldType) -> TokenStream {
             quote! { <#id as TestInstance>::test_tagged_fields(version) }
         },
         FieldType::Array(inner) => {
-            let inner_val = tagged_fields_array_element(inner);
-            quote! { vec![#inner_val] }
-        },
-        _ => populated_value_for_type(ft),
-    }
-}
-
-fn tagged_fields_array_element(ft: &FieldType) -> TokenStream {
-    match ft {
-        FieldType::Struct(name) => {
-            let id = Ident::new(name, Span::call_site());
-            quote! { <#id as TestInstance>::test_tagged_fields(version) }
-        },
-        FieldType::Array(inner) => {
-            let inner_val = tagged_fields_array_element(inner);
+            let inner_val = tagged_fields_value_for_type(inner);
             quote! { vec![#inner_val] }
         },
         _ => populated_value_for_type(ft),

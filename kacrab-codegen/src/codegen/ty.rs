@@ -3,7 +3,11 @@
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 
-use crate::ir::field::{FieldSpec, FieldType};
+use super::error::CodegenErrorKind;
+use crate::ir::{
+    field::{FieldSpec, FieldType},
+    version_range::VersionRange,
+};
 
 /// Map a [`FieldSpec`] to its Rust type [`TokenStream`], applying the
 /// `Option<T>` wrapper when the field is nullable.
@@ -24,6 +28,28 @@ pub(crate) const fn is_field_nullable(field: &FieldSpec) -> bool {
     field.nullable_versions.intersects(&field.versions)
 }
 
+/// True when the field is nullable at some version that will actually be
+/// encoded — its own presence range narrowed by `effective_versions`.
+///
+/// Strictly stronger than [`is_field_nullable`]: whenever this holds, the field's
+/// Rust type is an `Option` too, because the narrowed range is a subset of
+/// `field.versions`. That implication is what makes it safe for fixture
+/// generation — a fixture keyed on it can never assign `None` to a field the
+/// struct declares as a bare value.
+///
+/// The converse does not hold, and testing `nullable_versions` against
+/// `field.versions` alone would be wrong for a fixture: `ShareFetchResponse`'s
+/// `Records` is `"nullableVersions": "0"` on a `1-2` message, so its Rust type is
+/// `Option<Bytes>` while no encoded version may carry a null.
+pub(crate) fn is_field_nullable_in(field: &FieldSpec, effective_versions: &VersionRange) -> bool {
+    if field.nullable_versions.is_none() {
+        return false;
+    }
+    field
+        .nullable_versions
+        .intersects(&field.versions.intersect(effective_versions))
+}
+
 /// True when the field is nullable in some — but not all — of its versions.
 ///
 /// Forces version-conditional read/write branching: nullable encoding inside the
@@ -36,6 +62,32 @@ pub(crate) fn has_version_conditional_nullability(field: &FieldSpec) -> bool {
         return false;
     }
     !field.nullable_versions.covers(&field.versions)
+}
+
+/// Reject the one version-conditional nullability shape the encoders cannot
+/// lower: a `struct` field nullable in part of its presence range.
+///
+/// The write/size emitters fall back to an empty value (`KafkaString::default`,
+/// `Bytes::new`, a zero-length array) when a `None` has to be encoded at a
+/// version that has no null representation. A struct has no such fallback, and
+/// silently emitting `self.field.write(buf, version)?` against the field's
+/// `Option<Box<T>>` produces a generated crate that does not compile. Fail here
+/// instead, naming the field, so the schema change is caught at generation time.
+///
+/// Called by both [`crate::codegen::write_expr`] and
+/// [`crate::codegen::size_expr`] so the two encoders cannot drift on which
+/// shapes they accept.
+pub(crate) fn ensure_encodable_nullability(field: &FieldSpec) -> Result<(), CodegenErrorKind> {
+    if has_version_conditional_nullability(field)
+        && matches!(field.field_type, FieldType::Struct(_))
+    {
+        return Err(CodegenErrorKind::PartiallyNullableStruct {
+            field: field.name.clone(),
+            versions: field.versions.to_string(),
+            nullable_versions: field.nullable_versions.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Map a [`FieldType`] to its base Rust type [`TokenStream`] (without nullable wrapping).
