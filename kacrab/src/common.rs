@@ -9,13 +9,15 @@
 //! compatibility.
 
 mod consumer_group;
-#[cfg(any(feature = "producer", feature = "admin"))]
+#[cfg(any(feature = "producer", feature = "admin", feature = "consumer"))]
 mod coordinator;
 mod node;
 mod topic_partition;
 
 #[cfg(any(feature = "producer", feature = "admin"))]
 pub(crate) use self::coordinator::CoordinatorType;
+#[cfg(any(feature = "producer", feature = "admin", feature = "consumer"))]
+pub(crate) use self::coordinator::coordinator_for_key;
 pub use self::{
     consumer_group::ConsumerGroupMetadata,
     node::Node,

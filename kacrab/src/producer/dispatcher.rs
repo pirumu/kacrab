@@ -3694,13 +3694,11 @@ impl ProducerDispatcher {
                 .wire
                 .send_to_broker(broker_id, ApiKey::FindCoordinator, version, &request)
                 .await?;
-            let coordinator = response
-                .coordinators
-                .into_iter()
-                .find(|coordinator| coordinator.key.to_string() == key)
-                .ok_or(ProducerError::InvalidTransactionState(
+            let coordinator = crate::common::coordinator_for_key(response, key).ok_or(
+                ProducerError::InvalidTransactionState(
                     "coordinator response was missing requested key",
-                ))?;
+                ),
+            )?;
             let error = ErrorCode::from(coordinator.error_code);
             if !error.is_error() {
                 break coordinator;

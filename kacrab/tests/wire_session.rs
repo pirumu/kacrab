@@ -15,7 +15,8 @@ use kacrab::wire::{BrokerEndpoint, ConnectionConfig, WireClient, WireError};
 use kacrab_protocol::{
     KafkaString, frame,
     generated::{
-        ApiKey, ApiVersion, ApiVersionsResponseData, MetadataResponseBroker, MetadataResponseData,
+        ApiKey, ApiVersion, ApiVersionsResponseData, FindCoordinatorRequestData,
+        FindCoordinatorResponseData, MetadataResponseBroker, MetadataResponseData,
         MetadataResponsePartition, MetadataResponseTopic, ProduceRequestData, ProduceResponseData,
         RequestHeaderData, ResponseHeaderData, SaslAuthenticateRequestData,
         SaslAuthenticateResponseData, SaslHandshakeRequestData, SaslHandshakeResponseData,
@@ -182,6 +183,84 @@ async fn wire_client_uses_negotiated_broker_api_version_for_request_encoding() {
         .await
         .unwrap();
 
+    assert_eq!(broker.join().await, 2);
+}
+
+/// `FindCoordinator` only grew the batched `coordinator_keys` array in v4
+/// (KIP-699, broker 3.0). A broker that negotiates v3 or lower must receive the
+/// singular `key` form instead — the caller passes its client-side ceiling (v6),
+/// so the request has to be rewritten for the version the connection actually
+/// negotiated, or the encoder rejects it and group/transaction discovery dies on
+/// every broker older than 3.0.
+#[tokio::test]
+async fn wire_client_sends_singular_find_coordinator_key_to_pre_batched_broker() {
+    let broker = MockBroker::serve_many(vec![
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![
+                    ApiVersion {
+                        api_key: ApiKey::ApiVersions as i16,
+                        min_version: 0,
+                        max_version: 4,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                    ApiVersion {
+                        api_key: ApiKey::FindCoordinator as i16,
+                        min_version: 0,
+                        max_version: 3,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                ..ApiVersionsResponseData::default()
+            };
+            response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+        }),
+        Box::new(|mut request| {
+            let header_version = request_header_version(ApiKey::FindCoordinator as i16, 3);
+            let header = RequestHeaderData::read(&mut request, header_version)
+                .expect("find coordinator request header should use negotiated version");
+            assert_eq!(header.request_api_version, 3);
+            let find = FindCoordinatorRequestData::read(&mut request, 3)
+                .expect("find coordinator body should use negotiated version");
+            assert_eq!(find.key, KafkaString::from("group-a".to_owned()));
+            assert_eq!(find.key_type, 0);
+            assert!(find.coordinator_keys.is_empty());
+            let response = FindCoordinatorResponseData {
+                node_id: 9,
+                host: KafkaString::from("127.0.0.1".to_owned()),
+                port: 9092,
+                ..FindCoordinatorResponseData::default()
+            };
+            response_frame(ApiKey::FindCoordinator, 3, header.correlation_id, &response)
+        }),
+    ])
+    .await;
+    let client = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(7, broker.addr())],
+    );
+    let request = FindCoordinatorRequestData {
+        key_type: 0,
+        coordinator_keys: vec![KafkaString::from("group-a".to_owned())],
+        ..FindCoordinatorRequestData::default()
+    };
+
+    let response: FindCoordinatorResponseData = client
+        .send_to_broker(
+            7,
+            ApiKey::FindCoordinator,
+            kacrab_protocol::version::client_api_info(ApiKey::FindCoordinator).max_version,
+            &request,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.node_id, 9);
+    assert_eq!(response.port, 9092);
+    assert!(response.coordinators.is_empty());
     assert_eq!(broker.join().await, 2);
 }
 
@@ -2146,6 +2225,12 @@ impl ApiVersions for ApiVersionsResponseData {
 impl ApiVersions for MetadataResponseData {
     fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
         self.write(buf, version).expect("metadata response");
+    }
+}
+
+impl ApiVersions for FindCoordinatorResponseData {
+    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
+        self.write(buf, version).expect("find coordinator response");
     }
 }
 

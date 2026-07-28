@@ -121,6 +121,49 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **`FindCoordinator` was always sent in its v4+ form, so every broker older than
+  3.0 failed coordinator discovery.** The consumer, producer, and admin clients all
+  filled `coordinator_keys` — the batched array KIP-699 added in v4 — while the
+  version each request is actually sent at is negotiated per broker from its
+  `ApiVersions` (the version passed by a call site is only a ceiling). A broker that
+  negotiated v3 or lower got a request the encoder refused
+  (`UnsupportedFieldVersion { field: "coordinator_keys" }`), so group membership,
+  offset commits, and every transaction died before the first RPC — that alone
+  pinned kacrab's real broker floor at 3.0.
+
+  The request is now rewritten into the form the negotiated version speaks at the
+  encode seam, where that version is known: the singular `key` up to v3 and
+  `coordinator_keys` from v4 (mirroring Java's `FindCoordinatorRequest.Builder`), a
+  batched lookup below v4 still being refused rather than silently losing keys. Both
+  response shapes are read too — the flat top-level `node_id`/`host`/`port` of v0-3
+  as well as the v4+ `coordinators` array.
+
+  This is one instance of a class — a field that only exists from some version being
+  filled before the negotiated version is known — and every request-build site was
+  audited against the generated per-version encoders for the same mistake. The two
+  further instances it turned up are fixed below; the rest either set the field only
+  where Kafka's own client also raises `UnsupportedVersionException`, or are already
+  version-aware.
+
+- **`ListOffsets` always carried `timeout_ms`, which only exists from v10.** Both the
+  consumer's offset lookups (`beginning_offsets`, `end_offsets`, `offsets_for_times`,
+  and the `auto.offset.reset` path) and `Admin::list_offsets` filled the KIP-1075
+  remote-storage timeout unconditionally, so any broker negotiating v9 or lower —
+  every release before the field existed — rejected the request outright. The field
+  is ignorable, so it is now dropped for the versions that do not carry it, exactly
+  as Kafka's own encoder does.
+
+- **`SyncGroup` always carried `protocol_type`/`protocol_name`, which only exist from
+  v5.** The classic consumer group's `SyncGroup` filled both fields on every join, so
+  a broker negotiating v4 or lower (before 2.5) rejected the request and no member
+  could complete a rebalance. Both fields are ignorable and are now dropped below v5.
+
+- **`Fetch` always carried `client.rack`, which only exists from v11.** A consumer
+  configured for rack-aware fetching (KIP-392) sent its `rack_id` at every
+  negotiated `Fetch` version, so a broker older than 2.4 rejected every fetch
+  instead of simply serving from the leader. The field is ignorable and is now
+  dropped below v11, degrading rack-aware fetching to leader fetching.
+
 - **`list_consumer_groups` reported share, streams, and connect groups as consumer
   groups.** The broker's `ListGroups` response carries every group it coordinates
   whatever its protocol, and Java's `listConsumerGroups` filters that response down
