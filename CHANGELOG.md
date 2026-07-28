@@ -256,6 +256,33 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **`dispatch_ready` never healed the sequence gap an unsplittable oversized batch
+  leaves behind.** It carried a second copy of the producer's dispatch retry loop, and
+  the copy had drifted: when a single-record batch still exceeds `max.request.size` it
+  cannot be split and fails terminally, and only the drained loop then requested the
+  idempotent epoch bump (Kafka `failBatch(adjustSequenceNumbers=true)` ->
+  `requestIdempotentEpochBumpForPartition`) that restarts the partition's sequence.
+  Through `dispatch_ready` the gap survived and every later batch for that partition
+  wedged on `OUT_OF_ORDER_SEQUENCE_NUMBER`. It now delegates to the one loop, which also
+  gives it the in-flight sequence registration, the enqueue-turn advance (previously
+  leaked whenever a dispatch returned before enqueuing) and the delivery-future
+  completion that the copy was missing. The rest of the producer core lost its copies
+  the same way: the accumulator's two `append_internal` bodies and four hand-written
+  `ReadyBatch` drain/release sites (whose own doc warned that divergence "would leak
+  buffer memory"), the partitioner's three sticky-rotation loops and nine identical
+  `StickyPartitionState` literals, the sender's `join_next` alias chains and the
+  `#[cfg(test)]` twins that validated different accounting than production — notably
+  `complete_joined_dispatch`, which released reservations by partition-vector match, the
+  exact double-decrement the production function documents avoiding. Alongside them went
+  the transaction request "queue" whose priority ordering nobody read (now a plain
+  multiset), three dozen `if metrics_are_enabled()` blocks (now the recorder's own
+  concern), and the second, uncompressed re-encode of every batch that reporting
+  `compression-rate` performed on each dispatch — the identical number now falls out of
+  a constant header plus a varint sum per record, with no encode, allocation or CRC.
+
+- **Two admin group operations were broken on every broker older than Apache
+  Kafka 4.1, in opposite directions.**
+
 - **A metadata refresh for one topic evicted every other topic from the cache.**
   `metadata_for_topics` asks the broker only for the topics it needs, but the
   response then *replaced* the whole cached snapshot — so resolving `orders`

@@ -7231,6 +7231,150 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch() {
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
+    reason = "Unsplittable MESSAGE_TOO_LARGE epoch-heal fixture keeps ordered broker handlers \
+              inline."
+)]
+async fn dispatch_ready_bumps_epoch_after_unsplittable_message_too_large() {
+    // Kafka `failBatch(adjustSequenceNumbers=true)` ->
+    // `requestIdempotentEpochBumpForPartition`: a single-record batch that still exceeds
+    // max.request.size cannot be split, so it fails terminally and leaves a hole in the
+    // partition's sequence. The epoch must be bumped before the next produce or every
+    // later batch wedges on OUT_OF_ORDER_SEQUENCE_NUMBER. The accumulator-owning
+    // `dispatch_ready` entrypoint must heal it exactly like the drained dispatch does.
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::InitProducerId as i16);
+            let init = InitProducerIdRequestData::read(&mut request, 5).expect("init producer id");
+            assert_eq!(init.producer_id, -1);
+            assert_eq!(init.producer_epoch, -1);
+            init_producer_id_response_frame(header.correlation_id, 42, 3)
+        }),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            let mut records = produce.topic_data[0].partition_data[0]
+                .records
+                .clone()
+                .expect("records");
+            let batch = RecordBatch::decode(&mut records).expect("record batch");
+            assert_eq!(batch.records.len(), 1);
+            assert_eq!(batch.producer_epoch, 3);
+            assert_eq!(batch.base_sequence, 0);
+            produce_error_response_frame_for_request(&header, 0, ErrorCode::MessageTooLarge)
+        }),
+        // The heal: the next dispatch bumps the epoch before it produces again.
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::InitProducerId as i16);
+            let init = InitProducerIdRequestData::read(&mut request, 5).expect("init producer id");
+            assert_eq!(init.producer_id, 42);
+            assert_eq!(init.producer_epoch, 3);
+            init_producer_id_response_frame(header.correlation_id, 42, 4)
+        }),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            let mut records = produce.topic_data[0].partition_data[0]
+                .records
+                .clone()
+                .expect("records");
+            let batch = RecordBatch::decode(&mut records).expect("record batch");
+            assert_eq!(batch.producer_epoch, 4);
+            // The bump restarted the partition's sequence, so the gap the unsplittable
+            // batch left behind is healed rather than inherited.
+            assert_eq!(batch.base_sequence, 0);
+            produce_response_frame_for_request(&header, 0, 40)
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response([(7, leader_7)]);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let dispatcher = ProducerDispatcher::with_config(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            // Bounded so a regression that stops healing the sequence fails fast instead
+            // of burning the default two-minute delivery timeout on doomed retries.
+            delivery_timeout: Duration::from_secs(10),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: None,
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+            ..ProducerRuntimeConfig::default()
+        },
+    );
+    let now = Instant::now();
+    let accumulator = SharedAccumulator::with_config(
+        AccumulatorConfig::default()
+            .batch_size(1)
+            .buffer_memory(16 * 1024),
+    );
+    accumulator
+        .append_at(
+            ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")),
+            now,
+        )
+        .expect("append record");
+
+    let error = dispatcher
+        .dispatch_ready(&accumulator, now)
+        .await
+        .expect_err("an unsplittable MESSAGE_TOO_LARGE batch fails terminally");
+
+    assert!(matches!(
+        error,
+        kacrab::producer::ProducerError::Broker {
+            partition: 0,
+            error: ErrorCode::MessageTooLarge,
+            ..
+        }
+    ));
+
+    accumulator
+        .append_at(
+            ProducerRecord::new("orders", 0).value(Bytes::from_static(b"b")),
+            now,
+        )
+        .expect("append record");
+    let receipts = dispatcher
+        .dispatch_ready(&accumulator, now)
+        .await
+        .expect("the healed dispatch succeeds");
+
+    assert_eq!(receipts[0].offset, 40);
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(leader_7.join().await, 5);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
     reason = "Idempotent UnknownProducerId epoch-bump fixture keeps ordered broker handlers \
               inline."
 )]

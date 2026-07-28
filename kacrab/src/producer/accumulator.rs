@@ -564,53 +564,8 @@ impl RecordAccumulator {
         now: Instant,
         compression_sizing: CompressionSizing,
     ) -> Result<AppendStatus> {
-        let record = record_with_append_timestamp(record);
-        let key = TopicPartition {
-            topic: Arc::<str>::clone(&record.topic),
-            partition: record.partition,
-        };
-        let batch_size = self.config.batch_size.max(1);
-        let available = self
-            .config
-            .buffer_memory
-            .saturating_sub(self.buffered_bytes);
-        // Single hash lookup: take the (mutable) partition queue up front and
-        // compute the append target from it, instead of an immutable get()
-        // followed by a separate entry() — both hash the topic Arc<str> on every
-        // append. An empty queue plans the same target as a missing one.
-        let queue = self
-            .partitions
-            .entry(key)
-            .or_insert_with(|| PartitionQueue {
-                batches: VecDeque::new(),
-            });
-        let target = planned_append_target(Some(&*queue), &record, batch_size, compression_sizing);
-        if target.reserved_buffer_bytes > available {
-            return Err(ProducerError::Backpressure);
-        }
-        let next_identity = &mut self.next_batch_id;
-        if let Some(identity) = apply_append_target(queue, now, batch_size, target, next_identity) {
-            let _inserted = self.buffered_batch_identities.insert(identity);
-            let _inserted = self.incomplete_batch_identities.insert(identity);
-        }
-        let Some(batch) = queue.batches.back_mut() else {
-            return Err(ProducerError::Backpressure);
-        };
-        batch.compression_sizing = compression_sizing;
-        batch.batch_bytes = batch.batch_bytes.saturating_add(target.record_batch_bytes);
-        let current_batch_records = batch.records.len().saturating_add(1);
-        let current_batch_ready =
-            estimated_batch_bytes_for_sizing(batch.batch_bytes, compression_sizing) >= batch_size;
-        batch.records.push(record);
-        self.buffered_bytes = self
-            .buffered_bytes
-            .saturating_add(target.reserved_buffer_bytes);
-        Ok(append_status(
-            target.sealed_previous_records,
-            current_batch_ready,
-            current_batch_records,
-            target.starts_new_batch,
-        ))
+        self.append_internal_inner(record, now, compression_sizing, None)
+            .map(|(_delivery, status)| status)
     }
 
     fn append_internal_for_delivery(
@@ -619,6 +574,20 @@ impl RecordAccumulator {
         now: Instant,
         metadata_capacity: usize,
         compression_sizing: CompressionSizing,
+    ) -> Result<(Option<SendFuture>, AppendStatus)> {
+        self.append_internal_inner(record, now, compression_sizing, Some(metadata_capacity))
+    }
+
+    /// The one append path. `delivery_metadata_capacity` is `Some` when the caller wants a
+    /// delivery handle for the record's eventual broker ack, and `None` for the
+    /// fire-and-forget appends — the only difference between the two, and the reason this
+    /// was previously two copies that had to be kept in step by hand.
+    fn append_internal_inner(
+        &mut self,
+        record: ProducerRecord,
+        now: Instant,
+        compression_sizing: CompressionSizing,
+        delivery_metadata_capacity: Option<usize>,
     ) -> Result<(Option<SendFuture>, AppendStatus)> {
         let record = record_with_append_timestamp(record);
         let key = TopicPartition {
@@ -654,14 +623,18 @@ impl RecordAccumulator {
         };
         batch.compression_sizing = compression_sizing;
         batch.batch_bytes = batch.batch_bytes.saturating_add(target.record_batch_bytes);
-        let delivery = if let Some(sender) = &mut batch.delivery {
-            Some(sender.delivery_for_record(&record))
-        } else {
-            let (sender, delivery) =
-                SendFuture::channel_for_record_with_metadata_capacity(&record, metadata_capacity);
-            batch.delivery = Some(sender);
-            Some(delivery)
-        };
+        let delivery = delivery_metadata_capacity.map(|metadata_capacity| {
+            if let Some(sender) = &mut batch.delivery {
+                sender.delivery_for_record(&record)
+            } else {
+                let (sender, delivery) = SendFuture::channel_for_record_with_metadata_capacity(
+                    &record,
+                    metadata_capacity,
+                );
+                batch.delivery = Some(sender);
+                delivery
+            }
+        });
         let current_batch_records = batch.records.len().saturating_add(1);
         let current_batch_ready =
             estimated_batch_bytes_for_sizing(batch.batch_bytes, compression_sizing) >= batch_size;
@@ -722,24 +695,15 @@ impl RecordAccumulator {
                     .front()
                     .is_some_and(|batch| batch_is_ready(batch, now, batch_size, linger))
                 {
-                    let Some(batch) = queue.batches.pop_front() else {
+                    let Some(batch) = take_front_batch(
+                        &key,
+                        queue,
+                        &mut self.buffered_batch_identities,
+                        &mut self.buffered_bytes,
+                    ) else {
                         break;
                     };
-                    let bytes = ready_batch_bytes(&batch);
-                    let _removed = self.buffered_batch_identities.remove(&batch.identity);
-                    self.buffered_bytes = self.buffered_bytes.saturating_sub(batch.buffer_bytes);
-                    ready.push(ReadyBatch {
-                        identity: batch.identity,
-                        topic: key.topic.to_string(),
-                        partition: key.partition,
-                        records: batch.records,
-                        delivery: batch.delivery,
-                        bytes,
-                        pooled_buffer_bytes: batch.buffer_bytes,
-                        first_append_at: batch.first_append_at,
-                        producer_state: batch.producer_state,
-                        split_parent: None,
-                    });
+                    ready.push(batch);
                 }
             }
         }
@@ -766,24 +730,15 @@ impl RecordAccumulator {
             {
                 continue;
             }
-            let Some(batch) = queue.batches.pop_front() else {
+            let Some(batch) = take_front_batch(
+                key,
+                queue,
+                &mut self.buffered_batch_identities,
+                &mut self.buffered_bytes,
+            ) else {
                 continue;
             };
-            let bytes = ready_batch_bytes(&batch);
-            let _removed = self.buffered_batch_identities.remove(&batch.identity);
-            self.buffered_bytes = self.buffered_bytes.saturating_sub(batch.buffer_bytes);
-            ready.push(ReadyBatch {
-                identity: batch.identity,
-                topic: key.topic.to_string(),
-                partition: key.partition,
-                records: batch.records,
-                delivery: batch.delivery,
-                bytes,
-                pooled_buffer_bytes: batch.buffer_bytes,
-                first_append_at: batch.first_append_at,
-                producer_state: batch.producer_state,
-                split_parent: None,
-            });
+            ready.push(batch);
         }
         ready
     }
@@ -807,8 +762,8 @@ impl RecordAccumulator {
     /// and `RecordAccumulator.drainBatchesForOneNode` then takes the head batch of
     /// every partition that node leads with no readiness check at all — half-full
     /// batches whose linger has not expired ride along on the request that is going
-    /// out anyway. The bookkeeping here mirrors [`Self::drain_ready`] exactly;
-    /// diverging would leak buffer memory and wedge the producer.
+    /// out anyway. The bookkeeping is [`take_front_batch`], shared with
+    /// [`Self::drain_ready`]; diverging would leak buffer memory and wedge the producer.
     pub(crate) fn drain_front_unconditional(
         &mut self,
         partitions: &[BufferedPartition],
@@ -818,24 +773,15 @@ impl RecordAccumulator {
             let Some(queue) = self.partitions.get_mut(key) else {
                 continue;
             };
-            let Some(batch) = queue.batches.pop_front() else {
+            let Some(batch) = take_front_batch(
+                key,
+                queue,
+                &mut self.buffered_batch_identities,
+                &mut self.buffered_bytes,
+            ) else {
                 continue;
             };
-            let bytes = ready_batch_bytes(&batch);
-            let _removed = self.buffered_batch_identities.remove(&batch.identity);
-            self.buffered_bytes = self.buffered_bytes.saturating_sub(batch.buffer_bytes);
-            ready.push(ReadyBatch {
-                identity: batch.identity,
-                topic: key.topic.to_string(),
-                partition: key.partition,
-                records: batch.records,
-                delivery: batch.delivery,
-                bytes,
-                pooled_buffer_bytes: batch.buffer_bytes,
-                first_append_at: batch.first_append_at,
-                producer_state: batch.producer_state,
-                split_parent: None,
-            });
+            ready.push(batch);
         }
         ready
     }
@@ -857,21 +803,11 @@ impl RecordAccumulator {
         let mut batches = Vec::with_capacity(partitions.len());
         for (key, queue) in partitions {
             for batch in queue.batches {
-                let bytes = ready_batch_bytes(&batch);
-                batches.push(ReadyBatch {
-                    identity: batch.identity,
-                    topic: key.topic.to_string(),
-                    partition: key.partition,
-                    records: batch.records,
-                    delivery: batch.delivery,
-                    bytes,
-                    pooled_buffer_bytes: batch.buffer_bytes,
-                    first_append_at: batch.first_append_at,
-                    producer_state: batch.producer_state,
-                    split_parent: None,
-                });
+                batches.push(ready_batch_from(&key, batch));
             }
         }
+        // The per-batch release [`take_front_batch`] does, in bulk: this took the whole
+        // partition map, so every identity and every buffered byte goes at once.
         self.buffered_batch_identities.clear();
         self.buffered_bytes = 0;
         batches
@@ -1182,6 +1118,45 @@ fn ready_batch_bytes(batch: &PartitionBatch) -> usize {
     estimated_batch_bytes_for_sizing(batch.batch_bytes, batch.compression_sizing)
 }
 
+/// Turn a buffered batch into the drained form handed to the dispatcher.
+///
+/// Every drain path builds its `ReadyBatch` here so a field added to one cannot be
+/// forgotten by another — notably `pooled_buffer_bytes`, which is what returns the
+/// batch's pooled write buffer.
+fn ready_batch_from(key: &TopicPartition, batch: PartitionBatch) -> ReadyBatch {
+    ReadyBatch {
+        identity: batch.identity,
+        topic: key.topic.to_string(),
+        partition: key.partition,
+        bytes: ready_batch_bytes(&batch),
+        records: batch.records,
+        delivery: batch.delivery,
+        pooled_buffer_bytes: batch.buffer_bytes,
+        first_append_at: batch.first_append_at,
+        producer_state: batch.producer_state,
+        split_parent: None,
+    }
+}
+
+/// Pop a partition's head batch, release its buffer accounting, and hand it back drained.
+///
+/// The three head-drain paths (`drain_ready`, `drain_front_ready`,
+/// `drain_front_unconditional`) differ only in *which* heads they select; the release
+/// itself must not diverge, or the accumulator leaks buffer memory and wedges the
+/// producer. Takes the accounting fields rather than `&mut self` because one caller
+/// drains while iterating `self.partitions`.
+fn take_front_batch(
+    key: &TopicPartition,
+    queue: &mut PartitionQueue,
+    buffered_batch_identities: &mut AHashSet<ReadyBatchIdentity>,
+    buffered_bytes: &mut usize,
+) -> Option<ReadyBatch> {
+    let batch = queue.batches.pop_front()?;
+    let _removed = buffered_batch_identities.remove(&batch.identity);
+    *buffered_bytes = buffered_bytes.saturating_sub(batch.buffer_bytes);
+    Some(ready_batch_from(key, batch))
+}
+
 fn batch_is_ready(
     batch: &PartitionBatch,
     now: Instant,
@@ -1212,7 +1187,10 @@ fn batch_next_ready_at(
     if deadline <= now { now } else { deadline }
 }
 
-pub(crate) fn estimate_record_bytes(record: &ProducerRecord) -> usize {
+/// Buffer-accounting size of a record: what the split planner charges a group, not a
+/// wire size. It adds a flat per-record overhead and the topic name, neither of which is
+/// encoded per record — the `estimate_*` family models the wire, this does not.
+fn accounted_record_bytes(record: &ProducerRecord) -> usize {
     let key_bytes = record.key.as_ref().map_or(0, bytes::Bytes::len);
     let value_bytes = record.value.as_ref().map_or(0, bytes::Bytes::len);
     let header_bytes = estimate_headers_bytes(record);
@@ -1224,8 +1202,10 @@ pub(crate) fn estimate_record_bytes(record: &ProducerRecord) -> usize {
         .unwrap_or(usize::MAX)
 }
 
+/// Encoded size of `record` as the first record of a batch (offset delta 0, and its own
+/// timestamp as the batch's first timestamp).
 pub(crate) fn estimate_record_batch_bytes(record: &ProducerRecord) -> usize {
-    estimate_first_record_batch_bytes(record)
+    estimate_record_batch_bytes_at_offset(record, 0, record.timestamp_ms)
 }
 
 const fn append_status(
@@ -1316,7 +1296,7 @@ fn new_batch_append_target(
     record: &ProducerRecord,
     batch_size: usize,
 ) -> AppendTarget {
-    let record_batch_bytes = estimate_first_record_batch_bytes(record);
+    let record_batch_bytes = estimate_record_batch_bytes(record);
     AppendTarget {
         sealed_previous_records,
         record_batch_bytes,
@@ -1435,7 +1415,9 @@ fn split_records_by_batch_target(
         let adjusted_record_batch_bytes =
             apply_compression_ratio_estimate(record_batch_bytes, compression_ratio);
         current_batch_bytes = current_batch_bytes.saturating_add(adjusted_record_batch_bytes);
-        current.bytes = current.bytes.saturating_add(estimate_record_bytes(&record));
+        current.bytes = current
+            .bytes
+            .saturating_add(accounted_record_bytes(&record));
         current.records.push(record);
     }
 
@@ -1469,10 +1451,6 @@ fn estimate_ready_batch_encoded_bytes(records: &[ProducerRecord]) -> usize {
                 first_timestamp_ms,
             ))
         })
-}
-
-fn estimate_first_record_batch_bytes(record: &ProducerRecord) -> usize {
-    estimate_record_batch_bytes_at_offset(record, 0, record.timestamp_ms)
 }
 
 fn estimate_next_record_batch_bytes(

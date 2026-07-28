@@ -2,7 +2,7 @@ use super::{
     AHashMap, AHashSet, BTreeSet, ErrorCode, INVALID_LAST_ACKED_OFFSET, IdempotentRetryDecision,
     NO_LAST_ACKED_SEQUENCE, PENDING_TRANSACTION_OPERATION_MESSAGE,
     PendingTransactionOperationStatus, ProduceRoute, ProducerError, ProducerIdentity, Result,
-    TransactionOperation, TransactionPendingOperationStart, TransactionRequestQueue,
+    TransactionOperation, TransactionPendingOperationStart, TransactionRequestSet,
     TransactionState, TransactionalRequestResult, increment_sequence,
 };
 
@@ -37,7 +37,7 @@ pub(crate) struct ProducerIdempotenceState {
     pub(crate) pending_operation: Option<TransactionOperation>,
     pub(crate) pending_result: Option<TransactionalRequestResult>,
     pub(crate) pending_operation_status: PendingTransactionOperationStatus,
-    pub(crate) pending_requests: TransactionRequestQueue,
+    pub(crate) pending_requests: TransactionRequestSet,
 }
 
 impl ProducerIdempotenceState {
