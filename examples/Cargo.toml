@@ -8,18 +8,46 @@ authors.workspace = true
 publish = false
 readme = "README.md"
 
+# Every example is gated on the `kacrab` feature it demonstrates, so a single
+# client surface can be built and linted on its own (`--no-default-features
+# --features consumer`). `default` turns them all on, which keeps the plain
+# `cargo run -p kacrab-examples --example <name>` commands in the README working.
+[features]
+default = ["admin", "consumer", "producer", "share-consumer"]
+admin = ["kacrab/admin"]
+consumer = ["kacrab/consumer"]
+producer = ["kacrab/producer"]
+share-consumer = ["kacrab/share-consumer"]
+
 [dev-dependencies]
-kacrab = { workspace = true, features = ["producer", "admin"] }
+kacrab = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 bytes = { workspace = true }
 
 [[example]]
 name = "producer"
 path = "producer.rs"
+required-features = ["producer"]
+
+[[example]]
+name = "consumer"
+path = "consumer.rs"
+required-features = ["consumer"]
+
+[[example]]
+name = "share_consumer"
+path = "share_consumer.rs"
+required-features = ["share-consumer"]
+
+[[example]]
+name = "transactions"
+path = "transactions.rs"
+required-features = ["consumer", "producer"]
 
 [[example]]
 name = "admin"
 path = "admin.rs"
+required-features = ["admin"]
 
 [[example]]
 name = "config"
@@ -28,6 +56,7 @@ path = "config.rs"
 [[example]]
 name = "typed_serializer"
 path = "typed_serializer.rs"
+required-features = ["producer"]
 
 [lints]
 workspace = true
