@@ -24,12 +24,14 @@ use kacrab_protocol::{
         ApiKey, ApiVersion, ApiVersionsResponseData, DeletableTopicResult, DeleteTopicState,
         DeleteTopicsRequestData, DeleteTopicsResponseData, FindCoordinatorRequestData,
         FindCoordinatorResponseData, LeaveGroupRequestData, LeaveGroupResponseData,
-        MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition,
-        MetadataResponseTopic, OffsetFetchRequestData, OffsetFetchRequestGroup,
-        OffsetFetchRequestTopics, OffsetFetchResponseData, OffsetFetchResponsePartition,
-        OffsetFetchResponseTopic, ProduceRequestData, ProduceResponseData, RequestHeaderData,
-        ResponseHeaderData, SaslAuthenticateRequestData, SaslAuthenticateResponseData,
-        SaslHandshakeRequestData, SaslHandshakeResponseData, leave_group_request::MemberIdentity,
+        ListConfigResourcesRequestData, ListConfigResourcesResponseData, MetadataResponseBroker,
+        MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
+        OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
+        OffsetFetchResponseData, OffsetFetchResponsePartition, OffsetFetchResponseTopic,
+        ProduceRequestData, ProduceResponseData, RequestHeaderData, ResponseHeaderData,
+        SaslAuthenticateRequestData, SaslAuthenticateResponseData, SaslHandshakeRequestData,
+        SaslHandshakeResponseData, leave_group_request::MemberIdentity,
+        list_config_resources_response::ConfigResource as WireConfigResource,
     },
     version::{request_header_version, response_header_version},
 };
@@ -545,6 +547,90 @@ async fn wire_client_sends_flat_delete_topic_names_to_pre_topic_id_broker() {
         Some(KafkaString::from("orders".to_owned()))
     );
     assert_eq!(response.responses[0].error_code, 0);
+    assert_eq!(broker.join().await, 2);
+}
+
+/// `ListConfigResources` only grew the `resource_types` filter in v1; v0 has no
+/// such field and means client-metrics resources implicitly. Brokers 3.7-4.0
+/// advertise the API at v0 only, so a client that always fills the filter is
+/// rejected there — and `list_client_metrics_resources` is exactly the call
+/// those brokers can serve.
+#[tokio::test]
+async fn wire_client_drops_list_config_resource_types_for_a_v0_broker() {
+    let broker = MockBroker::serve_many(vec![
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![
+                    ApiVersion {
+                        api_key: ApiKey::ApiVersions as i16,
+                        min_version: 0,
+                        max_version: 4,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                    ApiVersion {
+                        api_key: ApiKey::ListConfigResources as i16,
+                        min_version: 0,
+                        max_version: 0,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                ..ApiVersionsResponseData::default()
+            };
+            response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+        }),
+        Box::new(|mut request| {
+            let header_version = request_header_version(ApiKey::ListConfigResources as i16, 0);
+            let header = RequestHeaderData::read(&mut request, header_version)
+                .expect("list config resources header should use negotiated version");
+            assert_eq!(header.request_api_version, 0);
+            let list = ListConfigResourcesRequestData::read(&mut request, 0)
+                .expect("list config resources body should use negotiated version");
+            assert!(list.resource_types.is_empty());
+            // v0 has no per-resource type either; it defaults to client metrics.
+            let response = ListConfigResourcesResponseData {
+                config_resources: vec![WireConfigResource {
+                    resource_name: KafkaString::from("subscription-1".to_owned()),
+                    resource_type: 16,
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                ..ListConfigResourcesResponseData::default()
+            };
+            response_frame(
+                ApiKey::ListConfigResources,
+                0,
+                header.correlation_id,
+                &response,
+            )
+        }),
+    ])
+    .await;
+    let client = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(7, broker.addr())],
+    );
+    let request = ListConfigResourcesRequestData {
+        resource_types: vec![16],
+        _unknown_tagged_fields: Vec::new(),
+    };
+
+    let response: ListConfigResourcesResponseData = client
+        .send_to_broker(
+            7,
+            ApiKey::ListConfigResources,
+            kacrab_protocol::version::client_api_info(ApiKey::ListConfigResources).max_version,
+            &request,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.config_resources[0].resource_name.as_str(),
+        "subscription-1"
+    );
+    assert_eq!(response.config_resources[0].resource_type, 16);
     assert_eq!(broker.join().await, 2);
 }
 
@@ -2886,6 +2972,13 @@ impl ApiVersions for ShareGroupHeartbeatResponseData {
     fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
         self.write(buf, version)
             .expect("share group heartbeat response");
+    }
+}
+
+impl ApiVersions for ListConfigResourcesResponseData {
+    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
+        self.write(buf, version)
+            .expect("list config resources response");
     }
 }
 

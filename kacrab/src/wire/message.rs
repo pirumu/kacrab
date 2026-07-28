@@ -190,6 +190,29 @@ impl ResponseMessage for OffsetFetchResponseData {
     }
 }
 
+// `ListConfigResources` grew its `resource_types` filter in v1. v0 has no such
+// field: it lists client-metrics resources and nothing else, implicitly. Brokers
+// 3.7 through 4.0 advertise the API at v0 only, so the filter is dropped for the
+// one request v0 can express and refused for the rest, mirroring Java's
+// `ListConfigResourcesRequest.Builder.build`. The response is pass-through —
+// its per-resource `resource_type` defaults to client metrics at v0.
+impl RequestMessage for ListConfigResourcesRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_list_config_resources_request(self, version)?.write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_list_config_resources_request(self, version)?.encoded_len(version)
+    }
+}
+
+impl ResponseMessage for ListConfigResourcesResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
 // `DeleteTopics` is two-shape as well: v1-5 carry the flat `topic_names` array,
 // v6+ (KIP-516) the `topics` objects that can name a topic by id instead, and
 // the generated encoder rejects whichever one its version does not carry. The
@@ -297,7 +320,6 @@ impl_passthrough_message! {
     AlterReplicaLogDirsRequestData => AlterReplicaLogDirsResponseData,
     WriteTxnMarkersRequestData => WriteTxnMarkersResponseData,
     ConsumerGroupDescribeRequestData => ConsumerGroupDescribeResponseData,
-    ListConfigResourcesRequestData => ListConfigResourcesResponseData,
     DescribeQuorumRequestData => DescribeQuorumResponseData,
     AddRaftVoterRequestData => AddRaftVoterResponseData,
     RemoveRaftVoterRequestData => RemoveRaftVoterResponseData,
@@ -429,6 +451,53 @@ fn normalize_add_partitions_to_txn_request(
         v3_and_below_topics: transaction.topics.clone(),
         _unknown_tagged_fields: request._unknown_tagged_fields.clone(),
     })
+}
+
+/// First `ListConfigResources` version carrying the `resource_types` filter.
+const LIST_CONFIG_RESOURCES_RESOURCE_TYPES_MIN_VERSION: i16 = 1;
+
+/// `ConfigResource.Type.CLIENT_METRICS` wire id — the only resource type
+/// `ListConfigResources` v0 can list.
+const CLIENT_METRICS_RESOURCE_TYPE: i8 = 16;
+
+/// Drop the `ListConfigResources` `resource_types` filter for a negotiated
+/// `version` that does not carry it.
+///
+/// v0 has no filter field: it lists client-metrics resources and nothing else.
+/// A request asking for exactly that is therefore already expressible — the
+/// filter is dropped and the meaning is unchanged — while a request naming any
+/// other type is refused, because dropping the filter there would silently
+/// answer a different question. This is Java's
+/// `ListConfigResourcesRequest.Builder.build`, which sends an empty
+/// `ListConfigResourcesRequestData` at v0 for the client-metrics case and raises
+/// `UnsupportedVersionException` for the rest.
+///
+/// An already-empty filter is left alone: it asks for the broker's default set,
+/// which at v0 is exactly the client-metrics resources.
+fn normalize_list_config_resources_request(
+    request: &ListConfigResourcesRequestData,
+    version: i16,
+) -> Result<Cow<'_, ListConfigResourcesRequestData>> {
+    if version >= LIST_CONFIG_RESOURCES_RESOURCE_TYPES_MIN_VERSION
+        || request.resource_types.is_empty()
+    {
+        return Ok(Cow::Borrowed(request));
+    }
+    if request
+        .resource_types
+        .iter()
+        .any(|resource_type| *resource_type != CLIENT_METRICS_RESOURCE_TYPE)
+    {
+        return Err(UnsupportedFieldVersion::new(
+            ApiKey::ListConfigResources as i16,
+            "resource_types",
+            version,
+        )
+        .into());
+    }
+    let mut normalized = request.clone();
+    normalized.resource_types.clear();
+    Ok(Cow::Owned(normalized))
 }
 
 /// First `DeleteTopics` version carrying the `topics` objects — the shape that
@@ -727,9 +796,10 @@ mod tests {
         generated::{
             AddPartitionsToTxnRequestData, AddPartitionsToTxnTopic, AddPartitionsToTxnTransaction,
             DeleteTopicState, DeleteTopicsRequestData, FetchRequestData,
-            FindCoordinatorRequestData, LeaveGroupRequestData, ListOffsetsRequestData,
-            OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopic,
-            OffsetFetchRequestTopics, SyncGroupRequestData, leave_group_request::MemberIdentity,
+            FindCoordinatorRequestData, LeaveGroupRequestData, ListConfigResourcesRequestData,
+            ListOffsetsRequestData, OffsetFetchRequestData, OffsetFetchRequestGroup,
+            OffsetFetchRequestTopic, OffsetFetchRequestTopics, SyncGroupRequestData,
+            leave_group_request::MemberIdentity,
         },
     };
 
@@ -1069,6 +1139,61 @@ mod tests {
         let mut buf = BytesMut::new();
 
         let error = request.write_request(&mut buf, 3);
+
+        assert!(error.is_err());
+    }
+
+    #[test]
+    fn list_config_resources_request_drops_the_client_metrics_filter_below_its_version() {
+        let request = ListConfigResourcesRequestData {
+            resource_types: vec![16],
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let mut buf = BytesMut::new();
+
+        request
+            .write_request(&mut buf, 0)
+            .expect("client-metrics filter should encode for v0");
+        assert_eq!(
+            RequestMessage::encoded_len(&request, 0).expect("encoded length"),
+            buf.len()
+        );
+
+        let mut encoded = buf.freeze();
+        let decoded = ListConfigResourcesRequestData::read(&mut encoded, 0)
+            .expect("list config resources request should decode");
+        assert!(decoded.resource_types.is_empty());
+    }
+
+    #[test]
+    fn list_config_resources_request_keeps_the_filter_from_its_version() {
+        let request = ListConfigResourcesRequestData {
+            resource_types: vec![2, 4],
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let mut buf = BytesMut::new();
+
+        request
+            .write_request(&mut buf, 1)
+            .expect("list config resources request should encode");
+
+        let mut encoded = buf.freeze();
+        let decoded = ListConfigResourcesRequestData::read(&mut encoded, 1)
+            .expect("list config resources request should decode");
+        assert_eq!(decoded.resource_types, vec![2, 4]);
+    }
+
+    /// v0 lists client-metrics resources and nothing else, so dropping a filter
+    /// that names another type would answer a different question.
+    #[test]
+    fn list_config_resources_request_rejects_another_filter_below_its_version() {
+        let request = ListConfigResourcesRequestData {
+            resource_types: vec![16, 32],
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let mut buf = BytesMut::new();
+
+        let error = request.write_request(&mut buf, 0);
 
         assert!(error.is_err());
     }
