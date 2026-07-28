@@ -164,7 +164,13 @@ fn record_batch(
         base_offset,
         partition_leader_epoch: UNKNOWN_PARTITION_LEADER_EPOCH,
         magic: RECORD_BATCH_MAGIC_V2,
-        attributes: compression.codec as i16,
+        attributes: {
+            /// KIP-98 record-batch attribute bit 4: the batch is part of a
+            /// transaction and is governed by its commit/abort marker.
+            const TRANSACTIONAL_BIT: i16 = 0x10;
+            let transactional = producer_state.is_some_and(|state| state.transactional);
+            compression.codec as i16 | if transactional { TRANSACTIONAL_BIT } else { 0 }
+        },
         last_offset_delta: i32::try_from(records.len().saturating_sub(1)).unwrap_or(i32::MAX),
         first_timestamp: timestamp_base.first_timestamp,
         max_timestamp: timestamp_base.max_timestamp,
@@ -277,6 +283,7 @@ mod tests {
                     producer_epoch: 3,
                 },
                 base_sequence: 7,
+                transactional: false,
             }),
             REQUEST_RECORD_BATCH_BASE_OFFSET,
         )

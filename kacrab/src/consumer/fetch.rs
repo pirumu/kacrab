@@ -225,6 +225,12 @@ pub(super) struct RawPartitionFetch {
     pub fetch_position: FetchPosition,
     /// The undecoded record batches, non-empty.
     pub records: Bytes,
+    /// Aborted transactions the broker reported for this partition, as
+    /// `(producer_id, first_offset)` sorted by first offset. This is the
+    /// client-side half of `read_committed`: the broker still returns aborted
+    /// data below the last stable offset and expects the consumer to drop it
+    /// (Java's `CompletedFetch` keeps the same queue).
+    pub aborted: VecDeque<(i64, i64)>,
 }
 
 /// The aggregate outcome of one `fetch` across every leader.
@@ -523,10 +529,19 @@ fn collect_fetches(
             let Some(records) = partition.records.filter(|blob| !blob.is_empty()) else {
                 continue;
             };
+            let mut aborted: Vec<(i64, i64)> = partition
+                .aborted_transactions
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|txn| (txn.producer_id, txn.first_offset))
+                .collect();
+            aborted.sort_unstable_by_key(|&(_, first_offset)| first_offset);
             progress.partitions.push(RawPartitionFetch {
                 partition: tp,
                 fetch_position: position,
                 records,
+                aborted: aborted.into(),
             });
         }
     }
@@ -590,6 +605,13 @@ struct DecodedFetch {
     /// The position to advance to once every decoded record is drained.
     next_offset: i64,
     next_leader_epoch: Option<i32>,
+    /// Aborted transactions not yet reached, `(producer_id, first_offset)` in
+    /// first-offset order; drained into `aborted_producers` as batches pass.
+    aborted: VecDeque<(i64, i64)>,
+    /// Producers whose current transaction is aborted: their transactional
+    /// batches are dropped under `read_committed` until a control marker ends
+    /// the transaction.
+    aborted_producers: HashSet<i64>,
 }
 
 impl DecodedFetch {
@@ -602,6 +624,8 @@ impl DecodedFetch {
             position_offset: raw.fetch_position.offset,
             next_offset: raw.fetch_position.offset,
             next_leader_epoch: None,
+            aborted: raw.aborted,
+            aborted_producers: HashSet::new(),
         }
     }
 
@@ -613,7 +637,7 @@ impl DecodedFetch {
     /// Decode batches until at least `budget` records are ready or the blob
     /// runs out. Records below the current position (a fetch landing mid-batch)
     /// are skipped.
-    fn refill(&mut self, budget: usize, crc_check: CrcCheck) -> Result<()> {
+    fn refill(&mut self, budget: usize, crc_check: CrcCheck, read_committed: bool) -> Result<()> {
         while self.records.len() < budget && !self.blob.is_empty() {
             let batch = decode_next_batch_with_crc(&mut self.blob, crc_check)
                 .map_err(|error| corrupt_batch(&self.partition, self.next_offset, &error))?;
@@ -623,6 +647,37 @@ impl DecodedFetch {
                 self.blob = Bytes::new();
                 break;
             };
+            let batch_next_offset = batch
+                .base_offset
+                .saturating_add(i64::from(batch.last_offset_delta))
+                .saturating_add(1);
+            if read_committed && batch.is_transactional() {
+                // Every aborted transaction starting at or before this batch is
+                // now active: its producer's batches are dropped until the
+                // control marker that ended it passes by.
+                while let Some(&(producer_id, first_offset)) = self.aborted.front() {
+                    if first_offset > batch.base_offset {
+                        break;
+                    }
+                    let _known = self.aborted_producers.insert(producer_id);
+                    let _entry = self.aborted.pop_front();
+                }
+            }
+            if batch.is_control_batch() {
+                // Control markers end their producer's transaction and are
+                // never delivered to the application in either isolation mode.
+                let _ended = self.aborted_producers.remove(&batch.producer_id);
+                self.next_offset = self.next_offset.max(batch_next_offset);
+                continue;
+            }
+            if read_committed
+                && batch.is_transactional()
+                && self.aborted_producers.contains(&batch.producer_id)
+            {
+                // The whole batch belongs to an aborted transaction.
+                self.next_offset = self.next_offset.max(batch_next_offset);
+                continue;
+            }
             let (records, leader_epoch) =
                 batch_records(batch, &self.topic, self.partition.partition);
             self.next_leader_epoch = leader_epoch;
@@ -710,6 +765,7 @@ impl FetchBuffer {
         subscription: &SubscriptionState,
         max_records: usize,
         crc_check: CrcCheck,
+        read_committed: bool,
     ) -> Result<Vec<PartitionFetch>> {
         let mut out = Vec::new();
         let mut budget = max_records;
@@ -738,7 +794,7 @@ impl FetchBuffer {
                 BufferedFetch::Decoded(decoded) => decoded,
                 BufferedFetch::Raw(raw) => DecodedFetch::new(raw),
             };
-            decoded.refill(budget, crc_check)?;
+            decoded.refill(budget, crc_check, read_committed)?;
             if decoded.records.is_empty() {
                 // Nothing at or past the position in this blob.
                 continue;
@@ -954,11 +1010,120 @@ mod tests {
     }
 
     fn buffered(blob: Bytes) -> DecodedFetch {
+        buffered_with_aborted(blob, &[])
+    }
+
+    fn buffered_with_aborted(blob: Bytes, aborted: &[(i64, i64)]) -> DecodedFetch {
         DecodedFetch::new(RawPartitionFetch {
             partition: tp(),
             fetch_position: FetchPosition::new(100, None),
             records: blob,
+            aborted: aborted.iter().copied().collect(),
         })
+    }
+
+    /// One encoded transactional (or control) batch from `producer_id`.
+    fn encode_txn_batch(base_offset: i64, count: i32, producer_id: i64, control: bool) -> Bytes {
+        let records: Vec<Record> = (0..count)
+            .map(|i| record(i, &format!("k{i}"), &format!("v{i}")))
+            .collect();
+        let batch = RecordBatch {
+            base_offset,
+            partition_leader_epoch: 4,
+            magic: 2,
+            attributes: if control { 0x30 } else { 0x10 },
+            last_offset_delta: count.saturating_sub(1),
+            first_timestamp: 1_000,
+            max_timestamp: 1_000_i64.saturating_add(i64::from(count.saturating_sub(1))),
+            producer_id,
+            producer_epoch: 0,
+            base_sequence: -1,
+            records,
+        };
+        let mut buf = BytesMut::new();
+        batch.encode(&mut buf).expect("encode txn batch");
+        buf.freeze()
+    }
+
+    fn concat(blobs: &[Bytes]) -> Bytes {
+        let mut buf = BytesMut::new();
+        for blob in blobs {
+            buf.extend_from_slice(blob);
+        }
+        buf.freeze()
+    }
+
+    /// The client half of `read_committed`: the broker returns aborted data
+    /// below the last stable offset and reports the aborted transactions; the
+    /// consumer must drop those batches and every control marker.
+    #[test]
+    fn read_committed_drops_aborted_transactions_and_control_markers() {
+        // p9's transaction (100-102) aborts; p7's (103-105) commits; the abort
+        // marker sits at 106.
+        let blob = concat(&[
+            encode_txn_batch(100, 3, 9, false),
+            encode_txn_batch(103, 3, 7, false),
+            encode_txn_batch(106, 1, 9, true),
+        ]);
+        let mut decoded = buffered_with_aborted(blob, &[(9, 100)]);
+
+        decoded
+            .refill(10, CrcCheck::Verify, true)
+            .expect("filtered refill succeeds");
+
+        let offsets: Vec<i64> = decoded.records.iter().map(|r| r.offset).collect();
+        assert_eq!(
+            offsets,
+            vec![103, 104, 105],
+            "only the committed transaction is visible"
+        );
+        assert_eq!(
+            decoded.next_offset, 107,
+            "the position advances past dropped batches and the marker"
+        );
+    }
+
+    /// `read_uncommitted` still sees the aborted data — but control markers are
+    /// never records in either mode.
+    #[test]
+    fn read_uncommitted_keeps_aborted_data_but_never_markers() {
+        let blob = concat(&[
+            encode_txn_batch(100, 3, 9, false),
+            encode_txn_batch(103, 3, 7, false),
+            encode_txn_batch(106, 1, 9, true),
+        ]);
+        let mut decoded = buffered_with_aborted(blob, &[(9, 100)]);
+
+        decoded
+            .refill(10, CrcCheck::Verify, false)
+            .expect("unfiltered refill succeeds");
+
+        let offsets: Vec<i64> = decoded.records.iter().map(|r| r.offset).collect();
+        assert_eq!(offsets, vec![100, 101, 102, 103, 104, 105]);
+        assert_eq!(decoded.next_offset, 107);
+    }
+
+    /// A control marker ends the exclusion: the same producer's next
+    /// transaction is visible again.
+    #[test]
+    fn a_marker_ends_the_aborted_producers_exclusion() {
+        let blob = concat(&[
+            encode_txn_batch(100, 2, 9, false),
+            encode_txn_batch(102, 1, 9, true),
+            encode_txn_batch(103, 2, 9, false),
+        ]);
+        let mut decoded = buffered_with_aborted(blob, &[(9, 100)]);
+
+        decoded
+            .refill(10, CrcCheck::Verify, true)
+            .expect("filtered refill succeeds");
+
+        let offsets: Vec<i64> = decoded.records.iter().map(|r| r.offset).collect();
+        assert_eq!(
+            offsets,
+            vec![103, 104],
+            "the aborted transaction is dropped, the next one from the same producer is kept"
+        );
     }
 
     /// `check.crcs=true` (Kafka's default) has to *do* something: a batch whose
@@ -968,7 +1133,7 @@ mod tests {
         let mut decoded = buffered(corrupt_a_value_byte(&encode_batch(100, 3)));
 
         let error = decoded
-            .refill(10, CrcCheck::Verify)
+            .refill(10, CrcCheck::Verify, false)
             .expect_err("a batch whose CRC does not match its payload is corrupt");
 
         let rendered = error.to_string();
@@ -1003,7 +1168,7 @@ mod tests {
         let mut decoded = buffered(corrupt_a_value_byte(&encode_batch(100, 3)));
 
         decoded
-            .refill(10, CrcCheck::Trust)
+            .refill(10, CrcCheck::Trust, false)
             .expect("check.crcs=false trusts the batch");
 
         assert_eq!(
@@ -1036,8 +1201,9 @@ mod tests {
             partition: tp(),
             fetch_position: FetchPosition::new(100, None),
             records: encode_batch(100, 3),
+            aborted: VecDeque::new(),
         });
-        decoded.refill(10, CrcCheck::Verify).unwrap();
+        decoded.refill(10, CrcCheck::Verify, false).unwrap();
         assert_eq!(decoded.records.len(), 3);
         assert_eq!(decoded.records[0].offset, 100);
         assert_eq!(decoded.records[2].offset, 102);
@@ -1055,8 +1221,9 @@ mod tests {
             partition: tp(),
             fetch_position: FetchPosition::new(101, None),
             records: encode_batch(100, 3),
+            aborted: VecDeque::new(),
         });
-        decoded.refill(10, CrcCheck::Verify).unwrap();
+        decoded.refill(10, CrcCheck::Verify, false).unwrap();
         assert_eq!(decoded.records.len(), 2);
         assert_eq!(decoded.records[0].offset, 101);
         assert_eq!(decoded.next_offset, 103);
@@ -1073,13 +1240,14 @@ mod tests {
             partition: tp(),
             fetch_position: FetchPosition::new(100, None),
             records: blob.freeze(),
+            aborted: VecDeque::new(),
         });
 
-        decoded.refill(2, CrcCheck::Verify).unwrap();
+        decoded.refill(2, CrcCheck::Verify, false).unwrap();
         assert_eq!(decoded.records.len(), 3);
         assert!(!decoded.blob.is_empty());
 
-        decoded.refill(6, CrcCheck::Verify).unwrap();
+        decoded.refill(6, CrcCheck::Verify, false).unwrap();
         assert_eq!(decoded.records.len(), 6);
         assert!(decoded.blob.is_empty());
         assert_eq!(decoded.next_offset, 106);
@@ -1098,11 +1266,12 @@ mod tests {
             partition: tp(),
             fetch_position: FetchPosition::new(100, None),
             records: blob.freeze(),
+            aborted: VecDeque::new(),
         });
         let subscription = subscription_at("t", 0, 100);
 
         let drained = buffer
-            .drain(&subscription, 10, CrcCheck::Verify)
+            .drain(&subscription, 10, CrcCheck::Verify, false)
             .expect("drain");
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].records.len(), 3);
@@ -1278,6 +1447,7 @@ mod tests {
             partition: TopicPartition::new(topic, partition),
             fetch_position: FetchPosition::new(offset, None),
             records: encode_batch(offset, count),
+            aborted: VecDeque::new(),
         });
         buffer
     }
@@ -1300,7 +1470,7 @@ mod tests {
         // First drain: 2 of 5 records, position advances past them, remainder
         // stays buffered so the partition must not be re-fetched.
         let first = buffer
-            .drain(&subscription, 2, CrcCheck::Verify)
+            .drain(&subscription, 2, CrcCheck::Verify, false)
             .expect("drain");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].records.len(), 2);
@@ -1310,7 +1480,7 @@ mod tests {
 
         // Second drain continues from the remainder without any new fetch.
         let second = buffer
-            .drain(&subscription, 2, CrcCheck::Verify)
+            .drain(&subscription, 2, CrcCheck::Verify, false)
             .expect("drain");
         assert_eq!(second[0].records.len(), 2);
         assert_eq!(second[0].records[0].offset, 102);
@@ -1318,7 +1488,7 @@ mod tests {
 
         // Final drain empties the buffer and advances past the whole blob.
         let third = buffer
-            .drain(&subscription, 2, CrcCheck::Verify)
+            .drain(&subscription, 2, CrcCheck::Verify, false)
             .expect("drain");
         assert_eq!(third[0].records.len(), 1);
         assert_eq!(third[0].next_offset, 105);
@@ -1332,7 +1502,7 @@ mod tests {
         // position and must be dropped, not served.
         let subscription = subscription_at("t", 0, 42);
         let drained = buffer
-            .drain(&subscription, 10, CrcCheck::Verify)
+            .drain(&subscription, 10, CrcCheck::Verify, false)
             .expect("drain");
         assert!(drained.is_empty());
         assert!(!buffer.has(&TopicPartition::new("t", 0)));
@@ -1345,7 +1515,7 @@ mod tests {
         let mut subscription = subscription_at("u", 1, 0);
         subscription.set_position(&TopicPartition::new("u", 1), FetchPosition::new(0, None));
         let drained = buffer
-            .drain(&subscription, 10, CrcCheck::Verify)
+            .drain(&subscription, 10, CrcCheck::Verify, false)
             .expect("drain");
         assert!(drained.is_empty());
         assert!(!buffer.has(&TopicPartition::new("t", 0)));
@@ -1360,14 +1530,14 @@ mod tests {
 
         // Paused: nothing drains but the data is kept (Java parity).
         let drained = buffer
-            .drain(&subscription, 10, CrcCheck::Verify)
+            .drain(&subscription, 10, CrcCheck::Verify, false)
             .expect("drain");
         assert!(drained.is_empty());
         assert!(buffer.has(&tp));
 
         subscription.resume(std::slice::from_ref(&tp));
         let drained = buffer
-            .drain(&subscription, 10, CrcCheck::Verify)
+            .drain(&subscription, 10, CrcCheck::Verify, false)
             .expect("drain");
         assert_eq!(drained[0].records.len(), 3);
         assert!(!buffer.has(&tp));
@@ -1380,6 +1550,7 @@ mod tests {
             partition: TopicPartition::new("t", 1),
             fetch_position: FetchPosition::new(0, None),
             records: encode_batch(0, 2),
+            aborted: VecDeque::new(),
         });
         let mut subscription = subscription_at("t", 0, 100);
         let other = TopicPartition::new("t", 1);
@@ -1390,7 +1561,7 @@ mod tests {
 
         // The paused front entry rotates to the back; t-1 still drains.
         let drained = buffer
-            .drain(&subscription, 10, CrcCheck::Verify)
+            .drain(&subscription, 10, CrcCheck::Verify, false)
             .expect("drain");
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].partition, other);
@@ -1408,11 +1579,12 @@ mod tests {
             partition: TopicPartition::new("t", 0),
             fetch_position: FetchPosition::new(103, None),
             records: encode_batch(100, 3),
+            aborted: VecDeque::new(),
         });
         // Position matches the entry (103) but every record is below it.
         let subscription = subscription_at("t", 0, 103);
         let drained = buffer
-            .drain(&subscription, 10, CrcCheck::Verify)
+            .drain(&subscription, 10, CrcCheck::Verify, false)
             .expect("drain");
         assert!(drained.is_empty());
         assert!(!buffer.has(&TopicPartition::new("t", 0)));
