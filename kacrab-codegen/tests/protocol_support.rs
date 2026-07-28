@@ -164,45 +164,48 @@ fn produce_and_fetch_match_the_hand_extracted_table() {
 }
 
 #[test]
-fn withdrawn_broker_apis_are_the_only_mismatches() {
+fn withdrawn_broker_apis_are_schema_only_and_nothing_is_flagged() {
     let output = scratch_path("support-mismatch");
     let document = run_report(&output);
 
-    let flagged: Vec<&str> = document
+    let flagged: Vec<(&str, &Vec<String>)> = document
         .apis
         .iter()
         .filter(|api| !api.client_matches_schema)
-        .map(|api| api.name.as_str())
+        .map(|api| (api.name.as_str(), &api.mismatches))
         .collect();
 
-    assert_eq!(
-        flagged,
-        vec![
-            "LeaderAndIsr",
-            "StopReplica",
-            "UpdateMetadata",
-            "ControlledShutdown"
-        ],
-        "only the APIs upstream withdrew should be flagged; a new entry means the generated \
-         client_api_info table drifted from the schema snapshot"
+    assert!(
+        flagged.is_empty(),
+        "the generated client_api_info table should match the schema snapshot exactly; a flagged \
+         row means it drifted: {flagged:?}"
     );
     assert_eq!(
-        document.mismatch_count,
-        flagged.len(),
+        document.mismatch_count, 0,
         "mismatch_count should match the flagged rows"
     );
-    for name in &flagged {
+
+    // The APIs upstream withdrew in 4.0 still have a schema, so they still get a
+    // report row — but the client must not advertise a version for them.
+    for name in [
+        "LeaderAndIsr",
+        "StopReplica",
+        "UpdateMetadata",
+        "ControlledShutdown",
+    ] {
         let api = row(&document, name);
         assert_eq!(
             api.schema_valid_versions, "none",
             "{name} should declare no valid versions upstream"
         );
-        assert!(
-            api.mismatches
-                .iter()
-                .any(|reason| reason.contains("withdrawn upstream")),
-            "{name} should explain why it is flagged: {:?}",
-            api.mismatches
+        assert_eq!(
+            (
+                api.client_min_version,
+                api.client_max_version,
+                api.client_flexible_versions_start
+            ),
+            (None, None, None),
+            "{name} is withdrawn upstream and must not appear in client_api_info at all"
         );
     }
 

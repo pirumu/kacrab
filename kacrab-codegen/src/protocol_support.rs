@@ -116,23 +116,26 @@ fn api_row(spec: &MessageSpec, entry: &ApiKeyEntry, client: Option<ClientApiInfo
 /// `entry` is the generator's own lowering of `validVersions` /
 /// `flexibleVersions`, so comparing against it flags a generated file that no
 /// longer matches its schema snapshot. `validVersions: none` is checked
-/// separately: the generator lowers it to `0-0`, which would otherwise hide an
-/// API upstream has withdrawn behind an apparently valid version bound.
+/// separately: an API upstream has withdrawn has no version to speak, so the
+/// generated table is *expected* to omit it — such a row is schema-only, not a
+/// mismatch. A table that still advertises one is flagged.
 fn collect_mismatches(
     spec: &MessageSpec,
     entry: &ApiKeyEntry,
     client: Option<ClientApiInfo>,
 ) -> Vec<String> {
+    if spec.valid_versions.is_none() {
+        return client.map_or_else(Vec::new, |client| {
+            vec![format!(
+                "schema declares validVersions `none` (API withdrawn upstream) but \
+                 client_api_info still advertises {}-{}",
+                client.min_version, client.max_version
+            )]
+        });
+    }
     let Some(client) = client else {
         return vec!["API is absent from the generated client_api_info table".to_owned()];
     };
-    if spec.valid_versions.is_none() {
-        return vec![format!(
-            "schema declares validVersions `none` (API withdrawn upstream) but client_api_info \
-             still advertises {}-{}",
-            client.min_version, client.max_version
-        )];
-    }
 
     let mut mismatches = Vec::new();
     if client.min_version != entry.min_version {
@@ -336,6 +339,34 @@ mod tests {
             "the reason should explain the withdrawal: {:?}",
             row.mismatches
         );
+    }
+
+    #[test]
+    fn withdrawn_api_absent_from_the_client_table_is_schema_only() {
+        let specs = vec![request(
+            "LeaderAndIsrRequest",
+            4,
+            VersionRange::None,
+            VersionRange::None,
+        )];
+
+        let document = report(&specs, &ClientApiInfoTable::new());
+
+        let row = document
+            .apis
+            .first()
+            .expect("LeaderAndIsr row should exist");
+        assert_eq!(
+            (row.client_min_version, row.client_max_version),
+            (None, None),
+            "a withdrawn API should have no client bounds"
+        );
+        assert!(
+            row.client_matches_schema && row.mismatches.is_empty(),
+            "not implementing an API upstream withdrew is the correct state, not drift: {:?}",
+            row.mismatches
+        );
+        assert_eq!(document.mismatch_count, 0, "no row should be flagged");
     }
 
     #[test]

@@ -11,8 +11,15 @@ use crate::ir::{
 
 /// Generate the `ApiKey` + `ApiInfo` + `client_api_info` token stream from the
 /// request specs in `specs`.
+///
+/// APIs whose schema declares `validVersions: none` are withdrawn upstream and
+/// have no version a client could negotiate, so they are left out of the enum and
+/// the advertised table entirely rather than being lowered to a fictitious `0-0`.
 pub(crate) fn generate_api_key(specs: &[MessageSpec]) -> TokenStream {
-    let entries = collect_api_key_entries(specs);
+    let entries: Vec<ApiKeyEntry> = collect_api_key_entries(specs)
+        .into_iter()
+        .filter(|entry| !entry.withdrawn)
+        .collect();
 
     let variants: Vec<TokenStream> = entries
         .iter()
@@ -186,6 +193,12 @@ pub struct ApiKeyEntry {
     pub max_version: i16,
     /// First flexible version, or `i16::MAX` when the API is never flexible.
     pub flexible_versions_start: i16,
+    /// True when the schema declares `validVersions: none`, i.e. upstream has
+    /// withdrawn the API and no version of it exists to be spoken.
+    ///
+    /// `min_version` / `max_version` carry no meaning for such an entry and the
+    /// generated `ApiKey` enum and `client_api_info` table leave it out.
+    pub withdrawn: bool,
 }
 
 struct MessagePair {
@@ -228,6 +241,7 @@ pub fn collect_api_key_entries(specs: &[MessageSpec]) -> Vec<ApiKeyEntry> {
                 min_version,
                 max_version,
                 flexible_versions_start,
+                withdrawn: s.valid_versions.is_none(),
             })
         })
         .collect();
@@ -235,6 +249,12 @@ pub fn collect_api_key_entries(specs: &[MessageSpec]) -> Vec<ApiKeyEntry> {
     entries
 }
 
+/// Pair up request and response specs for the `RequestKind`/`ResponseKind`
+/// enums.
+///
+/// Withdrawn APIs (`validVersions: none`) are skipped: their arms dispatch on an
+/// `ApiKey` variant that is no longer emitted, and there is no version at which
+/// they could be written.
 fn collect_message_pairs(specs: &[MessageSpec]) -> Vec<MessagePair> {
     let mut requests = std::collections::BTreeMap::new();
     let mut responses = std::collections::BTreeMap::new();
@@ -242,6 +262,9 @@ fn collect_message_pairs(specs: &[MessageSpec]) -> Vec<MessagePair> {
         let Some(api_key) = spec.api_key else {
             continue;
         };
+        if spec.valid_versions.is_none() {
+            continue;
+        }
         match spec.message_type {
             MessageType::Request => {
                 let _previous = requests.insert(api_key, spec.name.clone());

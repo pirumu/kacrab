@@ -66,6 +66,20 @@ release date and links to relevant pull requests or issues.
   [`benches/README.md`](benches/README.md). Their docs now say so, and the stale
   reference to a non-existent `send_now` method is gone.
 
+- **APIs Apache Kafka withdrew in 4.0 are no longer part of the generated protocol
+  surface.** `LeaderAndIsr`, `StopReplica`, `UpdateMetadata`, and
+  `ControlledShutdown` declare `"validVersions": "none"` in the 4.3.0 schemas —
+  there is no version of them left to speak. The generator lowered that to `0-0`,
+  so `ApiKey` carried a variant for each and `client_api_info` advertised v0,
+  claiming support for four broker-internal RPCs kacrab has never been able to
+  send. The four variants are gone from `ApiKey`, `RequestKind`, and
+  `ResponseKind`, and `ApiKey::from_i16` now returns `None` for keys 4-7. Their
+  `*Data` structs are still generated and still public.
+
+  `kacrab_protocol::version::CONTROLLED_SHUTDOWN_KEY` replaces
+  `ApiKey::ControlledShutdown` for the one place the key is still needed: the
+  legacy request-header v0 rule that `ControlledShutdown` v0 frames use.
+
 ### Added
 
 - **Share consumer (KIP-932), behind the new `share-consumer` feature.**
