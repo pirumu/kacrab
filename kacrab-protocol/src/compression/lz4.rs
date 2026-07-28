@@ -24,11 +24,12 @@
 //!
 //! Selected at compile time:
 //!
-//! * `feature = "lz4-hc"` → `lz4` crate (FFI to `liblz4`). Levels `1..=2` route through fast mode;
-//!   `3..=12` route through HC mode; values above `12` clamp to `12`; negative values clamp to `1`.
-//! * `feature = "lz4"` only → `lz4_flex` block API (pure Rust, fast mode only). The `level`
-//!   argument is ignored.
+//! * `feature = "lz4-hc"` → `lz4` crate (FFI to `liblz4`); fast and HC modes.
+//! * `feature = "lz4"` only → `lz4_flex` block API (pure Rust, fast mode only).
 //! * Both → `lz4-hc` wins; `lz4_flex` is linked but unused.
+//!
+//! How the `level` argument maps onto each backend is stated once, on
+//! [`Compression::compress_with_level`](super::Compression::compress_with_level).
 //!
 //! Pre-0.10 Kafka brokers used a slightly different header layout with a
 //! known `XXHash` bug (KIP-57). Modern brokers (0.10+) accept the
@@ -85,7 +86,8 @@ pub fn compress(input: &[u8]) -> Result<Vec<u8>> {
 
 /// Compress `input` at the given level.
 ///
-/// Level handling depends on the active backend; see the module doc.
+/// Level handling depends on the active backend; the mapping is stated once, on
+/// [`Compression::compress_with_level`](super::Compression::compress_with_level).
 pub fn compress_with_level(input: &[u8], level: Option<i32>) -> Result<Vec<u8>> {
     let estimated = HEADER_LEN
         .saturating_add(input.len())
@@ -191,6 +193,30 @@ fn header_checksum_byte() -> u8 {
     ((hash >> 8) & 0xFF) as u8
 }
 
+/// Validate the frame header and return the offset of the first block.
+///
+/// # Accepted subset
+///
+/// Only the magic is checked. FLG, BD and HC are read past, not validated, so the
+/// reader accepts *any* byte in those positions and always reports a fixed
+/// `HEADER_LEN`-byte header. That is sound only for the subset of the LZ4 frame
+/// format that Kafka producers actually emit — the one `write_frame_header`
+/// writes: no content size, no dictionary ID, and no content/block checksums.
+///
+/// Those are exactly the FLG/BD option bits that change the header layout or the
+/// block layout, so a frame that sets them is **misparsed rather than rejected**:
+///
+/// * FLG bit 3 (content size) adds 8 bytes after BD, shifting every block.
+/// * FLG bit 0 (dictionary ID) adds 4 bytes after BD, likewise.
+/// * FLG bit 4 (block checksum) appends 4 bytes to every block, so the next block's size prefix is
+///   read from the wrong offset.
+/// * FLG bit 2 (content checksum) appends 4 bytes after the end-of-stream marker; harmless here
+///   only because the loop stops at that marker.
+/// * BD bits 6-4 declare a block max above 64 KiB, which `decompress_block` refuses.
+///
+/// Kafka brokers and the Java/librdkafka clients all write the subset above, so no
+/// real traffic hits this. Enforcing it would mean rejecting frames the codec
+/// currently decodes, so it is documented rather than changed.
 fn read_frame_header(input: &[u8]) -> Result<usize> {
     let header = input
         .get(..HEADER_LEN)

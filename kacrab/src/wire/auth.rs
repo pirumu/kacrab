@@ -31,7 +31,7 @@ use tokio::{
 
 use super::{
     SaslClientAuthenticator, SaslClientAuthenticatorFactory, SaslClientAuthenticatorFactoryHandle,
-    SaslClientAuthenticatorHandle, TlsConfig, tls,
+    SaslClientAuthenticatorHandle, TlsConfig, WireError, tls,
 };
 
 /// Kafka `security.protocol` value.
@@ -52,16 +52,14 @@ impl SecurityProtocol {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::wire::WireError`] for unknown values.
-    pub fn parse(value: &str) -> Result<Self, crate::wire::WireError> {
+    /// Returns [`WireError`] for unknown values.
+    pub fn parse(value: &str) -> Result<Self, WireError> {
         match value {
             value if value.eq_ignore_ascii_case("PLAINTEXT") => Ok(Self::Plaintext),
             value if value.eq_ignore_ascii_case("SSL") => Ok(Self::Ssl),
             value if value.eq_ignore_ascii_case("SASL_PLAINTEXT") => Ok(Self::SaslPlaintext),
             value if value.eq_ignore_ascii_case("SASL_SSL") => Ok(Self::SaslSsl),
-            _ => Err(crate::wire::WireError::InvalidSecurityProtocol(
-                value.to_owned(),
-            )),
+            _ => Err(WireError::InvalidSecurityProtocol(value.to_owned())),
         }
     }
 
@@ -98,17 +96,15 @@ impl SaslMechanism {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::wire::WireError`] for unknown values.
-    pub fn parse(value: &str) -> Result<Self, crate::wire::WireError> {
+    /// Returns [`WireError`] for unknown values.
+    pub fn parse(value: &str) -> Result<Self, WireError> {
         match value {
             value if value.eq_ignore_ascii_case("PLAIN") => Ok(Self::Plain),
             value if value.eq_ignore_ascii_case("SCRAM-SHA-256") => Ok(Self::ScramSha256),
             value if value.eq_ignore_ascii_case("SCRAM-SHA-512") => Ok(Self::ScramSha512),
             value if value.eq_ignore_ascii_case("OAUTHBEARER") => Ok(Self::OAuthBearer),
             value if value.eq_ignore_ascii_case("GSSAPI") => Ok(Self::Gssapi),
-            _ => Err(crate::wire::WireError::UnsupportedSaslMechanism(
-                value.to_owned(),
-            )),
+            _ => Err(WireError::UnsupportedSaslMechanism(value.to_owned())),
         }
     }
 
@@ -129,23 +125,19 @@ impl SaslMechanism {
 ///
 /// # Errors
 ///
-/// Returns [`crate::wire::WireError`] when `username` or `password` is not
+/// Returns [`WireError`] when `username` or `password` is not
 /// present in the JAAS options.
-pub(crate) fn plain_auth_bytes(jaas_config: Option<&str>) -> Result<Bytes, crate::wire::WireError> {
+pub(crate) fn plain_auth_bytes(jaas_config: Option<&str>) -> Result<Bytes, WireError> {
     let Some(jaas_config) = jaas_config else {
-        return Err(crate::wire::WireError::InvalidSaslConfig(
+        return Err(WireError::InvalidSaslConfig(
             "sasl.jaas.config is required for PLAIN".to_owned(),
         ));
     };
     let username = jaas_option(jaas_config, "username").ok_or_else(|| {
-        crate::wire::WireError::InvalidSaslConfig(
-            "sasl.jaas.config must contain username for PLAIN".to_owned(),
-        )
+        WireError::InvalidSaslConfig("sasl.jaas.config must contain username for PLAIN".to_owned())
     })?;
     let password = jaas_option(jaas_config, "password").ok_or_else(|| {
-        crate::wire::WireError::InvalidSaslConfig(
-            "sasl.jaas.config must contain password for PLAIN".to_owned(),
-        )
+        WireError::InvalidSaslConfig("sasl.jaas.config must contain password for PLAIN".to_owned())
     })?;
     let mut bytes = Vec::with_capacity(
         username
@@ -170,7 +162,7 @@ pub(crate) async fn oauthbearer_auth_bytes(
     config: &SaslConfig,
     tls_config: &TlsConfig,
     token_cache: &tokio::sync::Mutex<OAuthTokenCache>,
-) -> Result<Bytes, crate::wire::WireError> {
+) -> Result<Bytes, WireError> {
     let token = oauthbearer_token(config, tls_config, token_cache).await?;
     let mut bytes = Vec::with_capacity(token.len().saturating_add(18));
     bytes.extend_from_slice(b"n,,\x01auth=Bearer ");
@@ -179,13 +171,11 @@ pub(crate) async fn oauthbearer_auth_bytes(
     Ok(Bytes::from(bytes))
 }
 
-pub(crate) fn validate_sasl_extension_hooks(
-    config: &SaslConfig,
-) -> Result<(), crate::wire::WireError> {
+pub(crate) fn validate_sasl_extension_hooks(config: &SaslConfig) -> Result<(), WireError> {
     if config.login_callback_handler_class.is_some()
         || config.client_callback_handler_class.is_some()
     {
-        return Err(crate::wire::WireError::InvalidSaslConfig(
+        return Err(WireError::InvalidSaslConfig(
             "Java sasl.*.callback.handler.class extensions cannot run inside the Rust wire backend"
                 .to_owned(),
         ));
@@ -207,23 +197,23 @@ impl ScramExchange {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::wire::WireError`] when credentials or nonce generation fail.
+    /// Returns [`WireError`] when credentials or nonce generation fail.
     pub(crate) fn start(
         mechanism: SaslMechanism,
         jaas_config: Option<&str>,
-    ) -> Result<(Self, Bytes), crate::wire::WireError> {
+    ) -> Result<(Self, Bytes), WireError> {
         let Some(jaas_config) = jaas_config else {
-            return Err(crate::wire::WireError::InvalidSaslConfig(
+            return Err(WireError::InvalidSaslConfig(
                 "sasl.jaas.config is required for SCRAM".to_owned(),
             ));
         };
         let username = jaas_option(jaas_config, "username").ok_or_else(|| {
-            crate::wire::WireError::InvalidSaslConfig(
+            WireError::InvalidSaslConfig(
                 "sasl.jaas.config must contain username for SCRAM".to_owned(),
             )
         })?;
         let password = jaas_option(jaas_config, "password").ok_or_else(|| {
-            crate::wire::WireError::InvalidSaslConfig(
+            WireError::InvalidSaslConfig(
                 "sasl.jaas.config must contain password for SCRAM".to_owned(),
             )
         })?;
@@ -262,28 +252,21 @@ impl ScramExchange {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::wire::WireError`] when the server challenge is invalid.
-    pub(crate) fn client_final(
-        &self,
-        server_first: &[u8],
-    ) -> Result<(Bytes, Vec<u8>), crate::wire::WireError> {
+    /// Returns [`WireError`] when the server challenge is invalid.
+    pub(crate) fn client_final(&self, server_first: &[u8]) -> Result<(Bytes, Vec<u8>), WireError> {
         let server_first = str::from_utf8(server_first).map_err(|_error| {
-            crate::wire::WireError::SaslAuthentication(
-                "SCRAM server-first message is not UTF-8".to_owned(),
-            )
+            WireError::SaslAuthentication("SCRAM server-first message is not UTF-8".to_owned())
         })?;
         let attributes = ScramServerFirst::parse(server_first)?;
         if !attributes.nonce.starts_with(&self.client_nonce) {
-            return Err(crate::wire::WireError::SaslAuthentication(
+            return Err(WireError::SaslAuthentication(
                 "SCRAM server nonce does not extend client nonce".to_owned(),
             ));
         }
         let salt = general_purpose::STANDARD
             .decode(attributes.salt.as_bytes())
             .map_err(|_error| {
-                crate::wire::WireError::SaslAuthentication(
-                    "SCRAM server salt is not valid base64".to_owned(),
-                )
+                WireError::SaslAuthentication("SCRAM server salt is not valid base64".to_owned())
             })?;
         let client_final_without_proof = {
             let mut value = String::from("c=biws,r=");
@@ -323,34 +306,32 @@ impl ScramExchange {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::wire::WireError`] when the server reports an error or
+    /// Returns [`WireError`] when the server reports an error or
     /// the signature does not match the SCRAM transcript.
     pub(crate) fn verify_server_final(
         server_final: &[u8],
         expected_signature: &[u8],
-    ) -> Result<(), crate::wire::WireError> {
+    ) -> Result<(), WireError> {
         let server_final = str::from_utf8(server_final).map_err(|_error| {
-            crate::wire::WireError::SaslAuthentication(
-                "SCRAM server-final message is not UTF-8".to_owned(),
-            )
+            WireError::SaslAuthentication("SCRAM server-final message is not UTF-8".to_owned())
         })?;
         if let Some(error) = parse_scram_attribute(server_final, "e") {
-            return Err(crate::wire::WireError::SaslAuthentication(error));
+            return Err(WireError::SaslAuthentication(error));
         }
         let signature = parse_scram_attribute(server_final, "v").ok_or_else(|| {
-            crate::wire::WireError::SaslAuthentication(
+            WireError::SaslAuthentication(
                 "SCRAM server-final message is missing verifier".to_owned(),
             )
         })?;
         let signature = general_purpose::STANDARD
             .decode(signature.as_bytes())
             .map_err(|_error| {
-                crate::wire::WireError::SaslAuthentication(
+                WireError::SaslAuthentication(
                     "SCRAM server verifier is not valid base64".to_owned(),
                 )
             })?;
         if signature != expected_signature {
-            return Err(crate::wire::WireError::SaslServerSignatureMismatch);
+            return Err(WireError::SaslServerSignatureMismatch);
         }
         Ok(())
     }
@@ -393,34 +374,28 @@ struct ScramServerFirst {
 }
 
 impl ScramServerFirst {
-    fn parse(value: &str) -> Result<Self, crate::wire::WireError> {
+    fn parse(value: &str) -> Result<Self, WireError> {
         let nonce = parse_scram_attribute(value, "r").ok_or_else(|| {
-            crate::wire::WireError::SaslAuthentication(
-                "SCRAM server-first message is missing nonce".to_owned(),
-            )
+            WireError::SaslAuthentication("SCRAM server-first message is missing nonce".to_owned())
         })?;
         let salt = parse_scram_attribute(value, "s").ok_or_else(|| {
-            crate::wire::WireError::SaslAuthentication(
-                "SCRAM server-first message is missing salt".to_owned(),
-            )
+            WireError::SaslAuthentication("SCRAM server-first message is missing salt".to_owned())
         })?;
         let iterations = parse_scram_attribute(value, "i").ok_or_else(|| {
-            crate::wire::WireError::SaslAuthentication(
+            WireError::SaslAuthentication(
                 "SCRAM server-first message is missing iteration count".to_owned(),
             )
         })?;
         let iterations = iterations.parse::<u32>().map_err(|_error| {
-            crate::wire::WireError::SaslAuthentication(
-                "SCRAM iteration count is invalid".to_owned(),
-            )
+            WireError::SaslAuthentication("SCRAM iteration count is invalid".to_owned())
         })?;
         if iterations < MIN_SCRAM_ITERATIONS {
-            return Err(crate::wire::WireError::SaslAuthentication(format!(
+            return Err(WireError::SaslAuthentication(format!(
                 "SCRAM iteration count {iterations} is below the minimum {MIN_SCRAM_ITERATIONS}"
             )));
         }
         if iterations > MAX_SCRAM_ITERATIONS {
-            return Err(crate::wire::WireError::SaslAuthentication(format!(
+            return Err(WireError::SaslAuthentication(format!(
                 "SCRAM iteration count {iterations} exceeds the maximum {MAX_SCRAM_ITERATIONS}"
             )));
         }
@@ -487,15 +462,15 @@ const FUZZ_FIXED_NONCE: &str = "fuzzfuzzfuzzfuzzfuzzfuzzfuzzfuzz";
     clippy::unnecessary_wraps,
     reason = "Mirrors the fallible signature of the non-fuzzing generate_nonce."
 )]
-fn generate_nonce() -> Result<String, crate::wire::WireError> {
+fn generate_nonce() -> Result<String, WireError> {
     Ok(FUZZ_FIXED_NONCE.to_owned())
 }
 
 #[cfg(not(feature = "__fuzzing"))]
-fn generate_nonce() -> Result<String, crate::wire::WireError> {
+fn generate_nonce() -> Result<String, WireError> {
     let mut bytes = [0_u8; 24];
     getrandom::fill(&mut bytes).map_err(|error| {
-        crate::wire::WireError::InvalidSaslConfig(format!("SCRAM nonce generation failed: {error}"))
+        WireError::InvalidSaslConfig(format!("SCRAM nonce generation failed: {error}"))
     })?;
     Ok(general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
@@ -509,7 +484,7 @@ fn salted_password(
     password: &[u8],
     salt: &[u8],
     iterations: u32,
-) -> Result<Vec<u8>, crate::wire::WireError> {
+) -> Result<Vec<u8>, WireError> {
     let mut first_input = Vec::with_capacity(salt.len().saturating_add(4));
     first_input.extend_from_slice(salt);
     first_input.extend_from_slice(&[0, 0, 0, 1]);
@@ -522,36 +497,29 @@ fn salted_password(
     Ok(output)
 }
 
-fn hmac_bytes(
-    mechanism: SaslMechanism,
-    key: &[u8],
-    message: &[u8],
-) -> Result<Vec<u8>, crate::wire::WireError> {
+fn hmac_bytes(mechanism: SaslMechanism, key: &[u8], message: &[u8]) -> Result<Vec<u8>, WireError> {
     match mechanism {
         SaslMechanism::ScramSha256 => {
             let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_error| {
-                crate::wire::WireError::InvalidSaslConfig("invalid SCRAM SHA-256 key".to_owned())
+                WireError::InvalidSaslConfig("invalid SCRAM SHA-256 key".to_owned())
             })?;
             mac.update(message);
             Ok(mac.finalize().into_bytes().to_vec())
         },
         SaslMechanism::ScramSha512 => {
             let mut mac = Hmac::<Sha512>::new_from_slice(key).map_err(|_error| {
-                crate::wire::WireError::InvalidSaslConfig("invalid SCRAM SHA-512 key".to_owned())
+                WireError::InvalidSaslConfig("invalid SCRAM SHA-512 key".to_owned())
             })?;
             mac.update(message);
             Ok(mac.finalize().into_bytes().to_vec())
         },
-        _ => Err(crate::wire::WireError::UnsupportedSaslMechanism(
+        _ => Err(WireError::UnsupportedSaslMechanism(
             mechanism.as_str().to_owned(),
         )),
     }
 }
 
-fn digest_bytes(
-    mechanism: SaslMechanism,
-    payload: &[u8],
-) -> Result<Vec<u8>, crate::wire::WireError> {
+fn digest_bytes(mechanism: SaslMechanism, payload: &[u8]) -> Result<Vec<u8>, WireError> {
     match mechanism {
         SaslMechanism::ScramSha256 => {
             use sha2::Digest;
@@ -561,21 +529,21 @@ fn digest_bytes(
             use sha2::Digest;
             Ok(Sha512::digest(payload).to_vec())
         },
-        _ => Err(crate::wire::WireError::UnsupportedSaslMechanism(
+        _ => Err(WireError::UnsupportedSaslMechanism(
             mechanism.as_str().to_owned(),
         )),
     }
 }
 
-fn xor_bytes(left: &[u8], right: &[u8]) -> Result<Vec<u8>, crate::wire::WireError> {
+fn xor_bytes(left: &[u8], right: &[u8]) -> Result<Vec<u8>, WireError> {
     let mut output = left.to_vec();
     xor_into(&mut output, right)?;
     Ok(output)
 }
 
-fn xor_into(left: &mut [u8], right: &[u8]) -> Result<(), crate::wire::WireError> {
+fn xor_into(left: &mut [u8], right: &[u8]) -> Result<(), WireError> {
     if left.len() != right.len() {
-        return Err(crate::wire::WireError::SaslAuthentication(
+        return Err(WireError::SaslAuthentication(
             "SCRAM proof length mismatch".to_owned(),
         ));
     }
@@ -762,7 +730,7 @@ impl OAuthTokenCache {
 }
 
 impl OAuthToken {
-    fn with_refresh_jitter(mut self, config: &SaslConfig) -> Result<Self, crate::wire::WireError> {
+    fn with_refresh_jitter(mut self, config: &SaslConfig) -> Result<Self, WireError> {
         self.refresh_window_jitter = random_refresh_window_jitter(config)?;
         Ok(self)
     }
@@ -802,14 +770,14 @@ impl OAuthToken {
     }
 }
 
-fn random_refresh_window_jitter(config: &SaslConfig) -> Result<f64, crate::wire::WireError> {
+fn random_refresh_window_jitter(config: &SaslConfig) -> Result<f64, WireError> {
     let max_jitter = config.login_refresh_window_jitter.clamp(0.0, 1.0);
     if max_jitter <= f64::EPSILON {
         return Ok(0.0);
     }
     let mut bytes = [0_u8; 4];
     getrandom::fill(&mut bytes).map_err(|error| {
-        crate::wire::WireError::TokenRefresh(format!(
+        WireError::TokenRefresh(format!(
             "OAUTHBEARER refresh jitter generation failed: {error}"
         ))
     })?;
@@ -821,7 +789,7 @@ async fn oauthbearer_token(
     config: &SaslConfig,
     tls_config: &TlsConfig,
     token_cache: &tokio::sync::Mutex<OAuthTokenCache>,
-) -> Result<String, crate::wire::WireError> {
+) -> Result<String, WireError> {
     if let Some(jaas_config) = &config.jaas_config
         && let Some(token) = jaas_option(jaas_config, "token")
             .or_else(|| jaas_option(jaas_config, "oauthBearerToken"))
@@ -829,7 +797,7 @@ async fn oauthbearer_token(
         return Ok(token);
     }
     let Some(endpoint) = &config.oauthbearer_token_endpoint_url else {
-        return Err(crate::wire::WireError::InvalidSaslConfig(
+        return Err(WireError::InvalidSaslConfig(
             "OAUTHBEARER requires sasl.oauthbearer.token.endpoint.url or token in sasl.jaas.config"
                 .to_owned(),
         ));
@@ -847,12 +815,12 @@ async fn oauthbearer_token(
         return Ok(token.value);
     }
     let token = fs::read_to_string(path).map_err(|error| {
-        crate::wire::WireError::TokenRefresh(format!(
+        WireError::TokenRefresh(format!(
             "cannot read sasl.oauthbearer.token.endpoint.url: {error}"
         ))
     })?;
     if token.trim().is_empty() {
-        return Err(crate::wire::WireError::TokenRefresh(
+        return Err(WireError::TokenRefresh(
             "OAUTHBEARER token file is empty".to_owned(),
         ));
     }
@@ -885,7 +853,7 @@ async fn fetch_oauthbearer_http_token(
     config: &SaslConfig,
     tls_config: &TlsConfig,
     endpoint: &str,
-) -> Result<OAuthToken, crate::wire::WireError> {
+) -> Result<OAuthToken, WireError> {
     let mut backoff = config
         .login_retry_backoff
         .min(config.login_retry_backoff_max);
@@ -907,19 +875,19 @@ async fn fetch_oauthbearer_http_token_once(
     config: &SaslConfig,
     tls_config: &TlsConfig,
     endpoint: &str,
-) -> Result<OAuthToken, crate::wire::WireError> {
+) -> Result<OAuthToken, WireError> {
     let endpoint = OAuthEndpoint::parse(endpoint)?;
     let connect = async {
         let stream = TcpStream::connect(endpoint.addr()).await.map_err(|error| {
-            crate::wire::WireError::TokenRefresh(format!(
+            WireError::TokenRefresh(format!(
                 "cannot connect to OAUTHBEARER token endpoint: {error}"
             ))
         })?;
         if endpoint.tls {
             let tls = tls::connect_client(stream, tls_config, &endpoint.host).await?;
-            Ok::<TokenEndpointStream, crate::wire::WireError>(Box::new(tls))
+            Ok::<TokenEndpointStream, WireError>(Box::new(tls))
         } else {
-            Ok::<TokenEndpointStream, crate::wire::WireError>(Box::new(stream))
+            Ok::<TokenEndpointStream, WireError>(Box::new(stream))
         }
     };
     let mut stream = with_optional_timeout(
@@ -933,23 +901,17 @@ async fn fetch_oauthbearer_http_token_once(
         .write_all(request.as_bytes())
         .await
         .map_err(|error| {
-            crate::wire::WireError::TokenRefresh(format!(
-                "cannot write OAUTHBEARER token request: {error}"
-            ))
+            WireError::TokenRefresh(format!("cannot write OAUTHBEARER token request: {error}"))
         })?;
     stream.flush().await.map_err(|error| {
-        crate::wire::WireError::TokenRefresh(format!(
-            "cannot flush OAUTHBEARER token request: {error}"
-        ))
+        WireError::TokenRefresh(format!("cannot flush OAUTHBEARER token request: {error}"))
     })?;
     let read = async {
         let mut response = Vec::new();
         let _bytes_read = stream.read_to_end(&mut response).await.map_err(|error| {
-            crate::wire::WireError::TokenRefresh(format!(
-                "cannot read OAUTHBEARER token response: {error}"
-            ))
+            WireError::TokenRefresh(format!("cannot read OAUTHBEARER token response: {error}"))
         })?;
-        Ok::<Vec<u8>, crate::wire::WireError>(response)
+        Ok::<Vec<u8>, WireError>(response)
     };
     let response = with_optional_timeout(
         read,
@@ -971,27 +933,27 @@ async fn with_optional_timeout<F, T>(
     future: F,
     timeout: Option<Duration>,
     message: &'static str,
-) -> Result<T, crate::wire::WireError>
+) -> Result<T, WireError>
 where
-    F: Future<Output = Result<T, crate::wire::WireError>>,
+    F: Future<Output = Result<T, WireError>>,
 {
     if let Some(timeout) = timeout {
         time::timeout(timeout, future)
             .await
-            .map_err(|_error| crate::wire::WireError::TokenRefresh(message.to_owned()))?
+            .map_err(|_error| WireError::TokenRefresh(message.to_owned()))?
     } else {
         future.await
     }
 }
 
 impl OAuthEndpoint {
-    fn parse(endpoint: &str) -> Result<Self, crate::wire::WireError> {
+    fn parse(endpoint: &str) -> Result<Self, WireError> {
         let (tls, rest, default_port) = if let Some(rest) = endpoint.strip_prefix("https://") {
             (true, rest, 443)
         } else if let Some(rest) = endpoint.strip_prefix("http://") {
             (false, rest, 80)
         } else {
-            return Err(crate::wire::WireError::TokenRefresh(
+            return Err(WireError::TokenRefresh(
                 "OAUTHBEARER token endpoint must be http:// or https://".to_owned(),
             ));
         };
@@ -1011,7 +973,7 @@ impl OAuthEndpoint {
             .split_once(':')
             .map_or_else(|| Ok((authority.to_owned(), default_port)), parse_host_port)?;
         if host.is_empty() {
-            return Err(crate::wire::WireError::TokenRefresh(
+            return Err(WireError::TokenRefresh(
                 "OAUTHBEARER token endpoint host is empty".to_owned(),
             ));
         }
@@ -1031,12 +993,10 @@ impl OAuthEndpoint {
     }
 }
 
-fn parse_host_port(value: (&str, &str)) -> Result<(String, u16), crate::wire::WireError> {
+fn parse_host_port(value: (&str, &str)) -> Result<(String, u16), WireError> {
     let (host, port) = value;
     let port = port.parse::<u16>().map_err(|_error| {
-        crate::wire::WireError::TokenRefresh(
-            "OAUTHBEARER token endpoint port is invalid".to_owned(),
-        )
+        WireError::TokenRefresh("OAUTHBEARER token endpoint port is invalid".to_owned())
     })?;
     Ok((host.to_owned(), port))
 }
@@ -1044,7 +1004,7 @@ fn parse_host_port(value: (&str, &str)) -> Result<(String, u16), crate::wire::Wi
 fn oauthbearer_http_request(
     config: &SaslConfig,
     endpoint: &OAuthEndpoint,
-) -> Result<String, crate::wire::WireError> {
+) -> Result<String, WireError> {
     let body = oauthbearer_form_body(config)?;
     let mut request = String::from("POST ");
     request.push_str(&endpoint.path);
@@ -1058,16 +1018,16 @@ fn oauthbearer_http_request(
     Ok(request)
 }
 
-fn oauthbearer_form_body(config: &SaslConfig) -> Result<String, crate::wire::WireError> {
+fn oauthbearer_form_body(config: &SaslConfig) -> Result<String, WireError> {
     if let Some(path) = &config.oauthbearer_assertion_file {
         let assertion = fs::read_to_string(path).map_err(|error| {
-            crate::wire::WireError::TokenRefresh(format!(
+            WireError::TokenRefresh(format!(
                 "cannot read sasl.oauthbearer.assertion.file: {error}"
             ))
         })?;
         let assertion = assertion.trim();
         if assertion.is_empty() {
-            return Err(crate::wire::WireError::TokenRefresh(
+            return Err(WireError::TokenRefresh(
                 "sasl.oauthbearer.assertion.file is empty".to_owned(),
             ));
         }
@@ -1100,7 +1060,7 @@ fn oauthbearer_form_body(config: &SaslConfig) -> Result<String, crate::wire::Wir
     }
     #[cfg(not(feature = "aws-lc-rs-tls"))]
     if config.oauthbearer_assertion_private_key_file.is_some() {
-        return Err(crate::wire::WireError::InvalidSaslConfig(
+        return Err(WireError::InvalidSaslConfig(
             "sasl.oauthbearer.assertion.private.key.file signs a JWT assertion locally, which \
              needs the kacrab `aws-lc-rs-tls` feature - use sasl.oauthbearer.assertion.file, an \
              OAuth token endpoint, or a JAAS token instead"
@@ -1131,19 +1091,19 @@ fn oauthbearer_form_body(config: &SaslConfig) -> Result<String, crate::wire::Wir
 }
 
 #[cfg(feature = "aws-lc-rs-tls")]
-fn build_oauthbearer_assertion(config: &SaslConfig) -> Result<String, crate::wire::WireError> {
+fn build_oauthbearer_assertion(config: &SaslConfig) -> Result<String, WireError> {
     let key_path = config
         .oauthbearer_assertion_private_key_file
         .as_ref()
         .ok_or_else(|| {
-            crate::wire::WireError::InvalidSaslConfig(
+            WireError::InvalidSaslConfig(
                 "OAUTHBEARER assertion builder requires \
                  sasl.oauthbearer.assertion.private.key.file"
                     .to_owned(),
             )
         })?;
     let key = fs::read(key_path).map_err(|error| {
-        crate::wire::WireError::TokenRefresh(format!(
+        WireError::TokenRefresh(format!(
             "cannot read sasl.oauthbearer.assertion.private.key.file: {error}"
         ))
     })?;
@@ -1151,7 +1111,7 @@ fn build_oauthbearer_assertion(config: &SaslConfig) -> Result<String, crate::wir
         .oauthbearer_assertion_algorithm
         .parse::<Algorithm>()
         .map_err(|_error| {
-            crate::wire::WireError::InvalidSaslConfig(format!(
+            WireError::InvalidSaslConfig(format!(
                 "unsupported sasl.oauthbearer.assertion.algorithm `{}`",
                 config.oauthbearer_assertion_algorithm
             ))
@@ -1170,7 +1130,7 @@ fn build_oauthbearer_assertion(config: &SaslConfig) -> Result<String, crate::wir
     // two backends, so settle that before handing it the key.
     crate::wire::crypto::ensure_jwt_provider();
     jsonwebtoken::encode(&header, &Value::Object(claims), &encoding_key).map_err(|error| {
-        crate::wire::WireError::TokenRefresh(format!("cannot sign OAUTHBEARER assertion: {error}"))
+        WireError::TokenRefresh(format!("cannot sign OAUTHBEARER assertion: {error}"))
     })
 }
 
@@ -1179,7 +1139,7 @@ fn oauthbearer_assertion_encoding_key(
     algorithm: Algorithm,
     key: &[u8],
     passphrase: Option<&str>,
-) -> Result<EncodingKey, crate::wire::WireError> {
+) -> Result<EncodingKey, WireError> {
     match algorithm.family() {
         AlgorithmFamily::Rsa => oauthbearer_pem_or_encrypted_pkcs8_key(
             key,
@@ -1199,7 +1159,7 @@ fn oauthbearer_assertion_encoding_key(
             EncodingKey::from_ed_der,
             EncodingKey::from_ed_pem,
         ),
-        AlgorithmFamily::Hmac => Err(crate::wire::WireError::InvalidSaslConfig(
+        AlgorithmFamily::Hmac => Err(WireError::InvalidSaslConfig(
             "OAUTHBEARER assertion private-key flow does not support HMAC algorithms".to_owned(),
         )),
     }
@@ -1211,17 +1171,17 @@ fn oauthbearer_pem_or_encrypted_pkcs8_key(
     passphrase: Option<&str>,
     der_key: fn(&[u8]) -> EncodingKey,
     pem_key: fn(&[u8]) -> jsonwebtoken::errors::Result<EncodingKey>,
-) -> Result<EncodingKey, crate::wire::WireError> {
+) -> Result<EncodingKey, WireError> {
     match pem_key(key) {
         Ok(key) => Ok(key),
         Err(error) => {
             let Some(passphrase) = passphrase else {
-                return Err(crate::wire::WireError::TokenRefresh(format!(
+                return Err(WireError::TokenRefresh(format!(
                     "cannot load sasl.oauthbearer.assertion.private.key.file: {error}"
                 )));
             };
             let decrypted = encrypted_pkcs8_der(key, passphrase).map_err(|error| {
-                crate::wire::WireError::TokenRefresh(format!(
+                WireError::TokenRefresh(format!(
                     "cannot load sasl.oauthbearer.assertion.private.key.file: {error}"
                 ))
             })?;
@@ -1247,22 +1207,22 @@ fn encrypted_pkcs8_der(pem: &[u8], passphrase: &str) -> Result<pkcs8::SecretDocu
 #[cfg(feature = "aws-lc-rs-tls")]
 fn oauthbearer_assertion_template(
     config: &SaslConfig,
-) -> Result<(Header, Map<String, Value>), crate::wire::WireError> {
+) -> Result<(Header, Map<String, Value>), WireError> {
     let Some(path) = &config.oauthbearer_assertion_template_file else {
         return Ok((Header::default(), Map::new()));
     };
     let template = fs::read_to_string(path).map_err(|error| {
-        crate::wire::WireError::TokenRefresh(format!(
+        WireError::TokenRefresh(format!(
             "cannot read sasl.oauthbearer.assertion.template.file: {error}"
         ))
     })?;
     let value = serde_json::from_str::<Value>(&template).map_err(|error| {
-        crate::wire::WireError::TokenRefresh(format!(
+        WireError::TokenRefresh(format!(
             "sasl.oauthbearer.assertion.template.file is not valid JSON: {error}"
         ))
     })?;
     let object = value.as_object().ok_or_else(|| {
-        crate::wire::WireError::TokenRefresh(
+        WireError::TokenRefresh(
             "sasl.oauthbearer.assertion.template.file must contain a JSON object".to_owned(),
         )
     })?;
@@ -1282,9 +1242,9 @@ fn oauthbearer_assertion_template(
 }
 
 #[cfg(feature = "aws-lc-rs-tls")]
-fn template_claims_object(value: &Value) -> Result<Map<String, Value>, crate::wire::WireError> {
+fn template_claims_object(value: &Value) -> Result<Map<String, Value>, WireError> {
     value.as_object().cloned().ok_or_else(|| {
-        crate::wire::WireError::TokenRefresh(
+        WireError::TokenRefresh(
             "sasl.oauthbearer.assertion.template.file claims must be a JSON object".to_owned(),
         )
     })
@@ -1294,7 +1254,7 @@ fn template_claims_object(value: &Value) -> Result<Map<String, Value>, crate::wi
 fn merge_oauthbearer_config_claims(
     config: &SaslConfig,
     claims: &mut Map<String, Value>,
-) -> Result<(), crate::wire::WireError> {
+) -> Result<(), WireError> {
     if let Some(aud) = &config.oauthbearer_assertion_claim_aud {
         set_claim(claims, "aud", Value::String(aud.clone()));
     }
@@ -1321,22 +1281,20 @@ fn set_claim(claims: &mut Map<String, Value>, key: &str, value: Value) {
 }
 
 #[cfg(feature = "aws-lc-rs-tls")]
-fn now_unix_seconds() -> Result<u64, crate::wire::WireError> {
+fn now_unix_seconds() -> Result<u64, WireError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|error| {
-            crate::wire::WireError::TokenRefresh(format!(
-                "system clock is before Unix epoch: {error}"
-            ))
+            WireError::TokenRefresh(format!("system clock is before Unix epoch: {error}"))
         })
 }
 
 #[cfg(feature = "aws-lc-rs-tls")]
-fn generate_jti() -> Result<String, crate::wire::WireError> {
+fn generate_jti() -> Result<String, WireError> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|error| {
-        crate::wire::WireError::TokenRefresh(format!(
+        WireError::TokenRefresh(format!(
             "OAUTHBEARER assertion jti generation failed: {error}"
         ))
     })?;
@@ -1357,7 +1315,7 @@ fn oauth_config_value(
     direct: Option<&str>,
     jaas_key: &str,
     config_key: &str,
-) -> Result<String, crate::wire::WireError> {
+) -> Result<String, WireError> {
     direct
         .map(str::to_owned)
         .or_else(|| {
@@ -1367,13 +1325,13 @@ fn oauth_config_value(
                 .and_then(|jaas| jaas_option(jaas, jaas_key))
         })
         .ok_or_else(|| {
-            crate::wire::WireError::InvalidSaslConfig(format!(
+            WireError::InvalidSaslConfig(format!(
                 "OAUTHBEARER HTTP token endpoint requires {config_key}"
             ))
         })
 }
 
-fn form_encode(value: &str) -> Result<String, crate::wire::WireError> {
+fn form_encode(value: &str) -> Result<String, WireError> {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
@@ -1382,48 +1340,38 @@ fn form_encode(value: &str) -> Result<String, crate::wire::WireError> {
             },
             b' ' => encoded.push('+'),
             _ => write!(&mut encoded, "%{byte:02X}").map_err(|_error| {
-                crate::wire::WireError::TokenRefresh(
-                    "cannot encode OAUTHBEARER token request".to_owned(),
-                )
+                WireError::TokenRefresh("cannot encode OAUTHBEARER token request".to_owned())
             })?,
         }
     }
     Ok(encoded)
 }
 
-pub(crate) fn parse_oauthbearer_http_response(
-    response: &[u8],
-) -> Result<OAuthToken, crate::wire::WireError> {
+pub(crate) fn parse_oauthbearer_http_response(response: &[u8]) -> Result<OAuthToken, WireError> {
     let response = str::from_utf8(response).map_err(|_error| {
-        crate::wire::WireError::TokenRefresh("OAUTHBEARER token response is not UTF-8".to_owned())
+        WireError::TokenRefresh("OAUTHBEARER token response is not UTF-8".to_owned())
     })?;
     let (head, body) = response.split_once("\r\n\r\n").ok_or_else(|| {
-        crate::wire::WireError::TokenRefresh(
-            "OAUTHBEARER token response is missing HTTP headers".to_owned(),
-        )
+        WireError::TokenRefresh("OAUTHBEARER token response is missing HTTP headers".to_owned())
     })?;
     let status_code = head
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .ok_or_else(|| {
-            crate::wire::WireError::TokenRefresh(
-                "OAUTHBEARER token response is missing status".to_owned(),
-            )
+            WireError::TokenRefresh("OAUTHBEARER token response is missing status".to_owned())
         })?
         .parse::<u16>()
         .map_err(|_error| {
-            crate::wire::WireError::TokenRefresh(
-                "OAUTHBEARER token response status is invalid".to_owned(),
-            )
+            WireError::TokenRefresh("OAUTHBEARER token response status is invalid".to_owned())
         })?;
     if !(200..300).contains(&status_code) {
-        return Err(crate::wire::WireError::TokenRefresh(format!(
+        return Err(WireError::TokenRefresh(format!(
             "OAUTHBEARER token endpoint returned HTTP {status_code}"
         )));
     }
     let body = serde_json::from_str::<Value>(body).map_err(|error| {
-        crate::wire::WireError::TokenRefresh(format!(
+        WireError::TokenRefresh(format!(
             "OAUTHBEARER token response is not valid JSON: {error}"
         ))
     })?;
@@ -1431,12 +1379,10 @@ pub(crate) fn parse_oauthbearer_http_response(
         .get("access_token")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            crate::wire::WireError::TokenRefresh(
-                "OAUTHBEARER token response is missing access_token".to_owned(),
-            )
+            WireError::TokenRefresh("OAUTHBEARER token response is missing access_token".to_owned())
         })?;
     if token.is_empty() {
-        return Err(crate::wire::WireError::TokenRefresh(
+        return Err(WireError::TokenRefresh(
             "OAUTHBEARER access_token is empty".to_owned(),
         ));
     }
@@ -1469,9 +1415,8 @@ mod tests {
 
     use super::{
         MAX_SCRAM_ITERATIONS, MIN_SCRAM_ITERATIONS, OAuthToken, SaslConfig, SaslMechanism,
-        ScramExchange,
+        ScramExchange, WireError,
     };
-    use crate::wire::WireError;
 
     /// `digest_bytes` feeds the SCRAM `stored_key`. Returning an empty hash for
     /// a mechanism it cannot digest would produce a silently wrong client proof

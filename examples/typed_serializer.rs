@@ -11,7 +11,8 @@
 //! cargo run -p kacrab-examples --example typed_serializer -- 127.0.0.1:9092 kacrab-orders 0
 //! ```
 //!
-//! Deserializers are consumer-side; the consumer is not implemented yet.
+//! Deserializers are the consumer-side mirror of this trait — see
+//! `kacrab::consumer::ConsumerDeserializer`.
 
 use std::{env, error::Error};
 

@@ -19,10 +19,13 @@
 //!
 //! ## LZ4 backend selection
 //!
-//! * **`lz4`** — `lz4_flex` block API behind a Kafka-compatible custom frame. Fast mode only; the
-//!   `level` argument is ignored. Pure Rust, no C toolchain at build time, cross-compile clean.
-//! * **`lz4-hc`** — `lz4` crate (FFI to liblz4) behind the same frame format. Levels 3..=12 use HC
-//!   mode; levels 0..=2 fall back to fast mode. Requires a C compiler at build time.
+//! * **`lz4`** — `lz4_flex` block API behind a Kafka-compatible custom frame. Fast mode only. Pure
+//!   Rust, no C toolchain at build time, cross-compile clean.
+//! * **`lz4-hc`** — `lz4` crate (FFI to liblz4) behind the same frame format. Adds HC mode.
+//!   Requires a C compiler at build time.
+//!
+//! How a `level` argument maps onto each backend is stated once, on
+//! [`Compression::compress_with_level`].
 //!
 //! Both features are independent — enabling `lz4-hc` alone is sufficient
 //! (the C lib handles fast mode too). When **both** are enabled, `lz4-hc`
@@ -132,13 +135,20 @@ impl Compression {
 
     /// Compress `payload` at the given level (codec-specific).
     ///
+    /// `None` means the codec default.
+    ///
     /// * `Gzip` accepts `0..=9`, default `6`.
     /// * `Zstd` accepts `1..=22`, default `3`.
     /// * `Snappy` ignores the level.
-    /// * `Lz4` level handling depends on the active backend feature:
-    ///   * with `lz4` only — level ignored, always fast mode.
-    ///   * with `lz4-hc` — level `0..=2` → fast, `3..=12` → HC mode, values above `12` clamp to
-    ///     `12`, negative/zero levels clamp to fast level `1`.
+    /// * `Lz4` level handling depends on the active backend feature. **This is the authoritative
+    ///   LZ4 level mapping** — the module docs and `lz4::compress_with_level` link here rather than
+    ///   restate it:
+    ///   * with `lz4` only (`lz4_flex`) — the level is ignored; always fast mode.
+    ///   * with `lz4-hc` (`liblz4`) — a level `<= 2` selects fast mode with acceleration factor
+    ///     `max(level, 1)`, so negative levels, `0` and `1` all mean acceleration `1` and `2` means
+    ///     acceleration `2`; a level `>= 3` selects HC mode at `min(level, 12)`, so `3..=12` map to
+    ///     themselves and anything above `12` clamps to `12`.
+    ///   * `None` means level `1` on either backend — fast mode, acceleration `1`.
     pub fn compress_with_level(self, payload: &[u8], level: Option<i32>) -> Result<Vec<u8>> {
         match self {
             Self::None => {

@@ -47,10 +47,14 @@ pub enum FrameErrorKind {
         length: i32,
     },
 
-    /// Length prefix exceeds [`crate::frame::MAX_FRAME_LENGTH`].
+    /// Frame payload exceeds [`crate::frame::MAX_FRAME_LENGTH`] — a length prefix
+    /// read from the wire, or a `header + body` too large to encode.
     #[error("frame length {length} exceeds maximum {max}")]
     TooLarge {
-        /// Length read from the wire.
+        /// Offending length: read from the wire when decoding, the `header + body`
+        /// size when encoding. `i32::MAX` is a sentinel for an encode-side length
+        /// that overflowed `usize` or does not fit `i32`, where the real value
+        /// cannot be represented in this field at all.
         length: i32,
         /// Configured maximum.
         max: i32,
