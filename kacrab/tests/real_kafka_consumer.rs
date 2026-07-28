@@ -684,6 +684,12 @@ async fn real_kafka_out_of_range_resets_and_recovers() {
 /// being a mid-handover instant. The first settled split is frozen, and the
 /// assertions run against it, so a rebalance triggered by whichever member
 /// stops first can no longer change what is asserted.
+/// Each member's `client.id` mapped to the partitions it currently owns.
+type Split = std::collections::BTreeMap<&'static str, Vec<TopicPartition>>;
+
+/// Members that have re-published the candidate split since it was first seen.
+type Confirmers = std::collections::BTreeSet<&'static str>;
+
 #[derive(Default)]
 struct AssignmentBoard {
     state: std::sync::Mutex<BoardState>,
@@ -692,15 +698,12 @@ struct AssignmentBoard {
 #[derive(Default)]
 struct BoardState {
     /// Latest assignment published by each member, keyed by `client.id`.
-    live: std::collections::BTreeMap<&'static str, Vec<TopicPartition>>,
+    live: Split,
     /// Split currently awaiting confirmation, plus the members that have
     /// re-published it since it was first observed.
-    candidate: Option<(
-        std::collections::BTreeMap<&'static str, Vec<TopicPartition>>,
-        std::collections::BTreeSet<&'static str>,
-    )>,
+    candidate: Option<(Split, Confirmers)>,
     /// The confirmed split, frozen on first agreement.
-    settled: Option<std::collections::BTreeMap<&'static str, Vec<TopicPartition>>>,
+    settled: Option<Split>,
 }
 
 impl AssignmentBoard {
@@ -726,7 +729,7 @@ impl AssignmentBoard {
                 confirmers.len() >= Self::MEMBERS
             },
             _ => {
-                state.candidate = Some((split.clone(), std::collections::BTreeSet::from([client])));
+                state.candidate = Some((split.clone(), Confirmers::from([client])));
                 false
             },
         };
@@ -737,22 +740,18 @@ impl AssignmentBoard {
     }
 
     /// The frozen settled split, or `None` if the group never agreed on one.
-    fn settled_split(
-        &self,
-    ) -> Option<std::collections::BTreeMap<&'static str, Vec<TopicPartition>>> {
+    fn settled_split(&self) -> Option<Split> {
         self.state.lock().expect("assignment board").settled.clone()
     }
 
     /// Last assignment each member published — failure-message context only.
-    fn live_assignments(&self) -> std::collections::BTreeMap<&'static str, Vec<TopicPartition>> {
+    fn live_assignments(&self) -> Split {
         self.state.lock().expect("assignment board").live.clone()
     }
 
     /// `Some(split)` when every member has published exactly one partition and
     /// no two members name the same one.
-    fn disjoint_single_split(
-        live: &std::collections::BTreeMap<&'static str, Vec<TopicPartition>>,
-    ) -> Option<std::collections::BTreeMap<&'static str, Vec<TopicPartition>>> {
+    fn disjoint_single_split(live: &Split) -> Option<Split> {
         if live.len() != Self::MEMBERS || live.values().any(|owned| owned.len() != 1) {
             return None;
         }
