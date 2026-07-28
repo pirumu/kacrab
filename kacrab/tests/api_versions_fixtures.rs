@@ -22,6 +22,7 @@
 
 use bytes::{Bytes, BytesMut};
 use kacrab::wire::{BrokerCapabilities, WireError};
+use kacrab_protocol::version::ApiVersionRange;
 use kacrab_protocol::{
     frame,
     generated::{ApiKey, ApiVersionsResponseData},
@@ -429,11 +430,20 @@ fn newer_apis_report_unavailable_on_older_brokers_without_panicking() {
         let capabilities = capabilities_of(fixture);
 
         for &(api, expected) in fixture.negotiated {
-            // This `ok_or` is the shape every call site uses to turn a missing
-            // capability into an error instead of an unwrap.
-            let resolved = capabilities
-                .version_for(api)
-                .ok_or(WireError::UnsupportedApiVersion(api));
+            // Mirrors the negotiation chokepoint's error shape: client range
+            // from `client_api_info`, broker range from the fixture's own
+            // ApiVersions data (None when the broker never advertised the key).
+            let resolved = capabilities.version_for(api).ok_or_else(|| {
+                let info = client_api_info(api);
+                WireError::UnsupportedApiVersion {
+                    api_key: api,
+                    client: ApiVersionRange {
+                        min_version: info.min_version,
+                        max_version: info.max_version,
+                    },
+                    broker: capabilities.broker_range(api),
+                }
+            });
             if let Some(version) = expected {
                 assert_eq!(
                     resolved.expect("api must be available"),
@@ -445,13 +455,17 @@ fn newer_apis_report_unavailable_on_older_brokers_without_panicking() {
             }
             let error = resolved.expect_err("api must be unavailable");
             assert!(
-                matches!(error, WireError::UnsupportedApiVersion(key) if key == api),
+                matches!(
+                    &error,
+                    WireError::UnsupportedApiVersion { api_key, broker: None, .. } if *api_key == api
+                ),
                 "{}: {api:?} produced the wrong error: {error}",
                 fixture.label
             );
-            assert_eq!(
-                error.to_string(),
-                format!("no compatible API version for {api:?}"),
+            let message = error.to_string();
+            assert!(
+                message.starts_with(&format!("no compatible {api:?} API version"))
+                    && message.contains("broker does not advertise this API"),
                 "{}: unavailable {api:?} must name the API",
                 fixture.label
             );
