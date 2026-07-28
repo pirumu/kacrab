@@ -43,6 +43,7 @@ use crate::{
     consumer::{
         error::{ConsumerError, Result},
         fetch::batch_records,
+        topics::{group_by_topic, topic_id_from_key, topic_id_key},
     },
 };
 
@@ -330,18 +331,16 @@ fn fetch_partition_entry(
 }
 
 fn build_forgotten(forgotten: &[TopicIdPartition]) -> Vec<ForgottenTopic> {
-    let mut topics: Vec<ForgottenTopic> = Vec::new();
-    for (partition, topic_id) in forgotten {
-        match topics.iter_mut().find(|topic| topic.topic_id == *topic_id) {
-            Some(topic) => topic.partitions.push(partition.partition),
-            None => topics.push(ForgottenTopic {
-                topic_id: *topic_id,
-                partitions: vec![partition.partition],
-                _unknown_tagged_fields: Vec::new(),
-            }),
-        }
-    }
-    topics
+    group_by_topic(
+        forgotten
+            .iter()
+            .map(|(partition, topic_id)| (topic_id_key(*topic_id), partition.partition)),
+        |topic_id, partitions| ForgottenTopic {
+            topic_id: topic_id_from_key(topic_id),
+            partitions,
+            _unknown_tagged_fields: Vec::new(),
+        },
+    )
 }
 
 /// One partition's worth of a decoded `ShareFetch` response.

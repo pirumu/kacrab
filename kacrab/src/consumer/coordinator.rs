@@ -29,6 +29,7 @@ use kacrab_protocol::{
 use super::{
     assignor::{self, MemberSubscription},
     error::{ConsumerError, Result},
+    topics::group_by_topic,
 };
 use crate::{
     common::{OffsetAndMetadata, TopicPartition, coordinator_for_key},
@@ -528,49 +529,39 @@ pub(super) async fn leave_group(
 fn commit_topics(
     offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
 ) -> Vec<OffsetCommitRequestTopic> {
-    let mut topics: Vec<OffsetCommitRequestTopic> = Vec::new();
-    for (partition, offset) in offsets {
-        let wire_partition = OffsetCommitRequestPartition {
-            partition_index: partition.partition,
-            committed_offset: offset.offset,
-            committed_leader_epoch: offset.leader_epoch.unwrap_or(-1),
-            committed_metadata: Some(offset.metadata.clone().unwrap_or_default().into()),
+    group_by_topic(
+        offsets.iter().map(|(partition, offset)| {
+            (
+                partition.topic.clone(),
+                OffsetCommitRequestPartition {
+                    partition_index: partition.partition,
+                    committed_offset: offset.offset,
+                    committed_leader_epoch: offset.leader_epoch.unwrap_or(-1),
+                    committed_metadata: Some(offset.metadata.clone().unwrap_or_default().into()),
+                    _unknown_tagged_fields: Vec::new(),
+                },
+            )
+        }),
+        |name, partitions| OffsetCommitRequestTopic {
+            name: name.into(),
+            topic_id: kacrab_protocol::KafkaUuid::default(),
+            partitions,
             _unknown_tagged_fields: Vec::new(),
-        };
-        if let Some(topic) = topics
-            .iter_mut()
-            .find(|topic| topic.name.as_str() == partition.topic)
-        {
-            topic.partitions.push(wire_partition);
-        } else {
-            topics.push(OffsetCommitRequestTopic {
-                name: partition.topic.clone().into(),
-                topic_id: kacrab_protocol::KafkaUuid::default(),
-                partitions: vec![wire_partition],
-                _unknown_tagged_fields: Vec::new(),
-            });
-        }
-    }
-    topics
+        },
+    )
 }
 
 fn fetch_topics(partitions: &[TopicPartition]) -> Vec<OffsetFetchRequestTopic> {
-    let mut topics: Vec<OffsetFetchRequestTopic> = Vec::new();
-    for partition in partitions {
-        if let Some(topic) = topics
-            .iter_mut()
-            .find(|topic| topic.name.as_str() == partition.topic)
-        {
-            topic.partition_indexes.push(partition.partition);
-        } else {
-            topics.push(OffsetFetchRequestTopic {
-                name: partition.topic.clone().into(),
-                partition_indexes: vec![partition.partition],
-                _unknown_tagged_fields: Vec::new(),
-            });
-        }
-    }
-    topics
+    group_by_topic(
+        partitions
+            .iter()
+            .map(|partition| (partition.topic.clone(), partition.partition)),
+        |name, partition_indexes| OffsetFetchRequestTopic {
+            name: name.into(),
+            partition_indexes,
+            _unknown_tagged_fields: Vec::new(),
+        },
+    )
 }
 
 #[cfg(test)]

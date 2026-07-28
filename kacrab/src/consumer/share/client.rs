@@ -704,11 +704,7 @@ impl ShareConsumer {
     }
 
     /// Adopt a coordinator-computed assignment, resolving its topic ids to names.
-    fn apply_assignment(
-        &mut self,
-        metadata: &ClusterMetadata,
-        assignment: &[AssignedTopic],
-    ) {
+    fn apply_assignment(&mut self, metadata: &ClusterMetadata, assignment: &[AssignedTopic]) {
         let mut target = Vec::new();
         for topic in assignment {
             let Some(name) = topic_name_for_id(metadata, topic.topic_id) else {

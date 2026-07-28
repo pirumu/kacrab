@@ -40,13 +40,15 @@ use super::{
     error::{ConsumerError, Result},
     fetch,
     interceptor::{ConsumerInterceptor, ConsumerInterceptors, InterceptorConfigs},
-    metrics::{ConsumerMetrics, ConsumerMetricsSnapshot},
     membership::{AssignedTopic, EPOCH_JOINING, EPOCH_LEAVING, GroupMemberState},
+    metrics::{ConsumerMetrics, ConsumerMetricsSnapshot},
     next_gen::{self, HeartbeatRequest},
     offsets::{self, EARLIEST_TIMESTAMP, LATEST_TIMESTAMP},
     record::{ConsumerRecords, OffsetAndTimestamp},
     subscription::{FetchPosition, SubscriptionState},
-    topics::{topic_id_for_name, topic_name_for_id},
+    topics::{
+        group_by_topic, topic_id_for_name, topic_id_from_key, topic_id_key, topic_name_for_id,
+    },
 };
 use crate::{
     common::{ConsumerGroupMetadata, OffsetAndMetadata, TopicPartition},
@@ -1546,21 +1548,19 @@ impl Consumer {
 
     /// The current assignment grouped by topic id, for the heartbeat's owned set.
     fn owned_as_topic_ids(&self, metadata: &ClusterMetadata) -> Vec<AssignedTopic> {
-        let mut by_id: Vec<AssignedTopic> = Vec::new();
-        for partition in self.subscription.assigned_partitions() {
-            let Some(topic_id) = topic_id_for_name(metadata, &partition.topic) else {
-                continue;
-            };
-            if let Some(topic) = by_id.iter_mut().find(|topic| topic.topic_id == topic_id) {
-                topic.partitions.push(partition.partition);
-            } else {
-                by_id.push(AssignedTopic {
-                    topic_id,
-                    partitions: vec![partition.partition],
-                });
-            }
-        }
-        by_id
+        group_by_topic(
+            self.subscription
+                .assigned_partitions()
+                .into_iter()
+                .filter_map(|partition| {
+                    topic_id_for_name(metadata, &partition.topic)
+                        .map(|topic_id| (topic_id_key(topic_id), partition.partition))
+                }),
+            |topic_id, partitions| AssignedTopic {
+                topic_id: topic_id_from_key(topic_id),
+                partitions,
+            },
+        )
     }
 
     /// Update the group context the background heartbeat task reads.

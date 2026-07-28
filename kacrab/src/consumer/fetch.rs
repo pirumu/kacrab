@@ -36,6 +36,7 @@ use super::{
     offsets::partition_leader,
     record::{ConsumerRecord, TimestampType},
     subscription::{FetchPosition, SubscriptionState},
+    topics::group_by_topic,
 };
 use crate::{
     common::TopicPartition,
@@ -741,43 +742,36 @@ fn build_fetch_request(
     let full = session.is_full();
     // Grouped by name (v13+ sends only the id on the wire, so the wire struct
     // can't be the grouping key), then lowered to `FetchTopic`s at the end.
-    let mut grouped: Vec<(&str, Vec<FetchPartition>)> = Vec::new();
-    for (partition, position) in entries {
-        // Incremental fetch: only send partitions whose position changed since the
-        // broker last saw them; a full fetch sends everything.
-        if !full
-            && session
-                .sent
-                .get(&(partition.topic.clone(), partition.partition))
-                == Some(position)
-        {
-            continue;
-        }
-        let wire_partition = FetchPartition {
-            partition: partition.partition,
-            current_leader_epoch: position.leader_epoch.unwrap_or(-1),
-            fetch_offset: position.offset,
-            last_fetched_epoch: -1,
-            log_start_offset: -1,
-            partition_max_bytes: config.max_partition_fetch_bytes,
-            replica_directory_id: KafkaUuid::default(),
-            high_watermark: i64::MAX,
-            _unknown_tagged_fields: Vec::new(),
-        };
-        if let Some((_, partitions)) = grouped
-            .iter_mut()
-            .find(|(topic, _)| *topic == partition.topic)
-        {
-            partitions.push(wire_partition);
-        } else {
-            grouped.push((partition.topic.as_str(), vec![wire_partition]));
-        }
-    }
     // Topic-id keyed fetches (v13+) leave the name empty and set the id; the
     // strict codec rejects a non-default name at v13+ and vice versa.
-    let topics: Vec<FetchTopic> = grouped
-        .into_iter()
-        .map(|(name, partitions)| match topic_ids {
+    let topics: Vec<FetchTopic> = group_by_topic(
+        entries
+            .iter()
+            // Incremental fetch: only send partitions whose position changed
+            // since the broker last saw them; a full fetch sends everything.
+            .filter(|(partition, position)| {
+                full || session
+                    .sent
+                    .get(&(partition.topic.clone(), partition.partition))
+                    != Some(position)
+            })
+            .map(|(partition, position)| {
+                (
+                    partition.topic.as_str(),
+                    FetchPartition {
+                        partition: partition.partition,
+                        current_leader_epoch: position.leader_epoch.unwrap_or(-1),
+                        fetch_offset: position.offset,
+                        last_fetched_epoch: -1,
+                        log_start_offset: -1,
+                        partition_max_bytes: config.max_partition_fetch_bytes,
+                        replica_directory_id: KafkaUuid::default(),
+                        high_watermark: i64::MAX,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                )
+            }),
+        |name, partitions| match topic_ids {
             Some(ids) => FetchTopic {
                 topic: kacrab_protocol::KafkaString::default(),
                 topic_id: ids.get(name).copied().unwrap_or_default(),
@@ -790,8 +784,8 @@ fn build_fetch_request(
                 partitions,
                 _unknown_tagged_fields: Vec::new(),
             },
-        })
-        .collect();
+        },
+    );
     let forgotten = if full {
         Vec::new()
     } else {
@@ -831,20 +825,13 @@ fn build_forgotten(
         .iter()
         .map(|(partition, _)| (partition.topic.as_str(), partition.partition))
         .collect();
-    let mut grouped: Vec<(&str, Vec<i32>)> = Vec::new();
-    for (topic, partition) in session.sent.keys() {
-        if current.contains(&(topic.as_str(), *partition)) {
-            continue;
-        }
-        if let Some((_, partitions)) = grouped.iter_mut().find(|(name, _)| name == topic) {
-            partitions.push(*partition);
-        } else {
-            grouped.push((topic.as_str(), vec![*partition]));
-        }
-    }
-    grouped
-        .into_iter()
-        .map(|(name, partitions)| {
+    group_by_topic(
+        session
+            .sent
+            .keys()
+            .filter(|(topic, partition)| !current.contains(&(topic.as_str(), *partition)))
+            .map(|(topic, partition)| (topic.as_str(), *partition)),
+        |name, partitions| {
             if session.uses_topic_ids {
                 ForgottenTopic {
                     topic: kacrab_protocol::KafkaString::default(),
@@ -860,8 +847,8 @@ fn build_forgotten(
                     _unknown_tagged_fields: Vec::new(),
                 }
             }
-        })
-        .collect()
+        },
+    )
 }
 
 #[cfg(test)]

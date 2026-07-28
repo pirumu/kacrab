@@ -21,6 +21,7 @@ use super::{
     config::ConsumerRuntimeConfig,
     error::{ConsumerError, Result},
     subscription::FetchPosition,
+    topics::group_by_topic,
 };
 use crate::{
     common::TopicPartition,
@@ -115,28 +116,24 @@ pub(super) async fn list_offsets(
 
 /// Build one `ListOffsets` topic list from `(partition, timestamp)` entries.
 fn list_offsets_topics(entries: &[(TopicPartition, i64)]) -> Vec<ListOffsetsTopic> {
-    let mut topics: Vec<ListOffsetsTopic> = Vec::new();
-    for (partition, timestamp) in entries {
-        let wire_partition = ListOffsetsPartition {
-            partition_index: partition.partition,
-            current_leader_epoch: -1,
-            timestamp: *timestamp,
+    group_by_topic(
+        entries.iter().map(|(partition, timestamp)| {
+            (
+                partition.topic.clone(),
+                ListOffsetsPartition {
+                    partition_index: partition.partition,
+                    current_leader_epoch: -1,
+                    timestamp: *timestamp,
+                    _unknown_tagged_fields: Vec::new(),
+                },
+            )
+        }),
+        |name, partitions| ListOffsetsTopic {
+            name: name.into(),
+            partitions,
             _unknown_tagged_fields: Vec::new(),
-        };
-        if let Some(topic) = topics
-            .iter_mut()
-            .find(|topic| topic.name.as_str() == partition.topic)
-        {
-            topic.partitions.push(wire_partition);
-        } else {
-            topics.push(ListOffsetsTopic {
-                name: partition.topic.clone().into(),
-                partitions: vec![wire_partition],
-                _unknown_tagged_fields: Vec::new(),
-            });
-        }
-    }
-    topics
+        },
+    )
 }
 
 /// The outcome of validating a fetch position against its partition leader's
@@ -270,28 +267,24 @@ fn entry_current_epoch(
 fn leader_epoch_topics(
     entries: &[(TopicPartition, FetchPosition, i32)],
 ) -> Vec<OffsetForLeaderTopic> {
-    let mut topics: Vec<OffsetForLeaderTopic> = Vec::new();
-    for (partition, position, current_epoch) in entries {
-        let wire_partition = OffsetForLeaderPartition {
-            partition: partition.partition,
-            current_leader_epoch: *current_epoch,
-            leader_epoch: position.leader_epoch.unwrap_or(-1),
+    group_by_topic(
+        entries.iter().map(|(partition, position, current_epoch)| {
+            (
+                partition.topic.clone(),
+                OffsetForLeaderPartition {
+                    partition: partition.partition,
+                    current_leader_epoch: *current_epoch,
+                    leader_epoch: position.leader_epoch.unwrap_or(-1),
+                    _unknown_tagged_fields: Vec::new(),
+                },
+            )
+        }),
+        |topic, partitions| OffsetForLeaderTopic {
+            topic: topic.into(),
+            partitions,
             _unknown_tagged_fields: Vec::new(),
-        };
-        if let Some(topic) = topics
-            .iter_mut()
-            .find(|topic| topic.topic.as_str() == partition.topic)
-        {
-            topic.partitions.push(wire_partition);
-        } else {
-            topics.push(OffsetForLeaderTopic {
-                topic: partition.topic.clone().into(),
-                partitions: vec![wire_partition],
-                _unknown_tagged_fields: Vec::new(),
-            });
-        }
-    }
-    topics
+        },
+    )
 }
 
 /// The current leader broker id for a topic partition, or `None` when unknown.

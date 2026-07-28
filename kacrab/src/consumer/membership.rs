@@ -110,7 +110,9 @@ mod tests {
         reason = "Unit test fixtures fail fastest with contextual expect calls."
     )]
 
-    use super::{Duration, EPOCH_JOINING, ErrorCode, GroupMemberState, HeartbeatOutcome, KafkaUuid};
+    use super::{
+        Duration, EPOCH_JOINING, ErrorCode, GroupMemberState, HeartbeatOutcome, KafkaUuid,
+    };
 
     fn outcome(member_id: Option<&str>, epoch: i32, interval_ms: u64) -> HeartbeatOutcome {
         HeartbeatOutcome {
