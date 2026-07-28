@@ -44,8 +44,10 @@ configure it well*.
   client as an external oracle. See [Protocol codegen](./codegen.md).
 - **Verified against real brokers, not just against itself.** Every SASL
   mechanism, every TLS mode, every compression codec, multi-broker failover,
-  and every admin operation ran end-to-end against real Apache Kafka 4.3.0.
-  See [Verification](./verification.md).
+  and every admin operation ran end-to-end against real Apache Kafka 4.3.0, and
+  the core producer/consumer/compression/admin path runs against 4.0.0, 3.9.0
+  and 3.6.2 as well. See [Verification](./verification.md) and
+  [Which brokers kacrab speaks to](./broker-compatibility.md).
 
 ## The route
 

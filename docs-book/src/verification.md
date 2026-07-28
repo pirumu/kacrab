@@ -6,8 +6,35 @@ or a SASL round skipped, passes a Rust-only round trip because kacrab is on
 both ends. Most of the discoveries in this book — the OAUTHBEARER error round,
 the GSSAPI security layer, the burst wedge, the IPv6 hang, the topic-id codec
 traps — were found *here*, walking the actual territory: every path exercised
-end-to-end against real Apache Kafka 4.3.0, with the environments captured as
+end-to-end against real Apache Kafka, with the environments captured as
 `docker-compose.*.yml` files.
+
+## Across four broker releases, not one
+
+The suites below run against Apache Kafka **4.3.0** by default, but every compose
+file reads `${KAFKA_IMAGE:-apache/kafka:4.3.0}`, and
+`.github/workflows/real-broker.yml` matrixes the base job over four releases:
+
+| Leg | Image | Compose file | Suite |
+|---|---|---|---|
+| 4.3.0 | `apache/kafka:4.3.0` | `docker-compose.kafka.yml` | full (blocking) |
+| 4.0.0 | `apache/kafka:4.0.0` | `docker-compose.kafka.yml` | core |
+| 3.9.0 | `apache/kafka:3.9.0` | `docker-compose.kafka.yml` | core |
+| 3.6.2 | `bitnamilegacy/kafka:3.6.2` | `docker-compose.kafka-bitnami.yml` | core |
+
+`docker-compose.kafka-bitnami.yml` exists because `apache/kafka` publishes no tag
+older than 3.7. It is a second file rather than an overlay: Bitnami configures
+the broker through `KAFKA_CFG_*` variables instead of the `KAFKA_*` shape the
+Apache image reads, and an overlay can only add keys — it cannot drop the
+Apache-shaped ones, which would then sit in the environment doing nothing while
+reading as if they applied.
+
+The *core* tier (producer, classic-protocol consumer, a compression round trip,
+admin smoke) runs on every leg; the *full* tier adds KIP-848 and the share
+consumer and is 4.3.0-only, because those APIs do not exist on the older legs.
+Which surfaces survive which release, why the old legs are non-blocking today,
+and what the golden `ApiVersions` fixtures prove offline is all in
+[Which brokers kacrab speaks to](./broker-compatibility.md).
 
 > **Quote**
 >
@@ -93,7 +120,12 @@ back `kacrab/tests/real_kafka_admin*.rs`. Every one of the 62 admin operations i
 exercised across all four routing paths (controller, coordinator, per-leader,
 broadcast). Operations that need cluster state the test cannot create are
 asserted at the wire layer — a well-formed broker error code proves correct
-encode/decode. This pass caught real wire bugs the unit tests could not: an empty
+encode/decode. On the older matrix legs the smoke half is capability-aware: an
+operation the broker genuinely cannot express (`list_config_resources(Topic)` on
+3.9.0 and 3.6.2, `list_client_metrics_resources` on 3.6.2) is reported as a named
+`SKIPPED` line plus a capability summary rather than a failure — see
+[Which brokers kacrab speaks to](./broker-compatibility.md#capability-aware-admin-smoke).
+This pass caught real wire bugs the unit tests could not: an empty
 `ApiVersions` client name, the `OffsetCommit`/`OffsetFetch` v10 topic-name-vs-id
 switch, and the missing transient-coordinator-error retry (see
 [The admin client](./admin.md)).

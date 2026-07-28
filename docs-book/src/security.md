@@ -133,6 +133,34 @@ loads from PEM (inline or file), JKS, or PKCS12 — the same `ssl.truststore.*` 
 - **Mutual TLS** — supply a client certificate/key (`ssl.keystore.*`) and the
   broker authenticates the client too.
 
+### Choosing a crypto provider
+
+TLS is the one place kacrab refuses to choose for you. `SSL` and `SASL_SSL`
+require exactly one of two features to be named:
+
+- **`aws-lc-rs-tls`** — the default provider and what CI exercises.
+- **`pure-rust-tls`** — `ring`-backed, and removes `aws-lc-sys` from the
+  dependency tree entirely. Note that `ring` still vendors some BoringSSL C, so
+  this is *no aws-lc*, not *zero C*.
+
+A `PLAINTEXT`-only build can name neither and then compiles no crypto backend at
+all; with neither named, a TLS connection fails at **config validation** with a
+message naming the two features rather than at handshake time. Enabling both is
+well defined — `aws-lc-rs` wins.
+
+One capability differs between them. Signing an **`OAUTHBEARER` JWT assertion
+locally** (`sasl.oauthbearer.assertion.private.key.file`) needs `aws-lc-rs-tls`,
+because `pure-rust-tls` deliberately leaves `jsonwebtoken` out: its pure-Rust
+backend depends on `rsa`, and `rsa` carries
+[RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071) — a timing
+sidechannel with no fixed release. Trading a C dependency for an unpatched
+key-recovery sidechannel is not what a "pure Rust" feature is for, so the
+capability is dropped instead. `make check-pure-rust-tls` fails the build if
+either `aws-lc-sys` or `rsa` reappears in that configuration.
+
+The other three `OAUTHBEARER` token sources — JAAS option, token file, and HTTP
+token endpoint — work identically in both builds.
+
 > **What "verified" means here**
 >
 > Not "the unit tests pass" — every mechanism above was run against real Apache
