@@ -3,9 +3,9 @@
 With the producer's road behind us, this leg is a side expedition — mapping
 the whole administrative territory before doubling back for the consumer. The
 `admin` feature adds `kacrab::admin::AdminClient`, a native implementation of
-Apache Kafka's `Admin` interface: the **full Kafka 4.3.0 operation surface —
-62 operations** — on the same wire/session layer (and therefore the same
-TLS/SASL auth) as the producer. The real discovery of this leg wasn't any
+Apache Kafka's `Admin` interface: the **full operation surface of the Kafka
+Java client 4.3.0 — 62 operations** — on the same wire/session layer (and
+therefore the same TLS/SASL auth) as the producer. The real discovery of this leg wasn't any
 single operation; it was that *routing* is the whole game — and that a
 handful of wire-version traps only a real broker could reveal.
 

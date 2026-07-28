@@ -43,17 +43,18 @@ built from the Kafka protocol up. It is not a `librdkafka` wrapper.**
   (`gzip`/`snappy`/`lz4`/`zstd`), murmur2 + sticky/adaptive partitioning,
   multi-broker dispatch with failover, transactions, and a Kafka-faithful
   idempotent path. Interceptors and Kafka-named metrics included.
-- **Consumer**: full Apache Kafka 4.3.0 feature parity — manual assignment,
-  topic and regex subscription, classic groups (eager + `cooperative-sticky`)
-  and the KIP-848 server-side protocol, incremental fetch sessions, truncation
-  detection, sync/async/auto commit, static membership, typed deserializers,
-  interceptors, and `metrics()`.
+- **Consumer**: feature parity with the Apache Kafka Java client 4.3.0 — manual
+  assignment, topic and regex subscription, classic groups (eager +
+  `cooperative-sticky`) and the KIP-848 server-side protocol, incremental fetch
+  sessions, truncation detection, sync/async/auto commit, static membership,
+  typed deserializers, interceptors, and `metrics()`.
 - **Share consumer (KIP-932)**: the queue-shaped consuming surface — per-record
   `Accept`/`Release`/`Reject`, delivery-count tracking for poison messages, and
   more consumers than partitions. See [Share consumer](#share-consumer).
-- **Admin**: the full 4.3.0 `Admin` surface (62 operations) — topics, configs,
-  ACLs, groups & offsets, transactions, delegation tokens, quotas, SCRAM,
-  reassignments, KRaft quorum, and the 4.x share/streams group families.
+- **Admin**: the full `Admin` surface of the Java client 4.3.0 (62 operations) —
+  topics, configs, ACLs, groups & offsets, transactions, delegation tokens,
+  quotas, SCRAM, reassignments, KRaft quorum, and the 4.x share/streams group
+  families.
 - **Auth**: `PLAINTEXT`/`SSL`/`SASL_PLAINTEXT`/`SASL_SSL`; SASL `PLAIN`,
   `SCRAM-SHA-256/512`, `OAUTHBEARER`, feature-gated `GSSAPI`; PEM/JKS/PKCS12
   stores and mutual TLS; custom-authenticator hooks. Failures fail fast with
@@ -89,8 +90,19 @@ and release history as of 2026-07-27:
 | Consumer groups | classic + KIP-848 | classic + KIP-848 (GA in librdkafka 2.12, opt in via `group.protocol`) | none — explicit non-goal | classic |
 | Transactions | yes | yes | none — explicit non-goal | not documented |
 | Admin API | 62 operations | yes | none | not documented |
-| Broker versions | targets 4.3.0 | broad | not stated | tested 0.8.2–3.1 |
+| Broker versions | 4.3.0 schemas, negotiated down per broker; tested against 4.3.0 | broad | not stated | tested 0.8.2–3.1 |
 | Untrusted-byte decode path | Rust, `forbid(unsafe_code)` workspace-wide, [11 fuzz targets nightly][fuzz-url] | C (librdkafka) | Rust | Rust |
+
+The broker-versions row deserves a note on mechanism. The protocol schemas are
+generated from the Apache Kafka 4.3.0 sources, but no request version is
+hardcoded: every API is negotiated down per broker from that broker's own
+`ApiVersions` response, which is the same bidirectional compatibility model
+Kafka's own clients use when a newer client talks to an older broker. The
+handshake itself is the floor — a broker too old to answer `ApiVersions` v3
+(pre-2.4) is rejected on connect with an error naming the requirement, instead
+of retrying until the request timeout. What that negotiation does in practice
+below 4.x is not yet covered by CI; see
+[When not to use kacrab](#when-not-to-use-kacrab).
 
 rskafka states its own scope plainly — *"No support for offset tracking,
 consumer groups, transactions, etc."* — it is a deliberately minimal
@@ -102,9 +114,9 @@ makes it look — feature-wise the two are close, because both track the same
 protocol.
 
 **Choose `rust-rdkafka` if** you need battle-tested code with years of
-production mileage, need a Kafka version older than 4.x, or want the ecosystem
-that has grown around librdkafka. It is the safe default and this project does
-not pretend otherwise.
+production mileage, need verified support for Kafka older than 4.x, or want
+the ecosystem that has grown around librdkafka. It is the safe default and this
+project does not pretend otherwise.
 
 **Choose kacrab if** a C toolchain in your build is a real cost — cross
 compilation, musl static builds, `cargo install` for downstream users, audit
@@ -541,10 +553,13 @@ Dropping a client without closing it:
 
 ## When not to use kacrab
 
-- **You need brokers older than Kafka 4.x.** kacrab targets and is tested
-  against 4.3.0 only. Version negotiation exists, but nothing older is
-  exercised in CI, so treat old-broker support as unverified. Use
-  `rust-rdkafka`.
+- **You need brokers older than Kafka 4.x, today.** Request versions are
+  negotiated down per broker from `ApiVersions`, and the handshake rejects
+  anything older than 2.4 outright, so there is a real mechanism here rather
+  than a hardcoded target — but CI exercises 4.3.0 only. A broker-version
+  matrix is planned; until it is green, treat anything below 4.x as unverified
+  rather than unsupported, and reach for `rust-rdkafka` if an older broker is a
+  hard requirement you cannot test yourself.
 - **You need Kafka Streams.** Out of scope, permanently — this is a client
   library. See [Status](#status).
 - **You need years of production mileage.** kacrab is pre-1.0 and first

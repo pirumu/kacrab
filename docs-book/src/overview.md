@@ -53,8 +53,8 @@ flowchart TB
 - **`consumer`** — manual assignment and group subscription over both group
   protocols, the fetch/position/offset state machines, and incremental fetch
   sessions. See [The consumer client](./consumer.md).
-- **`admin`** — the full Apache Kafka 4.3.0 `Admin` operation surface with
-  controller/coordinator/per-leader/broadcast routing. See
+- **`admin`** — the full `Admin` operation surface of the Apache Kafka Java
+  client 4.3.0, with controller/coordinator/per-leader/broadcast routing. See
   [The admin client](./admin.md).
 - **`kacrab-protocol`** — the generated wire types, record-batch v2
   encode/decode, compression codecs, and CRC32C. Zero hand-written byte
