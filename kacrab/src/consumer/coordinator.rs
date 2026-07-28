@@ -29,6 +29,7 @@ use kacrab_protocol::{
 use super::{
     assignor::{self, MemberSubscription},
     error::{ConsumerError, Result},
+    topics::group_by_topic,
 };
 use crate::{
     common::{OffsetAndMetadata, TopicPartition, coordinator_for_key},
@@ -37,6 +38,30 @@ use crate::{
 
 /// `FindCoordinator` key type for a consumer group coordinator.
 const COORDINATOR_KEY_TYPE_GROUP: i8 = 0;
+
+/// Whether an error means the group coordinator moved or is unavailable, so the
+/// cached coordinator must be dropped and re-discovered (`FindCoordinator`).
+/// Wire-level timeouts and connection failures count: a dead coordinator can
+/// never send `NOT_COORDINATOR` — it just times out — so treating only Kafka
+/// codes as "moved" pins a dead incarnation forever (Java marks the
+/// coordinator unknown on any coordinator request failure).
+///
+/// Shared with the share consumer, whose coordinator is found and lost the same
+/// way; the codes reach it through the heartbeat outcome rather than through an
+/// `Err`, so its own copy used to list only the wire arm.
+pub(super) const fn is_coordinator_moved(error: &ConsumerError) -> bool {
+    matches!(
+        error,
+        ConsumerError::Broker {
+            error: ErrorCode::NotCoordinator
+                | ErrorCode::CoordinatorNotAvailable
+                | ErrorCode::CoordinatorLoadInProgress,
+            ..
+        } | ConsumerError::Wire(
+            WireError::Timeout | WireError::ConnectionClosed | WireError::Io(_)
+        )
+    )
+}
 /// Highest `OffsetCommit` version to negotiate; v10 switched to topic ids.
 const OFFSET_COMMIT_MAX_VERSION: i16 = 9;
 /// Highest `OffsetFetch` version to negotiate; v8 switched to the `groups` form.
@@ -299,10 +324,6 @@ pub(super) struct JoinRequest<'a> {
     pub owned: &'a [TopicPartition],
 }
 
-/// Drive the classic `JoinGroup` handshake to completion, retrying as needed: it
-/// adopts the coordinator-assigned member id on `MEMBER_ID_REQUIRED`, and resets
-/// to a fresh member id on `UNKNOWN_MEMBER_ID`/`ILLEGAL_GENERATION`, looping until
-/// the broker accepts the join or returns another error.
 /// Bound for `JoinGroup`/`SyncGroup`: the coordinator legitimately holds
 /// these responses until the rebalance settles (up to the rebalance timeout),
 /// so the plain `request.timeout.ms` (30s) would expire mid-join, and the
@@ -314,6 +335,10 @@ fn rebalance_rpc_timeout(rebalance_timeout_ms: i32) -> std::time::Duration {
     std::time::Duration::from_millis(clamped.saturating_add(5_000))
 }
 
+/// Drive the classic `JoinGroup` handshake to completion, retrying as needed: it
+/// adopts the coordinator-assigned member id on `MEMBER_ID_REQUIRED`, and resets
+/// to a fresh member id on `UNKNOWN_MEMBER_ID`/`ILLEGAL_GENERATION`, looping until
+/// the broker accepts the join or returns another error.
 pub(super) async fn join_group(
     context: &GroupContext<'_>,
     join: &JoinRequest<'_>,
@@ -504,49 +529,39 @@ pub(super) async fn leave_group(
 fn commit_topics(
     offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
 ) -> Vec<OffsetCommitRequestTopic> {
-    let mut topics: Vec<OffsetCommitRequestTopic> = Vec::new();
-    for (partition, offset) in offsets {
-        let wire_partition = OffsetCommitRequestPartition {
-            partition_index: partition.partition,
-            committed_offset: offset.offset,
-            committed_leader_epoch: offset.leader_epoch.unwrap_or(-1),
-            committed_metadata: Some(offset.metadata.clone().unwrap_or_default().into()),
+    group_by_topic(
+        offsets.iter().map(|(partition, offset)| {
+            (
+                partition.topic.clone(),
+                OffsetCommitRequestPartition {
+                    partition_index: partition.partition,
+                    committed_offset: offset.offset,
+                    committed_leader_epoch: offset.leader_epoch.unwrap_or(-1),
+                    committed_metadata: Some(offset.metadata.clone().unwrap_or_default().into()),
+                    _unknown_tagged_fields: Vec::new(),
+                },
+            )
+        }),
+        |name, partitions| OffsetCommitRequestTopic {
+            name: name.into(),
+            topic_id: kacrab_protocol::KafkaUuid::default(),
+            partitions,
             _unknown_tagged_fields: Vec::new(),
-        };
-        if let Some(topic) = topics
-            .iter_mut()
-            .find(|topic| topic.name.as_str() == partition.topic)
-        {
-            topic.partitions.push(wire_partition);
-        } else {
-            topics.push(OffsetCommitRequestTopic {
-                name: partition.topic.clone().into(),
-                topic_id: kacrab_protocol::KafkaUuid::default(),
-                partitions: vec![wire_partition],
-                _unknown_tagged_fields: Vec::new(),
-            });
-        }
-    }
-    topics
+        },
+    )
 }
 
 fn fetch_topics(partitions: &[TopicPartition]) -> Vec<OffsetFetchRequestTopic> {
-    let mut topics: Vec<OffsetFetchRequestTopic> = Vec::new();
-    for partition in partitions {
-        if let Some(topic) = topics
-            .iter_mut()
-            .find(|topic| topic.name.as_str() == partition.topic)
-        {
-            topic.partition_indexes.push(partition.partition);
-        } else {
-            topics.push(OffsetFetchRequestTopic {
-                name: partition.topic.clone().into(),
-                partition_indexes: vec![partition.partition],
-                _unknown_tagged_fields: Vec::new(),
-            });
-        }
-    }
-    topics
+    group_by_topic(
+        partitions
+            .iter()
+            .map(|partition| (partition.topic.clone(), partition.partition)),
+        |name, partition_indexes| OffsetFetchRequestTopic {
+            name: name.into(),
+            partition_indexes,
+            _unknown_tagged_fields: Vec::new(),
+        },
+    )
 }
 
 #[cfg(test)]

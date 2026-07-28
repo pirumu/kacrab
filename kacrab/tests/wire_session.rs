@@ -2454,6 +2454,105 @@ async fn share_consumer_fails_before_heartbeating_a_broker_without_kip_932() {
     );
 }
 
+/// Kafka 3.9 serves `ConsumerGroupHeartbeat` at **v0 only** (KIP-848 early
+/// access) while kacrab speaks up to v1. The capability gate lets that broker
+/// through — so the heartbeat that follows has to actually go out at the
+/// *negotiated* version. A request framed at the client's own ceiling would be
+/// rejected with `UNSUPPORTED_VERSION` by every 3.9 cluster, and no unit test can
+/// see that: the version only becomes observable on the wire.
+///
+/// Nothing here writes a version number down; the test asserts the request header
+/// carries what the mock broker advertised.
+#[cfg(feature = "consumer")]
+#[tokio::test]
+async fn consumer_group_heartbeat_goes_out_at_the_version_a_v0_only_broker_advertised() {
+    use std::sync::{Arc, Mutex};
+
+    /// What the broker advertises as its whole `ConsumerGroupHeartbeat` range —
+    /// a Kafka 3.9 early-access cluster.
+    const BROKER_HEARTBEAT_RANGE: (i16, i16) = (0, 0);
+
+    let seen_version = Arc::new(Mutex::new(None));
+    let broker = MockBroker::serve_many(vec![
+        Box::new(move |request| {
+            capability_handshake_response(
+                request,
+                &[(
+                    ApiKey::ConsumerGroupHeartbeat,
+                    BROKER_HEARTBEAT_RANGE.0,
+                    BROKER_HEARTBEAT_RANGE.1,
+                )],
+            )
+        }),
+        Box::new(find_coordinator_response),
+        Box::new(|mut request| {
+            let header_version = request_header_version(ApiKey::Metadata as i16, 12);
+            let header =
+                RequestHeaderData::read(&mut request, header_version).expect("metadata header");
+            let response = metadata_response(0, "orders", vec![(0, "127.0.0.1".to_owned(), 9092)]);
+            response_frame(ApiKey::Metadata, 12, header.correlation_id, &response)
+        }),
+        Box::new({
+            let seen_version = Arc::clone(&seen_version);
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(
+                    header.request_api_key,
+                    ApiKey::ConsumerGroupHeartbeat as i16
+                );
+                *seen_version.lock().unwrap() = Some(header.request_api_version);
+                // Answer at the same version, and with a code that ends the poll
+                // rather than scheduling another heartbeat.
+                let response = ConsumerGroupHeartbeatResponseData {
+                    error_code: i16::from(ErrorCode::InvalidGroupId),
+                    ..ConsumerGroupHeartbeatResponseData::default()
+                };
+                response_frame(
+                    ApiKey::ConsumerGroupHeartbeat,
+                    header.request_api_version,
+                    header.correlation_id,
+                    &response,
+                )
+            }
+        }),
+    ])
+    .await;
+
+    let mut consumer = kacrab::consumer::Consumer::from_map([
+        ("bootstrap.servers", broker.addr().to_string()),
+        ("group.id", "early-access-group".to_owned()),
+        ("group.protocol", "consumer".to_owned()),
+    ])
+    .await
+    .expect("consumer builds");
+    consumer.subscribe(["orders"]).expect("subscribe");
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        consumer.poll(std::time::Duration::from_millis(100)),
+    )
+    .await
+    .expect("poll must not hang")
+    .expect_err("the mock coordinator rejects the group id");
+    assert!(
+        !matches!(
+            error,
+            kacrab::consumer::ConsumerError::UnsupportedGroupProtocol { .. }
+        ),
+        "a v0-only broker serves KIP-848 and must not be refused: {error}"
+    );
+
+    let sent = seen_version
+        .lock()
+        .unwrap()
+        .expect("the consumer must have sent a ConsumerGroupHeartbeat");
+    assert_eq!(
+        sent, BROKER_HEARTBEAT_RANGE.1,
+        "the heartbeat must be framed at the version negotiated with this broker, not at the \
+         client's own ceiling"
+    );
+}
+
 /// An `ApiVersions` handshake answer carrying the classic-group surface every
 /// broker since 2.4 has, plus whatever `extra` the caller wants advertised on top
 /// (`api key`, `min`, `max`). Nothing forward-looking is in the base set, so a

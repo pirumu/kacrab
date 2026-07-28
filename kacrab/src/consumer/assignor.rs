@@ -12,7 +12,7 @@
 //! encoding the broker relays between members, decoded at whatever version the
 //! group leader wrote.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use bytes::{Buf as _, BufMut as _, Bytes, BytesMut};
 use kacrab_protocol::generated::{
@@ -21,6 +21,7 @@ use kacrab_protocol::generated::{
     consumer_protocol_subscription::TopicPartition as SubscriptionTopic,
 };
 
+use super::topics::group_by_topic;
 use crate::common::TopicPartition;
 
 /// Kafka `protocol.type` for consumer groups.
@@ -350,21 +351,16 @@ pub(super) fn encode_subscription(topics: &[String], owned: &[TopicPartition]) -
 
 /// Group owned partitions by topic for the subscription blob.
 fn owned_topics(owned: &[TopicPartition]) -> Vec<SubscriptionTopic> {
-    let mut by_topic: BTreeMap<String, Vec<i32>> = BTreeMap::new();
-    for partition in owned {
-        by_topic
-            .entry(partition.topic.clone())
-            .or_default()
-            .push(partition.partition);
-    }
-    by_topic
-        .into_iter()
-        .map(|(topic, partitions)| SubscriptionTopic {
+    group_by_topic(
+        owned
+            .iter()
+            .map(|partition| (partition.topic.clone(), partition.partition)),
+        |topic, partitions| SubscriptionTopic {
             topic: topic.into(),
             partitions,
             _unknown_tagged_fields: Vec::new(),
-        })
-        .collect()
+        },
+    )
 }
 
 /// Decode the topics a member subscribed to from its subscription blob.
@@ -409,21 +405,16 @@ pub(super) fn decode_owned(metadata: &Bytes) -> Vec<TopicPartition> {
 
 /// Encode a `SyncGroup` assignment blob for one member's partitions.
 pub(super) fn encode_assignment(partitions: &[TopicPartition]) -> Bytes {
-    let mut by_topic: BTreeMap<String, Vec<i32>> = BTreeMap::new();
-    for partition in partitions {
-        by_topic
-            .entry(partition.topic.clone())
-            .or_default()
-            .push(partition.partition);
-    }
-    let assigned_partitions = by_topic
-        .into_iter()
-        .map(|(topic, partitions)| AssignmentTopic {
+    let assigned_partitions = group_by_topic(
+        partitions
+            .iter()
+            .map(|partition| (partition.topic.clone(), partition.partition)),
+        |topic, partitions| AssignmentTopic {
             topic: topic.into(),
             partitions,
             _unknown_tagged_fields: Vec::new(),
-        })
-        .collect();
+        },
+    );
     let assignment = ConsumerProtocolAssignmentData {
         assigned_partitions,
         user_data: None,

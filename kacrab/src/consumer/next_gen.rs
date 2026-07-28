@@ -9,14 +9,13 @@
 //! partition is never double-owned). Assignments are keyed by topic id, resolved
 //! to names against cluster metadata.
 //!
-//! This module owns the wire RPC and the small membership-state machine; the
+//! This module owns the wire RPC; the membership state it drives is the one
+//! [`membership`](super::membership) also gives share groups. The
 //! [`Consumer`](super::Consumer) facade drives reconciliation against its
 //! subscription (it holds the positions and metadata).
 
-use std::time::Duration;
-
 use kacrab_protocol::{
-    KafkaString, KafkaUuid,
+    KafkaString,
     generated::{
         ApiKey, ConsumerGroupHeartbeatRequestData, ConsumerGroupHeartbeatResponseData, ErrorCode,
         consumer_group_heartbeat_request::TopicPartitions as OwnedTopicPartitions,
@@ -24,47 +23,11 @@ use kacrab_protocol::{
     version::client_api_info,
 };
 
-use super::error::{ConsumerError, Result};
+use super::{
+    error::Result,
+    membership::{AssignedTopic, HeartbeatOutcome, heartbeat_interval},
+};
 use crate::wire::WireClient;
-
-/// Member epoch sent to join a fresh group.
-pub(super) const EPOCH_JOINING: i32 = 0;
-/// Member epoch sent to leave the group.
-pub(super) const EPOCH_LEAVING: i32 = -1;
-
-/// The membership state a KIP-848 consumer keeps for the lifetime of the process.
-#[derive(Debug, Clone)]
-pub(super) struct ModernGroupState {
-    /// Client-generated member id, kept for the whole consumer lifetime.
-    pub member_id: String,
-    /// Current member epoch (`0` before the first heartbeat is acknowledged).
-    pub member_epoch: i32,
-    /// Heartbeat cadence the coordinator asked for.
-    pub heartbeat_interval: Duration,
-}
-
-impl ModernGroupState {
-    /// Start fresh membership with a new client-generated member id.
-    pub(super) fn new(default_interval: Duration) -> Result<Self> {
-        let member_id = KafkaUuid::random()
-            .map_err(|_error| {
-                ConsumerError::InvalidState("could not generate a consumer member id")
-            })?
-            .to_string();
-        Ok(Self {
-            member_id,
-            member_epoch: EPOCH_JOINING,
-            heartbeat_interval: default_interval,
-        })
-    }
-}
-
-/// One topic's partitions in an assignment or owned set, keyed by topic id.
-#[derive(Debug, Clone)]
-pub(super) struct AssignedTopic {
-    pub topic_id: KafkaUuid,
-    pub partitions: Vec<i32>,
-}
 
 /// The per-heartbeat inputs beyond the routing context.
 pub(super) struct HeartbeatRequest<'a> {
@@ -79,27 +42,12 @@ pub(super) struct HeartbeatRequest<'a> {
     pub owned: &'a [AssignedTopic],
 }
 
-/// The parsed outcome of one `ConsumerGroupHeartbeat`.
-#[derive(Debug)]
-pub(super) struct HeartbeatOutcome {
-    /// The member id the coordinator echoed (may replace ours at v0).
-    pub member_id: Option<String>,
-    /// The new member epoch.
-    pub member_epoch: i32,
-    /// The heartbeat cadence the coordinator asked for.
-    pub heartbeat_interval: Duration,
-    /// The target assignment, when the coordinator sent one this round.
-    pub assignment: Option<Vec<AssignedTopic>>,
-    /// The top-level error code (fencing/coordinator signals are surfaced, not
-    /// turned into hard errors, so the caller can rejoin).
-    pub error: ErrorCode,
-}
-
 /// Send one `ConsumerGroupHeartbeat` to the coordinator and parse the response.
 ///
 /// Fencing (`FENCED_MEMBER_EPOCH`/`UNKNOWN_MEMBER_ID`) and coordinator-availability
 /// codes are returned in [`HeartbeatOutcome::error`] for the caller to recover
-/// from; only unexpected fatal codes become a [`ConsumerError`].
+/// from; only unexpected fatal codes become a
+/// [`ConsumerError`](super::error::ConsumerError).
 pub(super) async fn heartbeat(
     wire: &WireClient,
     coordinator_id: i32,
@@ -141,6 +89,9 @@ pub(super) async fn heartbeat(
         topic_partitions: Some(owned),
         _unknown_tagged_fields: Vec::new(),
     };
+    // The ceiling kacrab speaks, not the version sent: the connection resolves it
+    // against the broker's advertised `ApiVersions` range before framing, so a
+    // Kafka 3.9 cluster serving only v0 (KIP-848 early access) gets a v0 request.
     let version = client_api_info(ApiKey::ConsumerGroupHeartbeat).max_version;
     let response: ConsumerGroupHeartbeatResponseData = wire
         .send_to_broker(
@@ -150,7 +101,6 @@ pub(super) async fn heartbeat(
             &wire_request,
         )
         .await?;
-    let error = ErrorCode::from(response.error_code);
     let assignment = response.assignment.map(|assignment| {
         assignment
             .topic_partitions
@@ -161,28 +111,11 @@ pub(super) async fn heartbeat(
             })
             .collect()
     });
-    let interval = u64::try_from(response.heartbeat_interval_ms.max(0)).unwrap_or(0);
     Ok(HeartbeatOutcome {
         member_id: response.member_id.map(|id| id.to_string()),
         member_epoch: response.member_epoch,
-        heartbeat_interval: Duration::from_millis(interval),
+        heartbeat_interval: heartbeat_interval(response.heartbeat_interval_ms),
         assignment,
-        error,
+        error: ErrorCode::from(response.error_code),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn new_state_generates_a_member_id_and_joins_at_epoch_zero() {
-        let state = ModernGroupState::new(Duration::from_secs(3)).expect("member id");
-        assert!(!state.member_id.is_empty());
-        assert_eq!(state.member_epoch, EPOCH_JOINING);
-        assert_eq!(state.heartbeat_interval, Duration::from_secs(3));
-        // Two members get distinct ids.
-        let other = ModernGroupState::new(Duration::from_secs(3)).expect("member id");
-        assert_ne!(state.member_id, other.member_id);
-    }
 }

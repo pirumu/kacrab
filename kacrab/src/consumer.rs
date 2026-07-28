@@ -25,6 +25,7 @@ mod deserializer;
 mod error;
 mod fetch;
 mod interceptor;
+mod membership;
 mod metrics;
 mod next_gen;
 mod offsets;
@@ -32,6 +33,7 @@ mod record;
 #[cfg(feature = "share-consumer")]
 mod share;
 mod subscription;
+mod topics;
 
 #[cfg(feature = "share-consumer")]
 pub use self::share::{

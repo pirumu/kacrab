@@ -254,6 +254,40 @@ release date and links to relevant pull requests or issues.
   exactly once, acquisition-lock expiry redelivering an abandoned consumer's
   records, and admin interop against the live group.
 
+### Changed
+
+- **The share consumer no longer carries a forked copy of the consumer.** It was
+  built by copying, and the copies had started to drift. `ShareGroupState` was a
+  field-for-field duplicate of `ModernGroupState`, `EPOCH_JOINING`/`EPOCH_LEAVING`
+  were declared twice, and `ShareHeartbeatOutcome` had the same five fields as
+  `HeartbeatOutcome` — all now one `GroupMemberState`, one pair of epoch
+  sentinels and one outcome, with the identical "adopt what the heartbeat
+  reported" block behind `GroupMemberState::adopt`. `topic_name_for_id`,
+  `topic_id_for_name` and `clamp_ms` existed twice (in two idioms: `!= ZERO`
+  against `!is_nil()`), and the coordinator-moved predicate was a documented
+  `const fn` on one side and a narrower inline `matches!` on the other. There is
+  now one of each.
+
+  Nine request builders each grew their own quadratic
+  `Vec` + `iter_mut().find()` grouping loop; they now share one
+  `group_by_topic`. One visible consequence: request topic lists are
+  deterministic, ordered by topic key rather than by first-seen (or, for
+  `OffsetCommit`, `HashMap`) order. Partition order within a topic is unchanged.
+
+  Also folded: the three "commit, and re-find the coordinator once if it moved"
+  loops in the consumer. Three stale spots went with them — a `join_group` doc
+  comment attached to the timeout helper next to it, a
+  `FetchContext::max_wait_ms` doc claiming a poll-budget clamp that has never
+  existed (the consumer's fetch is a background task, so it deliberately passes
+  `fetch.max.wait.ms` straight through), and an `auto.offset.reset=none` branch
+  that re-tested a list the function had already returned on when empty.
+
+  A new `wire_session` test pins what no unit test could see: on a broker that
+  advertises only `ConsumerGroupHeartbeat` v0 (Kafka 3.9, KIP-848 early access),
+  the heartbeat goes out at v0. Version negotiation already produced that — the
+  version handed to `send_to_broker` is a ceiling the connection resolves
+  against the broker's advertised range — but nothing proved it.
+
 ### Fixed
 
 - **`dispatch_ready` never healed the sequence gap an unsplittable oversized batch
@@ -306,6 +340,28 @@ release date and links to relevant pull requests or issues.
   matching Java's `equivalentResponseCount` — a topic quietly expiring out of the
   merged view is not new information and must not reset the backoff, while a
   requested topic disappearing is.
+
+- **`check.crcs` did nothing, and a corrupted batch was reported as your
+  mistake.** The setting is declared native and defaults to `true`, but nothing
+  ever read it: `RecordBatch::decode` verified the checksum unconditionally, so
+  the `true` direction worked by accident and `check.crcs=false` was silently
+  ignored. The consumer and the share consumer now pass the setting into the
+  record decoder, and turning it off skips the checksum pass — every other
+  bound, magic and length check still runs, so this trades corruption detection
+  for throughput, not safety. `kacrab_protocol::record` gains `CrcCheck`,
+  `RecordBatch::decode_with_crc` and `decode_next_batch_with_crc`; the existing
+  `decode`/`decode_next_batch` keep verifying, so no other caller changes.
+
+  Separately, a batch that would not decode surfaced as
+  `ConsumerError::InvalidState("failed to decode fetched record batch")` — a
+  variant documented as *the caller* violating an API precondition — with no
+  partition, no offset, and the underlying cause discarded. A CRC mismatch from
+  a bad disk read looked exactly like mixing `subscribe` with `assign`. It is
+  now a broker error carrying Kafka's own `CORRUPT_MESSAGE` code, the partition,
+  the offset the decode stood at, and the specific failure.
+
+- **Two admin group operations were broken on every broker older than Apache
+  Kafka 4.1, in opposite directions.**
 
   `alter_consumer_group_offsets` committed nothing.
   `OffsetCommit` v10 (KIP-1140) swapped the topic key from `name` to `topic_id`,

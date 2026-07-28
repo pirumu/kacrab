@@ -22,7 +22,7 @@ use kacrab_protocol::{
 
 use super::{
     config::{ShareAcknowledgementMode, ShareRuntimeConfig, share_api_version},
-    membership::{EPOCH_JOINING, EPOCH_LEAVING, ShareGroupState, ShareHeartbeatRequest, heartbeat},
+    membership::{ShareHeartbeatRequest, heartbeat},
     record::{AcknowledgeType, ShareRecord, ShareRecords},
     session::{
         Acknowledgements, ShareFetchOutcome, ShareFetchPlan, ShareSession, TopicIdPartition,
@@ -36,11 +36,14 @@ use crate::{
     consumer::{
         capabilities,
         client::resolve_bootstrap_brokers,
-        coordinator,
+        config::{clamp_i32, clamp_ms},
+        coordinator::{self, is_coordinator_moved},
         error::{ConsumerError, Result},
-        fetch::idle_backoff,
+        fetch::{crc_check, idle_backoff},
+        membership::{AssignedTopic, EPOCH_JOINING, EPOCH_LEAVING, GroupMemberState},
         metrics::{ConsumerMetrics, ConsumerMetricsSnapshot},
         offsets::partition_leader,
+        topics::{topic_id_for_name, topic_name_for_id},
     },
     wire::{ClusterMetadata, WireClient, WireError},
 };
@@ -119,7 +122,7 @@ pub struct ShareConsumer {
     /// Topics this consumer subscribed to; empty until `subscribe`.
     subscribed_topics: Vec<String>,
     /// Membership state; `None` until the first heartbeat is attempted.
-    group: Option<ShareGroupState>,
+    group: Option<GroupMemberState>,
     /// When the last `ShareGroupHeartbeat` was sent.
     last_heartbeat: Option<Instant>,
     /// The partitions the coordinator assigned. Unlike a consumer group this is
@@ -622,7 +625,7 @@ impl ShareConsumer {
         // any heartbeat, fetch or acknowledgement is framed.
         capabilities::require_share_group(&self.wire, coordinator)?;
         if self.group.is_none() {
-            self.group = Some(ShareGroupState::new(self.config.base.heartbeat_interval)?);
+            self.group = Some(GroupMemberState::new(self.config.base.heartbeat_interval)?);
         }
         let (member_id, member_epoch) = self
             .group
@@ -649,12 +652,7 @@ impl ShareConsumer {
             Err(error) => {
                 // A dead coordinator never answers `NOT_COORDINATOR`; it just
                 // times out, so re-discover it rather than pinning a dead one.
-                if matches!(
-                    error,
-                    ConsumerError::Wire(
-                        WireError::Timeout | WireError::ConnectionClosed | WireError::Io(_)
-                    )
-                ) {
+                if is_coordinator_moved(&error) {
                     self.coordinator_id = None;
                 }
                 return Err(error);
@@ -666,13 +664,7 @@ impl ShareConsumer {
         match outcome.error {
             ErrorCode::None => {
                 if let Some(state) = self.group.as_mut() {
-                    state.member_epoch = outcome.member_epoch;
-                    if outcome.heartbeat_interval > Duration::ZERO {
-                        state.heartbeat_interval = outcome.heartbeat_interval;
-                    }
-                    if let Some(id) = outcome.member_id.filter(|id| !id.is_empty()) {
-                        state.member_id = id;
-                    }
+                    state.adopt(&outcome);
                 }
                 if let Some(assignment) = outcome.assignment {
                     let metadata = self
@@ -694,7 +686,7 @@ impl ShareConsumer {
             // The coordinator forgot us — start over with a fresh member id,
             // which is also a fresh share-session identity.
             ErrorCode::UnknownMemberId => {
-                self.group = Some(ShareGroupState::new(self.config.base.heartbeat_interval)?);
+                self.group = Some(GroupMemberState::new(self.config.base.heartbeat_interval)?);
                 self.forget_acquisitions();
             },
             code if code.is_retriable() => {
@@ -712,11 +704,7 @@ impl ShareConsumer {
     }
 
     /// Adopt a coordinator-computed assignment, resolving its topic ids to names.
-    fn apply_assignment(
-        &mut self,
-        metadata: &ClusterMetadata,
-        assignment: &[crate::consumer::next_gen::AssignedTopic],
-    ) {
+    fn apply_assignment(&mut self, metadata: &ClusterMetadata, assignment: &[AssignedTopic]) {
         let mut target = Vec::new();
         for topic in assignment {
             let Some(name) = topic_name_for_id(metadata, topic.topic_id) else {
@@ -903,7 +891,7 @@ impl ShareConsumer {
                 "share fetch request rejected",
             ));
         }
-        decode_share_fetch(response, topic_names)
+        decode_share_fetch(response, topic_names, crc_check(&self.config.base))
     }
 
     /// Send every pending acknowledgement as a standalone `ShareAcknowledge`,
@@ -1292,21 +1280,6 @@ fn partition_acknowledge_outcomes(
         .collect()
 }
 
-fn topic_name_for_id(metadata: &ClusterMetadata, topic_id: KafkaUuid) -> Option<String> {
-    metadata
-        .topics
-        .iter()
-        .find(|topic| topic.topic_id == topic_id)
-        .map(|topic| topic.name.clone())
-}
-
-fn topic_id_for_name(metadata: &ClusterMetadata, name: &str) -> Option<KafkaUuid> {
-    metadata
-        .topic(name)
-        .map(|topic| topic.topic_id)
-        .filter(|id| !id.is_nil())
-}
-
 fn topic_names_by_id(metadata: &ClusterMetadata) -> HashMap<KafkaUuid, String> {
     metadata
         .topics
@@ -1327,14 +1300,6 @@ fn topic_ids_by_partition(
                 .map(|topic_id| (partition.clone(), topic_id))
         })
         .collect()
-}
-
-fn clamp_ms(duration: Duration) -> i32 {
-    i32::try_from(duration.as_millis()).unwrap_or(i32::MAX)
-}
-
-fn clamp_i32(value: usize) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 #[cfg(test)]
