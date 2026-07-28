@@ -19,7 +19,7 @@ use kacrab_protocol::generated::{
     ConsumerGroupHeartbeatResponseData, ErrorCode, JoinGroupResponseData,
 };
 use kacrab_protocol::{
-    KafkaString, KafkaUuid, frame,
+    KafkaString, KafkaUuid,
     generated::{
         ApiKey, ApiVersion, ApiVersionsResponseData, DeletableTopicResult, DeleteTopicState,
         DeleteTopicsRequestData, DeleteTopicsResponseData, FindCoordinatorRequestData,
@@ -30,12 +30,12 @@ use kacrab_protocol::{
         OffsetCommitResponseData, OffsetCommitResponsePartition, OffsetCommitResponseTopic,
         OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
         OffsetFetchResponseData, OffsetFetchResponsePartition, OffsetFetchResponseTopic,
-        ProduceRequestData, ProduceResponseData, RequestHeaderData, ResponseHeaderData,
-        SaslAuthenticateRequestData, SaslAuthenticateResponseData, SaslHandshakeRequestData,
-        SaslHandshakeResponseData, leave_group_request::MemberIdentity,
+        ProduceRequestData, ProduceResponseData, RequestHeaderData, SaslAuthenticateRequestData,
+        SaslAuthenticateResponseData, SaslHandshakeRequestData, SaslHandshakeResponseData,
+        leave_group_request::MemberIdentity,
         list_config_resources_response::ConfigResource as WireConfigResource,
     },
-    version::{request_header_version, response_header_version},
+    version::request_header_version,
 };
 #[cfg(feature = "aws-lc-rs-tls")]
 use pkcs8::{
@@ -57,6 +57,10 @@ use tokio::{
 };
 #[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 use tokio_rustls::TlsAcceptor;
+
+use crate::common::{MockBroker, read_frame, response_frame};
+
+mod common;
 
 /// Pick a `rustls` crypto provider for the mock TLS broker.
 ///
@@ -809,7 +813,7 @@ async fn wire_client_send_without_response_completes_after_write() {
 #[tokio::test]
 async fn wire_client_rejects_request_when_in_flight_limit_is_full() {
     let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
-    let server = MockBroker::serve_blocking_after_handshake(request_seen_tx).await;
+    let server = serve_blocking_after_handshake(request_seen_tx).await;
     let client = WireClient::connect_with_brokers(
         ConnectionConfig::default()
             .max_in_flight_requests_per_connection(1)
@@ -973,8 +977,8 @@ async fn wire_client_refreshes_metadata_after_partition_invalidation() {
 async fn wire_client_stress_pipelines_requests_across_multiple_brokers() {
     const REQUESTS_PER_BROKER: usize = 32;
 
-    let broker_7 = MockBroker::serve_pipelined_api_versions(REQUESTS_PER_BROKER, 7).await;
-    let broker_8 = MockBroker::serve_pipelined_api_versions(REQUESTS_PER_BROKER, 8).await;
+    let broker_7 = serve_pipelined_api_versions(REQUESTS_PER_BROKER, 7).await;
+    let broker_8 = serve_pipelined_api_versions(REQUESTS_PER_BROKER, 8).await;
     let client = WireClient::connect_with_brokers(
         ConnectionConfig::default()
             .max_in_flight_requests_per_connection(REQUESTS_PER_BROKER + 1)
@@ -2102,7 +2106,7 @@ async fn wire_client_reconnects_after_initial_connect_failure() {
 
 #[tokio::test]
 async fn wire_client_reconnects_after_broker_closes_connection() {
-    let server = MockBroker::serve_reconnecting_api_versions([7, 8]).await;
+    let server = serve_reconnecting_api_versions([7, 8]).await;
     let client = WireClient::connect_with_brokers(
         ConnectionConfig::default()
             .request_timeout(std::time::Duration::from_millis(500))
@@ -2743,34 +2747,6 @@ fn oauthbearer_handlers(
     ]
 }
 
-fn response_frame(
-    api_key: ApiKey,
-    api_version: i16,
-    correlation_id: i32,
-    response: &impl ApiVersions,
-) -> BytesMut {
-    let mut header = BytesMut::new();
-    ResponseHeaderData {
-        correlation_id,
-        _unknown_tagged_fields: Vec::new(),
-    }
-    .write(
-        &mut header,
-        response_header_version(api_key as i16, api_version),
-    )
-    .expect("response header write");
-
-    let mut body = BytesMut::new();
-    response.write_api_versions(&mut body, api_version);
-
-    frame::encode_request(&header, &body).expect("response frame")
-}
-
-struct MockBroker {
-    addr: std::net::SocketAddr,
-    join: tokio::task::JoinHandle<usize>,
-}
-
 struct MockOAuthServer {
     addr: std::net::SocketAddr,
     join: tokio::task::JoinHandle<usize>,
@@ -2819,132 +2795,89 @@ impl MockOAuthServer {
     }
 }
 
-impl MockBroker {
-    async fn serve_many(handlers: Vec<Box<dyn FnOnce(Bytes) -> BytesMut + Send>>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        Self::serve_many_with_listener(listener, addr, handlers)
-    }
+/// Answers the handshake, then reads one more request and never replies — the
+/// fixture for the client-side request-timeout path.
+async fn serve_blocking_after_handshake(
+    request_seen: tokio::sync::oneshot::Sender<()>,
+) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_frame(&mut socket).await;
+        let response = api_versions_response(request);
+        socket.write_all(&response).await.unwrap();
 
-    async fn serve_many_on_addr(
-        addr: std::net::SocketAddr,
-        handlers: Vec<Box<dyn FnOnce(Bytes) -> BytesMut + Send>>,
-    ) -> Self {
-        let listener = TcpListener::bind(addr).await.unwrap();
-        Self::serve_many_with_listener(listener, addr, handlers)
-    }
+        let _request = read_frame(&mut socket).await;
+        let _ignored = request_seen.send(());
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        2
+    })
+    .await
+}
 
-    fn serve_many_with_listener(
-        listener: TcpListener,
-        addr: std::net::SocketAddr,
-        handlers: Vec<Box<dyn FnOnce(Bytes) -> BytesMut + Send>>,
-    ) -> Self {
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let handled = handlers.len();
-            for handler in handlers {
-                let request = read_frame(&mut socket).await;
-                let response = handler(request);
-                socket.write_all(&response).await.unwrap();
-            }
-            handled
-        });
-        Self { addr, join }
-    }
+/// Reads `requests` `ApiVersions` requests before writing any response, so the
+/// client can only make progress if it really pipelines.
+async fn serve_pipelined_api_versions(requests: usize, max_version: i16) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut socket).await;
+        let response = api_versions_response(handshake);
+        socket.write_all(&response).await.unwrap();
 
-    async fn serve_blocking_after_handshake(
-        request_seen: tokio::sync::oneshot::Sender<()>,
-    ) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let request = read_frame(&mut socket).await;
-            let response = api_versions_response(request);
-            socket.write_all(&response).await.unwrap();
+        let mut correlation_ids = Vec::with_capacity(requests);
+        for _ in 0..requests {
+            let mut request = read_frame(&mut socket).await;
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::ApiVersions as i16);
+            correlation_ids.push(header.correlation_id);
+        }
+        for correlation_id in correlation_ids {
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![ApiVersion {
+                    api_key: ApiKey::ApiVersions as i16,
+                    min_version: 0,
+                    max_version,
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                ..ApiVersionsResponseData::default()
+            };
+            let frame = response_frame(ApiKey::ApiVersions, 3, correlation_id, &response);
+            socket.write_all(&frame).await.unwrap();
+        }
+        requests.saturating_add(1)
+    })
+    .await
+}
 
-            let _request = read_frame(&mut socket).await;
-            let _ignored = request_seen.send(());
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            2
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_pipelined_api_versions(requests: usize, max_version: i16) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
+/// Accepts twice on the same port, advertising a different `max_version` each
+/// time, so a reconnect is observable through the negotiated version.
+async fn serve_reconnecting_api_versions(max_versions: [i16; 2]) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        for max_version in max_versions {
             let (mut socket, _) = listener.accept().await.unwrap();
             let handshake = read_frame(&mut socket).await;
             let response = api_versions_response(handshake);
             socket.write_all(&response).await.unwrap();
 
-            let mut correlation_ids = Vec::with_capacity(requests);
-            for _ in 0..requests {
-                let mut request = read_frame(&mut socket).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::ApiVersions as i16);
-                correlation_ids.push(header.correlation_id);
-            }
-            for correlation_id in correlation_ids {
-                let response = ApiVersionsResponseData {
-                    error_code: 0,
-                    api_keys: vec![ApiVersion {
-                        api_key: ApiKey::ApiVersions as i16,
-                        min_version: 0,
-                        max_version,
-                        _unknown_tagged_fields: Vec::new(),
-                    }],
-                    ..ApiVersionsResponseData::default()
-                };
-                let frame = response_frame(ApiKey::ApiVersions, 3, correlation_id, &response);
-                socket.write_all(&frame).await.unwrap();
-            }
-            requests.saturating_add(1)
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_reconnecting_api_versions(max_versions: [i16; 2]) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            for max_version in max_versions {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let handshake = read_frame(&mut socket).await;
-                let response = api_versions_response(handshake);
-                socket.write_all(&response).await.unwrap();
-
-                let mut request = read_frame(&mut socket).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::ApiVersions as i16);
-                let response = ApiVersionsResponseData {
-                    error_code: 0,
-                    api_keys: vec![ApiVersion {
-                        api_key: ApiKey::ApiVersions as i16,
-                        min_version: 0,
-                        max_version,
-                        _unknown_tagged_fields: Vec::new(),
-                    }],
-                    ..ApiVersionsResponseData::default()
-                };
-                let frame =
-                    response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response);
-                socket.write_all(&frame).await.unwrap();
-            }
-            4
-        });
-        Self { addr, join }
-    }
-
-    const fn addr(&self) -> std::net::SocketAddr {
-        self.addr
-    }
-
-    async fn join(self) -> usize {
-        self.join.await.unwrap()
-    }
+            let mut request = read_frame(&mut socket).await;
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::ApiVersions as i16);
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![ApiVersion {
+                    api_key: ApiKey::ApiVersions as i16,
+                    min_version: 0,
+                    max_version,
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                ..ApiVersionsResponseData::default()
+            };
+            let frame = response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response);
+            socket.write_all(&frame).await.unwrap();
+        }
+        4
+    })
+    .await
 }
 
 async fn read_http_head(socket: &mut tokio::net::TcpStream) -> String {
@@ -3128,112 +3061,6 @@ fn unique_test_suffix() -> u64 {
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
     NEXT.fetch_add(1, Ordering::Relaxed)
-}
-
-async fn read_frame<R>(socket: &mut R) -> Bytes
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let len = socket.read_i32().await.unwrap();
-    let len = usize::try_from(len).unwrap();
-    let mut bytes = vec![0; len];
-    let _bytes_read = socket.read_exact(&mut bytes).await.unwrap();
-    Bytes::from(bytes)
-}
-
-trait ApiVersions {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16);
-}
-
-impl ApiVersions for ApiVersionsResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("api versions response");
-    }
-}
-
-impl ApiVersions for MetadataResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("metadata response");
-    }
-}
-
-impl ApiVersions for FindCoordinatorResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("find coordinator response");
-    }
-}
-
-#[cfg(feature = "consumer")]
-impl ApiVersions for JoinGroupResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("join group response");
-    }
-}
-
-#[cfg(feature = "consumer")]
-impl ApiVersions for ConsumerGroupHeartbeatResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("consumer group heartbeat response");
-    }
-}
-
-#[cfg(feature = "share-consumer")]
-impl ApiVersions for ShareGroupHeartbeatResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("share group heartbeat response");
-    }
-}
-
-impl ApiVersions for ListConfigResourcesResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("list config resources response");
-    }
-}
-
-impl ApiVersions for DeleteTopicsResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("delete topics response");
-    }
-}
-
-impl ApiVersions for LeaveGroupResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("leave group response");
-    }
-}
-
-impl ApiVersions for OffsetFetchResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("offset fetch response");
-    }
-}
-
-impl ApiVersions for OffsetCommitResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("offset commit response");
-    }
-}
-
-impl ApiVersions for ProduceResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("produce response");
-    }
-}
-
-impl ApiVersions for SaslHandshakeResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("sasl handshake response");
-    }
-}
-
-impl ApiVersions for SaslAuthenticateResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("sasl authenticate response");
-    }
 }
 
 fn scram_attr(value: &str, key: &str) -> Option<String> {

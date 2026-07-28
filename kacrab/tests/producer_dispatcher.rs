@@ -30,7 +30,7 @@ use kacrab::{
 #[cfg(feature = "lz4")]
 use kacrab_protocol::compression::Compression;
 use kacrab_protocol::{
-    KafkaString, KafkaUuid, frame,
+    KafkaString, KafkaUuid,
     generated::{
         AddOffsetsToTxnRequestData, AddOffsetsToTxnResponseData, AddPartitionsToTxnRequestData,
         AddPartitionsToTxnResponseData, AddPartitionsToTxnResult, AddPartitionsToTxnTopicResult,
@@ -40,7 +40,7 @@ use kacrab_protocol::{
         InitProducerIdRequestData, InitProducerIdResponseData, MetadataResponseBroker,
         MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
         PartitionProduceResponse, ProduceRequestData, ProduceResponseData,
-        PushTelemetryRequestData, PushTelemetryResponseData, RequestHeaderData, ResponseHeaderData,
+        PushTelemetryRequestData, PushTelemetryResponseData, RequestHeaderData,
         TopicProduceResponse, TxnOffsetCommitRequestData, TxnOffsetCommitResponseData,
         TxnOffsetCommitResponsePartition, TxnOffsetCommitResponseTopic,
         produce_response::{
@@ -48,12 +48,12 @@ use kacrab_protocol::{
         },
     },
     record::{RecordBatch, decode_batches},
-    version::response_header_version,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-};
+use tokio::io::AsyncWriteExt;
+
+use crate::common::{MockBroker, read_frame, response_frame};
+
+mod common;
 
 const TOPIC_ID: KafkaUuid = KafkaUuid::from_parts(0x1111_2222_3333_4444, 0x5555_6666_7777_8888);
 
@@ -1217,7 +1217,7 @@ async fn kafka_producer_send_with_callback_auto_batches_until_flush() {
 
 #[tokio::test]
 async fn kafka_producer_pipelines_ready_batches_until_flush() {
-    let leader_7 = MockBroker::serve_pipelined_produce(2).await;
+    let leader_7 = serve_pipelined_produce(2).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new({
@@ -1524,7 +1524,7 @@ async fn kafka_producer_10kib_records_keep_observed_requests_under_max_request_s
 
 #[tokio::test]
 async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() {
-    let leader_7 = MockBroker::serve_pipelined_idempotent_produce(vec![0, 1]).await;
+    let leader_7 = serve_pipelined_idempotent_produce(vec![0, 1]).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new({
@@ -1745,7 +1745,7 @@ async fn idempotent_kafka_producer_sweeps_unready_colocated_partition_on_the_liv
 
 #[tokio::test]
 async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correlation() {
-    let leader_7 = MockBroker::serve_pipelined_idempotent_produce_reversed(vec![0, 1]).await;
+    let leader_7 = serve_pipelined_idempotent_produce_reversed(vec![0, 1]).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new({
@@ -1822,7 +1822,7 @@ async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correla
 
 #[tokio::test]
 async fn idempotent_kafka_producer_retries_disconnected_in_flight_batch_with_same_sequence() {
-    let leader_7 = MockBroker::serve_idempotent_disconnect_then_retry().await;
+    let leader_7 = serve_idempotent_disconnect_then_retry().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new(metadata_same_leader_handler(leader_7.addr())),
@@ -1884,7 +1884,7 @@ async fn idempotent_kafka_producer_retries_disconnected_in_flight_batch_with_sam
 
 #[tokio::test]
 async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_timeout_like_java() {
-    let leader_7 = MockBroker::serve_idempotent_timeout_then_epoch_bump_recovery().await;
+    let leader_7 = serve_idempotent_timeout_then_epoch_bump_recovery().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new(metadata_same_leader_handler(leader_7.addr())),
@@ -1961,7 +1961,7 @@ async fn idempotent_kafka_producer_resends_multi_inflight_batches_in_sequence_or
     // End-to-end fault injection for the firstInFlightSequence gate: two batches are
     // pipelined in flight to one partition (multi-in-flight), the connection drops, and
     // the producer must re-send them strictly in base-sequence order on retry.
-    let leader_7 = MockBroker::serve_idempotent_two_inflight_disconnect_then_inorder_retry().await;
+    let leader_7 = serve_idempotent_two_inflight_disconnect_then_inorder_retry().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new(metadata_same_leader_handler(leader_7.addr())),
@@ -2035,8 +2035,7 @@ async fn idempotent_kafka_producer_restamps_sibling_inflight_batch_after_single_
     // Cross-task re-stamp end-to-end: two batches in flight to one partition under
     // epoch 3 both get UNKNOWN_PRODUCER_ID; the producer must bump the epoch ONCE and
     // re-stamp BOTH (the sibling included) under the new epoch, then deliver them.
-    let leader_7 =
-        MockBroker::serve_idempotent_two_inflight_unknown_producer_then_single_rebump().await;
+    let leader_7 = serve_idempotent_two_inflight_unknown_producer_then_single_rebump().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new({
@@ -6681,7 +6680,7 @@ async fn dispatcher_sweeps_unready_partitions_of_a_dispatching_broker_like_java(
 
 #[tokio::test]
 async fn dispatcher_pipelines_owned_batches_to_same_broker() {
-    let leader_7 = MockBroker::serve_pipelined_produce(2).await;
+    let leader_7 = serve_pipelined_produce(2).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new({
@@ -9534,102 +9533,6 @@ fn push_telemetry_response_frame(correlation_id: i32, error: ErrorCode) -> Bytes
     response_frame(ApiKey::PushTelemetry, 0, correlation_id, &response)
 }
 
-fn response_frame(
-    api_key: ApiKey,
-    api_version: i16,
-    correlation_id: i32,
-    response: &impl WriteResponse,
-) -> BytesMut {
-    let mut header = BytesMut::new();
-    ResponseHeaderData {
-        correlation_id,
-        _unknown_tagged_fields: Vec::new(),
-    }
-    .write(
-        &mut header,
-        response_header_version(api_key as i16, api_version),
-    )
-    .expect("response header write");
-
-    let mut body = BytesMut::new();
-    response.write_response(&mut body, api_version);
-    frame::encode_request(&header, &body).expect("response frame")
-}
-
-trait WriteResponse {
-    fn write_response(&self, buf: &mut BytesMut, version: i16);
-}
-
-impl WriteResponse for ApiVersionsResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("api versions response");
-    }
-}
-
-impl WriteResponse for MetadataResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("metadata response");
-    }
-}
-
-impl WriteResponse for ProduceResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("produce response");
-    }
-}
-
-impl WriteResponse for InitProducerIdResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("init producer id response");
-    }
-}
-
-impl WriteResponse for FindCoordinatorResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("find coordinator response");
-    }
-}
-
-impl WriteResponse for AddPartitionsToTxnResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("add partitions to txn response");
-    }
-}
-
-impl WriteResponse for AddOffsetsToTxnResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("add offsets to txn response");
-    }
-}
-
-impl WriteResponse for TxnOffsetCommitResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("txn offset commit response");
-    }
-}
-
-impl WriteResponse for EndTxnResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("end txn response");
-    }
-}
-
-impl WriteResponse for GetTelemetrySubscriptionsResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("get telemetry subscriptions response");
-    }
-}
-
-impl WriteResponse for PushTelemetryResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("push telemetry response");
-    }
-}
-
 const fn idempotence_disabled() -> ProducerIdempotenceConfig {
     ProducerIdempotenceConfig {
         enabled: false,
@@ -9736,527 +9639,454 @@ fn transaction_v2_test_producer(wire: WireClient) -> Producer {
     )
 }
 
-struct MockBroker {
-    addr: std::net::SocketAddr,
-    join: tokio::task::JoinHandle<usize>,
-}
-
-impl MockBroker {
-    async fn serve_many(handlers: Vec<Box<dyn FnOnce(Bytes) -> BytesMut + Send>>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let handled = handlers.len();
-            for handler in handlers {
-                let request = read_frame(&mut socket).await;
-                let response = handler(request);
-                socket.write_all(&response).await.unwrap();
-            }
-            handled
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_pipelined_produce(produce_requests: usize) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut socket).await;
-            socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-            let mut correlation_ids = Vec::with_capacity(produce_requests);
-            for _ in 0..produce_requests {
-                let mut request = read_frame(&mut socket).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
-                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                    .expect("produce request");
-                assert_eq!(produce.topic_data.len(), 1);
-                let topic_data = produce.topic_data.first().expect("topic produce data");
-                assert_eq!(topic_data.topic_id, TOPIC_ID);
-                assert_eq!(topic_data.partition_data.len(), 1);
-                let partition_data = topic_data
-                    .partition_data
-                    .first()
-                    .expect("partition produce data");
-                assert_eq!(partition_data.index, 0);
-                correlation_ids.push(header.correlation_id);
-            }
-            for (index, correlation_id) in correlation_ids.into_iter().enumerate() {
-                let offset = 40_i64
-                    .checked_add(i64::try_from(index).expect("offset index"))
-                    .expect("offset should fit");
-                socket
-                    .write_all(&produce_response_frame(correlation_id, 0, offset))
-                    .await
-                    .unwrap();
-            }
-            produce_requests
-                .checked_add(1)
-                .expect("handled request count should fit")
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_pipelined_idempotent_produce(partitions: Vec<i32>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut socket).await;
-            socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut init_request = read_frame(&mut socket).await;
-            let init_header =
-                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
-            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
-            let init =
-                InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
-            assert_eq!(init.transactional_id, None);
-            socket
-                .write_all(&init_producer_id_response_frame(
-                    init_header.correlation_id,
-                    42,
-                    3,
-                ))
-                .await
-                .unwrap();
-
-            // The producer groups all ready batches for a broker into ONE
-            // ProduceRequest carrying every partition (Java RecordAccumulator.drain
-            // -> one request per node), so the pipelined partitions arrive in a
-            // single coalesced request rather than one request per partition.
+async fn serve_pipelined_produce(produce_requests: usize) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut socket).await;
+        socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+        let mut correlation_ids = Vec::with_capacity(produce_requests);
+        for _ in 0..produce_requests {
             let mut request = read_frame(&mut socket).await;
             let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
             assert_eq!(header.request_api_key, ApiKey::Produce as i16);
             let produce = ProduceRequestData::read(&mut request, header.request_api_version)
                 .expect("produce request");
-            assert_eq!(produce.acks, -1);
             assert_eq!(produce.topic_data.len(), 1);
             let topic_data = produce.topic_data.first().expect("topic produce data");
             assert_eq!(topic_data.topic_id, TOPIC_ID);
-            assert_eq!(topic_data.partition_data.len(), partitions.len());
-            let mut offsets = Vec::with_capacity(partitions.len());
-            for (index, expected_partition) in partitions.iter().enumerate() {
-                let partition_data = topic_data
-                    .partition_data
-                    .iter()
-                    .find(|entry| entry.index == *expected_partition)
-                    .expect("partition produce data");
-                let mut records = partition_data.records.clone().expect("records");
-                let batch = RecordBatch::decode(&mut records).expect("record batch");
-                assert_eq!(batch.producer_id, 42);
-                assert_eq!(batch.producer_epoch, 3);
-                assert_eq!(batch.base_sequence, 0);
-                let offset = 40_i64
-                    .checked_add(i64::try_from(index).expect("offset index"))
-                    .expect("offset should fit");
-                offsets.push((*expected_partition, offset));
-            }
-            socket
-                .write_all(&produce_response_frame_for_partitions(&header, &offsets))
-                .await
-                .unwrap();
-            // handshake + InitProducerId + one coalesced Produce.
-            3
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_pipelined_idempotent_produce_reversed(partitions: Vec<i32>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut socket).await;
-            socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut init_request = read_frame(&mut socket).await;
-            let init_header =
-                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
-            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
-            let init =
-                InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
-            assert_eq!(init.transactional_id, None);
-            socket
-                .write_all(&init_producer_id_response_frame(
-                    init_header.correlation_id,
-                    42,
-                    3,
-                ))
-                .await
-                .unwrap();
-
-            // Both partitions coalesce into one ProduceRequest (Java groups a
-            // broker's batches into a single request), so the partition responses
-            // are mapped back to their per-partition deliveries inside one frame
-            // rather than across reordered separate responses.
-            let mut request = read_frame(&mut socket).await;
-            let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
-            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                .expect("produce request");
-            assert_eq!(produce.acks, -1);
-            assert_eq!(produce.topic_data.len(), 1);
-            let topic_data = produce.topic_data.first().expect("topic produce data");
-            assert_eq!(topic_data.topic_id, TOPIC_ID);
-            assert_eq!(topic_data.partition_data.len(), partitions.len());
-            // Reverse the per-partition response order within the coalesced frame so
-            // the producer must still map each partition response to its delivery.
-            let mut offsets = Vec::with_capacity(partitions.len());
-            for expected_partition in partitions.iter().rev() {
-                let partition_data = topic_data
-                    .partition_data
-                    .iter()
-                    .find(|entry| entry.index == *expected_partition)
-                    .expect("partition produce data");
-                let mut records = partition_data.records.clone().expect("records");
-                let batch = RecordBatch::decode(&mut records).expect("record batch");
-                assert_eq!(batch.producer_id, 42);
-                assert_eq!(batch.producer_epoch, 3);
-                assert_eq!(batch.base_sequence, 0);
-                let offset = 40_i64
-                    .checked_add(i64::from(*expected_partition))
-                    .expect("offset should fit");
-                offsets.push((*expected_partition, offset));
-            }
-            socket
-                .write_all(&produce_response_frame_for_partitions(&header, &offsets))
-                .await
-                .unwrap();
-            // handshake + InitProducerId + one coalesced Produce.
-            3
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_idempotent_disconnect_then_retry() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut first_socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut first_socket).await;
-            first_socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut init_request = read_frame(&mut first_socket).await;
-            let init_header =
-                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
-            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
-            let init =
-                InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
-            assert_eq!(init.transactional_id, None);
-            first_socket
-                .write_all(&init_producer_id_response_frame(
-                    init_header.correlation_id,
-                    42,
-                    3,
-                ))
-                .await
-                .unwrap();
-
-            let mut produce_request = read_frame(&mut first_socket).await;
-            let produce_header =
-                RequestHeaderData::read(&mut produce_request, 2).expect("produce header");
-            assert_eq!(produce_header.request_api_key, ApiKey::Produce as i16);
-            let produce =
-                ProduceRequestData::read(&mut produce_request, produce_header.request_api_version)
-                    .expect("produce request");
-            assert_single_idempotent_produce(&produce, 0, 0);
-            drop(first_socket);
-
-            let (mut retry_socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut retry_socket).await;
-            retry_socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-            let mut retry_request = read_frame(&mut retry_socket).await;
-            let retry_header =
-                RequestHeaderData::read(&mut retry_request, 2).expect("retry produce header");
-            assert_eq!(retry_header.request_api_key, ApiKey::Produce as i16);
-            let retry =
-                ProduceRequestData::read(&mut retry_request, retry_header.request_api_version)
-                    .expect("retry produce request");
-            assert_single_idempotent_produce(&retry, 0, 0);
-            retry_socket
-                .write_all(&produce_response_frame(retry_header.correlation_id, 0, 40))
-                .await
-                .unwrap();
-            5
-        });
-        Self { addr, join }
-    }
-
-    /// Two idempotent batches are in flight to one partition under epoch 3; BOTH get
-    /// `UNKNOWN_PRODUCER_ID`, forcing a producer-epoch bump. The mock is ADAPTIVE — it
-    /// answers whatever frame order the producer uses: epoch-3 produces are failed with
-    /// `UNKNOWN_PRODUCER_ID`, `InitProducerId` is answered (epoch 3 first, then 4), and
-    /// epoch-4 produces are acked until both records are delivered. The join handle
-    /// returns the number of `InitProducerId` calls: exactly 2 (one initial + ONE bump)
-    /// proves the sibling batch was re-stamped under the new epoch with a SINGLE bump
-    /// (no chained bump, gap A).
-    async fn serve_idempotent_two_inflight_unknown_producer_then_single_rebump() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut socket).await;
-            socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut init_calls = 0_usize;
-            let mut delivered = 0_usize;
-            let mut next_offset = 40_i64;
-            while delivered < 2 {
-                let mut request = read_frame(&mut socket).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                if header.request_api_key == ApiKey::InitProducerId as i16 {
-                    init_calls = init_calls.saturating_add(1);
-                    // First call assigns epoch 3; the recovery bump assigns epoch 4.
-                    let epoch = if init_calls == 1 { 3 } else { 4 };
-                    socket
-                        .write_all(&init_producer_id_response_frame(
-                            header.correlation_id,
-                            42,
-                            epoch,
-                        ))
-                        .await
-                        .unwrap();
-                    continue;
-                }
-                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                    .expect("produce request");
-                let mut records = produce
-                    .topic_data
-                    .first()
-                    .and_then(|topic| topic.partition_data.first())
-                    .and_then(|partition| partition.records.clone())
-                    .expect("records");
-                let batch = RecordBatch::decode(&mut records).expect("record batch");
-                assert_eq!(batch.producer_id, 42);
-                if batch.producer_epoch < 4 {
-                    // Stale epoch: fail with UNKNOWN_PRODUCER_ID to force the bump.
-                    socket
-                        .write_all(
-                            &produce_error_response_frame_with_log_start_offset_for_version(
-                                header.request_api_version,
-                                header.correlation_id,
-                                0,
-                                ErrorCode::UnknownProducerId,
-                                0,
-                            ),
-                        )
-                        .await
-                        .unwrap();
-                } else {
-                    // Re-stamped under the new epoch: ack it.
-                    socket
-                        .write_all(&produce_response_frame(
-                            header.correlation_id,
-                            0,
-                            next_offset,
-                        ))
-                        .await
-                        .unwrap();
-                    next_offset = next_offset.saturating_add(1);
-                    delivered = delivered.saturating_add(1);
-                }
-            }
-            init_calls
-        });
-        Self { addr, join }
-    }
-
-    /// Two idempotent batches (base sequence 0 and 1) are pipelined IN FLIGHT to one
-    /// partition, then the connection drops so both re-enqueue for retry. The retry
-    /// must re-send them strictly in base-sequence order (Java firstInFlightSequence):
-    /// seq 0 alone, ack it, THEN seq 1 — never seq 1 before seq 0.
-    async fn serve_idempotent_two_inflight_disconnect_then_inorder_retry() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut first, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut first).await;
-            first
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut init_request = read_frame(&mut first).await;
-            let init_header =
-                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
-            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
-            first
-                .write_all(&init_producer_id_response_frame(
-                    init_header.correlation_id,
-                    42,
-                    3,
-                ))
-                .await
-                .unwrap();
-
-            // Two produce requests held in flight (not yet answered), in ascending
-            // base-sequence order: 0 then 1.
-            for expected_base_sequence in [0_i32, 1] {
-                let mut request = read_frame(&mut first).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
-                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                    .expect("produce request");
-                assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
-            }
-            // Drop both in-flight requests so the producer re-enqueues them.
-            drop(first);
-
-            // On retry the producer must re-send seq 0 first (alone), wait for its ack,
-            // then seq 1 — the firstInFlightSequence ordering gate. No re-InitProducerId
-            // (the producer id is cached) and the same epoch 3 (a plain wire retry does
-            // not bump the epoch).
-            let (mut retry, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut retry).await;
-            retry
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-            for (expected_base_sequence, offset) in [(0_i32, 40_i64), (1, 41)] {
-                let mut request = read_frame(&mut retry).await;
-                let header =
-                    RequestHeaderData::read(&mut request, 2).expect("retry produce header");
-                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                    .expect("retry produce request");
-                assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
-                retry
-                    .write_all(&produce_response_frame(header.correlation_id, 0, offset))
-                    .await
-                    .unwrap();
-            }
-            // handshake + InitProducerId + 2 produce (conn 1) + handshake + 2 produce (conn 2).
-            6
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_idempotent_timeout_then_epoch_bump_recovery() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut first_socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut first_socket).await;
-            first_socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut init_request = read_frame(&mut first_socket).await;
-            let init_header =
-                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
-            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
-            let init =
-                InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
-            assert_eq!(init.transactional_id, None);
-            assert_eq!(init.producer_id, -1);
-            assert_eq!(init.producer_epoch, -1);
-            first_socket
-                .write_all(&init_producer_id_response_frame(
-                    init_header.correlation_id,
-                    42,
-                    3,
-                ))
-                .await
-                .unwrap();
-
-            let mut produce_request = read_frame(&mut first_socket).await;
-            let produce_header =
-                RequestHeaderData::read(&mut produce_request, 2).expect("produce header");
-            assert_eq!(produce_header.request_api_key, ApiKey::Produce as i16);
-            let produce =
-                ProduceRequestData::read(&mut produce_request, produce_header.request_api_version)
-                    .expect("produce request");
-            assert_single_idempotent_produce(&produce, 0, 0);
-            drop(first_socket);
-
-            let (mut recovery_socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut recovery_socket).await;
-            recovery_socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut bump_request = read_frame(&mut recovery_socket).await;
-            let bump_header =
-                RequestHeaderData::read(&mut bump_request, 2).expect("epoch bump header");
-            assert_eq!(bump_header.request_api_key, ApiKey::InitProducerId as i16);
-            let bump =
-                InitProducerIdRequestData::read(&mut bump_request, 5).expect("epoch bump request");
-            assert_eq!(bump.transactional_id, None);
-            assert_eq!(bump.producer_id, 42);
-            assert_eq!(bump.producer_epoch, 3);
-            recovery_socket
-                .write_all(&init_producer_id_response_frame(
-                    bump_header.correlation_id,
-                    42,
-                    4,
-                ))
-                .await
-                .unwrap();
-
-            let mut retry_request = read_frame(&mut recovery_socket).await;
-            let retry_header =
-                RequestHeaderData::read(&mut retry_request, 2).expect("recovered produce header");
-            assert_eq!(retry_header.request_api_key, ApiKey::Produce as i16);
-            let retry =
-                ProduceRequestData::read(&mut retry_request, retry_header.request_api_version)
-                    .expect("recovered produce request");
-            assert_eq!(retry.acks, -1);
-            let topic_data = retry.topic_data.first().expect("topic produce data");
+            assert_eq!(topic_data.partition_data.len(), 1);
             let partition_data = topic_data
                 .partition_data
                 .first()
                 .expect("partition produce data");
+            assert_eq!(partition_data.index, 0);
+            correlation_ids.push(header.correlation_id);
+        }
+        for (index, correlation_id) in correlation_ids.into_iter().enumerate() {
+            let offset = 40_i64
+                .checked_add(i64::try_from(index).expect("offset index"))
+                .expect("offset should fit");
+            socket
+                .write_all(&produce_response_frame(correlation_id, 0, offset))
+                .await
+                .unwrap();
+        }
+        produce_requests
+            .checked_add(1)
+            .expect("handled request count should fit")
+    })
+    .await
+}
+
+async fn serve_pipelined_idempotent_produce(partitions: Vec<i32>) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut socket).await;
+        socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut init_request = read_frame(&mut socket).await;
+        let init_header =
+            RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+        assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+        let init = InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
+        assert_eq!(init.transactional_id, None);
+        socket
+            .write_all(&init_producer_id_response_frame(
+                init_header.correlation_id,
+                42,
+                3,
+            ))
+            .await
+            .unwrap();
+
+        // The producer groups all ready batches for a broker into ONE
+        // ProduceRequest carrying every partition (Java RecordAccumulator.drain
+        // -> one request per node), so the pipelined partitions arrive in a
+        // single coalesced request rather than one request per partition.
+        let mut request = read_frame(&mut socket).await;
+        let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+        assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+        let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+            .expect("produce request");
+        assert_eq!(produce.acks, -1);
+        assert_eq!(produce.topic_data.len(), 1);
+        let topic_data = produce.topic_data.first().expect("topic produce data");
+        assert_eq!(topic_data.topic_id, TOPIC_ID);
+        assert_eq!(topic_data.partition_data.len(), partitions.len());
+        let mut offsets = Vec::with_capacity(partitions.len());
+        for (index, expected_partition) in partitions.iter().enumerate() {
+            let partition_data = topic_data
+                .partition_data
+                .iter()
+                .find(|entry| entry.index == *expected_partition)
+                .expect("partition produce data");
             let mut records = partition_data.records.clone().expect("records");
             let batch = RecordBatch::decode(&mut records).expect("record batch");
             assert_eq!(batch.producer_id, 42);
-            assert_eq!(batch.producer_epoch, 4);
+            assert_eq!(batch.producer_epoch, 3);
             assert_eq!(batch.base_sequence, 0);
-            recovery_socket
-                .write_all(&produce_response_frame(retry_header.correlation_id, 0, 41))
-                .await
-                .unwrap();
-            6
-        });
-        Self { addr, join }
-    }
-
-    const fn addr(&self) -> std::net::SocketAddr {
-        self.addr
-    }
-
-    async fn join(self) -> usize {
-        self.join.await.unwrap()
-    }
+            let offset = 40_i64
+                .checked_add(i64::try_from(index).expect("offset index"))
+                .expect("offset should fit");
+            offsets.push((*expected_partition, offset));
+        }
+        socket
+            .write_all(&produce_response_frame_for_partitions(&header, &offsets))
+            .await
+            .unwrap();
+        // handshake + InitProducerId + one coalesced Produce.
+        3
+    })
+    .await
 }
 
-async fn read_frame(socket: &mut TcpStream) -> Bytes {
-    let len = socket.read_i32().await.unwrap();
-    let len = usize::try_from(len).unwrap();
-    let mut bytes = vec![0; len];
-    let _bytes_read = socket.read_exact(&mut bytes).await.unwrap();
-    Bytes::from(bytes)
+async fn serve_pipelined_idempotent_produce_reversed(partitions: Vec<i32>) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut socket).await;
+        socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut init_request = read_frame(&mut socket).await;
+        let init_header =
+            RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+        assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+        let init = InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
+        assert_eq!(init.transactional_id, None);
+        socket
+            .write_all(&init_producer_id_response_frame(
+                init_header.correlation_id,
+                42,
+                3,
+            ))
+            .await
+            .unwrap();
+
+        // Both partitions coalesce into one ProduceRequest (Java groups a
+        // broker's batches into a single request), so the partition responses
+        // are mapped back to their per-partition deliveries inside one frame
+        // rather than across reordered separate responses.
+        let mut request = read_frame(&mut socket).await;
+        let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+        assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+        let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+            .expect("produce request");
+        assert_eq!(produce.acks, -1);
+        assert_eq!(produce.topic_data.len(), 1);
+        let topic_data = produce.topic_data.first().expect("topic produce data");
+        assert_eq!(topic_data.topic_id, TOPIC_ID);
+        assert_eq!(topic_data.partition_data.len(), partitions.len());
+        // Reverse the per-partition response order within the coalesced frame so
+        // the producer must still map each partition response to its delivery.
+        let mut offsets = Vec::with_capacity(partitions.len());
+        for expected_partition in partitions.iter().rev() {
+            let partition_data = topic_data
+                .partition_data
+                .iter()
+                .find(|entry| entry.index == *expected_partition)
+                .expect("partition produce data");
+            let mut records = partition_data.records.clone().expect("records");
+            let batch = RecordBatch::decode(&mut records).expect("record batch");
+            assert_eq!(batch.producer_id, 42);
+            assert_eq!(batch.producer_epoch, 3);
+            assert_eq!(batch.base_sequence, 0);
+            let offset = 40_i64
+                .checked_add(i64::from(*expected_partition))
+                .expect("offset should fit");
+            offsets.push((*expected_partition, offset));
+        }
+        socket
+            .write_all(&produce_response_frame_for_partitions(&header, &offsets))
+            .await
+            .unwrap();
+        // handshake + InitProducerId + one coalesced Produce.
+        3
+    })
+    .await
+}
+
+async fn serve_idempotent_disconnect_then_retry() -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut first_socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut first_socket).await;
+        first_socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut init_request = read_frame(&mut first_socket).await;
+        let init_header =
+            RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+        assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+        let init = InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
+        assert_eq!(init.transactional_id, None);
+        first_socket
+            .write_all(&init_producer_id_response_frame(
+                init_header.correlation_id,
+                42,
+                3,
+            ))
+            .await
+            .unwrap();
+
+        let mut produce_request = read_frame(&mut first_socket).await;
+        let produce_header =
+            RequestHeaderData::read(&mut produce_request, 2).expect("produce header");
+        assert_eq!(produce_header.request_api_key, ApiKey::Produce as i16);
+        let produce =
+            ProduceRequestData::read(&mut produce_request, produce_header.request_api_version)
+                .expect("produce request");
+        assert_single_idempotent_produce(&produce, 0, 0);
+        drop(first_socket);
+
+        let (mut retry_socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut retry_socket).await;
+        retry_socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+        let mut retry_request = read_frame(&mut retry_socket).await;
+        let retry_header =
+            RequestHeaderData::read(&mut retry_request, 2).expect("retry produce header");
+        assert_eq!(retry_header.request_api_key, ApiKey::Produce as i16);
+        let retry = ProduceRequestData::read(&mut retry_request, retry_header.request_api_version)
+            .expect("retry produce request");
+        assert_single_idempotent_produce(&retry, 0, 0);
+        retry_socket
+            .write_all(&produce_response_frame(retry_header.correlation_id, 0, 40))
+            .await
+            .unwrap();
+        5
+    })
+    .await
+}
+
+async fn serve_idempotent_two_inflight_unknown_producer_then_single_rebump() -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut socket).await;
+        socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut init_calls = 0_usize;
+        let mut delivered = 0_usize;
+        let mut next_offset = 40_i64;
+        while delivered < 2 {
+            let mut request = read_frame(&mut socket).await;
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            if header.request_api_key == ApiKey::InitProducerId as i16 {
+                init_calls = init_calls.saturating_add(1);
+                // First call assigns epoch 3; the recovery bump assigns epoch 4.
+                let epoch = if init_calls == 1 { 3 } else { 4 };
+                socket
+                    .write_all(&init_producer_id_response_frame(
+                        header.correlation_id,
+                        42,
+                        epoch,
+                    ))
+                    .await
+                    .unwrap();
+                continue;
+            }
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            let mut records = produce
+                .topic_data
+                .first()
+                .and_then(|topic| topic.partition_data.first())
+                .and_then(|partition| partition.records.clone())
+                .expect("records");
+            let batch = RecordBatch::decode(&mut records).expect("record batch");
+            assert_eq!(batch.producer_id, 42);
+            if batch.producer_epoch < 4 {
+                // Stale epoch: fail with UNKNOWN_PRODUCER_ID to force the bump.
+                socket
+                    .write_all(
+                        &produce_error_response_frame_with_log_start_offset_for_version(
+                            header.request_api_version,
+                            header.correlation_id,
+                            0,
+                            ErrorCode::UnknownProducerId,
+                            0,
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                // Re-stamped under the new epoch: ack it.
+                socket
+                    .write_all(&produce_response_frame(
+                        header.correlation_id,
+                        0,
+                        next_offset,
+                    ))
+                    .await
+                    .unwrap();
+                next_offset = next_offset.saturating_add(1);
+                delivered = delivered.saturating_add(1);
+            }
+        }
+        init_calls
+    })
+    .await
+}
+
+async fn serve_idempotent_two_inflight_disconnect_then_inorder_retry() -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut first).await;
+        first
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut init_request = read_frame(&mut first).await;
+        let init_header =
+            RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+        assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+        first
+            .write_all(&init_producer_id_response_frame(
+                init_header.correlation_id,
+                42,
+                3,
+            ))
+            .await
+            .unwrap();
+
+        // Two produce requests held in flight (not yet answered), in ascending
+        // base-sequence order: 0 then 1.
+        for expected_base_sequence in [0_i32, 1] {
+            let mut request = read_frame(&mut first).await;
+            let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
+        }
+        // Drop both in-flight requests so the producer re-enqueues them.
+        drop(first);
+
+        // On retry the producer must re-send seq 0 first (alone), wait for its ack,
+        // then seq 1 — the firstInFlightSequence ordering gate. No re-InitProducerId
+        // (the producer id is cached) and the same epoch 3 (a plain wire retry does
+        // not bump the epoch).
+        let (mut retry, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut retry).await;
+        retry
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+        for (expected_base_sequence, offset) in [(0_i32, 40_i64), (1, 41)] {
+            let mut request = read_frame(&mut retry).await;
+            let header = RequestHeaderData::read(&mut request, 2).expect("retry produce header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("retry produce request");
+            assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
+            retry
+                .write_all(&produce_response_frame(header.correlation_id, 0, offset))
+                .await
+                .unwrap();
+        }
+        // handshake + InitProducerId + 2 produce (conn 1) + handshake + 2 produce (conn 2).
+        6
+    })
+    .await
+}
+
+async fn serve_idempotent_timeout_then_epoch_bump_recovery() -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut first_socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut first_socket).await;
+        first_socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut init_request = read_frame(&mut first_socket).await;
+        let init_header =
+            RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+        assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+        let init = InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
+        assert_eq!(init.transactional_id, None);
+        assert_eq!(init.producer_id, -1);
+        assert_eq!(init.producer_epoch, -1);
+        first_socket
+            .write_all(&init_producer_id_response_frame(
+                init_header.correlation_id,
+                42,
+                3,
+            ))
+            .await
+            .unwrap();
+
+        let mut produce_request = read_frame(&mut first_socket).await;
+        let produce_header =
+            RequestHeaderData::read(&mut produce_request, 2).expect("produce header");
+        assert_eq!(produce_header.request_api_key, ApiKey::Produce as i16);
+        let produce =
+            ProduceRequestData::read(&mut produce_request, produce_header.request_api_version)
+                .expect("produce request");
+        assert_single_idempotent_produce(&produce, 0, 0);
+        drop(first_socket);
+
+        let (mut recovery_socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut recovery_socket).await;
+        recovery_socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut bump_request = read_frame(&mut recovery_socket).await;
+        let bump_header = RequestHeaderData::read(&mut bump_request, 2).expect("epoch bump header");
+        assert_eq!(bump_header.request_api_key, ApiKey::InitProducerId as i16);
+        let bump =
+            InitProducerIdRequestData::read(&mut bump_request, 5).expect("epoch bump request");
+        assert_eq!(bump.transactional_id, None);
+        assert_eq!(bump.producer_id, 42);
+        assert_eq!(bump.producer_epoch, 3);
+        recovery_socket
+            .write_all(&init_producer_id_response_frame(
+                bump_header.correlation_id,
+                42,
+                4,
+            ))
+            .await
+            .unwrap();
+
+        let mut retry_request = read_frame(&mut recovery_socket).await;
+        let retry_header =
+            RequestHeaderData::read(&mut retry_request, 2).expect("recovered produce header");
+        assert_eq!(retry_header.request_api_key, ApiKey::Produce as i16);
+        let retry = ProduceRequestData::read(&mut retry_request, retry_header.request_api_version)
+            .expect("recovered produce request");
+        assert_eq!(retry.acks, -1);
+        let topic_data = retry.topic_data.first().expect("topic produce data");
+        let partition_data = topic_data
+            .partition_data
+            .first()
+            .expect("partition produce data");
+        let mut records = partition_data.records.clone().expect("records");
+        let batch = RecordBatch::decode(&mut records).expect("record batch");
+        assert_eq!(batch.producer_id, 42);
+        assert_eq!(batch.producer_epoch, 4);
+        assert_eq!(batch.base_sequence, 0);
+        recovery_socket
+            .write_all(&produce_response_frame(retry_header.correlation_id, 0, 41))
+            .await
+            .unwrap();
+        6
+    })
+    .await
 }
