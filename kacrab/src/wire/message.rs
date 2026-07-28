@@ -22,14 +22,14 @@ use kacrab_protocol::{
         CreateTopicsResponseData, DeleteAclsRequestData, DeleteAclsResponseData,
         DeleteGroupsRequestData, DeleteGroupsResponseData, DeleteRecordsRequestData,
         DeleteRecordsResponseData, DeleteShareGroupOffsetsRequestData,
-        DeleteShareGroupOffsetsResponseData, DeleteTopicsRequestData, DeleteTopicsResponseData,
-        DescribeAclsRequestData, DescribeAclsResponseData, DescribeClientQuotasRequestData,
-        DescribeClientQuotasResponseData, DescribeClusterRequestData, DescribeClusterResponseData,
-        DescribeConfigsRequestData, DescribeConfigsResponseData,
-        DescribeDelegationTokenRequestData, DescribeDelegationTokenResponseData,
-        DescribeGroupsRequestData, DescribeGroupsResponseData, DescribeLogDirsRequestData,
-        DescribeLogDirsResponseData, DescribeProducersRequestData, DescribeProducersResponseData,
-        DescribeQuorumRequestData, DescribeQuorumResponseData,
+        DeleteShareGroupOffsetsResponseData, DeleteTopicState, DeleteTopicsRequestData,
+        DeleteTopicsResponseData, DescribeAclsRequestData, DescribeAclsResponseData,
+        DescribeClientQuotasRequestData, DescribeClientQuotasResponseData,
+        DescribeClusterRequestData, DescribeClusterResponseData, DescribeConfigsRequestData,
+        DescribeConfigsResponseData, DescribeDelegationTokenRequestData,
+        DescribeDelegationTokenResponseData, DescribeGroupsRequestData, DescribeGroupsResponseData,
+        DescribeLogDirsRequestData, DescribeLogDirsResponseData, DescribeProducersRequestData,
+        DescribeProducersResponseData, DescribeQuorumRequestData, DescribeQuorumResponseData,
         DescribeShareGroupOffsetsRequestData, DescribeShareGroupOffsetsResponseData,
         DescribeTransactionsRequestData, DescribeTransactionsResponseData,
         DescribeUserScramCredentialsRequestData, DescribeUserScramCredentialsResponseData,
@@ -190,6 +190,30 @@ impl ResponseMessage for OffsetFetchResponseData {
     }
 }
 
+// `DeleteTopics` is two-shape as well: v1-5 carry the flat `topic_names` array,
+// v6+ (KIP-516) the `topics` objects that can name a topic by id instead, and
+// the generated encoder rejects whichever one its version does not carry. The
+// request is rewritten into the negotiated version's form here, mirroring Java's
+// `DeleteTopicsRequest.Builder.build` / `topics()`. The response is
+// pass-through: `DeletableTopicResult` carries the topic name at every version,
+// so the caller keys results by name in both shapes.
+impl RequestMessage for DeleteTopicsRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_delete_topics_request(self, version)?.write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_delete_topics_request(self, version)?.encoded_len(version)
+    }
+}
+
+impl ResponseMessage for DeleteTopicsResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
 // `LeaveGroup` is a two-shape request too: v0-2 carry a singular `member_id`,
 // v3+ (KIP-345 static membership) the batched `members` array, and the generated
 // encoder rejects whichever one its version does not carry. The request is
@@ -239,7 +263,6 @@ impl ResponseMessage for ProduceResponseData {
 // the macro above generates their wire adapters.
 impl_passthrough_message! {
     CreateTopicsRequestData => CreateTopicsResponseData,
-    DeleteTopicsRequestData => DeleteTopicsResponseData,
     CreatePartitionsRequestData => CreatePartitionsResponseData,
     DescribeClusterRequestData => DescribeClusterResponseData,
     DescribeConfigsRequestData => DescribeConfigsResponseData,
@@ -406,6 +429,69 @@ fn normalize_add_partitions_to_txn_request(
         v3_and_below_topics: transaction.topics.clone(),
         _unknown_tagged_fields: request._unknown_tagged_fields.clone(),
     })
+}
+
+/// First `DeleteTopics` version carrying the `topics` objects — the shape that
+/// can name a topic by id — instead of the flat `topic_names` array (KIP-516,
+/// broker 3.0).
+const DELETE_TOPICS_TOPIC_ID_MIN_VERSION: i16 = 6;
+
+/// Rewrite a `DeleteTopics` request into the topic form the negotiated `version`
+/// speaks: the flat `topic_names` array up to v5, the `topics` objects from v6
+/// on.
+///
+/// Mirrors Java's `DeleteTopicsRequest`, which promotes `topicNames` into
+/// `topics` from v6 in `Builder.build` and reads the flat array back out as
+/// `DeleteTopicState`s below it in `topics()`.
+///
+/// A topic named only by its id cannot be expressed below v6 — the id is the
+/// whole point of the shape KIP-516 added — so that deletion is refused instead
+/// of silently deleting nothing (or, worse, a topic named by the empty string).
+fn normalize_delete_topics_request(
+    request: &DeleteTopicsRequestData,
+    version: i16,
+) -> Result<Cow<'_, DeleteTopicsRequestData>> {
+    if version >= DELETE_TOPICS_TOPIC_ID_MIN_VERSION {
+        if request.topic_names.is_empty() {
+            return Ok(Cow::Borrowed(request));
+        }
+        let mut normalized = request.clone();
+        let topic_names = core::mem::take(&mut normalized.topic_names);
+        if normalized.topics.is_empty() {
+            normalized.topics = topic_names
+                .into_iter()
+                .map(|name| DeleteTopicState {
+                    name: Some(name),
+                    topic_id: KafkaUuid::ZERO,
+                    _unknown_tagged_fields: Vec::new(),
+                })
+                .collect();
+        }
+        return Ok(Cow::Owned(normalized));
+    }
+    if request.topics.is_empty() {
+        return Ok(Cow::Borrowed(request));
+    }
+    let mut topic_names = Vec::with_capacity(request.topics.len());
+    for topic in &request.topics {
+        let name = topic
+            .name
+            .clone()
+            .filter(|name| name != &KafkaString::default());
+        let Some(name) = name else {
+            return Err(UnsupportedFieldVersion::new(
+                ApiKey::DeleteTopics as i16,
+                "topic_id",
+                version,
+            )
+            .into());
+        };
+        topic_names.push(name);
+    }
+    let mut normalized = request.clone();
+    normalized.topics.clear();
+    normalized.topic_names = topic_names;
+    Ok(Cow::Owned(normalized))
 }
 
 /// First `LeaveGroup` version carrying the batched `members` array instead of
@@ -640,10 +726,10 @@ mod tests {
         KafkaString, KafkaUuid,
         generated::{
             AddPartitionsToTxnRequestData, AddPartitionsToTxnTopic, AddPartitionsToTxnTransaction,
-            FetchRequestData, FindCoordinatorRequestData, LeaveGroupRequestData,
-            ListOffsetsRequestData, OffsetFetchRequestData, OffsetFetchRequestGroup,
-            OffsetFetchRequestTopic, OffsetFetchRequestTopics, SyncGroupRequestData,
-            leave_group_request::MemberIdentity,
+            DeleteTopicState, DeleteTopicsRequestData, FetchRequestData,
+            FindCoordinatorRequestData, LeaveGroupRequestData, ListOffsetsRequestData,
+            OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopic,
+            OffsetFetchRequestTopics, SyncGroupRequestData, leave_group_request::MemberIdentity,
         },
     };
 
@@ -985,6 +1071,103 @@ mod tests {
         let error = request.write_request(&mut buf, 3);
 
         assert!(error.is_err());
+    }
+
+    fn delete_topics_request() -> DeleteTopicsRequestData {
+        DeleteTopicsRequestData {
+            topics: vec![DeleteTopicState {
+                name: Some(KafkaString::from("orders".to_owned())),
+                topic_id: KafkaUuid::ZERO,
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            timeout_ms: 30_000,
+            ..DeleteTopicsRequestData::default()
+        }
+    }
+
+    fn encode_delete_topics(request: &DeleteTopicsRequestData, version: i16) -> Bytes {
+        let mut buf = BytesMut::new();
+        request
+            .write_request(&mut buf, version)
+            .expect("delete topics request should encode for the negotiated version");
+        assert_eq!(
+            RequestMessage::encoded_len(request, version).expect("encoded length"),
+            buf.len()
+        );
+        buf.freeze()
+    }
+
+    #[test]
+    fn delete_topics_request_uses_topic_names_below_the_topic_id_version() {
+        let request = delete_topics_request();
+
+        for version in 1..=5 {
+            let mut encoded = encode_delete_topics(&request, version);
+            let decoded = DeleteTopicsRequestData::read(&mut encoded, version)
+                .expect("delete topics request should decode");
+            assert!(decoded.topics.is_empty());
+            assert_eq!(
+                decoded.topic_names,
+                vec![KafkaString::from("orders".to_owned())]
+            );
+            assert_eq!(decoded.timeout_ms, 30_000);
+        }
+    }
+
+    #[test]
+    fn delete_topics_request_uses_topics_from_the_topic_id_version() {
+        let request = delete_topics_request();
+
+        let mut encoded = encode_delete_topics(&request, 6);
+
+        let decoded =
+            DeleteTopicsRequestData::read(&mut encoded, 6).expect("v6 request should decode");
+        assert!(decoded.topic_names.is_empty());
+        assert_eq!(
+            decoded.topics[0].name,
+            Some(KafkaString::from("orders".to_owned()))
+        );
+    }
+
+    #[test]
+    fn delete_topics_request_promotes_topic_names_to_the_topic_id_version() {
+        let request = DeleteTopicsRequestData {
+            topic_names: vec![KafkaString::from("orders".to_owned())],
+            timeout_ms: 30_000,
+            ..DeleteTopicsRequestData::default()
+        };
+
+        let mut encoded = encode_delete_topics(&request, 6);
+
+        let decoded =
+            DeleteTopicsRequestData::read(&mut encoded, 6).expect("v6 request should decode");
+        assert!(decoded.topic_names.is_empty());
+        assert_eq!(
+            decoded.topics[0].name,
+            Some(KafkaString::from("orders".to_owned()))
+        );
+        assert_eq!(decoded.topics[0].topic_id, KafkaUuid::ZERO);
+    }
+
+    /// The id is the whole point of the shape v6 added, so a topic named only by
+    /// its id cannot be deleted on a broker that predates it.
+    #[test]
+    fn delete_topics_request_rejects_a_topic_id_below_the_topic_id_version() {
+        let request = DeleteTopicsRequestData {
+            topics: vec![DeleteTopicState {
+                name: None,
+                topic_id: KafkaUuid::from_parts(1, 2),
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            timeout_ms: 30_000,
+            ..DeleteTopicsRequestData::default()
+        };
+        let mut buf = BytesMut::new();
+
+        let error = request.write_request(&mut buf, 5);
+
+        assert!(error.is_err());
+        assert!(request.write_request(&mut BytesMut::new(), 6).is_ok());
     }
 
     fn leave_group_request() -> LeaveGroupRequestData {

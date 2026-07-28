@@ -21,7 +21,8 @@ use kacrab_protocol::generated::{
 use kacrab_protocol::{
     KafkaString, KafkaUuid, frame,
     generated::{
-        ApiKey, ApiVersion, ApiVersionsResponseData, FindCoordinatorRequestData,
+        ApiKey, ApiVersion, ApiVersionsResponseData, DeletableTopicResult, DeleteTopicState,
+        DeleteTopicsRequestData, DeleteTopicsResponseData, FindCoordinatorRequestData,
         FindCoordinatorResponseData, LeaveGroupRequestData, LeaveGroupResponseData,
         MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition,
         MetadataResponseTopic, OffsetFetchRequestData, OffsetFetchRequestGroup,
@@ -454,6 +455,96 @@ async fn wire_client_sends_singular_leave_group_member_to_pre_batched_broker() {
 
     assert_eq!(response.error_code, 25);
     assert!(response.members.is_empty());
+    assert_eq!(broker.join().await, 2);
+}
+
+/// `DeleteTopics` only grew the `topics` objects — the shape that can name a
+/// topic by id — in v6 (KIP-516, broker 3.0). A broker that negotiates v5 or
+/// lower must be sent the flat `topic_names` array instead, or the encoder
+/// rejects the request and `delete_topics` dies on every broker older than 3.0.
+#[tokio::test]
+async fn wire_client_sends_flat_delete_topic_names_to_pre_topic_id_broker() {
+    let broker = MockBroker::serve_many(vec![
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![
+                    ApiVersion {
+                        api_key: ApiKey::ApiVersions as i16,
+                        min_version: 0,
+                        max_version: 4,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                    ApiVersion {
+                        api_key: ApiKey::DeleteTopics as i16,
+                        min_version: 1,
+                        max_version: 5,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                ..ApiVersionsResponseData::default()
+            };
+            response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+        }),
+        Box::new(|mut request| {
+            let header_version = request_header_version(ApiKey::DeleteTopics as i16, 5);
+            let header = RequestHeaderData::read(&mut request, header_version)
+                .expect("delete topics request header should use negotiated version");
+            assert_eq!(header.request_api_version, 5);
+            let delete = DeleteTopicsRequestData::read(&mut request, 5)
+                .expect("delete topics body should use negotiated version");
+            assert!(delete.topics.is_empty());
+            assert_eq!(
+                delete.topic_names,
+                vec![KafkaString::from("orders".to_owned())]
+            );
+            assert_eq!(delete.timeout_ms, 30_000);
+            // v0-5 key the results by name only; there is no topic id to give.
+            let response = DeleteTopicsResponseData {
+                responses: vec![DeletableTopicResult {
+                    name: Some(KafkaString::from("orders".to_owned())),
+                    topic_id: KafkaUuid::ZERO,
+                    error_code: 0,
+                    error_message: None,
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                ..DeleteTopicsResponseData::default()
+            };
+            response_frame(ApiKey::DeleteTopics, 5, header.correlation_id, &response)
+        }),
+    ])
+    .await;
+    let client = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(7, broker.addr())],
+    );
+    let request = DeleteTopicsRequestData {
+        topics: vec![DeleteTopicState {
+            name: Some(KafkaString::from("orders".to_owned())),
+            topic_id: KafkaUuid::ZERO,
+            _unknown_tagged_fields: Vec::new(),
+        }],
+        timeout_ms: 30_000,
+        ..DeleteTopicsRequestData::default()
+    };
+
+    let response: DeleteTopicsResponseData = client
+        .send_to_broker(
+            7,
+            ApiKey::DeleteTopics,
+            kacrab_protocol::version::client_api_info(ApiKey::DeleteTopics).max_version,
+            &request,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.responses[0].name,
+        Some(KafkaString::from("orders".to_owned()))
+    );
+    assert_eq!(response.responses[0].error_code, 0);
     assert_eq!(broker.join().await, 2);
 }
 
@@ -2795,6 +2886,12 @@ impl ApiVersions for ShareGroupHeartbeatResponseData {
     fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
         self.write(buf, version)
             .expect("share group heartbeat response");
+    }
+}
+
+impl ApiVersions for DeleteTopicsResponseData {
+    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
+        self.write(buf, version).expect("delete topics response");
     }
 }
 
