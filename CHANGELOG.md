@@ -7,7 +7,7 @@ This project is pre-1.0; minor releases may still change public APIs.
 The format is based on human-readable release notes. Each entry includes the
 release date and links to relevant pull requests or issues.
 
-## Unreleased
+## 0.4.0 — 2026-07-29
 
 ### Changed — breaking
 

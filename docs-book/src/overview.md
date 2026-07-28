@@ -81,7 +81,7 @@ what you use:
 
 ```toml
 [dependencies]
-kacrab = { version = "0.3", features = ["producer", "consumer", "admin", "aws-lc-rs-tls"] }
+kacrab = { version = "0.4", features = ["producer", "consumer", "admin", "aws-lc-rs-tls"] }
 ```
 
 `consumer` pulls in the `compression` meta-feature (fetched batches must be

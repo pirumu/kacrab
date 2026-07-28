@@ -166,7 +166,7 @@ Nothing is enabled by default (`default = []`) — turn on the surfaces you use:
 
 ```toml
 [dependencies]
-kacrab = { version = "0.3", features = ["producer", "consumer", "admin", "aws-lc-rs-tls"] }
+kacrab = { version = "0.4", features = ["producer", "consumer", "admin", "aws-lc-rs-tls"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
