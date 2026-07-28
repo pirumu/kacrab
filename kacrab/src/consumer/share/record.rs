@@ -86,7 +86,7 @@ impl ShareRecord {
 /// member at the broker, so the whole acquisition is handed over at once.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ShareRecords {
-    by_partition: BTreeMap<(String, i32), Vec<ShareRecord>>,
+    by_partition: BTreeMap<TopicPartition, Vec<ShareRecord>>,
     count: usize,
 }
 
@@ -108,7 +108,10 @@ impl ShareRecords {
             return;
         }
         self.count = self.count.saturating_add(records.len());
-        match self.by_partition.entry((topic, partition)) {
+        match self
+            .by_partition
+            .entry(TopicPartition::new(topic, partition))
+        {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 let _records = entry.insert(records);
             },
@@ -133,18 +136,13 @@ impl ShareRecords {
     /// The set of partitions with at least one record in this batch.
     #[must_use]
     pub fn partitions(&self) -> Vec<TopicPartition> {
-        self.by_partition
-            .keys()
-            .map(|(topic, partition)| TopicPartition::new(topic.clone(), *partition))
-            .collect()
+        self.by_partition.keys().cloned().collect()
     }
 
     /// Records for a single partition, in offset order.
     #[must_use]
     pub fn records(&self, partition: &TopicPartition) -> &[ShareRecord] {
-        self.by_partition
-            .get(&(partition.topic.clone(), partition.partition))
-            .map_or(&[], Vec::as_slice)
+        self.by_partition.get(partition).map_or(&[], Vec::as_slice)
     }
 
     /// Iterate every record across all partitions, in partition then offset order.
@@ -156,7 +154,7 @@ impl ShareRecords {
 impl<'a> IntoIterator for &'a ShareRecords {
     type Item = &'a ShareRecord;
     type IntoIter = std::iter::Flatten<
-        std::collections::btree_map::Values<'a, (String, i32), Vec<ShareRecord>>,
+        std::collections::btree_map::Values<'a, TopicPartition, Vec<ShareRecord>>,
     >;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -167,7 +165,7 @@ impl<'a> IntoIterator for &'a ShareRecords {
 impl IntoIterator for ShareRecords {
     type Item = ShareRecord;
     type IntoIter = std::iter::Flatten<
-        std::collections::btree_map::IntoValues<(String, i32), Vec<ShareRecord>>,
+        std::collections::btree_map::IntoValues<TopicPartition, Vec<ShareRecord>>,
     >;
 
     fn into_iter(self) -> Self::IntoIter {

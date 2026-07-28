@@ -86,7 +86,7 @@ impl ConsumerRecord {
 /// Kafka's `ConsumerRecords`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConsumerRecords {
-    by_partition: BTreeMap<(String, i32), Vec<ConsumerRecord>>,
+    by_partition: BTreeMap<TopicPartition, Vec<ConsumerRecord>>,
     count: usize,
 }
 
@@ -108,7 +108,10 @@ impl ConsumerRecords {
             return;
         }
         self.count = self.count.saturating_add(records.len());
-        match self.by_partition.entry((topic, partition)) {
+        match self
+            .by_partition
+            .entry(TopicPartition::new(topic, partition))
+        {
             // The common case — one slice per partition per poll — moves the
             // vector in whole instead of copying every record.
             std::collections::btree_map::Entry::Vacant(entry) => {
@@ -135,18 +138,13 @@ impl ConsumerRecords {
     /// The set of partitions with at least one record in this batch.
     #[must_use]
     pub fn partitions(&self) -> Vec<TopicPartition> {
-        self.by_partition
-            .keys()
-            .map(|(topic, partition)| TopicPartition::new(topic.clone(), *partition))
-            .collect()
+        self.by_partition.keys().cloned().collect()
     }
 
     /// Records for a single partition, in offset order.
     #[must_use]
     pub fn records(&self, partition: &TopicPartition) -> &[ConsumerRecord] {
-        self.by_partition
-            .get(&(partition.topic.clone(), partition.partition))
-            .map_or(&[], Vec::as_slice)
+        self.by_partition.get(partition).map_or(&[], Vec::as_slice)
     }
 
     /// Iterate every record across all partitions, in partition then offset order.
@@ -158,7 +156,7 @@ impl ConsumerRecords {
 impl<'a> IntoIterator for &'a ConsumerRecords {
     type Item = &'a ConsumerRecord;
     type IntoIter = std::iter::Flatten<
-        std::collections::btree_map::Values<'a, (String, i32), Vec<ConsumerRecord>>,
+        std::collections::btree_map::Values<'a, TopicPartition, Vec<ConsumerRecord>>,
     >;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -169,7 +167,7 @@ impl<'a> IntoIterator for &'a ConsumerRecords {
 impl IntoIterator for ConsumerRecords {
     type Item = ConsumerRecord;
     type IntoIter = std::iter::Flatten<
-        std::collections::btree_map::IntoValues<(String, i32), Vec<ConsumerRecord>>,
+        std::collections::btree_map::IntoValues<TopicPartition, Vec<ConsumerRecord>>,
     >;
 
     fn into_iter(self) -> Self::IntoIter {

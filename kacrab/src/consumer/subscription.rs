@@ -51,7 +51,7 @@ enum SubscriptionType {
 #[derive(Debug)]
 pub(super) struct SubscriptionState {
     subscription_type: SubscriptionType,
-    assignment: BTreeMap<(String, i32), TopicPartitionState>,
+    assignment: BTreeMap<TopicPartition, TopicPartitionState>,
     default_reset: AutoOffsetReset,
 }
 
@@ -75,10 +75,6 @@ impl SubscriptionState {
         matches!(self.subscription_type, SubscriptionType::UserAssigned)
     }
 
-    fn key(partition: &TopicPartition) -> (String, i32) {
-        (partition.topic.clone(), partition.partition)
-    }
-
     /// Replace the assignment with a manual (user) partition set. Positions for
     /// partitions already assigned are retained; new partitions start unpositioned.
     pub(super) fn assign(&mut self, partitions: &[TopicPartition]) {
@@ -99,29 +95,25 @@ impl SubscriptionState {
         };
         let mut next = BTreeMap::new();
         for partition in partitions {
-            let key = Self::key(partition);
-            let state = self.assignment.remove(&key).unwrap_or_default();
-            let _previous = next.insert(key, state);
+            let state = self.assignment.remove(partition).unwrap_or_default();
+            let _previous = next.insert(partition.clone(), state);
         }
         self.assignment = next;
     }
 
     /// Whether a partition is currently assigned.
     pub(super) fn is_assigned(&self, partition: &TopicPartition) -> bool {
-        self.assignment.contains_key(&Self::key(partition))
+        self.assignment.contains_key(partition)
     }
 
     /// The currently assigned partitions, in a stable order.
     pub(super) fn assigned_partitions(&self) -> Vec<TopicPartition> {
-        self.assignment
-            .keys()
-            .map(|(topic, partition)| TopicPartition::new(topic.clone(), *partition))
-            .collect()
+        self.assignment.keys().cloned().collect()
     }
 
     /// Set the fetch position of a partition (used by `seek` and reset).
     pub(super) fn set_position(&mut self, partition: &TopicPartition, position: FetchPosition) {
-        if let Some(state) = self.assignment.get_mut(&Self::key(partition)) {
+        if let Some(state) = self.assignment.get_mut(partition) {
             state.position = Some(position);
         }
     }
@@ -129,14 +121,14 @@ impl SubscriptionState {
     /// Clear a partition's position so it is re-resolved via `auto.offset.reset`
     /// on the next poll (used when the broker reports the position out of range).
     pub(super) fn request_reset(&mut self, partition: &TopicPartition) {
-        if let Some(state) = self.assignment.get_mut(&Self::key(partition)) {
+        if let Some(state) = self.assignment.get_mut(partition) {
             state.position = None;
         }
     }
 
     /// The current fetch position (next offset) of a partition, if positioned.
     pub(super) fn position(&self, partition: &TopicPartition) -> Option<FetchPosition> {
-        self.assignment.get(&Self::key(partition))?.position
+        self.assignment.get(partition)?.position
     }
 
     /// Advance a partition's fetch position after records were delivered.
@@ -146,7 +138,7 @@ impl SubscriptionState {
         next_offset: i64,
         leader_epoch: Option<i32>,
     ) {
-        if let Some(state) = self.assignment.get_mut(&Self::key(partition)) {
+        if let Some(state) = self.assignment.get_mut(partition) {
             state.position = Some(FetchPosition::new(next_offset, leader_epoch));
         }
     }
@@ -154,7 +146,7 @@ impl SubscriptionState {
     /// Pause a set of partitions (fetches skip them; buffered data is kept).
     pub(super) fn pause(&mut self, partitions: &[TopicPartition]) {
         for partition in partitions {
-            if let Some(state) = self.assignment.get_mut(&Self::key(partition)) {
+            if let Some(state) = self.assignment.get_mut(partition) {
                 state.paused = true;
             }
         }
@@ -163,7 +155,7 @@ impl SubscriptionState {
     /// Resume a set of partitions.
     pub(super) fn resume(&mut self, partitions: &[TopicPartition]) {
         for partition in partitions {
-            if let Some(state) = self.assignment.get_mut(&Self::key(partition)) {
+            if let Some(state) = self.assignment.get_mut(partition) {
                 state.paused = false;
             }
         }
@@ -172,7 +164,7 @@ impl SubscriptionState {
     /// Whether a partition is currently paused.
     pub(super) fn is_paused(&self, partition: &TopicPartition) -> bool {
         self.assignment
-            .get(&Self::key(partition))
+            .get(partition)
             .is_some_and(|state| state.paused)
     }
 
@@ -181,7 +173,7 @@ impl SubscriptionState {
         self.assignment
             .iter()
             .filter(|(_, state)| state.paused)
-            .map(|((topic, partition), _)| TopicPartition::new(topic.clone(), *partition))
+            .map(|(partition, _)| partition.clone())
             .collect()
     }
 
@@ -191,10 +183,8 @@ impl SubscriptionState {
         self.assignment
             .iter()
             .filter(|(_, state)| !state.paused)
-            .filter_map(|((topic, partition), state)| {
-                state
-                    .position
-                    .map(|position| (TopicPartition::new(topic.clone(), *partition), position))
+            .filter_map(|(partition, state)| {
+                state.position.map(|position| (partition.clone(), position))
             })
             .collect()
     }
@@ -205,7 +195,7 @@ impl SubscriptionState {
         self.assignment
             .iter()
             .filter(|(_, state)| !state.paused && state.position.is_none())
-            .map(|((topic, partition), _)| TopicPartition::new(topic.clone(), *partition))
+            .map(|(partition, _)| partition.clone())
             .collect()
     }
 }
