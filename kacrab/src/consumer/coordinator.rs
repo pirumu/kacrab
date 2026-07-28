@@ -31,7 +31,7 @@ use super::{
     error::{ConsumerError, Result},
 };
 use crate::{
-    common::{OffsetAndMetadata, TopicPartition},
+    common::{OffsetAndMetadata, TopicPartition, coordinator_for_key},
     wire::{BackoffPolicy, BackoffState, BrokerEndpoint, WireClient, WireError},
 };
 
@@ -69,17 +69,13 @@ pub(super) async fn find_coordinator(
         let response: FindCoordinatorResponseData = wire
             .send_to_broker(broker_id, ApiKey::FindCoordinator, version, &request)
             .await?;
-        let coordinator = response
-            .coordinators
-            .into_iter()
-            .find(|coordinator| coordinator.key.to_string() == group_id)
-            .ok_or_else(|| {
-                ConsumerError::broker(
-                    "find_coordinator",
-                    ErrorCode::CoordinatorNotAvailable,
-                    "coordinator response was missing the requested group",
-                )
-            })?;
+        let coordinator = coordinator_for_key(response, group_id).ok_or_else(|| {
+            ConsumerError::broker(
+                "find_coordinator",
+                ErrorCode::CoordinatorNotAvailable,
+                "coordinator response was missing the requested group",
+            )
+        })?;
         let error = ErrorCode::from(coordinator.error_code);
         if !error.is_error() {
             break coordinator;

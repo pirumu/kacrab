@@ -3188,13 +3188,11 @@ impl AdminClient {
         let response: FindCoordinatorResponseData = self
             .send_metered(broker_id, ApiKey::FindCoordinator, version, &request)
             .await?;
-        let coordinator = response
-            .coordinators
-            .into_iter()
-            .find(|coordinator| coordinator.key.as_str() == key)
-            .ok_or_else(|| AdminError::CoordinatorUnavailable {
+        let coordinator = crate::common::coordinator_for_key(response, key).ok_or_else(|| {
+            AdminError::CoordinatorUnavailable {
                 key: key.to_owned(),
-            })?;
+            }
+        })?;
         check_code(
             key,
             coordinator.error_code,

@@ -121,6 +121,30 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **`FindCoordinator` was always sent in its v4+ form, so every broker older than
+  3.0 failed coordinator discovery.** The consumer, producer, and admin clients all
+  filled `coordinator_keys` — the batched array KIP-699 added in v4 — while the
+  version each request is actually sent at is negotiated per broker from its
+  `ApiVersions` (the version passed by a call site is only a ceiling). A broker that
+  negotiated v3 or lower got a request the encoder refused
+  (`UnsupportedFieldVersion { field: "coordinator_keys" }`), so group membership,
+  offset commits, and every transaction died before the first RPC — that alone
+  pinned kacrab's real broker floor at 3.0.
+
+  The request is now rewritten into the form the negotiated version speaks at the
+  encode seam, where that version is known: the singular `key` up to v3 and
+  `coordinator_keys` from v4 (mirroring Java's `FindCoordinatorRequest.Builder`), a
+  batched lookup below v4 still being refused rather than silently losing keys. Both
+  response shapes are read too — the flat top-level `node_id`/`host`/`port` of v0-3
+  as well as the v4+ `coordinators` array.
+
+  This is one instance of a class — a field that only exists from some version being
+  filled before the negotiated version is known — and every request-build site was
+  audited against the generated per-version encoders for the same mistake. The two
+  further instances it turned up are fixed below; the rest either set the field only
+  where Kafka's own client also raises `UnsupportedVersionException`, or are already
+  version-aware.
+
 - **`list_consumer_groups` reported share, streams, and connect groups as consumer
   groups.** The broker's `ListGroups` response carries every group it coordinates
   whatever its protocol, and Java's `listConsumerGroups` filters that response down

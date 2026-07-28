@@ -107,7 +107,6 @@ impl_passthrough_message! {
     ApiVersionsRequestData => ApiVersionsResponseData,
     MetadataRequestData => MetadataResponseData,
     InitProducerIdRequestData => InitProducerIdResponseData,
-    FindCoordinatorRequestData => FindCoordinatorResponseData,
     AddPartitionsToTxnRequestData => AddPartitionsToTxnResponseData,
     AddOffsetsToTxnRequestData => AddOffsetsToTxnResponseData,
     TxnOffsetCommitRequestData => TxnOffsetCommitResponseData,
@@ -116,10 +115,34 @@ impl_passthrough_message! {
     PushTelemetryRequestData => PushTelemetryResponseData,
 }
 
-// Produce is the only request that is not a straight pass-through: depending on
-// the negotiated version the wire form carries either the topic name (v < 13) or
-// the topic id (v >= 13), so the unused field is cleared before the generated
-// encoder runs (see `normalize_produce_request`). The response is pass-through.
+// `FindCoordinator` is not a straight pass-through either: v0-3 carries a
+// singular `key`, v4+ (KIP-699) the batched `coordinator_keys` array, and the
+// generated encoder rejects whichever one its version does not carry. Call sites
+// only learn the negotiated version after they have built the request, so the
+// request is rewritten into the negotiated version's form here, mirroring Java's
+// `FindCoordinatorRequest.Builder.build`. The response is pass-through — callers
+// read both shapes through `common::coordinator::coordinator_for_key`.
+impl RequestMessage for FindCoordinatorRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_find_coordinator_request(self, version).write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_find_coordinator_request(self, version).encoded_len(version)
+    }
+}
+
+impl ResponseMessage for FindCoordinatorResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
+// Produce is not a straight pass-through: depending on the negotiated version
+// the wire form carries either the topic name (v < 13) or the topic id (v >= 13),
+// so the unused field is cleared before the generated encoder runs (see
+// `normalize_produce_request`). The response is pass-through.
 impl RequestMessage for ProduceRequestData {
     fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
         normalize_produce_request(self, version).write(buf, version)?;
@@ -211,6 +234,42 @@ impl_passthrough_message! {
     ShareAcknowledgeRequestData => ShareAcknowledgeResponseData,
 }
 
+/// First `FindCoordinator` version carrying the batched `coordinator_keys` array
+/// instead of the singular `key` (KIP-699, broker 3.0).
+const FIND_COORDINATOR_BATCHED_MIN_VERSION: i16 = 4;
+
+/// Rewrite a `FindCoordinator` request into the coordinator-key form the
+/// negotiated `version` speaks: the singular `key` below v4, the batched
+/// `coordinator_keys` array from v4 on.
+///
+/// A caller asking for several coordinators at once cannot be expressed below
+/// v4, so that request is left untouched for the generated encoder to reject
+/// rather than silently dropping the keys it cannot carry (Java raises
+/// `NoBatchedFindCoordinatorsException` for the same case).
+fn normalize_find_coordinator_request(
+    request: &FindCoordinatorRequestData,
+    version: i16,
+) -> Cow<'_, FindCoordinatorRequestData> {
+    if version >= FIND_COORDINATOR_BATCHED_MIN_VERSION {
+        if request.key == KafkaString::default() {
+            return Cow::Borrowed(request);
+        }
+        let mut normalized = request.clone();
+        let key = core::mem::take(&mut normalized.key);
+        if normalized.coordinator_keys.is_empty() {
+            normalized.coordinator_keys.push(key);
+        }
+        return Cow::Owned(normalized);
+    }
+    let [key] = request.coordinator_keys.as_slice() else {
+        return Cow::Borrowed(request);
+    };
+    let mut normalized = request.clone();
+    normalized.key = key.clone();
+    normalized.coordinator_keys.clear();
+    Cow::Owned(normalized)
+}
+
 /// Clear the topic key that the negotiated `version` does not put on the wire so
 /// the generated encoder does not reject a request that still carries both the
 /// topic name and topic id.
@@ -242,4 +301,104 @@ fn normalize_produce_request(
         }
     }
     Cow::Owned(normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::missing_assert_message,
+        clippy::unwrap_used,
+        reason = "Unit test fixtures fail fastest with contextual unwrap/expect calls."
+    )]
+
+    use bytes::{Bytes, BytesMut};
+    use kacrab_protocol::{KafkaString, generated::FindCoordinatorRequestData};
+
+    use super::RequestMessage;
+
+    fn find_coordinator_request() -> FindCoordinatorRequestData {
+        FindCoordinatorRequestData {
+            key_type: 0,
+            coordinator_keys: vec![KafkaString::from("group-a".to_owned())],
+            ..FindCoordinatorRequestData::default()
+        }
+    }
+
+    fn encode(request: &FindCoordinatorRequestData, version: i16) -> Bytes {
+        let mut buf = BytesMut::new();
+        request
+            .write_request(&mut buf, version)
+            .expect("find coordinator request should encode for the negotiated version");
+        assert_eq!(
+            RequestMessage::encoded_len(request, version).expect("encoded length"),
+            buf.len()
+        );
+        buf.freeze()
+    }
+
+    #[test]
+    fn find_coordinator_request_uses_singular_key_below_batched_versions() {
+        let request = find_coordinator_request();
+
+        for version in 0..=3 {
+            let mut encoded = encode(&request, version);
+            let decoded = FindCoordinatorRequestData::read(&mut encoded, version)
+                .expect("find coordinator request should decode");
+            assert_eq!(decoded.key, KafkaString::from("group-a".to_owned()));
+            assert!(decoded.coordinator_keys.is_empty());
+        }
+    }
+
+    #[test]
+    fn find_coordinator_request_uses_coordinator_keys_from_batched_version() {
+        let request = find_coordinator_request();
+
+        for version in 4..=6 {
+            let mut encoded = encode(&request, version);
+            let decoded = FindCoordinatorRequestData::read(&mut encoded, version)
+                .expect("find coordinator request should decode");
+            assert_eq!(
+                decoded.coordinator_keys,
+                vec![KafkaString::from("group-a".to_owned())]
+            );
+            assert_eq!(decoded.key, KafkaString::default());
+        }
+    }
+
+    #[test]
+    fn find_coordinator_request_promotes_singular_key_to_batched_versions() {
+        let request = FindCoordinatorRequestData {
+            key: KafkaString::from("group-a".to_owned()),
+            key_type: 0,
+            ..FindCoordinatorRequestData::default()
+        };
+
+        let mut encoded = encode(&request, 6);
+
+        let decoded =
+            FindCoordinatorRequestData::read(&mut encoded, 6).expect("v6 request should decode");
+        assert_eq!(
+            decoded.coordinator_keys,
+            vec![KafkaString::from("group-a".to_owned())]
+        );
+        assert_eq!(decoded.key, KafkaString::default());
+    }
+
+    #[test]
+    fn find_coordinator_request_rejects_batched_keys_below_batched_versions() {
+        let request = FindCoordinatorRequestData {
+            key_type: 0,
+            coordinator_keys: vec![
+                KafkaString::from("group-a".to_owned()),
+                KafkaString::from("group-b".to_owned()),
+            ],
+            ..FindCoordinatorRequestData::default()
+        };
+        let mut buf = BytesMut::new();
+
+        let error = request.write_request(&mut buf, 3);
+
+        assert!(error.is_err());
+    }
 }

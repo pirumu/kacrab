@@ -5545,6 +5545,78 @@ async fn kafka_producer_init_transactions_retries_retriable_coordinator_lookup()
     assert_eq!(coordinator.join().await, 3);
 }
 
+/// A broker that negotiates `FindCoordinator` v3 answers with the flat
+/// top-level coordinator (v0-3) instead of the batched `coordinators` array that
+/// v4 added (KIP-699), and it must be sent the singular `key` too. The
+/// transaction bootstrap has to speak both shapes, or every broker older than
+/// 3.0 fails coordinator discovery.
+#[tokio::test]
+async fn kafka_producer_init_transactions_uses_pre_batched_find_coordinator_shapes() {
+    let coordinator = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::InitProducerId as i16);
+            init_producer_id_response_frame(header.correlation_id, 78, 5)
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(pre_batched_find_coordinator_api_versions_response_frame),
+        Box::new({
+            let coordinator = coordinator.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::FindCoordinator as i16);
+                assert_eq!(header.request_api_version, 3);
+                let find = FindCoordinatorRequestData::read(&mut request, 3)
+                    .expect("find coordinator should use the negotiated version");
+                assert_eq!(find.key, KafkaString::from("txn-orders".to_owned()));
+                assert!(find.coordinator_keys.is_empty());
+                pre_batched_find_coordinator_response_frame(header.correlation_id, 9, coordinator)
+            }
+        }),
+    ])
+    .await;
+
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default(),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 1,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
+            delivery_timeout: Duration::from_mins(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 5,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: Some("txn-orders".to_owned()),
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+
+    producer.init_transactions().await.unwrap();
+
+    assert_eq!(bootstrap.join().await, 2);
+    assert_eq!(coordinator.join().await, 2);
+}
+
 #[tokio::test]
 async fn kafka_producer_init_transactions_timeout_can_retry_same_operation_like_java() {
     let coordinator = MockBroker::serve_many(vec![
@@ -8223,79 +8295,113 @@ fn api_versions_response_frame(mut request: Bytes) -> BytesMut {
         ApiKey::ApiVersions,
         3,
         header.correlation_id,
-        &ApiVersionsResponseData {
-            error_code: 0,
-            api_keys: vec![
-                ApiVersion {
-                    api_key: ApiKey::ApiVersions as i16,
-                    min_version: 0,
-                    max_version: 4,
-                    _unknown_tagged_fields: Vec::new(),
-                },
-                ApiVersion {
-                    api_key: ApiKey::Metadata as i16,
-                    min_version: 0,
-                    max_version: 13,
-                    _unknown_tagged_fields: Vec::new(),
-                },
-                ApiVersion {
-                    api_key: ApiKey::Produce as i16,
-                    min_version: 3,
-                    max_version: 13,
-                    _unknown_tagged_fields: Vec::new(),
-                },
-                ApiVersion {
-                    api_key: ApiKey::InitProducerId as i16,
-                    min_version: 0,
-                    max_version: 6,
-                    _unknown_tagged_fields: Vec::new(),
-                },
-                ApiVersion {
-                    api_key: ApiKey::FindCoordinator as i16,
-                    min_version: 0,
-                    max_version: 6,
-                    _unknown_tagged_fields: Vec::new(),
-                },
-                ApiVersion {
-                    api_key: ApiKey::AddPartitionsToTxn as i16,
-                    min_version: 0,
-                    max_version: 5,
-                    _unknown_tagged_fields: Vec::new(),
-                },
-                ApiVersion {
-                    api_key: ApiKey::AddOffsetsToTxn as i16,
-                    min_version: 0,
-                    max_version: 4,
-                    _unknown_tagged_fields: Vec::new(),
-                },
-                ApiVersion {
-                    api_key: ApiKey::TxnOffsetCommit as i16,
-                    min_version: 0,
-                    max_version: 5,
-                    _unknown_tagged_fields: Vec::new(),
-                },
-                ApiVersion {
-                    api_key: ApiKey::EndTxn as i16,
-                    min_version: 0,
-                    max_version: 5,
-                    _unknown_tagged_fields: Vec::new(),
-                },
-                ApiVersion {
-                    api_key: ApiKey::GetTelemetrySubscriptions as i16,
-                    min_version: 0,
-                    max_version: 0,
-                    _unknown_tagged_fields: Vec::new(),
-                },
-                ApiVersion {
-                    api_key: ApiKey::PushTelemetry as i16,
-                    min_version: 0,
-                    max_version: 0,
-                    _unknown_tagged_fields: Vec::new(),
-                },
-            ],
-            ..ApiVersionsResponseData::default()
-        },
+        &api_versions_response_data(),
     )
+}
+
+fn api_versions_response_data() -> ApiVersionsResponseData {
+    ApiVersionsResponseData {
+        error_code: 0,
+        api_keys: vec![
+            ApiVersion {
+                api_key: ApiKey::ApiVersions as i16,
+                min_version: 0,
+                max_version: 4,
+                _unknown_tagged_fields: Vec::new(),
+            },
+            ApiVersion {
+                api_key: ApiKey::Metadata as i16,
+                min_version: 0,
+                max_version: 13,
+                _unknown_tagged_fields: Vec::new(),
+            },
+            ApiVersion {
+                api_key: ApiKey::Produce as i16,
+                min_version: 3,
+                max_version: 13,
+                _unknown_tagged_fields: Vec::new(),
+            },
+            ApiVersion {
+                api_key: ApiKey::InitProducerId as i16,
+                min_version: 0,
+                max_version: 6,
+                _unknown_tagged_fields: Vec::new(),
+            },
+            ApiVersion {
+                api_key: ApiKey::FindCoordinator as i16,
+                min_version: 0,
+                max_version: 6,
+                _unknown_tagged_fields: Vec::new(),
+            },
+            ApiVersion {
+                api_key: ApiKey::AddPartitionsToTxn as i16,
+                min_version: 0,
+                max_version: 5,
+                _unknown_tagged_fields: Vec::new(),
+            },
+            ApiVersion {
+                api_key: ApiKey::AddOffsetsToTxn as i16,
+                min_version: 0,
+                max_version: 4,
+                _unknown_tagged_fields: Vec::new(),
+            },
+            ApiVersion {
+                api_key: ApiKey::TxnOffsetCommit as i16,
+                min_version: 0,
+                max_version: 5,
+                _unknown_tagged_fields: Vec::new(),
+            },
+            ApiVersion {
+                api_key: ApiKey::EndTxn as i16,
+                min_version: 0,
+                max_version: 5,
+                _unknown_tagged_fields: Vec::new(),
+            },
+            ApiVersion {
+                api_key: ApiKey::GetTelemetrySubscriptions as i16,
+                min_version: 0,
+                max_version: 0,
+                _unknown_tagged_fields: Vec::new(),
+            },
+            ApiVersion {
+                api_key: ApiKey::PushTelemetry as i16,
+                min_version: 0,
+                max_version: 0,
+                _unknown_tagged_fields: Vec::new(),
+            },
+        ],
+        ..ApiVersionsResponseData::default()
+    }
+}
+
+/// `ApiVersions` for a broker that predates the batched `FindCoordinator`
+/// (KIP-699, broker 3.0): everything else as usual, `FindCoordinator` capped at
+/// v3.
+fn pre_batched_find_coordinator_api_versions_response_frame(mut request: Bytes) -> BytesMut {
+    let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+    let mut response = api_versions_response_data();
+    for api in &mut response.api_keys {
+        if api.api_key == ApiKey::FindCoordinator as i16 {
+            api.max_version = 3;
+        }
+    }
+    response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+}
+
+/// The flat `FindCoordinator` response shape used up to v3: one coordinator in
+/// the top-level `node_id`/`host`/`port` fields, no `coordinators` array.
+fn pre_batched_find_coordinator_response_frame(
+    correlation_id: i32,
+    node_id: i32,
+    addr: std::net::SocketAddr,
+) -> BytesMut {
+    let response = FindCoordinatorResponseData {
+        node_id,
+        host: KafkaString::from(addr.ip().to_string()),
+        port: i32::from(addr.port()),
+        ..FindCoordinatorResponseData::default()
+    };
+    response_frame(ApiKey::FindCoordinator, 3, correlation_id, &response)
 }
 
 fn metadata_response<const N: usize>(
