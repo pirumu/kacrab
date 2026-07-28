@@ -52,8 +52,7 @@ pub use self::{
     },
     partitioner::{ProducerPartitioner, RoundRobinPartitioner},
     record::{
-        DeliveryCallback, Header, Headers, ProducerRecord, RecordHeader, RecordHeaders,
-        RecordMetadata, SendFuture,
+        DeliveryCallback, Header, ProducerRecord, RecordHeader, RecordMetadata, SendFuture,
     },
     serializer::{
         BooleanSerializer, ByteArraySerializer, BytesSerializer, ConfiguredProducerSerializer,

@@ -80,6 +80,22 @@ release date and links to relevant pull requests or issues.
   `ApiKey::ControlledShutdown` for the one place the key is still needed: the
   legacy request-header v0 rule that `ControlledShutdown` v0 frames use.
 
+- **`producer::RecordHeaders` and its `producer::Headers` alias are gone.** The
+  type was ~180 lines of exported, self-tested collection that nothing in kacrab
+  ever constructed: `ProducerRecord::headers` is a `Vec<RecordHeader>`, and
+  `ProducerSerializer::serialize` takes `&mut Vec<RecordHeader>`, so no producer
+  path could ever hand one out. Java needs a `Headers` object because
+  `ProducerRecord.headers()` returns a live, mutable view the producer freezes
+  with `setReadOnly` after the interceptor chain runs — kacrab has no freeze
+  point, so its `set_read_only`/`is_read_only` pair guarded an invariant the
+  producer never applied.
+
+  `ProducerRecord` already carries the whole Java `Headers` surface as inherent
+  methods — `header`, `header_null`, `with_headers`, `headers`, `headers_for_key`
+  (Java `headers(key)`), `last_header` (`lastHeader`), `remove_headers`,
+  `remove_headers_mut` — and the tests that pinned those semantics are untouched.
+  `producer::Header`/`producer::RecordHeader` are unchanged.
+
 - **`ProducerError::UnsupportedOperation` is gone.** No code path in the crate
   ever constructed it — the only three mentions were the variant itself and the
   two hand-written clone/`match` arms that copied it around. It was a public
