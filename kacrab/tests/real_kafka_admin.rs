@@ -39,7 +39,7 @@ use kacrab::{
     },
     wire::WireError,
 };
-use kacrab_protocol::ProtocolError;
+use kacrab_protocol::{ProtocolError, generated::ErrorCode};
 
 #[tokio::test]
 #[ignore = "requires local Kafka from docker-compose.kafka.yml"]
@@ -264,11 +264,23 @@ async fn real_kafka_admin_smoke() {
         .delete_consumer_group_offsets(&group, vec![TopicPartition::new(&topic, 0)])
         .await
         .expect("delete_consumer_group_offsets");
-    admin
-        .delete_consumer_groups(vec![group.clone()])
-        .await
-        .expect("delete_consumer_groups");
-    println!("  group cleanup — OK");
+    // Cleanup, and the only call in this file that reads GROUP_ID_NOT_FOUND as
+    // success. The group above is a simple group that never had a member: the
+    // classic coordinator drops such a group as soon as its last offset is
+    // deleted, so on the brokers that do that `delete_consumer_group_offsets`
+    // has already removed it and the delete arrives at a group that is gone.
+    // Deleting a group is idempotent — "no such group" and "deleted" leave the
+    // same end state, which is the only thing this cleanup asserts. Every other
+    // error code still fails the test, and no other assertion in this file
+    // accepts GROUP_ID_NOT_FOUND.
+    match admin.delete_consumer_groups(vec![group.clone()]).await {
+        Ok(()) => println!("  group cleanup — OK"),
+        Err(AdminError::Broker {
+            error: ErrorCode::GroupIdNotFound,
+            ..
+        }) => println!("  group cleanup — OK (coordinator already dropped the emptied group)"),
+        Err(other) => panic!("delete_consumer_groups: {other:?}"),
+    }
 
     // --- cleanup ---
     admin

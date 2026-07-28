@@ -56,15 +56,23 @@ name: real-broker
 # They are evidence-gathering: nobody has written the per-surface floor table
 # (checklist P0.2 / P3.1), so there is no agreed answer to "should this test
 # pass on 3.6?" and a red leg would be noise rather than a regression signal.
-# Two failures are already known and reproduced locally against real brokers:
 #
-#   - `real_kafka_admin_smoke` fails on 3.6.2 with `UnsupportedApiVersion` for
-#     ListConfigResources (API 74 — it does not exist before 3.7).
-#   - The same test fails on 3.9.0 and 4.0.0 with `UnsupportedFieldVersion
-#     { api_key: 74, field: "resource_types", version: 0 }`: those brokers
-#     advertise API 74 at v0 only, and `resource_types` arrived in v1. That is
-#     the same bug class PR #11 fixed for FindCoordinator / ListOffsets /
-#     SyncGroup / Fetch, in a call site it did not reach.
+# The two `real_kafka_admin_smoke` failures this comment used to list — the
+# `ListConfigResources` (API 74) `UnsupportedApiVersion` on 3.6.2 and the
+# `UnsupportedFieldVersion { field: "resource_types", version: 0 }` on 3.9.0 /
+# 4.0.0 — are fixed and no longer expected. The v0/v1 request shape is handled,
+# and the two ops that a broker genuinely cannot express are now reported as
+# named SKIPPED lines plus a capability-summary line rather than as failures.
+# `real_kafka_admin_smoke` is verified green on 3.6.2, 3.9.0 and 4.3.0:
+#
+#   - 4.3.0 — no skips; every op runs.
+#   - 3.9.0 — SKIPPED `list_config_resources(Topic)` (broker advertises API 74
+#     at v0 only, and v0 has no `resource_types` field).
+#   - 3.6.2 — SKIPPED both `list_config_resources(Topic)` and
+#     `list_client_metrics_resources` (API 74 does not exist before 3.7).
+#
+# No other known failure is outstanding on these legs; they stay non-blocking
+# only until the floor table below exists.
 #
 # Once P1.3 lands per-test `#[min_broker(..)]` gating and P3.1 publishes the
 # floor table, DELETE the `experimental` flag from the matrix legs below and let
