@@ -873,7 +873,6 @@ async fn kafka_producer_partitions_for_returns_topic_metadata() {
     assert_eq!(partitions[1].partition, 1);
     assert_eq!(partitions[1].leader_id, 8);
     assert_eq!(metrics.metadata_wait_count, 1);
-    assert!(metrics.metadata_wait_total_latency >= Duration::ZERO);
     assert_eq!(bootstrap.join().await, 2);
 }
 
@@ -2589,12 +2588,10 @@ async fn kafka_producer_commits_transactional_send() {
     producer.init_transactions().await.unwrap();
     let metrics = producer.metrics();
     assert_eq!(metrics.transaction_init_count, 1);
-    assert!(metrics.transaction_init_total_latency >= Duration::ZERO);
     assert_eq!(metrics.transaction_begin_count, 0);
     producer.begin_transaction().unwrap();
     let metrics = producer.metrics();
     assert_eq!(metrics.transaction_begin_count, 1);
-    assert!(metrics.transaction_begin_total_latency >= Duration::ZERO);
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
         .unwrap();
@@ -2605,7 +2602,6 @@ async fn kafka_producer_commits_transactional_send() {
     assert_eq!(delivery.await.unwrap().offset, 90);
     let metrics = producer.metrics();
     assert_eq!(metrics.transaction_commit_count, 1);
-    assert!(metrics.transaction_commit_total_latency >= Duration::ZERO);
     assert_eq!(bootstrap.join().await, 3);
     assert_eq!(coordinator.join().await, 4);
     assert_eq!(leader_7.join().await, 2);
@@ -4271,7 +4267,6 @@ async fn kafka_producer_sends_offsets_to_transaction_before_commit() {
         .unwrap();
     let metrics = producer.metrics();
     assert_eq!(metrics.send_offsets_to_transaction_count, 1);
-    assert!(metrics.send_offsets_to_transaction_total_latency >= Duration::ZERO);
     producer.commit_transaction().await.unwrap();
 
     assert_eq!(bootstrap.join().await, 3);
@@ -4518,7 +4513,6 @@ async fn kafka_producer_send_offsets_to_transaction_reports_commit_error() {
     producer.abort_transaction().await.unwrap();
     let metrics = producer.metrics();
     assert_eq!(metrics.transaction_abort_count, 1);
-    assert!(metrics.transaction_abort_total_latency >= Duration::ZERO);
     assert_eq!(bootstrap.join().await, 3);
     assert_eq!(coordinator.join().await, 5);
 }
