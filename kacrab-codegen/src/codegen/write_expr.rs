@@ -5,7 +5,11 @@ use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 
 use super::{
-    ty::{has_version_conditional_nullability, is_field_nullable, needs_flexible_branching},
+    error::CodegenErrorKind,
+    ty::{
+        ensure_encodable_nullability, has_version_conditional_nullability, is_field_nullable,
+        needs_flexible_branching,
+    },
     version_check::{
         effective_flex_versions, flexible_version_check_with_context, version_check_always_true,
         version_check_never_true, version_contains_check_with_context,
@@ -22,7 +26,8 @@ pub(crate) fn generate_write_field_expr(
     var_ident: &Ident,
     flex_versions: &VersionRange,
     effective_versions: &VersionRange,
-) -> TokenStream {
+) -> Result<TokenStream, CodegenErrorKind> {
+    ensure_encodable_nullability(field)?;
     let is_nullable = is_field_nullable(field);
 
     if has_version_conditional_nullability(field) {
@@ -49,22 +54,22 @@ pub(crate) fn generate_write_field_expr(
             flex_versions,
             &non_nullable_effective,
         );
-        return quote! {
+        return Ok(quote! {
             if #nullable_check {
                 #nullable_write
             } else {
                 #non_nullable_write
             }
-        };
+        });
     }
 
-    generate_write_field_expr_inner(
+    Ok(generate_write_field_expr_inner(
         field,
         var_ident,
         flex_versions,
         is_nullable,
         effective_versions,
-    )
+    ))
 }
 
 fn generate_write_field_expr_inner(
@@ -103,6 +108,12 @@ fn generate_write_field_expr_inner(
     }
 }
 
+/// Encode a field whose Rust type is `Option<T>` at a version where the wire
+/// form has no null representation: substitute the type's empty value.
+///
+/// `FieldType::Struct` cannot reach here — it has no empty value to substitute,
+/// so [`ensure_encodable_nullability`] rejects the shape before codegen gets
+/// this far.
 fn generate_write_option_as_non_nullable(
     field: &FieldSpec,
     var_ident: &Ident,
@@ -119,40 +130,25 @@ fn generate_write_option_as_non_nullable(
             write_bytes_option_as_non_nullable(var_ident, &eff_flex, effective_versions, &buf_expr)
         },
         FieldType::Array(inner) => {
-            let flexible = !eff_flex.is_none();
-            let needs_flex = needs_flexible_branching(&field.field_type);
-            if needs_flex && flexible {
-                if version_check_always_true(&eff_flex, effective_versions) {
-                    generate_write_array_from_option(inner, var_ident, true, &buf_expr)
-                } else if version_check_never_true(&eff_flex, effective_versions) {
-                    generate_write_array_from_option(inner, var_ident, false, &buf_expr)
-                } else {
-                    let flex_check =
-                        flexible_version_check_with_context(&eff_flex, effective_versions);
-                    let compact_write =
-                        generate_write_array_from_option(inner, var_ident, true, &buf_expr);
-                    let standard_write =
-                        generate_write_array_from_option(inner, var_ident, false, &buf_expr);
-                    quote! {
-                        if #flex_check {
-                            #compact_write
-                        } else {
-                            #standard_write
-                        }
-                    }
-                }
-            } else {
+            // `FieldType::Array` always needs flex branching, so we gate only on
+            // `eff_flex`.
+            if eff_flex.is_none() {
                 generate_write_array_from_option(inner, var_ident, false, &buf_expr)
-            }
-        },
-        FieldType::Struct(_) => {
-            let non_nullable_write =
-                write_expr_for_type(&field.field_type, var_ident, false, false);
-            quote! {
-                match &self.#var_ident {
-                    Some(v) => { v.write(#buf_expr, version)?; }
-                    None => {
-                        #non_nullable_write
+            } else if version_check_always_true(&eff_flex, effective_versions) {
+                generate_write_array_from_option(inner, var_ident, true, &buf_expr)
+            } else if version_check_never_true(&eff_flex, effective_versions) {
+                generate_write_array_from_option(inner, var_ident, false, &buf_expr)
+            } else {
+                let flex_check = flexible_version_check_with_context(&eff_flex, effective_versions);
+                let compact_write =
+                    generate_write_array_from_option(inner, var_ident, true, &buf_expr);
+                let standard_write =
+                    generate_write_array_from_option(inner, var_ident, false, &buf_expr);
+                quote! {
+                    if #flex_check {
+                        #compact_write
+                    } else {
+                        #standard_write
                     }
                 }
             }

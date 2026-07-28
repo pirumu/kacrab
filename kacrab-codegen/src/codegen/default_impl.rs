@@ -105,6 +105,14 @@ fn resolve_explicit_default(
             inner
         });
     }
+    // Everything left is a bare string literal, which only lowers to
+    // `KafkaString`. Handing it to any other field type used to emit a
+    // `KafkaString` where the struct declares a `KafkaUuid`/`Bytes`/`Vec`/nested
+    // struct — a generated crate that does not compile. Fail like the numeric
+    // and hex resolvers do instead.
+    if !matches!(field.field_type, FieldType::String) {
+        return Err(invalid_default(default_str, field));
+    }
     Ok(if is_nullable {
         quote! { Some(KafkaString::from(#default_str.to_string())) }
     } else {
@@ -361,6 +369,47 @@ mod tests {
                 .unwrap()
                 .to_string(),
             "None"
+        );
+    }
+
+    /// The `KafkaString::from(...)` fallback is only valid for `string` fields.
+    /// Handing it to any other type used to emit a generated crate that does not
+    /// compile; the resolver must fail like its numeric siblings instead.
+    #[test]
+    fn string_shaped_defaults_are_rejected_for_non_string_types() {
+        for field_type in [
+            FieldType::Uuid,
+            FieldType::Bytes,
+            FieldType::Struct("Thing".to_owned()),
+            FieldType::Array(Box::new(FieldType::Int32)),
+            FieldType::Records,
+            FieldType::Bool,
+            FieldType::Int32,
+            FieldType::Float64,
+        ] {
+            let field = explicit_field(field_type.clone(), "not-a-value");
+            assert!(
+                resolve_default(&field).is_err(),
+                "a bare-string default must not be accepted for {field_type:?}"
+            );
+        }
+
+        // Nullability does not launder the type mismatch either.
+        assert!(
+            resolve_default(&FieldSpec {
+                default: Some("not-a-uuid".to_owned()),
+                ..nullable_field(FieldType::Uuid)
+            })
+            .is_err(),
+            "a nullable uuid must reject a bare-string default too"
+        );
+
+        // The one accepted shape stays accepted.
+        assert_eq!(
+            resolve_default(&explicit_field(FieldType::String, "hello"))
+                .unwrap()
+                .to_string(),
+            "KafkaString :: from (\"hello\" . to_string ())"
         );
     }
 

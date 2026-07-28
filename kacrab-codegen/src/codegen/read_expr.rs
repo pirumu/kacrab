@@ -123,10 +123,11 @@ fn generate_read_non_nullable_to_option(
     effective_versions: &VersionRange,
 ) -> TokenStream {
     let eff_flex = effective_flex_versions(field, flex_versions);
-    let needs_flex = needs_flexible_branching(&field.field_type);
 
+    // `String`/`Bytes`/`Array` always need flex branching, so the arms below gate
+    // only on `eff_flex`.
     match &field.field_type {
-        FieldType::String | FieldType::Bytes if needs_flex && !eff_flex.is_none() => {
+        FieldType::String | FieldType::Bytes if !eff_flex.is_none() => {
             if version_check_always_true(&eff_flex, effective_versions) {
                 let compact_expr = read_expr_for_type(&field.field_type, false, true);
                 quote! { #var_ident = Some(#compact_expr); }
@@ -146,7 +147,7 @@ fn generate_read_non_nullable_to_option(
                 }
             }
         },
-        FieldType::Array(inner) if needs_flex && !eff_flex.is_none() => {
+        FieldType::Array(inner) if !eff_flex.is_none() => {
             let buf_expr = quote! { buf };
             if version_check_always_true(&eff_flex, effective_versions) {
                 let compact_read = generate_read_array_expr(inner, false, true, &buf_expr);

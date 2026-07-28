@@ -42,6 +42,30 @@ pub enum CodegenErrorKind {
         #[source]
         source: syn::Error,
     },
+    /// A struct-typed field is nullable in only part of its presence range.
+    ///
+    /// Such a field lowers to `Option<Box<T>>`, but the versions outside its
+    /// nullable range encode a bare struct with no null marker — and unlike
+    /// `string`/`bytes`/array there is no empty value the write side can
+    /// substitute for `None`. No Kafka schema has ever used this shape; if one
+    /// starts to, `generate_write_option_as_non_nullable` /
+    /// `generate_len_option_as_non_nullable` need a real encoding decision
+    /// (upstream Java would have to make the same one) rather than emitting Rust
+    /// that does not compile.
+    #[error(
+        "field {field:?} is a struct nullable only in versions {nullable_versions} of its \
+         presence range {versions}; a partially-nullable struct has no encodable non-null form, \
+         so teach kacrab-codegen/src/codegen/write_expr.rs and size_expr.rs how to encode it \
+         before landing this schema"
+    )]
+    PartiallyNullableStruct {
+        /// Field carrying the unencodable nullability shape.
+        field: String,
+        /// The field's presence range.
+        versions: String,
+        /// The sub-range in which the field is nullable.
+        nullable_versions: String,
+    },
     /// A schema default could not be represented as the Rust type selected for
     /// the field.
     #[error("invalid default {value:?} for field {field:?} of type {field_type:?}")]

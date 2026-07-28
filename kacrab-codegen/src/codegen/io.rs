@@ -303,7 +303,7 @@ fn generate_write_field_exprs(def: &StructDef<'_>) -> Result<Vec<TokenStream>, C
                 &rust_ident,
                 &def.flexible_versions,
                 &def.effective_versions,
-            );
+            )?;
             if version_check_always_true(&field.versions, &def.effective_versions) {
                 Ok(write_expr)
             } else {
@@ -403,7 +403,7 @@ fn generate_len_field_exprs(def: &StructDef<'_>) -> Result<Vec<TokenStream>, Cod
                 &rust_ident,
                 &def.flexible_versions,
                 &def.effective_versions,
-            );
+            )?;
             if version_check_always_true(&field.versions, &def.effective_versions) {
                 Ok(len_expr)
             } else {

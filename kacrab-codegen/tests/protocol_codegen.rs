@@ -12,7 +12,7 @@ use std::{
 };
 
 use kacrab_codegen::{
-    codegen,
+    codegen::{self, CodegenErrorKind},
     errors_java::{self, ErrorsJavaErrorKind},
     ir::{
         field::{FieldSpec, FieldType},
@@ -358,6 +358,182 @@ fn errors_java_scrape_and_lower_cover_retriability_display_and_low_count_errors(
         errors_java::scrape(&missing).unwrap_err().kind,
         ErrorsJavaErrorKind::MissingEnumBlock
     ));
+}
+
+/// A `struct`-typed field that is nullable in only part of its presence range
+/// has no encodable non-null form: unlike `string`/`bytes`/arrays there is no
+/// empty value the write side can substitute, so the emitters used to produce
+/// `self.detail.write(buf, version)?` against an `Option<Box<DetailThing>>`.
+/// Codegen must reject the shape instead of emitting Rust that cannot compile.
+#[test]
+fn partially_nullable_struct_field_is_rejected_instead_of_emitting_broken_rust() {
+    let dir = scratch_dir("partial-nullable-struct");
+    let path = write_file(
+        &dir,
+        "PartialRequest.json",
+        r#"{
+  "apiKey": 91,
+  "type": "request",
+  "name": "PartialRequest",
+  "validVersions": "0-3",
+  "flexibleVersions": "none",
+  "fields": [
+    {
+      "name": "Detail",
+      "type": "DetailThing",
+      "versions": "0+",
+      "nullableVersions": "2+",
+      "fields": [
+        { "name": "Code", "type": "int16", "versions": "0+" }
+      ]
+    }
+  ]
+}"#,
+    );
+
+    let spec = parser::parse_spec(&path).unwrap();
+    let error = codegen::generate_file(&spec, &[])
+        .expect_err("a partially-nullable struct field must fail codegen");
+
+    assert_eq!(error.schema, "PartialRequest");
+    match error.kind {
+        CodegenErrorKind::PartiallyNullableStruct {
+            field,
+            versions,
+            nullable_versions,
+        } => {
+            assert_eq!(field, "Detail");
+            assert_eq!(versions, "0+");
+            assert_eq!(nullable_versions, "2+");
+        },
+        other => panic!("expected partially-nullable struct error, got {other:?}"),
+    }
+}
+
+/// The fixture generator once decided nullability with
+/// `nullable_versions.intersects(effective_versions)` while the type mapper used
+/// `nullable_versions.intersects(field.versions)`. A field whose nullable range
+/// falls entirely outside its own presence range diverges: the struct field is a
+/// bare `KafkaString`, but the fixture assigned `None` to it.
+#[test]
+fn fixture_nullability_matches_the_emitted_field_type() {
+    let dir = scratch_dir("divergent-nullability");
+    let path = write_file(
+        &dir,
+        "DivergentRequest.json",
+        r#"{
+  "apiKey": 92,
+  "type": "request",
+  "name": "DivergentRequest",
+  "validVersions": "0-5",
+  "flexibleVersions": "none",
+  "fields": [
+    { "name": "Label", "type": "string", "versions": "3+", "nullableVersions": "0-2" }
+  ]
+}"#,
+    );
+
+    let spec = parser::parse_spec(&path).unwrap();
+
+    let generated = codegen::generate_file(&spec, &[]).unwrap().to_string();
+    assert!(
+        generated.contains("pub label : KafkaString"),
+        "the field is not nullable within its own presence range: {generated}"
+    );
+
+    let test_utils = codegen::generate_test_utils_file(&spec)
+        .unwrap()
+        .to_string();
+    assert!(
+        !test_utils.contains("None"),
+        "a non-optional field must never get a `None` fixture value: {test_utils}"
+    );
+    assert!(
+        test_utils.contains("label : KafkaString :: default ()"),
+        "the fixture must use the field's own non-null default: {test_utils}"
+    );
+}
+
+/// The other direction of the same predicate: a field that *is* an `Option` in
+/// Rust but cannot be null at any encoded version must still get a non-null
+/// fixture, because the encoder has no null form to write there. This is
+/// `ShareFetchResponse`'s `Records` (`"nullableVersions": "0"` on a `1-2`
+/// message) reduced to a single field — keying the fixture on the type-level
+/// predicate alone would silently flip it to `None`.
+#[test]
+fn fixture_keeps_a_non_null_value_when_no_encoded_version_is_nullable() {
+    let dir = scratch_dir("nullable-outside-encoded-range");
+    let path = write_file(
+        &dir,
+        "LateNullableResponse.json",
+        r#"{
+  "apiKey": 94,
+  "type": "response",
+  "name": "LateNullableResponse",
+  "validVersions": "1-2",
+  "flexibleVersions": "0+",
+  "fields": [
+    { "name": "Records", "type": "records", "versions": "0+", "nullableVersions": "0" }
+  ]
+}"#,
+    );
+
+    let spec = parser::parse_spec(&path).unwrap();
+
+    let generated = codegen::generate_file(&spec, &[]).unwrap().to_string();
+    assert!(
+        generated.contains("pub records : Option < Bytes >"),
+        "records always lower to an Option: {generated}"
+    );
+
+    let test_utils = codegen::generate_test_utils_file(&spec)
+        .unwrap()
+        .to_string();
+    assert!(
+        test_utils.contains("records : Some (Bytes :: new ())"),
+        "a field nullable only outside the encoded version range must keep a non-null fixture: \
+         {test_utils}"
+    );
+}
+
+/// The explicit-default resolver ended in a string catch-all that handed
+/// `KafkaString::from(...)` to any field type, so a `uuid` default that is not a
+/// number silently produced a type error in the generated crate.
+#[test]
+fn non_string_typed_explicit_defaults_are_rejected() {
+    let dir = scratch_dir("string-default-catch-all");
+    let path = write_file(
+        &dir,
+        "BadDefaultRequest.json",
+        r#"{
+  "apiKey": 93,
+  "type": "request",
+  "name": "BadDefaultRequest",
+  "validVersions": "0-1",
+  "flexibleVersions": "none",
+  "fields": [
+    { "name": "TopicId", "type": "uuid", "versions": "0+", "default": "not-a-uuid" }
+  ]
+}"#,
+    );
+
+    let spec = parser::parse_spec(&path).unwrap();
+    let error = codegen::generate_file(&spec, &[])
+        .expect_err("a non-numeric uuid default must fail codegen");
+
+    assert_eq!(error.schema, "BadDefaultRequest");
+    match error.kind {
+        CodegenErrorKind::InvalidDefaultValue {
+            field,
+            value,
+            field_type,
+        } => {
+            assert_eq!(field, "TopicId");
+            assert_eq!(value, "not-a-uuid");
+            assert_eq!(field_type, "Uuid");
+        },
+        other => panic!("expected invalid default error, got {other:?}"),
+    }
 }
 
 fn test_field(name: &str, field_type: FieldType) -> FieldSpec {
