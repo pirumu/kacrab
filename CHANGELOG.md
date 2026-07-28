@@ -121,6 +121,13 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **A produce response could bind receipts to the wrong topic.** Matching a
+  response to its route accepted topic-id equality unconditionally, but a broker
+  that reports no topic ids leaves both sides at `KafkaUuid::ZERO` — so the first
+  topic in a multi-topic produce response matched *every* route and every receipt
+  took its offsets. The id disjunct now only counts when the id is non-zero,
+  leaving the topic name to disambiguate as it always did on older brokers.
+
 - **Typed producer builders never configured their registered interceptors.**
   `ProducerBuilder::build_with_serializers` and
   `build_with_configured_serializers` were drifted copies of `build`'s pipeline
