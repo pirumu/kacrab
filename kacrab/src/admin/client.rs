@@ -829,7 +829,7 @@ impl AdminClient {
         {
             Ok(pair) => pair,
             // Broker predates ConsumerGroupDescribe — fall back to DescribeGroups.
-            Err(AdminError::Wire(WireError::UnsupportedApiVersion(_))) => return Ok(None),
+            Err(AdminError::Wire(WireError::UnsupportedApiVersion { .. })) => return Ok(None),
             Err(other) => return Err(other),
         };
         let Some(group) = response

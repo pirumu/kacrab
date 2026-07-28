@@ -593,9 +593,12 @@ impl BrokerTask {
             timeout,
             ..
         } = command;
-        let Some(api_version) = capabilities.version_for_limit(api_key, max_api_version) else {
-            completion.send_error(WireError::UnsupportedApiVersion(api_key));
-            return Ok(false);
+        let api_version = match capabilities.resolve_version_for_limit(api_key, max_api_version) {
+            Ok(api_version) => api_version,
+            Err(error) => {
+                completion.send_error(error);
+                return Ok(false);
+            },
         };
         let body_len = match request.encoded_len(api_version) {
             Ok(body_len) => body_len,

@@ -135,6 +135,16 @@ release date and links to relevant pull requests or issues.
   requires Apache Kafka 2.4 or newer`. Other `ApiVersions` error codes are still
   retried as before.
 
+  Incompatibility errors on ordinary requests are actionable too now.
+  `WireError::UnsupportedApiVersion` used to render as `no compatible API version
+  for Metadata`, leaving the reader to guess which versions were in play. It now
+  carries the API, the range kacrab speaks, and the range the broker advertised —
+  and distinguishes a broker that never advertised the API from one whose range
+  does not overlap kacrab's, because those need different fixes: `no compatible
+  Produce API version (key 0): kacrab supports v3..=v13, broker supports v0..=v2;
+  needs a broker that supports Produce v3 or newer`. The variant changed from a
+  tuple to a struct (`api_key`, `client`, `broker`) to carry it.
+
 - **`FindCoordinator` was always sent in its v4+ form, so every broker older than
   3.0 failed coordinator discovery.** The consumer, producer, and admin clients all
   filled `coordinator_keys` — the batched array KIP-699 added in v4 — while the
