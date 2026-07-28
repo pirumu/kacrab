@@ -88,10 +88,13 @@ pub enum RecordErrorKind {
         min: i32,
     },
 
-    /// `recordCount` exceeds [`crate::record::MAX_RECORDS_PER_BATCH`].
+    /// `recordCount` exceeds [`crate::record::MAX_RECORDS_PER_BATCH`], or an
+    /// encoded batch holds more records than the `i32` count field can carry.
     #[error("record count {got} exceeds maximum {max}")]
     RecordCountTooLarge {
-        /// Count declared on the wire.
+        /// Offending count: declared on the wire when decoding. `i32::MAX` is a
+        /// sentinel for the encode side, where the real count is the batch's
+        /// in-memory record count precisely because it does not fit `i32`.
         got: i32,
         /// Configured maximum.
         max: usize,
@@ -106,14 +109,20 @@ pub enum RecordErrorKind {
         length: i32,
     },
 
-    /// A length field exceeds the remaining buffer.
+    /// A length field exceeds the budget available to it — the bytes left in the
+    /// buffer when decoding, the protocol maximum when encoding.
     #[error("{field} length {got} exceeds remaining {remaining}")]
     LengthOverflow {
         /// Which field overflowed.
         field: &'static str,
-        /// Length declared on the wire.
+        /// Offending length: declared on the wire when decoding, in-memory when
+        /// encoding. `usize::MAX` is a sentinel for a length that does not fit
+        /// `usize` at all — a wire length prefix wider than this platform's address
+        /// space, or a running encoded-length sum that overflowed.
         got: usize,
-        /// Bytes actually remaining in the buffer.
+        /// Budget the length had to fit into: bytes actually remaining in the buffer
+        /// when decoding, or the protocol maximum (`i32::MAX`,
+        /// [`crate::record::MAX_RECORDS_PER_BATCH`]) when encoding.
         remaining: usize,
     },
 }

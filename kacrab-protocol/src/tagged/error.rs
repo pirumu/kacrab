@@ -24,18 +24,24 @@ pub enum TaggedFieldError {
     SizeOverflow {
         /// The tag whose size was bad.
         tag: u32,
-        /// Declared size.
+        /// Declared size. `usize::MAX` is a sentinel for a wire size varint wider
+        /// than this platform's address space, where the real value cannot be
+        /// represented in a `usize` at all.
         size: usize,
         /// Bytes actually remaining in the buffer.
         remaining: usize,
     },
 
-    /// A tagged-field count does not fit this platform's address space.
+    /// A tagged-field count does not fit — this platform's address space when
+    /// decoding, or the `u32` varint count prefix when encoding.
     #[error("tagged field count {count} exceeds maximum {max}")]
     CountOverflow {
-        /// Declared count.
+        /// Offending count: read from the wire when decoding. `u32::MAX` is a
+        /// sentinel for the encode side, where the real count is the section's
+        /// field count precisely because it does not fit `u32`.
         count: u32,
-        /// Maximum representable count on this platform.
+        /// Maximum the count had to fit into: the largest representable `usize`
+        /// when decoding, the largest encodable count (`u32::MAX`) when encoding.
         max: usize,
     },
 
