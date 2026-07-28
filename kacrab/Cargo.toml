@@ -131,6 +131,10 @@ name = "producer_dispatcher"
 required-features = ["producer"]
 
 [[test]]
+name = "producer_interceptor_api"
+required-features = ["producer"]
+
+[[test]]
 name = "real_kafka_admin"
 required-features = ["admin"]
 

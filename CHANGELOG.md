@@ -159,6 +159,15 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **`ProducerInterceptor::configure` and `on_update` could not be overridden
+  outside kacrab.** Both are public trait methods, but their parameter types —
+  `InterceptorConfigs` and `ClusterResource` — were never re-exported from
+  `kacrab::producer`, so a downstream crate had no way to name the argument and
+  was stuck with the two default implementations. Both types are now re-exported,
+  mirroring `consumer::InterceptorConfigs`, and a new integration test
+  (`tests/producer_interceptor_api.rs` — a separate crate, so it proves the
+  downstream case) implements every method of the trait.
+
 - **`ConfigError` and `ParseConfigValueError` are now `std::error::Error`.** Both
   implemented `Display` but not `Error`, so they could not be boxed into
   `Box<dyn Error>`, could not be `?`-converted in a `main`, and produced no source
