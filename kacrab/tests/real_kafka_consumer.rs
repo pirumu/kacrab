@@ -228,15 +228,21 @@ async fn real_kafka_two_consumers_split_partitions() {
 
     let group_id = format!("group-rebal-{topic}");
     let expected = per_partition * 2;
+    // Deduplicate by (partition, offset): nothing is committed here, so a
+    // partition that changes hands mid-run is legitimately re-read from the
+    // beginning by its new owner (at-least-once). Counting distinct records
+    // asserts the pair covered every record, which a raw sum cannot.
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     // Real consumers poll on independent threads: while one blocks in JoinGroup
     // (the coordinator holds it until every member rejoins), the other must keep
     // polling to rejoin. Drive each in its own task to mirror that.
-    let total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let board = std::sync::Arc::new(AssignmentBoard::default());
     let run = |client: &'static str| {
         let bootstrap = bootstrap.clone();
         let group_id = group_id.clone();
         let topic = topic.clone();
-        let total = std::sync::Arc::clone(&total);
+        let seen = std::sync::Arc::clone(&seen);
+        let board = std::sync::Arc::clone(&board);
         tokio::spawn(async move {
             let mut consumer = Consumer::from_map([
                 ("bootstrap.servers", bootstrap.as_str()),
@@ -249,31 +255,50 @@ async fn real_kafka_two_consumers_split_partitions() {
             .await
             .expect("consumer should connect");
             consumer.subscribe([topic]).expect("subscribe");
+            // Keep polling until every record is accounted for AND the board
+            // reports a settled split, i.e. both members confirmed the same
+            // one-partition-each division while both were still in the group.
             let deadline = std::time::Instant::now() + Duration::from_secs(50);
-            while total.load(std::sync::atomic::Ordering::SeqCst) < expected
-                && std::time::Instant::now() < deadline
-            {
-                let count = consumer
-                    .poll(Duration::from_secs(1))
-                    .await
-                    .expect("poll")
-                    .count();
-                let _prev = total.fetch_add(count, std::sync::atomic::Ordering::SeqCst);
+            while std::time::Instant::now() < deadline {
+                let records = consumer.poll(Duration::from_secs(1)).await.expect("poll");
+                let all_seen = {
+                    let mut seen = seen.lock().expect("seen lock");
+                    for record in &records {
+                        let _new = seen.insert((record.partition, record.offset));
+                    }
+                    seen.len() >= expected
+                };
+                if board.publish(client, consumer.assignment()) && all_seen {
+                    break;
+                }
             }
-            let assignment = consumer.assignment();
             consumer.close().await;
-            assignment
         })
     };
 
     let task_a = run("kacrab-rebal-a");
     let task_b = run("kacrab-rebal-b");
-    let a_assign = task_a.await.expect("task a");
-    let b_assign = task_b.await.expect("task b");
+    task_a.await.expect("task a");
+    task_b.await.expect("task b");
 
-    let consumed = total.load(std::sync::atomic::Ordering::SeqCst);
-    println!("  a={a_assign:?} b={b_assign:?} consumed={consumed}");
+    let split = board.settled_split();
+    let consumed = seen.lock().expect("seen lock").len();
+    println!("  split={split:?} consumed={consumed}");
     assert_eq!(consumed, expected, "the pair should consume every record");
+    let split = split.unwrap_or_else(|| {
+        panic!(
+            "the two consumers never settled on a disjoint one-partition-each split; last \
+             observed assignments: {:?}",
+            board.live_assignments()
+        )
+    });
+    let a_assign = split
+        .get("kacrab-rebal-a")
+        .expect("consumer a in the settled split");
+    let b_assign = split
+        .get("kacrab-rebal-b")
+        .expect("consumer b in the settled split");
+    println!("  a={a_assign:?} b={b_assign:?}");
     assert_eq!(
         a_assign.len(),
         1,
@@ -642,6 +667,100 @@ async fn real_kafka_out_of_range_resets_and_recovers() {
     println!("real Kafka out-of-range smoke: ALL OK");
 }
 
+/// Shared board the two members of a group-rebalance test publish their live
+/// assignment into after every poll.
+///
+/// Both rebalance tests used to snapshot `consumer.assignment()` at the moment
+/// each member's own poll loop happened to exit, and assert on that pair of
+/// snapshots. That is a racing read of a group that is still moving: the two
+/// members exit independently, and the first one to `close()` sends a
+/// `LeaveGroup` that makes the survivor rebalance onto *both* partitions before
+/// it takes its own snapshot. Both tests flaked exactly that way.
+///
+/// The board replaces that with an agreement protocol. A split counts as
+/// settled only when both members are present, each owns exactly one partition,
+/// the two partitions are distinct, and **both members re-published that same
+/// split** — so it survived a full round of polling by each member rather than
+/// being a mid-handover instant. The first settled split is frozen, and the
+/// assertions run against it, so a rebalance triggered by whichever member
+/// stops first can no longer change what is asserted.
+/// Each member's `client.id` mapped to the partitions it currently owns.
+type Split = std::collections::BTreeMap<&'static str, Vec<TopicPartition>>;
+
+/// Members that have re-published the candidate split since it was first seen.
+type Confirmers = std::collections::BTreeSet<&'static str>;
+
+#[derive(Default)]
+struct AssignmentBoard {
+    state: std::sync::Mutex<BoardState>,
+}
+
+#[derive(Default)]
+struct BoardState {
+    /// Latest assignment published by each member, keyed by `client.id`.
+    live: Split,
+    /// Split currently awaiting confirmation, plus the members that have
+    /// re-published it since it was first observed.
+    candidate: Option<(Split, Confirmers)>,
+    /// The confirmed split, frozen on first agreement.
+    settled: Option<Split>,
+}
+
+impl AssignmentBoard {
+    /// Members expected in the group — both rebalance tests run a pair over a
+    /// two-partition topic, so this is also the expected partition count.
+    const MEMBERS: usize = 2;
+
+    /// Record `client`'s current assignment, returning `true` once the group has
+    /// settled on a disjoint one-partition-each split.
+    fn publish(&self, client: &'static str, assignment: Vec<TopicPartition>) -> bool {
+        let mut state = self.state.lock().expect("assignment board");
+        let _prev = state.live.insert(client, assignment);
+        if state.settled.is_some() {
+            return true;
+        }
+        let Some(split) = Self::disjoint_single_split(&state.live) else {
+            state.candidate = None;
+            return false;
+        };
+        let confirmed = match state.candidate.as_mut() {
+            Some((candidate, confirmers)) if *candidate == split => {
+                let _new = confirmers.insert(client);
+                confirmers.len() >= Self::MEMBERS
+            },
+            _ => {
+                state.candidate = Some((split.clone(), Confirmers::from([client])));
+                false
+            },
+        };
+        if confirmed {
+            state.settled = Some(split);
+        }
+        confirmed
+    }
+
+    /// The frozen settled split, or `None` if the group never agreed on one.
+    fn settled_split(&self) -> Option<Split> {
+        self.state.lock().expect("assignment board").settled.clone()
+    }
+
+    /// Last assignment each member published — failure-message context only.
+    fn live_assignments(&self) -> Split {
+        self.state.lock().expect("assignment board").live.clone()
+    }
+
+    /// `Some(split)` when every member has published exactly one partition and
+    /// no two members name the same one.
+    fn disjoint_single_split(live: &Split) -> Option<Split> {
+        if live.len() != Self::MEMBERS || live.values().any(|owned| owned.len() != 1) {
+            return None;
+        }
+        let distinct: std::collections::HashSet<&TopicPartition> =
+            live.values().flatten().collect();
+        (distinct.len() == Self::MEMBERS).then(|| live.clone())
+    }
+}
+
 async fn create_topic(bootstrap: &str, topic: &str, partitions: i32) {
     let admin = AdminClient::from_map([("bootstrap.servers", bootstrap)])
         .await
@@ -700,11 +819,13 @@ async fn real_kafka_cooperative_sticky_incremental() {
     // (at-least-once), so a raw count over-counts on slow hosts where the
     // second member joins after the first has already consumed everything.
     let seen = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let board = std::sync::Arc::new(AssignmentBoard::default());
     let run = |client: &'static str| {
         let bootstrap = bootstrap.clone();
         let group_id = group_id.clone();
         let topic = topic.clone();
         let seen = std::sync::Arc::clone(&seen);
+        let board = std::sync::Arc::clone(&board);
         tokio::spawn(async move {
             let mut consumer = Consumer::from_map([
                 ("bootstrap.servers", bootstrap.as_str()),
@@ -718,14 +839,14 @@ async fn real_kafka_cooperative_sticky_incremental() {
             .await
             .expect("consumer should connect");
             consumer.subscribe([topic]).expect("subscribe");
-            // Keep polling until every record is accounted for AND this member
-            // has settled at exactly one partition — i.e. it has observed the
-            // incremental handover complete. Snapshotting only then keeps the
-            // final asserts race-free: exiting as soon as the count is reached
-            // lets one member leave before the other ever saw the 1/1 split
-            // (the survivor then rebalances to own both partitions).
+            // Keep polling until every record is accounted for AND the board
+            // reports a settled split, i.e. the incremental handover completed
+            // and *both* members confirmed the same one-partition-each division
+            // while both were still in the group. Stopping on this member's own
+            // `assignment().len() == 1` was not enough: the first member to stop
+            // sends a LeaveGroup on close, and the survivor can rebalance onto
+            // both partitions before it takes its own snapshot.
             let deadline = std::time::Instant::now() + Duration::from_secs(50);
-            let mut assignment = consumer.assignment();
             while std::time::Instant::now() < deadline {
                 let records = consumer.poll(Duration::from_secs(1)).await.expect("poll");
                 let all_seen = {
@@ -735,24 +856,37 @@ async fn real_kafka_cooperative_sticky_incremental() {
                     }
                     seen.len() >= expected
                 };
-                assignment = consumer.assignment();
-                if all_seen && assignment.len() == 1 {
+                if board.publish(client, consumer.assignment()) && all_seen {
                     break;
                 }
             }
             consumer.close().await;
-            assignment
         })
     };
 
     let task_a = run("kacrab-coop-a");
     let task_b = run("kacrab-coop-b");
-    let a_assign = task_a.await.expect("task a");
-    let b_assign = task_b.await.expect("task b");
+    task_a.await.expect("task a");
+    task_b.await.expect("task b");
 
+    let split = board.settled_split();
     let consumed = seen.lock().expect("seen lock").len();
-    println!("  a={a_assign:?} b={b_assign:?} consumed={consumed}");
+    println!("  split={split:?} consumed={consumed}");
     assert_eq!(consumed, expected, "the pair should consume every record");
+    let split = split.unwrap_or_else(|| {
+        panic!(
+            "the two consumers never settled on a disjoint one-partition-each split; last \
+             observed assignments: {:?}",
+            board.live_assignments()
+        )
+    });
+    let a_assign = split
+        .get("kacrab-coop-a")
+        .expect("consumer a in the settled split");
+    let b_assign = split
+        .get("kacrab-coop-b")
+        .expect("consumer b in the settled split");
+    println!("  a={a_assign:?} b={b_assign:?}");
     assert_eq!(a_assign.len(), 1, "consumer a owns one partition");
     assert_eq!(b_assign.len(), 1, "consumer b owns one partition");
     assert_ne!(

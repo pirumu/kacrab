@@ -21,7 +21,8 @@
 
 use std::{
     env,
-    time::{SystemTime, UNIX_EPOCH},
+    future::Future,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use kacrab::{
@@ -169,13 +170,14 @@ async fn real_kafka_admin_smoke() {
     println!("  create_partitions: -> 3");
 
     // --- offsets (leader-routed) ---
-    let offsets = admin
-        .list_offsets(vec![
+    let offsets = retry_until_leader("list_offsets", || {
+        admin.list_offsets(vec![
             (TopicPartition::new(&topic, 0), OffsetSpec::Earliest),
             (TopicPartition::new(&topic, 1), OffsetSpec::Latest),
         ])
-        .await
-        .expect("list_offsets");
+    })
+    .await
+    .expect("list_offsets");
     println!("  list_offsets: {} results", offsets.len());
     assert_eq!(offsets.len(), 2, "expected earliest+latest results");
 
@@ -200,10 +202,11 @@ async fn real_kafka_admin_smoke() {
         .expect("elect_leaders");
     println!("  elect_leaders(preferred, p0) — OK");
 
-    let producers = admin
-        .describe_producers(vec![TopicPartition::new(&topic, 0)])
-        .await
-        .expect("describe_producers");
+    let producers = retry_until_leader("describe_producers", || {
+        admin.describe_producers(vec![TopicPartition::new(&topic, 0)])
+    })
+    .await
+    .expect("describe_producers");
     println!(
         "  describe_producers(p0): {} active",
         producers.first().map_or(0, |p| p.active_producers.len())
@@ -348,7 +351,7 @@ async fn real_kafka_admin_extended() {
         if acls.iter().any(|b| b.principal == principal) {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
     println!("  acls: created+described {} binding(s)", acls.len());
     assert!(
@@ -404,7 +407,7 @@ async fn real_kafka_admin_extended() {
             quota_seen = true;
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
     println!("  quotas: read back = {quota_seen}");
     assert!(quota_seen, "quota must read back");
@@ -452,7 +455,7 @@ async fn real_kafka_admin_extended() {
             scram_seen = true;
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
     println!("  scram: read back = {scram_seen}");
     assert!(scram_seen, "SCRAM credential must read back");
@@ -495,7 +498,7 @@ async fn real_kafka_admin_extended() {
                 break;
             },
             Err(AdminError::Broker { error, .. }) if error.is_retriable() => {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
             },
             Err(other) => panic!("fence_producers: {other:?}"),
         }
@@ -659,6 +662,57 @@ impl CapabilityLog {
             skipped,
             self.outcomes.len()
         )
+    }
+}
+
+/// Run a leader-routed admin op against a freshly created topic, retrying only
+/// the error codes that mean "leader election has not landed on this broker
+/// yet", up to a bounded deadline.
+///
+/// `create_topics`/`create_partitions` return once the *controller* has
+/// committed the metadata record. The partition leader is elected — and the
+/// owning broker starts serving the partition — only after that broker replays
+/// the metadata delta. A leader-routed request issued inside that gap is
+/// answered with a transient routing code rather than data: the 4.0 leg of the
+/// broker matrix returned `NotLeaderOrFollower` from `list_offsets` issued
+/// immediately after `create_topics`.
+///
+/// Only the transient leader-election codes are retried. Every other error —
+/// including every other broker error code — is returned on the first attempt,
+/// and the caller still `expect`s a success, so the assertion this guards is
+/// exactly as strong as before: the op must succeed, it is merely allowed to
+/// lose the race with leader election first.
+async fn retry_until_leader<T, F, Fut>(label: &str, mut op: F) -> Result<T, AdminError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, AdminError>>,
+{
+    /// Same bound as the `describe_acls`/client-quota polls above: 25 attempts
+    /// 200ms apart, so ~5s of leader-election slack before the test fails.
+    const ATTEMPTS: u32 = 25;
+    const BACKOFF: Duration = Duration::from_millis(200);
+
+    let mut attempt = 1_u32;
+    loop {
+        let result = op().await;
+        match result {
+            Err(AdminError::Broker {
+                error:
+                    error @ (ErrorCode::NotLeaderOrFollower
+                    | ErrorCode::LeaderNotAvailable
+                    | ErrorCode::ReplicaNotAvailable
+                    | ErrorCode::UnknownTopicOrPartition),
+                ..
+            }) if attempt < ATTEMPTS => {
+                println!(
+                    "  {label}: {error:?} on attempt {attempt}/{ATTEMPTS} — leader not settled \
+                     yet, retrying"
+                );
+                attempt = attempt.saturating_add(1);
+                tokio::time::sleep(BACKOFF).await;
+            },
+            other => return other,
+        }
     }
 }
 

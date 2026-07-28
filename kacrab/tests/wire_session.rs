@@ -19,7 +19,7 @@ use kacrab_protocol::generated::{
     ConsumerGroupHeartbeatResponseData, ErrorCode, JoinGroupResponseData,
 };
 use kacrab_protocol::{
-    KafkaString, KafkaUuid, frame,
+    KafkaString, KafkaUuid,
     generated::{
         ApiKey, ApiVersion, ApiVersionsResponseData, DeletableTopicResult, DeleteTopicState,
         DeleteTopicsRequestData, DeleteTopicsResponseData, FindCoordinatorRequestData,
@@ -30,12 +30,12 @@ use kacrab_protocol::{
         OffsetCommitResponseData, OffsetCommitResponsePartition, OffsetCommitResponseTopic,
         OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
         OffsetFetchResponseData, OffsetFetchResponsePartition, OffsetFetchResponseTopic,
-        ProduceRequestData, ProduceResponseData, RequestHeaderData, ResponseHeaderData,
-        SaslAuthenticateRequestData, SaslAuthenticateResponseData, SaslHandshakeRequestData,
-        SaslHandshakeResponseData, leave_group_request::MemberIdentity,
+        ProduceRequestData, ProduceResponseData, RequestHeaderData, SaslAuthenticateRequestData,
+        SaslAuthenticateResponseData, SaslHandshakeRequestData, SaslHandshakeResponseData,
+        leave_group_request::MemberIdentity,
         list_config_resources_response::ConfigResource as WireConfigResource,
     },
-    version::{request_header_version, response_header_version},
+    version::request_header_version,
 };
 #[cfg(feature = "aws-lc-rs-tls")]
 use pkcs8::{
@@ -57,6 +57,10 @@ use tokio::{
 };
 #[cfg(any(feature = "aws-lc-rs-tls", feature = "pure-rust-tls"))]
 use tokio_rustls::TlsAcceptor;
+
+use crate::common::{MockBroker, read_frame, response_frame};
+
+mod common;
 
 /// Pick a `rustls` crypto provider for the mock TLS broker.
 ///
@@ -809,7 +813,7 @@ async fn wire_client_send_without_response_completes_after_write() {
 #[tokio::test]
 async fn wire_client_rejects_request_when_in_flight_limit_is_full() {
     let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
-    let server = MockBroker::serve_blocking_after_handshake(request_seen_tx).await;
+    let server = serve_blocking_after_handshake(request_seen_tx).await;
     let client = WireClient::connect_with_brokers(
         ConnectionConfig::default()
             .max_in_flight_requests_per_connection(1)
@@ -973,8 +977,8 @@ async fn wire_client_refreshes_metadata_after_partition_invalidation() {
 async fn wire_client_stress_pipelines_requests_across_multiple_brokers() {
     const REQUESTS_PER_BROKER: usize = 32;
 
-    let broker_7 = MockBroker::serve_pipelined_api_versions(REQUESTS_PER_BROKER, 7).await;
-    let broker_8 = MockBroker::serve_pipelined_api_versions(REQUESTS_PER_BROKER, 8).await;
+    let broker_7 = serve_pipelined_api_versions(REQUESTS_PER_BROKER, 7).await;
+    let broker_8 = serve_pipelined_api_versions(REQUESTS_PER_BROKER, 8).await;
     let client = WireClient::connect_with_brokers(
         ConnectionConfig::default()
             .max_in_flight_requests_per_connection(REQUESTS_PER_BROKER + 1)
@@ -1760,152 +1764,67 @@ async fn wire_client_runs_tls_with_client_certificate_before_api_versions() {
     assert_eq!(tls.join().await, 2);
 }
 
+/// Which SCRAM mechanism a `wire_client_runs_scram_*` run drives.
+///
+/// The SHA-256 and SHA-512 tests were a 139-line copy differing in four places:
+/// the mechanism name the broker asserts and advertises, the reference-vector
+/// function, and the mechanism the client is configured with. Everything else —
+/// the full `client-first` / `server-first` / `client-final` / `server-final`
+/// exchange, the nonce and salt handling, the server-signature check — was
+/// identical, so a fix to the exchange had to be made twice.
+#[derive(Clone, Copy)]
+enum ScramMechanism {
+    Sha256,
+    Sha512,
+}
+
+impl ScramMechanism {
+    /// The mechanism name as it travels on the wire.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Sha256 => "SCRAM-SHA-256",
+            Self::Sha512 => "SCRAM-SHA-512",
+        }
+    }
+
+    /// The mechanism the client is configured with.
+    const fn config(self) -> kacrab::wire::SaslMechanism {
+        match self {
+            Self::Sha256 => kacrab::wire::SaslMechanism::ScramSha256,
+            Self::Sha512 => kacrab::wire::SaslMechanism::ScramSha512,
+        }
+    }
+
+    /// Reference `(client proof, server signature)` computed independently of
+    /// the client under test.
+    fn vectors(
+        self,
+        password: &[u8],
+        salt: &[u8],
+        iterations: u32,
+        auth_message: &[u8],
+    ) -> (Vec<u8>, Vec<u8>) {
+        match self {
+            Self::Sha256 => scram_sha256_vectors(password, salt, iterations, auth_message),
+            Self::Sha512 => scram_sha512_vectors(password, salt, iterations, auth_message),
+        }
+    }
+}
+
 #[tokio::test]
 async fn wire_client_runs_scram_sha256_and_verifies_server_signature() {
-    let broker = MockBroker::serve_many(vec![
-        Box::new(api_versions_response),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(
-                &mut request,
-                request_header_version(ApiKey::SaslHandshake as i16, 1),
-            )
-            .expect("sasl handshake header");
-            let body =
-                SaslHandshakeRequestData::read(&mut request, 1).expect("sasl handshake body");
-            assert_eq!(body.mechanism.to_string(), "SCRAM-SHA-256");
-            let response = SaslHandshakeResponseData {
-                error_code: 0,
-                mechanisms: vec![KafkaString::from("SCRAM-SHA-256".to_owned())],
-                _unknown_tagged_fields: Vec::new(),
-            };
-            response_frame(ApiKey::SaslHandshake, 1, header.correlation_id, &response)
-        }),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(
-                &mut request,
-                request_header_version(ApiKey::SaslAuthenticate as i16, 2),
-            )
-            .expect("scram first header");
-            let body =
-                SaslAuthenticateRequestData::read(&mut request, 2).expect("scram first body");
-            let client_first = std::str::from_utf8(body.auth_bytes.as_ref()).expect("utf8");
-            assert!(client_first.starts_with("n,,n=alice,r="));
-            let client_first_bare = client_first.strip_prefix("n,,").expect("gs2 header");
-            let client_nonce =
-                scram_attr(client_first_bare, "r").expect("client nonce in first message");
-            let server_first = format!(
-                "r={client_nonce}SERVER,s={},i=4096",
-                general_purpose::STANDARD.encode(b"salt")
-            );
-            let response = SaslAuthenticateResponseData {
-                error_code: 0,
-                error_message: None,
-                auth_bytes: Bytes::from(server_first),
-                session_lifetime_ms: 300_000,
-                _unknown_tagged_fields: Vec::new(),
-            };
-            response_frame(
-                ApiKey::SaslAuthenticate,
-                2,
-                header.correlation_id,
-                &response,
-            )
-        }),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(
-                &mut request,
-                request_header_version(ApiKey::SaslAuthenticate as i16, 2),
-            )
-            .expect("scram final header");
-            let body =
-                SaslAuthenticateRequestData::read(&mut request, 2).expect("scram final body");
-            let client_final = std::str::from_utf8(body.auth_bytes.as_ref()).expect("utf8");
-            let client_final_without_proof = client_final
-                .split(",p=")
-                .next()
-                .expect("client final proof separator");
-            let nonce = scram_attr(client_final_without_proof, "r").expect("nonce");
-            let client_first_bare = {
-                let client_nonce = nonce.strip_suffix("SERVER").expect("server suffix");
-                format!("n=alice,r={client_nonce}")
-            };
-            let server_first = format!(
-                "r={nonce},s={},i=4096",
-                general_purpose::STANDARD.encode(b"salt")
-            );
-            let auth_message =
-                format!("{client_first_bare},{server_first},{client_final_without_proof}");
-            let (expected_proof, server_signature) =
-                scram_sha256_vectors(b"secret", b"salt", 4096, auth_message.as_bytes());
-            let proof = scram_attr(client_final, "p").expect("proof");
-            assert_eq!(proof, general_purpose::STANDARD.encode(expected_proof));
-            let response = SaslAuthenticateResponseData {
-                error_code: 0,
-                error_message: None,
-                auth_bytes: Bytes::from(format!(
-                    "v={}",
-                    general_purpose::STANDARD.encode(server_signature)
-                )),
-                session_lifetime_ms: 300_000,
-                _unknown_tagged_fields: Vec::new(),
-            };
-            response_frame(
-                ApiKey::SaslAuthenticate,
-                2,
-                header.correlation_id,
-                &response,
-            )
-        }),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::ApiVersions as i16);
-            let response = ApiVersionsResponseData {
-                error_code: 0,
-                api_keys: vec![ApiVersion {
-                    api_key: ApiKey::ApiVersions as i16,
-                    min_version: 0,
-                    max_version: 4,
-                    _unknown_tagged_fields: Vec::new(),
-                }],
-                ..ApiVersionsResponseData::default()
-            };
-            response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
-        }),
-    ])
-    .await;
-    let mut config = ConnectionConfig::default();
-    config.security.protocol = kacrab::wire::SecurityProtocol::SaslPlaintext;
-    config.sasl.mechanism = Some(kacrab::wire::SaslMechanism::ScramSha256);
-    config.sasl.jaas_config = Some(
-        "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"alice\" \
-         password=\"secret\";"
-            .to_owned(),
-    );
-    let client = WireClient::connect_with_brokers(
-        config,
-        "kacrab-test",
-        [BrokerEndpoint::new(7, broker.addr())],
-    );
-    let request = kacrab_protocol::generated::ApiVersionsRequestData {
-        client_software_name: KafkaString::from("kacrab".to_owned()),
-        client_software_version: KafkaString::from("0.0.1".to_owned()),
-        _unknown_tagged_fields: Vec::new(),
-    };
-
-    let response: ApiVersionsResponseData = client
-        .send_to_broker(7, ApiKey::ApiVersions, 3, &request)
-        .await
-        .unwrap();
-
-    assert_eq!(response.api_keys[0].max_version, 4);
-    assert_eq!(broker.join().await, 5);
+    scram_verifies_server_signature(ScramMechanism::Sha256).await;
 }
 
 #[tokio::test]
 async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
+    scram_verifies_server_signature(ScramMechanism::Sha512).await;
+}
+
+async fn scram_verifies_server_signature(mechanism: ScramMechanism) {
     let broker = MockBroker::serve_many(vec![
         Box::new(api_versions_response),
-        Box::new(|mut request| {
+        Box::new(move |mut request| {
             let header = RequestHeaderData::read(
                 &mut request,
                 request_header_version(ApiKey::SaslHandshake as i16, 1),
@@ -1913,15 +1832,15 @@ async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
             .expect("sasl handshake header");
             let body =
                 SaslHandshakeRequestData::read(&mut request, 1).expect("sasl handshake body");
-            assert_eq!(body.mechanism.to_string(), "SCRAM-SHA-512");
+            assert_eq!(body.mechanism.to_string(), mechanism.name());
             let response = SaslHandshakeResponseData {
                 error_code: 0,
-                mechanisms: vec![KafkaString::from("SCRAM-SHA-512".to_owned())],
+                mechanisms: vec![KafkaString::from(mechanism.name().to_owned())],
                 _unknown_tagged_fields: Vec::new(),
             };
             response_frame(ApiKey::SaslHandshake, 1, header.correlation_id, &response)
         }),
-        Box::new(|mut request| {
+        Box::new(move |mut request| {
             let header = RequestHeaderData::read(
                 &mut request,
                 request_header_version(ApiKey::SaslAuthenticate as i16, 2),
@@ -1952,7 +1871,7 @@ async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
                 &response,
             )
         }),
-        Box::new(|mut request| {
+        Box::new(move |mut request| {
             let header = RequestHeaderData::read(
                 &mut request,
                 request_header_version(ApiKey::SaslAuthenticate as i16, 2),
@@ -1977,7 +1896,7 @@ async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
             let auth_message =
                 format!("{client_first_bare},{server_first},{client_final_without_proof}");
             let (expected_proof, server_signature) =
-                scram_sha512_vectors(b"secret", b"salt", 4096, auth_message.as_bytes());
+                mechanism.vectors(b"secret", b"salt", 4096, auth_message.as_bytes());
             let proof = scram_attr(client_final, "p").expect("proof");
             assert_eq!(proof, general_purpose::STANDARD.encode(expected_proof));
             let response = SaslAuthenticateResponseData {
@@ -1997,7 +1916,7 @@ async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
                 &response,
             )
         }),
-        Box::new(|mut request| {
+        Box::new(move |mut request| {
             let header = RequestHeaderData::read(&mut request, 2).expect("request header");
             assert_eq!(header.request_api_key, ApiKey::ApiVersions as i16);
             let response = ApiVersionsResponseData {
@@ -2016,7 +1935,7 @@ async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
     .await;
     let mut config = ConnectionConfig::default();
     config.security.protocol = kacrab::wire::SecurityProtocol::SaslPlaintext;
-    config.sasl.mechanism = Some(kacrab::wire::SaslMechanism::ScramSha512);
+    config.sasl.mechanism = Some(mechanism.config());
     config.sasl.jaas_config = Some(
         "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"alice\" \
          password=\"secret\";"
@@ -2038,7 +1957,11 @@ async fn wire_client_runs_scram_sha512_and_verifies_server_signature() {
         .await
         .unwrap();
 
-    assert_eq!(response.api_keys[0].max_version, 4);
+    let negotiated = response
+        .api_keys
+        .first()
+        .expect("the broker advertised one ApiVersions entry");
+    assert_eq!(negotiated.max_version, 4);
     assert_eq!(broker.join().await, 5);
 }
 
@@ -2102,7 +2025,7 @@ async fn wire_client_reconnects_after_initial_connect_failure() {
 
 #[tokio::test]
 async fn wire_client_reconnects_after_broker_closes_connection() {
-    let server = MockBroker::serve_reconnecting_api_versions([7, 8]).await;
+    let server = serve_reconnecting_api_versions([7, 8]).await;
     let client = WireClient::connect_with_brokers(
         ConnectionConfig::default()
             .request_timeout(std::time::Duration::from_millis(500))
@@ -2743,34 +2666,6 @@ fn oauthbearer_handlers(
     ]
 }
 
-fn response_frame(
-    api_key: ApiKey,
-    api_version: i16,
-    correlation_id: i32,
-    response: &impl ApiVersions,
-) -> BytesMut {
-    let mut header = BytesMut::new();
-    ResponseHeaderData {
-        correlation_id,
-        _unknown_tagged_fields: Vec::new(),
-    }
-    .write(
-        &mut header,
-        response_header_version(api_key as i16, api_version),
-    )
-    .expect("response header write");
-
-    let mut body = BytesMut::new();
-    response.write_api_versions(&mut body, api_version);
-
-    frame::encode_request(&header, &body).expect("response frame")
-}
-
-struct MockBroker {
-    addr: std::net::SocketAddr,
-    join: tokio::task::JoinHandle<usize>,
-}
-
 struct MockOAuthServer {
     addr: std::net::SocketAddr,
     join: tokio::task::JoinHandle<usize>,
@@ -2819,132 +2714,89 @@ impl MockOAuthServer {
     }
 }
 
-impl MockBroker {
-    async fn serve_many(handlers: Vec<Box<dyn FnOnce(Bytes) -> BytesMut + Send>>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        Self::serve_many_with_listener(listener, addr, handlers)
-    }
+/// Answers the handshake, then reads one more request and never replies — the
+/// fixture for the client-side request-timeout path.
+async fn serve_blocking_after_handshake(
+    request_seen: tokio::sync::oneshot::Sender<()>,
+) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_frame(&mut socket).await;
+        let response = api_versions_response(request);
+        socket.write_all(&response).await.unwrap();
 
-    async fn serve_many_on_addr(
-        addr: std::net::SocketAddr,
-        handlers: Vec<Box<dyn FnOnce(Bytes) -> BytesMut + Send>>,
-    ) -> Self {
-        let listener = TcpListener::bind(addr).await.unwrap();
-        Self::serve_many_with_listener(listener, addr, handlers)
-    }
+        let _request = read_frame(&mut socket).await;
+        let _ignored = request_seen.send(());
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        2
+    })
+    .await
+}
 
-    fn serve_many_with_listener(
-        listener: TcpListener,
-        addr: std::net::SocketAddr,
-        handlers: Vec<Box<dyn FnOnce(Bytes) -> BytesMut + Send>>,
-    ) -> Self {
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let handled = handlers.len();
-            for handler in handlers {
-                let request = read_frame(&mut socket).await;
-                let response = handler(request);
-                socket.write_all(&response).await.unwrap();
-            }
-            handled
-        });
-        Self { addr, join }
-    }
+/// Reads `requests` `ApiVersions` requests before writing any response, so the
+/// client can only make progress if it really pipelines.
+async fn serve_pipelined_api_versions(requests: usize, max_version: i16) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut socket).await;
+        let response = api_versions_response(handshake);
+        socket.write_all(&response).await.unwrap();
 
-    async fn serve_blocking_after_handshake(
-        request_seen: tokio::sync::oneshot::Sender<()>,
-    ) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let request = read_frame(&mut socket).await;
-            let response = api_versions_response(request);
-            socket.write_all(&response).await.unwrap();
+        let mut correlation_ids = Vec::with_capacity(requests);
+        for _ in 0..requests {
+            let mut request = read_frame(&mut socket).await;
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::ApiVersions as i16);
+            correlation_ids.push(header.correlation_id);
+        }
+        for correlation_id in correlation_ids {
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![ApiVersion {
+                    api_key: ApiKey::ApiVersions as i16,
+                    min_version: 0,
+                    max_version,
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                ..ApiVersionsResponseData::default()
+            };
+            let frame = response_frame(ApiKey::ApiVersions, 3, correlation_id, &response);
+            socket.write_all(&frame).await.unwrap();
+        }
+        requests.saturating_add(1)
+    })
+    .await
+}
 
-            let _request = read_frame(&mut socket).await;
-            let _ignored = request_seen.send(());
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            2
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_pipelined_api_versions(requests: usize, max_version: i16) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
+/// Accepts twice on the same port, advertising a different `max_version` each
+/// time, so a reconnect is observable through the negotiated version.
+async fn serve_reconnecting_api_versions(max_versions: [i16; 2]) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        for max_version in max_versions {
             let (mut socket, _) = listener.accept().await.unwrap();
             let handshake = read_frame(&mut socket).await;
             let response = api_versions_response(handshake);
             socket.write_all(&response).await.unwrap();
 
-            let mut correlation_ids = Vec::with_capacity(requests);
-            for _ in 0..requests {
-                let mut request = read_frame(&mut socket).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::ApiVersions as i16);
-                correlation_ids.push(header.correlation_id);
-            }
-            for correlation_id in correlation_ids {
-                let response = ApiVersionsResponseData {
-                    error_code: 0,
-                    api_keys: vec![ApiVersion {
-                        api_key: ApiKey::ApiVersions as i16,
-                        min_version: 0,
-                        max_version,
-                        _unknown_tagged_fields: Vec::new(),
-                    }],
-                    ..ApiVersionsResponseData::default()
-                };
-                let frame = response_frame(ApiKey::ApiVersions, 3, correlation_id, &response);
-                socket.write_all(&frame).await.unwrap();
-            }
-            requests.saturating_add(1)
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_reconnecting_api_versions(max_versions: [i16; 2]) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            for max_version in max_versions {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let handshake = read_frame(&mut socket).await;
-                let response = api_versions_response(handshake);
-                socket.write_all(&response).await.unwrap();
-
-                let mut request = read_frame(&mut socket).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::ApiVersions as i16);
-                let response = ApiVersionsResponseData {
-                    error_code: 0,
-                    api_keys: vec![ApiVersion {
-                        api_key: ApiKey::ApiVersions as i16,
-                        min_version: 0,
-                        max_version,
-                        _unknown_tagged_fields: Vec::new(),
-                    }],
-                    ..ApiVersionsResponseData::default()
-                };
-                let frame =
-                    response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response);
-                socket.write_all(&frame).await.unwrap();
-            }
-            4
-        });
-        Self { addr, join }
-    }
-
-    const fn addr(&self) -> std::net::SocketAddr {
-        self.addr
-    }
-
-    async fn join(self) -> usize {
-        self.join.await.unwrap()
-    }
+            let mut request = read_frame(&mut socket).await;
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::ApiVersions as i16);
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![ApiVersion {
+                    api_key: ApiKey::ApiVersions as i16,
+                    min_version: 0,
+                    max_version,
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                ..ApiVersionsResponseData::default()
+            };
+            let frame = response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response);
+            socket.write_all(&frame).await.unwrap();
+        }
+        4
+    })
+    .await
 }
 
 async fn read_http_head(socket: &mut tokio::net::TcpStream) -> String {
@@ -3128,112 +2980,6 @@ fn unique_test_suffix() -> u64 {
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
     NEXT.fetch_add(1, Ordering::Relaxed)
-}
-
-async fn read_frame<R>(socket: &mut R) -> Bytes
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let len = socket.read_i32().await.unwrap();
-    let len = usize::try_from(len).unwrap();
-    let mut bytes = vec![0; len];
-    let _bytes_read = socket.read_exact(&mut bytes).await.unwrap();
-    Bytes::from(bytes)
-}
-
-trait ApiVersions {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16);
-}
-
-impl ApiVersions for ApiVersionsResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("api versions response");
-    }
-}
-
-impl ApiVersions for MetadataResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("metadata response");
-    }
-}
-
-impl ApiVersions for FindCoordinatorResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("find coordinator response");
-    }
-}
-
-#[cfg(feature = "consumer")]
-impl ApiVersions for JoinGroupResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("join group response");
-    }
-}
-
-#[cfg(feature = "consumer")]
-impl ApiVersions for ConsumerGroupHeartbeatResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("consumer group heartbeat response");
-    }
-}
-
-#[cfg(feature = "share-consumer")]
-impl ApiVersions for ShareGroupHeartbeatResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("share group heartbeat response");
-    }
-}
-
-impl ApiVersions for ListConfigResourcesResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("list config resources response");
-    }
-}
-
-impl ApiVersions for DeleteTopicsResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("delete topics response");
-    }
-}
-
-impl ApiVersions for LeaveGroupResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("leave group response");
-    }
-}
-
-impl ApiVersions for OffsetFetchResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("offset fetch response");
-    }
-}
-
-impl ApiVersions for OffsetCommitResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("offset commit response");
-    }
-}
-
-impl ApiVersions for ProduceResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("produce response");
-    }
-}
-
-impl ApiVersions for SaslHandshakeResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("sasl handshake response");
-    }
-}
-
-impl ApiVersions for SaslAuthenticateResponseData {
-    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("sasl authenticate response");
-    }
 }
 
 fn scram_attr(value: &str, key: &str) -> Option<String> {

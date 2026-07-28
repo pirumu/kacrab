@@ -21,22 +21,16 @@ use kacrab::{
     },
     wire::{BrokerEndpoint, ConnectionConfig, WireClient},
 };
+use kacrab_benches::{MockBroker, read_frame, response_frame};
 use kacrab_protocol::{
-    KafkaString, KafkaUuid, frame,
+    KafkaString, KafkaUuid,
     generated::{
         ApiKey, ApiVersion, ApiVersionsResponseData, MetadataResponseBroker, MetadataResponseData,
         MetadataResponsePartition, MetadataResponseTopic, PartitionProduceResponse,
-        ProduceRequestData, ProduceResponseData, RequestHeaderData, ResponseHeaderData,
-        TopicProduceResponse,
+        ProduceRequestData, ProduceResponseData, RequestHeaderData, TopicProduceResponse,
     },
-    version::response_header_version,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    runtime::Builder,
-    sync::watch,
-};
+use tokio::{io::AsyncWriteExt, runtime::Builder, sync::watch};
 
 const PARTITIONS: usize = 3;
 const TOPIC_ID: KafkaUuid = KafkaUuid::from_parts(0x1111_2222_3333_4444, 0x5555_6666_7777_8888);
@@ -79,7 +73,7 @@ async fn run_scenario(scenario: Scenario) {
         .checked_add(scenario.batch_messages.saturating_sub(1))
         .expect("scenario chunk count should not overflow")
         / scenario.batch_messages;
-    let broker = MockBroker::serve().await;
+    let broker = serve_stoppable_broker().await;
     let wire = WireClient::connect_with_brokers(
         ConnectionConfig::default()
             .max_in_flight_requests_per_connection(1)
@@ -180,76 +174,84 @@ fn print_result(
     );
 }
 
-struct MockBroker {
-    addr: std::net::SocketAddr,
+/// The mock broker plus the stop signal its produce loop selects on.
+///
+/// The produce loop has no natural end — the benchmark stops sending, it does
+/// not disconnect — so the run has to tell the server it is finished before
+/// joining on the request count.
+struct StoppableBroker {
+    broker: MockBroker,
     stop: watch::Sender<bool>,
-    join: tokio::task::JoinHandle<usize>,
 }
 
-impl MockBroker {
-    async fn serve() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind broker");
-        let addr = listener.local_addr().expect("broker addr");
-        let (stop, mut stop_rx) = watch::channel(false);
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept broker");
-            let handshake = read_frame(&mut socket).await;
-            socket
-                .write_all(&api_versions_response(handshake))
-                .await
-                .expect("write handshake");
-            let mut request = read_frame(&mut socket).await;
-            let header = RequestHeaderData::read(&mut request, 2).expect("metadata header");
-            socket
-                .write_all(&response_frame(
-                    ApiKey::Metadata,
-                    13,
-                    header.correlation_id,
-                    &metadata_response(addr),
-                ))
-                .await
-                .expect("write metadata");
-            let mut produce_requests = 0usize;
-            loop {
-                tokio::select! {
-                    result = stop_rx.changed() => {
-                        result.expect("benchmark stop channel should stay open");
-                        if *stop_rx.borrow() {
-                            break;
-                        }
-                    },
-                    request = read_frame(&mut socket) => {
-                        let mut request = request;
-                        let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
-                        let produce = ProduceRequestData::read(&mut request, 13).expect("produce request");
-                        socket
-                            .write_all(&response_frame(
-                                ApiKey::Produce,
-                                13,
-                                header.correlation_id,
-                                &produce_response(&produce),
-                            ))
-                            .await
-                            .expect("write produce response");
-                        produce_requests = produce_requests.saturating_add(1);
-                    },
-                }
-            }
-            produce_requests.saturating_add(2)
-        });
-        Self { addr, stop, join }
-    }
-
+impl StoppableBroker {
     const fn addr(&self) -> std::net::SocketAddr {
-        self.addr
+        self.broker.addr()
     }
 
     async fn join(self) -> usize {
         self.stop
             .send(true)
             .expect("benchmark broker stop signal should send");
-        self.join.await.expect("mock broker join")
+        self.broker.join().await
     }
+}
+
+/// Answers the handshake and one `Metadata` request, then serves produce
+/// requests until the stop signal fires.
+async fn serve_stoppable_broker() -> StoppableBroker {
+    let (stop, mut stop_rx) = watch::channel(false);
+    let broker = MockBroker::serve_with(move |listener| async move {
+        let addr = listener.local_addr().expect("broker addr");
+        let (mut socket, _) = listener.accept().await.expect("accept broker");
+        let handshake = read_frame(&mut socket).await.expect("handshake frame");
+        socket
+            .write_all(&api_versions_response(handshake))
+            .await
+            .expect("write handshake");
+        let mut request = read_frame(&mut socket).await.expect("metadata frame");
+        let header = RequestHeaderData::read(&mut request, 2).expect("metadata header");
+        socket
+            .write_all(&response_frame(
+                ApiKey::Metadata,
+                13,
+                header.correlation_id,
+                &metadata_response(addr),
+            ))
+            .await
+            .expect("write metadata");
+        let mut produce_requests = 0usize;
+        loop {
+            tokio::select! {
+                result = stop_rx.changed() => {
+                    result.expect("benchmark stop channel should stay open");
+                    if *stop_rx.borrow() {
+                        break;
+                    }
+                },
+                request = read_frame(&mut socket) => {
+                    let Some(mut request) = request else { break };
+                    let header =
+                        RequestHeaderData::read(&mut request, 2).expect("produce header");
+                    let produce =
+                        ProduceRequestData::read(&mut request, 13).expect("produce request");
+                    socket
+                        .write_all(&response_frame(
+                            ApiKey::Produce,
+                            13,
+                            header.correlation_id,
+                            &produce_response(&produce),
+                        ))
+                        .await
+                        .expect("write produce response");
+                    produce_requests = produce_requests.saturating_add(1);
+                },
+            }
+        }
+        produce_requests.saturating_add(2)
+    })
+    .await;
+    StoppableBroker { broker, stop }
 }
 
 fn api_versions_response(mut request: Bytes) -> BytesMut {
@@ -336,56 +338,4 @@ fn produce_response(request: &ProduceRequestData) -> ProduceResponseData {
             .collect(),
         ..ProduceResponseData::default()
     }
-}
-
-fn response_frame(
-    api_key: ApiKey,
-    api_version: i16,
-    correlation_id: i32,
-    response: &impl WriteResponse,
-) -> BytesMut {
-    let mut header = BytesMut::new();
-    ResponseHeaderData {
-        correlation_id,
-        _unknown_tagged_fields: Vec::new(),
-    }
-    .write(
-        &mut header,
-        response_header_version(api_key as i16, api_version),
-    )
-    .expect("response header write");
-
-    let mut body = BytesMut::new();
-    response.write_response(&mut body, api_version);
-    frame::encode_request(&header, &body).expect("response frame")
-}
-
-trait WriteResponse {
-    fn write_response(&self, buf: &mut BytesMut, version: i16);
-}
-
-impl WriteResponse for ApiVersionsResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("api versions response");
-    }
-}
-
-impl WriteResponse for MetadataResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("metadata response");
-    }
-}
-
-impl WriteResponse for ProduceResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("produce response");
-    }
-}
-
-async fn read_frame(socket: &mut TcpStream) -> Bytes {
-    let len = socket.read_i32().await.expect("frame length");
-    let len = usize::try_from(len).expect("positive frame length");
-    let mut bytes = vec![0; len];
-    let _bytes_read = socket.read_exact(&mut bytes).await.expect("frame body");
-    Bytes::from(bytes)
 }

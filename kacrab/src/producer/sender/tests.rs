@@ -82,6 +82,20 @@ fn lingering_accumulator(now: std::time::Instant) -> SharedAccumulator {
     accumulator
 }
 
+/// Deadline headroom for capacity waits that are expected to *make progress*.
+///
+/// The tests that use it assert the wait drained the pending ready batch before
+/// appending — the drain is what they measure, and it needs no wall clock: the
+/// batch is already expired (`test_dispatcher` sets `delivery_timeout(ZERO)`)
+/// and its dispatch fails immediately against a broker-less wire client. A
+/// short deadline instead raced the scheduler, so under CPU load the deadline
+/// expired before the drain ran and the observer saw nothing — reproduced as
+/// 1-in-30 failures of `append_untracked_waits_for_capacity_then_appends_record`
+/// and `append_for_delivery_waits_for_capacity_then_returns_delivery` under 24
+/// competing spinners. Tests that deliberately assert deadline *expiry* keep
+/// their own short deadline.
+const CAPACITY_WAIT_HEADROOM: Duration = Duration::from_secs(30);
+
 fn test_dispatcher() -> crate::producer::dispatcher::ProducerDispatcher {
     crate::producer::dispatcher::ProducerDispatcher::new(WireClient::connect_with_brokers(
         ConnectionConfig::default(),
@@ -833,30 +847,6 @@ fn sender_state_discards_buffered_batches_for_abort_lifecycle() {
     assert_eq!(accumulator.buffered_bytes(), 0);
 }
 
-#[test]
-fn producer_sender_discards_buffered_batches_for_abort_lifecycle() {
-    let sender = ProducerSender::new(
-        AccumulatorConfig::default()
-            .batch_size(1)
-            .linger(Duration::ZERO)
-            .buffer_memory(16 * 1024),
-        1,
-    );
-    sender
-        .accumulator
-        .append_at(
-            ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")),
-            std::time::Instant::now(),
-        )
-        .expect("append ready batch");
-
-    let dropped = sender.discard_buffered_batches();
-
-    assert_eq!(dropped, 1);
-    assert_eq!(sender.accumulator.buffered_records(), 0);
-    assert_eq!(sender.accumulator.buffered_bytes(), 0);
-}
-
 #[tokio::test]
 async fn producer_sender_assigns_partition_with_accumulator_without_exposing_accumulator() {
     let sender = ProducerSender::new(AccumulatorConfig::default(), 1);
@@ -993,30 +983,6 @@ async fn producer_sender_refreshes_and_assigns_multiple_topics_with_metadata() {
 fn sender_state_creates_append_poll_budget_from_in_flight_limit() {
     let state = ProducerSenderState::new(3);
     let mut budget = state.append_poll_budget();
-    let ready = AppendStatus {
-        batch_ready: true,
-        ready_batch_records: 1,
-        starts_new_batch: false,
-    };
-
-    assert!(!ProducerSenderState::observe_batch_append_status(
-        &mut budget,
-        ready
-    ));
-    assert!(!ProducerSenderState::observe_batch_append_status(
-        &mut budget,
-        ready
-    ));
-    assert!(ProducerSenderState::observe_batch_append_status(
-        &mut budget,
-        ready
-    ));
-}
-
-#[test]
-fn producer_sender_creates_append_poll_budget_from_in_flight_limit() {
-    let sender = ProducerSender::new(AccumulatorConfig::default(), 3);
-    let mut budget = sender.append_poll_budget();
     let ready = AppendStatus {
         batch_ready: true,
         ready_batch_records: 1,
@@ -1253,45 +1219,6 @@ async fn sender_state_applies_append_dispatch_decision_then_collects_finished_di
 }
 
 #[tokio::test]
-async fn producer_sender_applies_append_dispatch_decision_then_collects_finished_dispatches() {
-    let mut sender = ProducerSender::new(AccumulatorConfig::default(), 2);
-    let latency = Duration::from_millis(7);
-    let mut observed_latencies = Vec::new();
-    let mut observed_requeues = 0;
-    let mut observed_batches = Vec::new();
-
-    let _completed = sender.state.spawn_in_flight(async move {
-        TimedDispatchOutcome {
-            outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
-            latency,
-            partitions: Vec::new(),
-        }
-    });
-    tokio::task::yield_now().await;
-
-    sender
-        .apply_append_dispatch_decision_then_collect_finished(
-            AppendDispatchDecision::Idle,
-            None,
-            false,
-            ReadyDispatchObservers::new(
-                |duration| observed_latencies.push(duration),
-                || observed_requeues += 1,
-                |batches: &[crate::producer::ReadyBatch]| {
-                    observed_batches.push(batches.len());
-                },
-            ),
-        )
-        .await
-        .expect("idle decision should still collect completed dispatches");
-
-    assert_eq!(observed_latencies, vec![latency]);
-    assert_eq!(observed_requeues, 0);
-    assert!(observed_batches.is_empty());
-    assert_eq!(sender.state.in_flight_len(), 0);
-}
-
-#[tokio::test]
 async fn sender_state_finishes_batch_append_by_driving_ready_dispatch() {
     let mut state = ProducerSenderState::new(1);
     let dispatcher = test_dispatcher();
@@ -1318,6 +1245,10 @@ async fn sender_state_finishes_batch_append_by_driving_ready_dispatch() {
     assert_eq!(state.in_flight_len(), 1);
 }
 
+// NOTE: the `ProducerSenderState` twin above covers the same behaviour; this
+// wrapper test is kept only because `ProducerSender::finish_batch_append_dispatch`
+// currently has no production caller, so deleting it would leave dead
+// production code behind. Delete both together when that method goes.
 #[tokio::test]
 async fn producer_sender_finishes_batch_append_by_driving_ready_dispatch() {
     let mut sender = ProducerSender::new(
@@ -1403,70 +1334,6 @@ async fn sender_state_applies_batch_append_status_with_poll_budget() {
     assert_eq!(observed_batches, vec![1]);
     assert_eq!(accumulator.buffered_records(), 0);
     assert_eq!(state.in_flight_len(), 1);
-}
-
-#[tokio::test]
-async fn producer_sender_applies_batch_append_status_with_poll_budget() {
-    let mut sender = ProducerSender::new(
-        AccumulatorConfig::default()
-            .batch_size(1)
-            .linger(Duration::ZERO),
-        2,
-    );
-    sender
-        .accumulator
-        .append_at(
-            ProducerRecord::new("orders", 0).value(Bytes::from_static(b"value")),
-            std::time::Instant::now(),
-        )
-        .expect("append ready batch");
-    let mut budget = sender.state.append_poll_budget();
-    let status = AppendStatus {
-        batch_ready: true,
-        ready_batch_records: 1,
-        starts_new_batch: false,
-    };
-    let mut observed_batches = Vec::new();
-
-    sender
-        .apply_batch_append_status(
-            &mut budget,
-            status,
-            Some("orders"),
-            ReadyDispatchObservers::new(
-                |_| {},
-                || {},
-                |batches: &[crate::producer::ReadyBatch]| {
-                    observed_batches.push(batches.len());
-                },
-            ),
-        )
-        .await
-        .expect("first ready batch should only mark sticky readiness");
-
-    assert!(observed_batches.is_empty());
-    assert_eq!(sender.accumulator.buffered_records(), 1);
-    assert_eq!(sender.state.in_flight_len(), 0);
-
-    sender
-        .apply_batch_append_status(
-            &mut budget,
-            status,
-            Some("orders"),
-            ReadyDispatchObservers::new(
-                |_| {},
-                || {},
-                |batches: &[crate::producer::ReadyBatch]| {
-                    observed_batches.push(batches.len());
-                },
-            ),
-        )
-        .await
-        .expect("second ready batch should drive dispatch at budget threshold");
-
-    assert_eq!(observed_batches, vec![1]);
-    assert_eq!(sender.accumulator.buffered_records(), 0);
-    assert_eq!(sender.state.in_flight_len(), 1);
 }
 
 #[tokio::test]
@@ -1714,7 +1581,7 @@ async fn wait_for_append_capacity_drains_ready_buffered_batch_before_append() {
 async fn append_untracked_waits_for_capacity_then_appends_record() {
     let mut state = ProducerSenderState::new(1);
     let now = std::time::Instant::now();
-    let deadline = now + Duration::from_millis(5);
+    let deadline = now + CAPACITY_WAIT_HEADROOM;
     let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(128)
@@ -1760,7 +1627,7 @@ async fn append_untracked_waits_for_capacity_then_appends_record() {
 #[tokio::test]
 async fn producer_sender_append_untracked_owns_capacity_wait_and_append() {
     let now = std::time::Instant::now();
-    let deadline = now + Duration::from_millis(5);
+    let deadline = now + CAPACITY_WAIT_HEADROOM;
     let mut sender = ProducerSender::new(
         AccumulatorConfig::default()
             .batch_size(128)
@@ -2016,7 +1883,7 @@ async fn producer_sender_buffer_progress_dispatches_after_linger_sleep() {
 async fn append_for_delivery_waits_for_capacity_then_returns_delivery() {
     let mut state = ProducerSenderState::new(1);
     let now = std::time::Instant::now();
-    let deadline = now + Duration::from_millis(5);
+    let deadline = now + CAPACITY_WAIT_HEADROOM;
     let accumulator = SharedAccumulator::with_config(
         AccumulatorConfig::default()
             .batch_size(128)
@@ -2062,7 +1929,7 @@ async fn append_for_delivery_waits_for_capacity_then_returns_delivery() {
 #[tokio::test]
 async fn producer_sender_append_for_delivery_owns_capacity_wait_and_append() {
     let now = std::time::Instant::now();
-    let deadline = now + Duration::from_millis(5);
+    let deadline = now + CAPACITY_WAIT_HEADROOM;
     let mut sender = ProducerSender::new(
         AccumulatorConfig::default()
             .batch_size(128)

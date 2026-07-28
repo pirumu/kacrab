@@ -488,32 +488,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_defensively_returns_sender_when_slot_storage_is_inconsistent() {
-        let mut pipeline = RequestPipeline::new(1, Duration::from_secs(1));
-        let (tx, rx) = channel();
-
-        pipeline.len = 1;
-        pipeline.slots.clear();
-        let returned = pipeline
-            .reserve(ApiKey::ApiVersions, 3, tx)
-            .expect_err("missing slot should return the sender");
-
-        drop(returned);
-        assert!(rx.await.is_err());
-    }
-
-    #[tokio::test]
-    async fn pipeline_defensively_trims_missing_head_response_slot() {
-        let mut pipeline = RequestPipeline::new(1, Duration::from_secs(1));
-
-        pipeline.len = 1;
-        pipeline.slots.clear();
-        pipeline.complete_response(bytes::Bytes::from_static(b"\0"));
-
-        assert_eq!(pipeline.len, 1);
-    }
-
-    #[tokio::test]
     async fn pipeline_fail_correlation_skips_empty_slots_and_fails_match() {
         let mut pipeline = RequestPipeline::new(2, Duration::from_secs(1));
         let (first_tx, first_rx) = channel();

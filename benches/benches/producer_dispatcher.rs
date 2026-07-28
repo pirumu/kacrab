@@ -19,21 +19,16 @@ use kacrab::{
     },
     wire::{BrokerEndpoint, ConnectionConfig, WireClient},
 };
+use kacrab_benches::{MockBroker, read_frame, response_frame};
 use kacrab_protocol::{
-    KafkaString, KafkaUuid, frame,
+    KafkaString, KafkaUuid,
     generated::{
         ApiKey, ApiVersion, ApiVersionsResponseData, MetadataResponseBroker, MetadataResponseData,
         MetadataResponsePartition, MetadataResponseTopic, PartitionProduceResponse,
-        ProduceRequestData, ProduceResponseData, RequestHeaderData, ResponseHeaderData,
-        TopicProduceResponse,
+        ProduceRequestData, ProduceResponseData, RequestHeaderData, TopicProduceResponse,
     },
-    version::response_header_version,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    runtime::Builder,
-};
+use tokio::{io::AsyncWriteExt, runtime::Builder};
 
 const BROKERS: usize = 4;
 const RECORDS_PER_ITERATION: u64 = 16_384;
@@ -60,12 +55,12 @@ fn bench_producer_dispatcher(c: &mut Criterion) {
 
 async fn run_dispatcher_sample(iterations: usize) {
     let leaders = [
-        MockBroker::serve_produce_leader(7).await,
-        MockBroker::serve_produce_leader(8).await,
-        MockBroker::serve_produce_leader(9).await,
-        MockBroker::serve_produce_leader(10).await,
+        serve_produce_leader(7).await,
+        serve_produce_leader(8).await,
+        serve_produce_leader(9).await,
+        serve_produce_leader(10).await,
     ];
-    let bootstrap = MockBroker::serve_bootstrap([
+    let bootstrap = serve_bootstrap([
         (7, leaders[0].addr()),
         (8, leaders[1].addr()),
         (9, leaders[2].addr()),
@@ -125,93 +120,70 @@ fn records_for_iteration() -> Vec<ProducerRecord> {
         .collect()
 }
 
-struct MockBroker {
-    addr: std::net::SocketAddr,
-    join: tokio::task::JoinHandle<usize>,
+/// Answers the handshake and one `Metadata` request naming `brokers`, then stops.
+async fn serve_bootstrap<const N: usize>(brokers: [(i32, std::net::SocketAddr); N]) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.expect("accept bootstrap");
+        let handshake = read_frame(&mut socket)
+            .await
+            .expect("bootstrap handshake frame");
+        socket
+            .write_all(&api_versions_response(handshake))
+            .await
+            .expect("write bootstrap handshake");
+        let mut request = read_frame(&mut socket)
+            .await
+            .expect("bootstrap metadata frame");
+        let header = RequestHeaderData::read(&mut request, 2).expect("metadata header");
+        let response = metadata_response(brokers);
+        socket
+            .write_all(&response_frame(
+                ApiKey::Metadata,
+                13,
+                header.correlation_id,
+                &response,
+            ))
+            .await
+            .expect("write metadata");
+        2
+    })
+    .await
 }
 
-impl MockBroker {
-    async fn serve_bootstrap<const N: usize>(brokers: [(i32, std::net::SocketAddr); N]) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
+/// Serves every produce request the client sends until it disconnects.
+///
+/// The dispatcher decides how many requests each drain becomes, so a fixed count
+/// would race the actual pipelining shape.
+async fn serve_produce_leader(node_id: i32) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.expect("accept leader");
+        let handshake = read_frame(&mut socket)
             .await
-            .expect("bind bootstrap");
-        let addr = listener.local_addr().expect("bootstrap addr");
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept bootstrap");
-            let handshake = read_frame(&mut socket)
-                .await
-                .expect("bootstrap handshake frame");
-            socket
-                .write_all(&api_versions_response(handshake))
-                .await
-                .expect("write bootstrap handshake");
-            let mut request = read_frame(&mut socket)
-                .await
-                .expect("bootstrap metadata frame");
-            let header = RequestHeaderData::read(&mut request, 2).expect("metadata header");
-            let response = metadata_response(brokers);
+            .expect("leader handshake frame");
+        socket
+            .write_all(&api_versions_response(handshake))
+            .await
+            .expect("write leader handshake");
+        let mut served = 0usize;
+        while let Some(mut request) = read_frame(&mut socket).await {
+            let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+            let produce = ProduceRequestData::read(&mut request, 13).expect("produce request");
+            let partition = produce.topic_data[0].partition_data[0].index;
+            let response = produce_response(partition, i64::from(node_id));
             socket
                 .write_all(&response_frame(
-                    ApiKey::Metadata,
+                    ApiKey::Produce,
                     13,
                     header.correlation_id,
                     &response,
                 ))
                 .await
-                .expect("write metadata");
-            2
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_produce_leader(node_id: i32) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind leader");
-        let addr = listener.local_addr().expect("leader addr");
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept leader");
-            let handshake = read_frame(&mut socket)
-                .await
-                .expect("leader handshake frame");
-            socket
-                .write_all(&api_versions_response(handshake))
-                .await
-                .expect("write leader handshake");
-            // Serve every produce request the client sends until it disconnects.
-            // The dispatcher decides how many requests each drain becomes, so a
-            // fixed count would race the actual pipelining shape.
-            let mut served = 0usize;
-            while let Some(mut request) = read_frame(&mut socket).await {
-                let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
-                let produce = ProduceRequestData::read(&mut request, 13).expect("produce request");
-                let partition = produce.topic_data[0].partition_data[0].index;
-                let response = produce_response(partition, i64::from(node_id));
-                socket
-                    .write_all(&response_frame(
-                        ApiKey::Produce,
-                        13,
-                        header.correlation_id,
-                        &response,
-                    ))
-                    .await
-                    .expect("write produce response");
-                served = served.saturating_add(1);
-            }
-            served
-        });
-        Self { addr, join }
-    }
-
-    fn abort(self) {
-        self.join.abort();
-    }
-
-    const fn addr(&self) -> std::net::SocketAddr {
-        self.addr
-    }
-
-    async fn join(self) -> usize {
-        self.join.await.expect("mock broker join")
-    }
+                .expect("write produce response");
+            served = served.saturating_add(1);
+        }
+        served
+    })
+    .await
 }
 
 fn api_versions_response(mut request: Bytes) -> BytesMut {
@@ -298,59 +270,6 @@ fn produce_response(partition: i32, base_offset: i64) -> ProduceResponseData {
         }],
         ..ProduceResponseData::default()
     }
-}
-
-fn response_frame(
-    api_key: ApiKey,
-    api_version: i16,
-    correlation_id: i32,
-    response: &impl WriteResponse,
-) -> BytesMut {
-    let mut header = BytesMut::new();
-    ResponseHeaderData {
-        correlation_id,
-        _unknown_tagged_fields: Vec::new(),
-    }
-    .write(
-        &mut header,
-        response_header_version(api_key as i16, api_version),
-    )
-    .expect("response header write");
-    let mut body = BytesMut::new();
-    response.write_response(&mut body, api_version);
-    frame::encode_request(&header, &body).expect("response frame")
-}
-
-trait WriteResponse {
-    fn write_response(&self, buf: &mut BytesMut, version: i16);
-}
-
-impl WriteResponse for ApiVersionsResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("api versions response");
-    }
-}
-
-impl WriteResponse for MetadataResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("metadata response");
-    }
-}
-
-impl WriteResponse for ProduceResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("produce response");
-    }
-}
-
-async fn read_frame(socket: &mut TcpStream) -> Option<Bytes> {
-    // Returns None once the client disconnects (clean EOF on the length prefix),
-    // so serve loops terminate instead of panicking on the closed socket.
-    let len = socket.read_i32().await.ok()?;
-    let len = usize::try_from(len).expect("positive frame length");
-    let mut bytes = vec![0; len];
-    let _bytes_read = socket.read_exact(&mut bytes).await.expect("frame payload");
-    Some(Bytes::from(bytes))
 }
 
 criterion_group!(benches, bench_producer_dispatcher);

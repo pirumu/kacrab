@@ -16,10 +16,11 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
+#[cfg(feature = "lz4")]
+use kacrab::producer::ProducerCompression;
 use kacrab::{
     producer::{
-        Producer, ProducerCompression, ProducerInterceptor, ProducerPartitioner, ProducerRecord,
-        RecordMetadata,
+        Producer, ProducerInterceptor, ProducerPartitioner, ProducerRecord, RecordMetadata,
         internals::{
             AccumulatorConfig, ProducerDispatcher, ProducerIdempotenceConfig,
             ProducerRuntimeConfig, SharedAccumulator,
@@ -30,7 +31,7 @@ use kacrab::{
 #[cfg(feature = "lz4")]
 use kacrab_protocol::compression::Compression;
 use kacrab_protocol::{
-    KafkaString, KafkaUuid, frame,
+    KafkaString, KafkaUuid,
     generated::{
         AddOffsetsToTxnRequestData, AddOffsetsToTxnResponseData, AddPartitionsToTxnRequestData,
         AddPartitionsToTxnResponseData, AddPartitionsToTxnResult, AddPartitionsToTxnTopicResult,
@@ -40,7 +41,7 @@ use kacrab_protocol::{
         InitProducerIdRequestData, InitProducerIdResponseData, MetadataResponseBroker,
         MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
         PartitionProduceResponse, ProduceRequestData, ProduceResponseData,
-        PushTelemetryRequestData, PushTelemetryResponseData, RequestHeaderData, ResponseHeaderData,
+        PushTelemetryRequestData, PushTelemetryResponseData, RequestHeaderData,
         TopicProduceResponse, TxnOffsetCommitRequestData, TxnOffsetCommitResponseData,
         TxnOffsetCommitResponsePartition, TxnOffsetCommitResponseTopic,
         produce_response::{
@@ -48,12 +49,12 @@ use kacrab_protocol::{
         },
     },
     record::{RecordBatch, decode_batches},
-    version::response_header_version,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-};
+use tokio::io::AsyncWriteExt;
+
+use crate::common::{MockBroker, read_frame, response_frame};
+
+mod common;
 
 const TOPIC_ID: KafkaUuid = KafkaUuid::from_parts(0x1111_2222_3333_4444, 0x5555_6666_7777_8888);
 
@@ -121,15 +122,7 @@ async fn kafka_producer_send_buffers_until_flush() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -146,20 +139,8 @@ async fn kafka_producer_send_buffers_until_flush() {
                 .linger(Duration::from_mins(1))
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     producer.enable_metrics();
@@ -200,15 +181,7 @@ async fn kafka_producer_background_sender_dispatches_after_linger_without_flush(
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -225,20 +198,10 @@ async fn kafka_producer_background_sender_dispatches_after_linger_without_flush(
                 .linger(Duration::from_millis(10))
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_secs(1),
             max_block: Duration::from_secs(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -280,15 +243,7 @@ async fn kafka_producer_background_sender_dispatches_ready_batch_without_linger_
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -305,20 +260,10 @@ async fn kafka_producer_background_sender_dispatches_ready_batch_without_linger_
                 .linger(Duration::ZERO)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_secs(1),
             max_block: Duration::from_secs(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -353,15 +298,7 @@ async fn kafka_producer_send_with_callback_invokes_callback_and_returns_delivery
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -378,20 +315,8 @@ async fn kafka_producer_send_with_callback_invokes_callback_and_returns_delivery
                 .linger(Duration::from_mins(1))
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     let callback_receipts = Arc::new(Mutex::new(Vec::new()));
@@ -436,15 +361,7 @@ async fn kafka_producer_builder_accepts_java_style_config() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -846,12 +763,10 @@ async fn kafka_producer_get_telemetry_subscriptions_disables_after_invalid_reque
 async fn kafka_producer_partitions_for_returns_topic_metadata() {
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            let response = metadata_response([(7, "127.0.0.1:9092".parse().expect("socket addr"))]);
-            response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-        }),
+        Box::new(metadata_handler(metadata_response([(
+            7,
+            "127.0.0.1:9092".parse().expect("socket addr"),
+        )]))),
     ])
     .await;
 
@@ -873,7 +788,6 @@ async fn kafka_producer_partitions_for_returns_topic_metadata() {
     assert_eq!(partitions[1].partition, 1);
     assert_eq!(partitions[1].leader_id, 8);
     assert_eq!(metrics.metadata_wait_count, 1);
-    assert!(metrics.metadata_wait_total_latency >= Duration::ZERO);
     assert_eq!(bootstrap.join().await, 2);
 }
 
@@ -882,12 +796,10 @@ async fn kafka_producer_interceptor_send_error_uses_assigned_partition_like_java
     let captured = Arc::new(Mutex::new(None));
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            let response = metadata_response([(7, "127.0.0.1:9092".parse().expect("socket addr"))]);
-            response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-        }),
+        Box::new(metadata_handler(metadata_response([(
+            7,
+            "127.0.0.1:9092".parse().expect("socket addr"),
+        )]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -955,18 +867,10 @@ async fn kafka_producer_builder_uses_native_partitioner_instead_of_jvm_class_loa
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_8 = leader_8.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([
-                    (7, "127.0.0.1:9092".parse().expect("socket addr")),
-                    (8, leader_8),
-                ]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([
+            (7, "127.0.0.1:9092".parse().expect("socket addr")),
+            (8, leader_8.addr()),
+        ]))),
     ])
     .await;
 
@@ -1037,15 +941,7 @@ async fn kafka_producer_send_auto_batches_per_record_sends_until_flush() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -1062,20 +958,8 @@ async fn kafka_producer_send_auto_batches_per_record_sends_until_flush() {
                 .linger(Duration::from_mins(1))
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -1145,15 +1029,7 @@ async fn kafka_producer_send_with_callback_auto_batches_until_flush() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -1170,20 +1046,8 @@ async fn kafka_producer_send_with_callback_auto_batches_until_flush() {
                 .linger(Duration::from_mins(1))
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -1218,18 +1082,10 @@ async fn kafka_producer_send_with_callback_auto_batches_until_flush() {
 
 #[tokio::test]
 async fn kafka_producer_pipelines_ready_batches_until_flush() {
-    let leader_7 = MockBroker::serve_pipelined_produce(2).await;
+    let leader_7 = serve_pipelined_produce(2).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -1248,20 +1104,9 @@ async fn kafka_producer_pipelines_ready_batches_until_flush() {
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 2,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -1311,15 +1156,10 @@ async fn kafka_producer_single_send_budget_coalesces_ready_partitions() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
 
@@ -1338,20 +1178,9 @@ async fn kafka_producer_single_send_budget_coalesces_ready_partitions() {
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 2,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     producer.enable_metrics();
@@ -1417,15 +1246,11 @@ async fn kafka_producer_10kib_records_keep_observed_requests_under_max_request_s
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader_partitions(7, leader_7, PARTITIONS);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader_partitions(
+            7,
+            leader_7.addr(),
+            PARTITIONS,
+        ))),
     ])
     .await;
 
@@ -1445,20 +1270,9 @@ async fn kafka_producer_10kib_records_keep_observed_requests_under_max_request_s
                 .linger(Duration::from_mins(1))
                 .buffer_memory(2 * MAX_REQUEST_SIZE),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
             max_request_size: MAX_REQUEST_SIZE,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     producer.enable_metrics();
@@ -1525,18 +1339,13 @@ async fn kafka_producer_10kib_records_keep_observed_requests_under_max_request_s
 
 #[tokio::test]
 async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() {
-    let leader_7 = MockBroker::serve_pipelined_idempotent_produce(vec![0, 1]).await;
+    let leader_7 = serve_pipelined_idempotent_produce(vec![0, 1]).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
 
@@ -1554,26 +1363,8 @@ async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() 
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 2,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let partitions = producer.partitions_for("orders").await.unwrap();
@@ -1604,11 +1395,6 @@ async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() 
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Proving the live sender path sweeps needs mock broker, metadata, idempotent \
-              producer config, and request capture in one integration scenario."
-)]
 async fn idempotent_kafka_producer_sweeps_unready_colocated_partition_on_the_live_sender_path() {
     const BATCH_SIZE: usize = 512;
 
@@ -1651,15 +1437,10 @@ async fn idempotent_kafka_producer_sweeps_unready_colocated_partition_on_the_liv
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
 
@@ -1677,26 +1458,7 @@ async fn idempotent_kafka_producer_sweeps_unready_colocated_partition_on_the_liv
                 .batch_size(BATCH_SIZE)
                 .linger(Duration::from_secs(30))
                 .buffer_memory(64 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
 
@@ -1746,18 +1508,13 @@ async fn idempotent_kafka_producer_sweeps_unready_colocated_partition_on_the_liv
 
 #[tokio::test]
 async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correlation() {
-    let leader_7 = MockBroker::serve_pipelined_idempotent_produce_reversed(vec![0, 1]).await;
+    let leader_7 = serve_pipelined_idempotent_produce_reversed(vec![0, 1]).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
 
@@ -1775,26 +1532,8 @@ async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correla
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 2,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let partitions = producer.partitions_for("orders").await.unwrap();
@@ -1823,13 +1562,19 @@ async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correla
 
 #[tokio::test]
 async fn idempotent_kafka_producer_retries_disconnected_in_flight_batch_with_same_sequence() {
-    let leader_7 = MockBroker::serve_idempotent_disconnect_then_retry().await;
+    let leader_7 = serve_idempotent_disconnect_then_retry().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
         // A disconnect now invalidates the partition's leader (Java requests a
         // metadata update on server disconnect), so the retry re-fetches metadata.
-        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -1846,26 +1591,12 @@ async fn idempotent_kafka_producer_retries_disconnected_in_flight_batch_with_sam
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
             retry_backoff: Duration::from_millis(1),
             retry_backoff_max: Duration::from_millis(1),
             delivery_timeout: Duration::from_secs(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
 
@@ -1885,13 +1616,19 @@ async fn idempotent_kafka_producer_retries_disconnected_in_flight_batch_with_sam
 
 #[tokio::test]
 async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_timeout_like_java() {
-    let leader_7 = MockBroker::serve_idempotent_timeout_then_epoch_bump_recovery().await;
+    let leader_7 = serve_idempotent_timeout_then_epoch_bump_recovery().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
         // The disconnect invalidates the cached leader, so the second send
         // re-fetches metadata before producing.
-        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -1908,26 +1645,12 @@ async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_t
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
             retry_backoff: Duration::from_millis(1),
             retry_backoff_max: Duration::from_millis(1),
             delivery_timeout: Duration::from_millis(1),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
 
@@ -1962,13 +1685,19 @@ async fn idempotent_kafka_producer_resends_multi_inflight_batches_in_sequence_or
     // End-to-end fault injection for the firstInFlightSequence gate: two batches are
     // pipelined in flight to one partition (multi-in-flight), the connection drops, and
     // the producer must re-send them strictly in base-sequence order on retry.
-    let leader_7 = MockBroker::serve_idempotent_two_inflight_disconnect_then_inorder_retry().await;
+    let leader_7 = serve_idempotent_two_inflight_disconnect_then_inorder_retry().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
         // The disconnect invalidates the cached leader, so the in-order retry
         // re-fetches metadata before re-sending the two in-flight batches.
-        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -1985,28 +1714,13 @@ async fn idempotent_kafka_producer_resends_multi_inflight_batches_in_sequence_or
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 5,
             retry_backoff: Duration::from_millis(1),
             retry_backoff_max: Duration::from_millis(1),
             // Generous so the disconnect is a plain wire retry, not a delivery timeout
             // (which would bump the epoch and reset the sequences).
             delivery_timeout: Duration::from_mins(10),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
 
@@ -2036,19 +1750,13 @@ async fn idempotent_kafka_producer_restamps_sibling_inflight_batch_after_single_
     // Cross-task re-stamp end-to-end: two batches in flight to one partition under
     // epoch 3 both get UNKNOWN_PRODUCER_ID; the producer must bump the epoch ONCE and
     // re-stamp BOTH (the sibling included) under the new epoch, then deliver them.
-    let leader_7 =
-        MockBroker::serve_idempotent_two_inflight_unknown_producer_then_single_rebump().await;
+    let leader_7 = serve_idempotent_two_inflight_unknown_producer_then_single_rebump().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -2065,26 +1773,11 @@ async fn idempotent_kafka_producer_restamps_sibling_inflight_batch_after_single_
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 10,
             retry_backoff: Duration::from_millis(1),
             retry_backoff_max: Duration::from_millis(1),
             delivery_timeout: Duration::from_secs(30),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
 
@@ -2149,15 +1842,7 @@ async fn idempotent_kafka_producer_retries_leadership_error_with_current_leader_
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -2174,26 +1859,12 @@ async fn idempotent_kafka_producer_retries_leadership_error_with_current_leader_
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
             retry_backoff: Duration::from_millis(1),
             retry_backoff_max: Duration::from_millis(1),
             delivery_timeout: Duration::from_secs(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
 
@@ -2229,25 +1900,8 @@ async fn kafka_producer_flush_retries_requeued_batch_until_metadata_resolves() {
     // dispatch requeues it. The refreshed metadata then names leader 7.
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            response_frame(
-                ApiKey::Metadata,
-                13,
-                header.correlation_id,
-                &empty_metadata_response(),
-            )
-        }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(empty_metadata_response())),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -2262,20 +1916,10 @@ async fn kafka_producer_flush_retries_requeued_batch_until_metadata_resolves() {
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_secs(5),
             max_block: Duration::from_secs(2),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     producer.enable_metrics();
@@ -2310,15 +1954,7 @@ async fn kafka_producer_metrics_snapshot_reports_queue_and_dispatch_counters() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -2335,20 +1971,8 @@ async fn kafka_producer_metrics_snapshot_reports_queue_and_dispatch_counters() {
                 .linger(Duration::from_mins(1))
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     producer.enable_metrics();
@@ -2400,15 +2024,7 @@ async fn dispatcher_records_batch_metrics_after_request_build_with_actual_encode
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -2539,15 +2155,7 @@ async fn kafka_producer_commits_transactional_send() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -2562,26 +2170,13 @@ async fn kafka_producer_commits_transactional_send() {
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -2589,12 +2184,10 @@ async fn kafka_producer_commits_transactional_send() {
     producer.init_transactions().await.unwrap();
     let metrics = producer.metrics();
     assert_eq!(metrics.transaction_init_count, 1);
-    assert!(metrics.transaction_init_total_latency >= Duration::ZERO);
     assert_eq!(metrics.transaction_begin_count, 0);
     producer.begin_transaction().unwrap();
     let metrics = producer.metrics();
     assert_eq!(metrics.transaction_begin_count, 1);
-    assert!(metrics.transaction_begin_total_latency >= Duration::ZERO);
     let delivery = producer
         .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
         .unwrap();
@@ -2605,7 +2198,6 @@ async fn kafka_producer_commits_transactional_send() {
     assert_eq!(delivery.await.unwrap().offset, 90);
     let metrics = producer.metrics();
     assert_eq!(metrics.transaction_commit_count, 1);
-    assert!(metrics.transaction_commit_total_latency >= Duration::ZERO);
     assert_eq!(bootstrap.join().await, 3);
     assert_eq!(coordinator.join().await, 4);
     assert_eq!(leader_7.join().await, 2);
@@ -2618,10 +2210,6 @@ async fn kafka_producer_commits_transactional_send() {
 /// must be sent — and read in — that shape, or no transaction can add a single
 /// partition on any broker older than 3.6.
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Transaction wire-flow fixture keeps ordered broker handlers inline for readability."
-)]
 async fn kafka_producer_transactional_send_uses_pre_batched_add_partitions_to_txn_shapes() {
     let coordinator = MockBroker::serve_many(vec![
         Box::new(pre_batched_add_partitions_to_txn_api_versions_response_frame),
@@ -2676,15 +2264,7 @@ async fn kafka_producer_transactional_send_uses_pre_batched_add_partitions_to_tx
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -2699,26 +2279,13 @@ async fn kafka_producer_transactional_send_uses_pre_batched_add_partitions_to_tx
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -2785,26 +2352,16 @@ async fn kafka_producer_init_transactions_retries_coordinator_load_in_progress_p
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
             retry_backoff: Duration::from_millis(50),
             retry_backoff_max: Duration::from_millis(50),
-            delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_secs(10),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -2819,145 +2376,70 @@ async fn kafka_producer_init_transactions_retries_coordinator_load_in_progress_p
     assert_eq!(bootstrap.join().await, 2);
 }
 
+/// Which transaction-completion operation an `end_txn_timeout_can_retry` run
+/// drives.
+///
+/// The commit and abort tests were a 103-line copy differing only in the
+/// `EndTxn.committed` flag the broker asserts, which of the two operations is
+/// called (and which is the one that must *not* displace it), the timeout
+/// message, and the metric counted. Everything else — the coordinator lookup,
+/// the produce, the deliberate 50ms stall inside the `EndTxn` handler, and the
+/// retry — was identical, so a fix to the retry semantics had to be made twice.
+#[derive(Clone, Copy)]
+enum TxnCompletion {
+    Commit,
+    Abort,
+}
+
+impl TxnCompletion {
+    /// The `EndTxn.committed` flag this operation puts on the wire.
+    const fn committed(self) -> bool {
+        matches!(self, Self::Commit)
+    }
+
+    /// The operation that must be rejected while this one is still pending.
+    const fn other(self) -> Self {
+        match self {
+            Self::Commit => Self::Abort,
+            Self::Abort => Self::Commit,
+        }
+    }
+
+    /// The fragment the dispatch-timeout error names this operation by.
+    const fn timeout_message(self) -> &'static str {
+        match self {
+            Self::Commit => "CommitTransaction timed out",
+            Self::Abort => "AbortTransaction timed out",
+        }
+    }
+
+    async fn end(self, producer: &Producer) -> Result<(), kacrab::producer::ProducerError> {
+        match self {
+            Self::Commit => producer.commit_transaction().await,
+            Self::Abort => producer.abort_transaction().await,
+        }
+    }
+
+    /// This operation's completion counter.
+    const fn count(self, metrics: &kacrab::producer::ProducerMetricsSnapshot) -> u64 {
+        match self {
+            Self::Commit => metrics.transaction_commit_count,
+            Self::Abort => metrics.transaction_abort_count,
+        }
+    }
+}
+
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Transaction timeout retry fixture keeps ordered broker handlers inline."
-)]
 async fn kafka_producer_commit_timeout_can_retry_same_operation_like_java() {
-    let coordinator = MockBroker::serve_many(vec![
-        Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::InitProducerId as i16);
-            init_producer_id_response_frame(header.correlation_id, 77, 4)
-        }),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::AddPartitionsToTxn as i16);
-            add_partitions_to_txn_response_frame(header.correlation_id)
-        }),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::EndTxn as i16);
-            let end =
-                EndTxnRequestData::read(&mut request, header.request_api_version).expect("end txn");
-            assert!(end.committed);
-            std::thread::sleep(Duration::from_millis(50));
-            end_txn_response_frame_for_request(&header)
-        }),
-    ])
-    .await;
-    let leader_7 = MockBroker::serve_many(vec![
-        Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-            produce_response_frame_for_request(&header, 0, 90)
-        }),
-    ])
-    .await;
-    let bootstrap = MockBroker::serve_many(vec![
-        Box::new(api_versions_response_frame),
-        Box::new({
-            let coordinator = coordinator.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::FindCoordinator as i16);
-                find_coordinator_response_frame(header.correlation_id, 9, coordinator)
-            }
-        }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                response_frame(
-                    ApiKey::Metadata,
-                    13,
-                    header.correlation_id,
-                    &metadata_response([(7, leader_7)]),
-                )
-            }
-        }),
-    ])
-    .await;
-
-    let wire = WireClient::connect_with_brokers(
-        ConnectionConfig::default(),
-        "kacrab-test",
-        [BrokerEndpoint::new(1, bootstrap.addr())],
-    );
-    let producer = Producer::from_parts(
-        wire,
-        ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default()
-                .batch_size(1)
-                .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_millis(30),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: Some("txn-orders".to_owned()),
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
-        },
-    );
-
-    producer.init_transactions().await.unwrap();
-    producer.begin_transaction().unwrap();
-    let delivery = producer
-        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
-        .unwrap();
-    producer.flush().await.unwrap();
-
-    assert!(matches!(
-        producer
-            .commit_transaction()
-            .await
-            .expect_err("first commit should time out while EndTxn is still in flight"),
-        kacrab::producer::ProducerError::DispatchTask(message)
-            if message.contains("CommitTransaction timed out")
-    ));
-    assert!(matches!(
-        producer
-            .abort_transaction()
-            .await
-            .expect_err("abort must not replace the pending commit result"),
-        kacrab::producer::ProducerError::InvalidTransactionState(message)
-            if message == "previous transaction operation is pending and must be retried"
-    ));
-    producer
-        .commit_transaction()
-        .await
-        .expect("retrying the same commit should await cached EndTxn result");
-
-    assert_eq!(delivery.await.unwrap().offset, 90);
-    assert_eq!(producer.metrics().transaction_commit_count, 1);
-    assert_eq!(bootstrap.join().await, 3);
-    assert_eq!(coordinator.join().await, 4);
-    assert_eq!(leader_7.join().await, 2);
+    end_txn_timeout_can_retry_same_operation(TxnCompletion::Commit).await;
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Abort timeout retry fixture keeps ordered broker handlers inline."
-)]
 async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
+    end_txn_timeout_can_retry_same_operation(TxnCompletion::Abort).await;
+}
+
+async fn end_txn_timeout_can_retry_same_operation(completion: TxnCompletion) {
     let coordinator = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
         Box::new(|mut request| {
@@ -2970,12 +2452,12 @@ async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
             assert_eq!(header.request_api_key, ApiKey::AddPartitionsToTxn as i16);
             add_partitions_to_txn_response_frame(header.correlation_id)
         }),
-        Box::new(|mut request| {
+        Box::new(move |mut request| {
             let header = RequestHeaderData::read(&mut request, 2).expect("request header");
             assert_eq!(header.request_api_key, ApiKey::EndTxn as i16);
             let end =
                 EndTxnRequestData::read(&mut request, header.request_api_version).expect("end txn");
-            assert!(!end.committed);
+            assert_eq!(end.committed, completion.committed());
             std::thread::sleep(Duration::from_millis(50));
             end_txn_response_frame_for_request(&header)
         }),
@@ -3000,19 +2482,7 @@ async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                response_frame(
-                    ApiKey::Metadata,
-                    13,
-                    header.correlation_id,
-                    &metadata_response([(7, leader_7)]),
-                )
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -3027,26 +2497,14 @@ async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_millis(30),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -3058,39 +2516,35 @@ async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
     producer.flush().await.unwrap();
 
     assert!(matches!(
-        producer
-            .abort_transaction()
+        completion
+            .end(&producer)
             .await
-            .expect_err("first abort should time out while EndTxn is still in flight"),
+            .expect_err("the first attempt should time out while EndTxn is still in flight"),
         kacrab::producer::ProducerError::DispatchTask(message)
-            if message.contains("AbortTransaction timed out")
+            if message.contains(completion.timeout_message())
     ));
     assert!(matches!(
-        producer
-            .commit_transaction()
+        completion
+            .other()
+            .end(&producer)
             .await
-            .expect_err("commit must not replace the pending abort result"),
+            .expect_err("the opposite operation must not replace the pending result"),
         kacrab::producer::ProducerError::InvalidTransactionState(message)
             if message == "previous transaction operation is pending and must be retried"
     ));
-    producer
-        .abort_transaction()
+    completion
+        .end(&producer)
         .await
-        .expect("retrying the same abort should await cached EndTxn result");
+        .expect("retrying the same operation should await the cached EndTxn result");
 
     assert_eq!(delivery.await.unwrap().offset, 90);
-    assert_eq!(producer.metrics().transaction_abort_count, 1);
+    assert_eq!(completion.count(&producer.metrics()), 1);
     assert_eq!(bootstrap.join().await, 3);
     assert_eq!(coordinator.join().await, 4);
     assert_eq!(leader_7.join().await, 2);
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Abort drain-order fixture needs separate coordinator, leader, and bootstrap \
-              handlers."
-)]
 async fn kafka_producer_abort_holds_end_txn_until_in_flight_batches_drain_like_java() {
     let produce_done = Arc::new(AtomicBool::new(false));
     let coordinator = MockBroker::serve_many(vec![
@@ -3146,19 +2600,7 @@ async fn kafka_producer_abort_holds_end_txn_until_in_flight_batches_drain_like_j
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                response_frame(
-                    ApiKey::Metadata,
-                    13,
-                    header.correlation_id,
-                    &metadata_response([(7, leader_7)]),
-                )
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -3173,26 +2615,14 @@ async fn kafka_producer_abort_holds_end_txn_until_in_flight_batches_drain_like_j
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_secs(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -3230,10 +2660,6 @@ async fn kafka_producer_abort_holds_end_txn_until_in_flight_batches_drain_like_j
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Transaction V2 produce fixture keeps ordered broker handlers inline."
-)]
 async fn kafka_producer_transaction_v2_skips_add_partitions_to_txn_like_java() {
     let coordinator = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -3309,15 +2735,7 @@ async fn kafka_producer_transaction_v2_skips_add_partitions_to_txn_like_java() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -3424,15 +2842,7 @@ async fn kafka_producer_transaction_v2_installs_end_txn_epoch_like_java() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -3544,15 +2954,7 @@ async fn kafka_producer_transactional_unknown_producer_id_is_abortable_like_java
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -3607,10 +3009,6 @@ async fn kafka_producer_transactional_unknown_producer_id_is_abortable_like_java
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Abortable unsupported-format fixture verifies EndTxn epoch-bump request."
-)]
 async fn kafka_producer_transactional_unsupported_message_format_is_abortable_like_java() {
     let coordinator = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -3664,15 +3062,7 @@ async fn kafka_producer_transactional_unsupported_message_format_is_abortable_li
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -3749,17 +3139,12 @@ async fn kafka_producer_add_partitions_fatal_error_blocks_abort() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader = "127.0.0.1:9092"
+        Box::new(metadata_handler(metadata_response([(
+            7,
+            "127.0.0.1:9092"
                 .parse::<std::net::SocketAddr>()
-                .expect("leader addr");
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+                .expect("leader addr"),
+        )]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -3831,17 +3216,12 @@ async fn kafka_producer_fatal_transaction_error_blocks_later_send_like_java() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader = "127.0.0.1:9092"
+        Box::new(metadata_handler(metadata_response([(
+            7,
+            "127.0.0.1:9092"
                 .parse::<std::net::SocketAddr>()
-                .expect("leader addr");
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+                .expect("leader addr"),
+        )]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -3925,15 +3305,7 @@ async fn kafka_producer_retries_retriable_add_partitions_error() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -3999,15 +3371,7 @@ async fn kafka_producer_retries_concurrent_transactions_add_partitions_error_lik
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -4077,15 +3441,7 @@ async fn kafka_producer_add_partitions_reloads_transaction_coordinator() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
         Box::new({
             let coordinator = refreshed_coordinator.addr();
             move |mut request| {
@@ -4231,26 +3587,13 @@ async fn kafka_producer_sends_offsets_to_transaction_before_commit() {
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -4271,7 +3614,6 @@ async fn kafka_producer_sends_offsets_to_transaction_before_commit() {
         .unwrap();
     let metrics = producer.metrics();
     assert_eq!(metrics.send_offsets_to_transaction_count, 1);
-    assert!(metrics.send_offsets_to_transaction_total_latency >= Duration::ZERO);
     producer.commit_transaction().await.unwrap();
 
     assert_eq!(bootstrap.join().await, 3);
@@ -4461,26 +3803,13 @@ async fn kafka_producer_send_offsets_to_transaction_reports_commit_error() {
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -4518,16 +3847,11 @@ async fn kafka_producer_send_offsets_to_transaction_reports_commit_error() {
     producer.abort_transaction().await.unwrap();
     let metrics = producer.metrics();
     assert_eq!(metrics.transaction_abort_count, 1);
-    assert!(metrics.transaction_abort_total_latency >= Duration::ZERO);
     assert_eq!(bootstrap.join().await, 3);
     assert_eq!(coordinator.join().await, 5);
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Send-offsets timeout fixture keeps ordered broker handlers inline."
-)]
 async fn kafka_producer_send_offsets_timeout_can_retry_same_operation_like_java() {
     let coordinator = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -4585,26 +3909,14 @@ async fn kafka_producer_send_offsets_timeout_can_retry_same_operation_like_java(
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_millis(30),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -4721,15 +4033,7 @@ async fn kafka_producer_add_offsets_unknown_producer_id_bumps_epoch_after_abort_
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -5640,27 +4944,14 @@ async fn kafka_producer_init_transactions_retries_retriable_coordinator_lookup()
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -5712,27 +5003,14 @@ async fn kafka_producer_init_transactions_uses_pre_batched_find_coordinator_shap
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -5780,27 +5058,14 @@ async fn kafka_producer_init_transactions_timeout_can_retry_same_operation_like_
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_millis(30),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -5868,27 +5133,13 @@ async fn kafka_producer_commit_transaction_reports_end_txn_broker_error() {
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -5970,27 +5221,13 @@ async fn kafka_producer_abort_transaction_abortable_error_becomes_fatal_like_jav
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -6250,27 +5487,13 @@ async fn kafka_producer_init_transactions_reports_unretriable_init_producer_erro
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -6356,27 +5579,13 @@ async fn kafka_producer_init_transactions_reports_unretriable_find_coordinator_e
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -6448,27 +5657,13 @@ async fn kafka_producer_init_transactions_rejects_invalid_coordinator_port() {
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -6515,16 +5710,10 @@ async fn dispatcher_drains_ready_batches_by_leader_broker() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            let leader_8 = leader_8.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7), (8, leader_8)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([
+            (7, leader_7.addr()),
+            (8, leader_8.addr()),
+        ]))),
     ])
     .await;
 
@@ -6606,15 +5795,10 @@ async fn dispatcher_sweeps_unready_partitions_of_a_dispatching_broker_like_java(
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
 
@@ -6687,18 +5871,10 @@ async fn dispatcher_sweeps_unready_partitions_of_a_dispatching_broker_like_java(
 
 #[tokio::test]
 async fn dispatcher_pipelines_owned_batches_to_same_broker() {
-    let leader_7 = MockBroker::serve_pipelined_produce(2).await;
+    let leader_7 = serve_pipelined_produce(2).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -6781,15 +5957,7 @@ async fn dispatcher_initializes_idempotent_producer_and_sequences_partition_batc
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -6798,32 +5966,7 @@ async fn dispatcher_initializes_idempotent_producer_and_sequences_partition_batc
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let dispatcher = ProducerDispatcher::with_config(
-        wire,
-        ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
-        },
-    );
+    let dispatcher = ProducerDispatcher::with_config(wire, test_producer_config());
     let now = Instant::now();
 
     let first = dispatcher
@@ -6872,15 +6015,7 @@ async fn dispatcher_completes_duplicate_sequence_number_as_success_like_java() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -6891,27 +6026,8 @@ async fn dispatcher_completes_duplicate_sequence_number_as_success_like_java() {
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -6929,10 +6045,6 @@ async fn dispatcher_completes_duplicate_sequence_number_as_success_like_java() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Idempotent local-failure sequence recovery fixture keeps broker handlers inline."
-)]
 async fn dispatcher_does_not_consume_sequence_after_local_record_too_large_error_like_java() {
     let leader_7 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -6963,15 +6075,7 @@ async fn dispatcher_does_not_consume_sequence_after_local_record_too_large_error
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -6982,27 +6086,9 @@ async fn dispatcher_does_not_consume_sequence_after_local_record_too_large_error
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
             max_request_size: 220,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -7044,13 +6130,10 @@ async fn dispatcher_does_not_consume_sequence_after_local_record_too_large_error
 async fn dispatcher_releases_encoded_buffers_after_later_local_record_too_large_error() {
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            let leader: std::net::SocketAddr = "127.0.0.1:9".parse().expect("leader addr");
-            let response = metadata_response([(7, leader)]);
-            response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-        }),
+        Box::new(metadata_handler(metadata_response([(
+            7,
+            "127.0.0.1:9".parse().expect("leader addr"),
+        )]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7061,27 +6144,16 @@ async fn dispatcher_releases_encoded_buffers_after_later_local_record_too_large_
     let dispatcher = ProducerDispatcher::with_config(
         wire.clone(),
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
             max_request_size: 220,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: false,
                 transactional_id: None,
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -7175,15 +6247,7 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7295,15 +6359,7 @@ async fn dispatch_ready_bumps_epoch_after_unsplittable_message_too_large() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7373,11 +6429,6 @@ async fn dispatch_ready_bumps_epoch_after_unsplittable_message_too_large() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Idempotent UnknownProducerId epoch-bump fixture keeps ordered broker handlers \
-              inline."
-)]
 async fn dispatcher_bumps_epoch_and_retries_unknown_producer_id() {
     let leader_7 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -7436,15 +6487,7 @@ async fn dispatcher_bumps_epoch_and_retries_unknown_producer_id() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7455,27 +6498,9 @@ async fn dispatcher_bumps_epoch_and_retries_unknown_producer_id() {
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -7542,15 +6567,7 @@ async fn dispatcher_retries_unknown_producer_id_without_epoch_bump_when_log_star
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7561,27 +6578,9 @@ async fn dispatcher_retries_unknown_producer_id_without_epoch_bump_when_log_star
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -7597,10 +6596,6 @@ async fn dispatcher_retries_unknown_producer_id_without_epoch_bump_when_log_star
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Idempotent sequence recovery fixture keeps ordered broker handlers inline."
-)]
 async fn dispatcher_releases_sequence_after_leadership_retry_timeout_like_java() {
     let leader_7 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -7643,24 +6638,8 @@ async fn dispatcher_releases_sequence_after_leadership_retry_timeout_like_java()
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7671,27 +6650,10 @@ async fn dispatcher_releases_sequence_after_leadership_retry_timeout_like_java()
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_millis(1),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -7718,10 +6680,6 @@ async fn dispatcher_releases_sequence_after_leadership_retry_timeout_like_java()
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Idempotent unresolved sequence timeout fixture keeps ordered broker handlers inline."
-)]
 async fn dispatcher_recovers_unknown_producer_id_timeout_with_unknown_log_start_like_java() {
     let leader_7 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -7780,15 +6738,7 @@ async fn dispatcher_recovers_unknown_producer_id_timeout_with_unknown_log_start_
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7799,27 +6749,10 @@ async fn dispatcher_recovers_unknown_producer_id_timeout_with_unknown_log_start_
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_millis(1),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -7872,15 +6805,7 @@ async fn dispatcher_sends_compressed_record_batches_from_runtime_config() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -7892,25 +6817,13 @@ async fn dispatcher_sends_compressed_record_batches_from_runtime_config() {
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
             compression: ProducerCompression {
                 codec: Compression::Lz4,
                 level: Some(9),
             },
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     let accumulator = SharedAccumulator::with_config(
@@ -7947,25 +6860,14 @@ async fn dispatcher_invalidates_metadata_on_leadership_error() {
     let leader_8 = MockBroker::serve_many(vec![Box::new(api_versions_response_frame)]).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            let leader_8 = leader_8.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7), (8, leader_8)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
-        Box::new({
-            let leader_8 = leader_8.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = moved_metadata_response(8, leader_8);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([
+            (7, leader_7.addr()),
+            (8, leader_8.addr()),
+        ]))),
+        Box::new(metadata_handler(moved_metadata_response(
+            8,
+            leader_8.addr(),
+        ))),
     ])
     .await;
 
@@ -8035,25 +6937,14 @@ async fn dispatcher_retries_leadership_error_after_metadata_refresh() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            let leader_8 = leader_8.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7), (8, leader_8)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
-        Box::new({
-            let leader_8 = leader_8.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = moved_metadata_response(8, leader_8);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([
+            (7, leader_7.addr()),
+            (8, leader_8.addr()),
+        ]))),
+        Box::new(metadata_handler(moved_metadata_response(
+            8,
+            leader_8.addr(),
+        ))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8093,16 +6984,7 @@ async fn dispatcher_retries_leadership_error_after_metadata_refresh() {
 async fn dispatcher_requeues_batch_when_metadata_is_missing() {
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            response_frame(
-                ApiKey::Metadata,
-                13,
-                header.correlation_id,
-                &empty_metadata_response(),
-            )
-        }),
+        Box::new(metadata_handler(empty_metadata_response())),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8137,16 +7019,7 @@ async fn dispatcher_requeues_batch_when_metadata_is_missing() {
 async fn dispatcher_owned_batches_reports_flush_incomplete_when_metadata_is_missing() {
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            response_frame(
-                ApiKey::Metadata,
-                13,
-                header.correlation_id,
-                &empty_metadata_response(),
-            )
-        }),
+        Box::new(metadata_handler(empty_metadata_response())),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8174,16 +7047,7 @@ async fn dispatcher_owned_batches_reports_flush_incomplete_when_metadata_is_miss
 async fn dispatcher_dispatch_all_requeues_and_reports_flush_incomplete() {
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            response_frame(
-                ApiKey::Metadata,
-                13,
-                header.correlation_id,
-                &empty_metadata_response(),
-            )
-        }),
+        Box::new(metadata_handler(empty_metadata_response())),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8224,15 +7088,7 @@ async fn kafka_producer_delivery_future_receives_terminal_broker_error_like_java
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8247,20 +7103,9 @@ async fn kafka_producer_delivery_future_receives_terminal_broker_error_like_java
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -8309,15 +7154,7 @@ async fn kafka_producer_send_with_callback_receives_terminal_broker_error_like_j
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8332,20 +7169,9 @@ async fn kafka_producer_send_with_callback_receives_terminal_broker_error_like_j
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     let callback_errors = Arc::new(Mutex::new(Vec::new()));
@@ -8403,15 +7229,7 @@ async fn kafka_producer_delivery_future_preserves_terminal_wire_connection_close
     let leader_7 = MockBroker::serve_many(vec![Box::new(api_versions_response_frame)]).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8428,20 +7246,10 @@ async fn kafka_producer_delivery_future_preserves_terminal_wire_connection_close
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_secs(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -8482,15 +7290,7 @@ async fn dispatcher_owned_batches_report_leadership_error_without_retry() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8754,17 +7554,18 @@ fn metadata_response<const N: usize>(
     }
 }
 
-/// A `serve_many` handler that answers one `Metadata` request with leader 7 at
-/// `leader_addr`. Shared by the disconnect/retry idempotent tests, which now see
-/// an extra metadata fetch because a wire disconnect invalidates the partition's
-/// cached leader before retrying.
-fn metadata_same_leader_handler(
-    leader_addr: std::net::SocketAddr,
-) -> impl FnOnce(Bytes) -> BytesMut + Send {
+/// A `serve_many` handler that asserts one `Metadata` request arrived and
+/// answers it with `response`.
+///
+/// The reply never depends on the request, so every metadata handler in this
+/// file was the same six lines wrapped around one interesting expression: the
+/// cluster view the test hands the client. Writing them out inline hid that
+/// expression, and the copies had already diverged on whether the response was
+/// bound to a `let` first and on how the leader address was captured.
+fn metadata_handler(response: MetadataResponseData) -> impl FnOnce(Bytes) -> BytesMut + Send {
     move |mut request| {
         let header = RequestHeaderData::read(&mut request, 2).expect("request header");
         assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-        let response = metadata_response_same_leader(7, leader_addr);
         response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
     }
 }
@@ -9540,99 +8341,22 @@ fn push_telemetry_response_frame(correlation_id: i32, error: ErrorCode) -> Bytes
     response_frame(ApiKey::PushTelemetry, 0, correlation_id, &response)
 }
 
-fn response_frame(
-    api_key: ApiKey,
-    api_version: i16,
-    correlation_id: i32,
-    response: &impl WriteResponse,
-) -> BytesMut {
-    let mut header = BytesMut::new();
-    ResponseHeaderData {
-        correlation_id,
-        _unknown_tagged_fields: Vec::new(),
-    }
-    .write(
-        &mut header,
-        response_header_version(api_key as i16, api_version),
-    )
-    .expect("response header write");
-
-    let mut body = BytesMut::new();
-    response.write_response(&mut body, api_version);
-    frame::encode_request(&header, &body).expect("response frame")
-}
-
-trait WriteResponse {
-    fn write_response(&self, buf: &mut BytesMut, version: i16);
-}
-
-impl WriteResponse for ApiVersionsResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("api versions response");
-    }
-}
-
-impl WriteResponse for MetadataResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("metadata response");
-    }
-}
-
-impl WriteResponse for ProduceResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("produce response");
-    }
-}
-
-impl WriteResponse for InitProducerIdResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("init producer id response");
-    }
-}
-
-impl WriteResponse for FindCoordinatorResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("find coordinator response");
-    }
-}
-
-impl WriteResponse for AddPartitionsToTxnResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("add partitions to txn response");
-    }
-}
-
-impl WriteResponse for AddOffsetsToTxnResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("add offsets to txn response");
-    }
-}
-
-impl WriteResponse for TxnOffsetCommitResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("txn offset commit response");
-    }
-}
-
-impl WriteResponse for EndTxnResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("end txn response");
-    }
-}
-
-impl WriteResponse for GetTelemetrySubscriptionsResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version)
-            .expect("get telemetry subscriptions response");
-    }
-}
-
-impl WriteResponse for PushTelemetryResponseData {
-    fn write_response(&self, buf: &mut BytesMut, version: i16) {
-        self.write(buf, version).expect("push telemetry response");
+/// The runtime config the tests in this file start from.
+///
+/// `ProducerRuntimeConfig::default()` with retries pinned off. Retries are the
+/// one production default a test cannot inherit: it is `usize::MAX` attempts, so
+/// any fixture that answers with a retriable error would spin instead of
+/// failing. Everything else — acks, timeouts, the in-flight limit, request size,
+/// compression, idempotence — is exactly the production default.
+///
+/// Fifty call sites used to restate all sixteen fields, so the two or three that
+/// a given test actually depends on were buried in fourteen that were the same
+/// everywhere, and a real difference between two neighbouring fixtures read like
+/// noise. A test now names only what it exercises.
+fn test_producer_config() -> ProducerRuntimeConfig {
+    ProducerRuntimeConfig {
+        retry_attempts: 0,
+        ..ProducerRuntimeConfig::default()
     }
 }
 
@@ -9687,26 +8411,14 @@ fn transactional_test_producer_with_retries_batch_size_and_linger(
                 .batch_size(batch_size)
                 .linger(linger)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     )
 }
@@ -9718,551 +8430,465 @@ fn transaction_v2_test_producer(wire: WireClient) -> Producer {
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: true,
             },
+            ..test_producer_config()
         },
     )
 }
 
-struct MockBroker {
-    addr: std::net::SocketAddr,
-    join: tokio::task::JoinHandle<usize>,
-}
-
-impl MockBroker {
-    async fn serve_many(handlers: Vec<Box<dyn FnOnce(Bytes) -> BytesMut + Send>>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let handled = handlers.len();
-            for handler in handlers {
-                let request = read_frame(&mut socket).await;
-                let response = handler(request);
-                socket.write_all(&response).await.unwrap();
-            }
-            handled
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_pipelined_produce(produce_requests: usize) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut socket).await;
-            socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-            let mut correlation_ids = Vec::with_capacity(produce_requests);
-            for _ in 0..produce_requests {
-                let mut request = read_frame(&mut socket).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
-                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                    .expect("produce request");
-                assert_eq!(produce.topic_data.len(), 1);
-                let topic_data = produce.topic_data.first().expect("topic produce data");
-                assert_eq!(topic_data.topic_id, TOPIC_ID);
-                assert_eq!(topic_data.partition_data.len(), 1);
-                let partition_data = topic_data
-                    .partition_data
-                    .first()
-                    .expect("partition produce data");
-                assert_eq!(partition_data.index, 0);
-                correlation_ids.push(header.correlation_id);
-            }
-            for (index, correlation_id) in correlation_ids.into_iter().enumerate() {
-                let offset = 40_i64
-                    .checked_add(i64::try_from(index).expect("offset index"))
-                    .expect("offset should fit");
-                socket
-                    .write_all(&produce_response_frame(correlation_id, 0, offset))
-                    .await
-                    .unwrap();
-            }
-            produce_requests
-                .checked_add(1)
-                .expect("handled request count should fit")
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_pipelined_idempotent_produce(partitions: Vec<i32>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut socket).await;
-            socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut init_request = read_frame(&mut socket).await;
-            let init_header =
-                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
-            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
-            let init =
-                InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
-            assert_eq!(init.transactional_id, None);
-            socket
-                .write_all(&init_producer_id_response_frame(
-                    init_header.correlation_id,
-                    42,
-                    3,
-                ))
-                .await
-                .unwrap();
-
-            // The producer groups all ready batches for a broker into ONE
-            // ProduceRequest carrying every partition (Java RecordAccumulator.drain
-            // -> one request per node), so the pipelined partitions arrive in a
-            // single coalesced request rather than one request per partition.
+async fn serve_pipelined_produce(produce_requests: usize) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut socket).await;
+        socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+        let mut correlation_ids = Vec::with_capacity(produce_requests);
+        for _ in 0..produce_requests {
             let mut request = read_frame(&mut socket).await;
             let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
             assert_eq!(header.request_api_key, ApiKey::Produce as i16);
             let produce = ProduceRequestData::read(&mut request, header.request_api_version)
                 .expect("produce request");
-            assert_eq!(produce.acks, -1);
             assert_eq!(produce.topic_data.len(), 1);
             let topic_data = produce.topic_data.first().expect("topic produce data");
             assert_eq!(topic_data.topic_id, TOPIC_ID);
-            assert_eq!(topic_data.partition_data.len(), partitions.len());
-            let mut offsets = Vec::with_capacity(partitions.len());
-            for (index, expected_partition) in partitions.iter().enumerate() {
-                let partition_data = topic_data
-                    .partition_data
-                    .iter()
-                    .find(|entry| entry.index == *expected_partition)
-                    .expect("partition produce data");
-                let mut records = partition_data.records.clone().expect("records");
-                let batch = RecordBatch::decode(&mut records).expect("record batch");
-                assert_eq!(batch.producer_id, 42);
-                assert_eq!(batch.producer_epoch, 3);
-                assert_eq!(batch.base_sequence, 0);
-                let offset = 40_i64
-                    .checked_add(i64::try_from(index).expect("offset index"))
-                    .expect("offset should fit");
-                offsets.push((*expected_partition, offset));
-            }
-            socket
-                .write_all(&produce_response_frame_for_partitions(&header, &offsets))
-                .await
-                .unwrap();
-            // handshake + InitProducerId + one coalesced Produce.
-            3
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_pipelined_idempotent_produce_reversed(partitions: Vec<i32>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut socket).await;
-            socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut init_request = read_frame(&mut socket).await;
-            let init_header =
-                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
-            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
-            let init =
-                InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
-            assert_eq!(init.transactional_id, None);
-            socket
-                .write_all(&init_producer_id_response_frame(
-                    init_header.correlation_id,
-                    42,
-                    3,
-                ))
-                .await
-                .unwrap();
-
-            // Both partitions coalesce into one ProduceRequest (Java groups a
-            // broker's batches into a single request), so the partition responses
-            // are mapped back to their per-partition deliveries inside one frame
-            // rather than across reordered separate responses.
-            let mut request = read_frame(&mut socket).await;
-            let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
-            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                .expect("produce request");
-            assert_eq!(produce.acks, -1);
-            assert_eq!(produce.topic_data.len(), 1);
-            let topic_data = produce.topic_data.first().expect("topic produce data");
-            assert_eq!(topic_data.topic_id, TOPIC_ID);
-            assert_eq!(topic_data.partition_data.len(), partitions.len());
-            // Reverse the per-partition response order within the coalesced frame so
-            // the producer must still map each partition response to its delivery.
-            let mut offsets = Vec::with_capacity(partitions.len());
-            for expected_partition in partitions.iter().rev() {
-                let partition_data = topic_data
-                    .partition_data
-                    .iter()
-                    .find(|entry| entry.index == *expected_partition)
-                    .expect("partition produce data");
-                let mut records = partition_data.records.clone().expect("records");
-                let batch = RecordBatch::decode(&mut records).expect("record batch");
-                assert_eq!(batch.producer_id, 42);
-                assert_eq!(batch.producer_epoch, 3);
-                assert_eq!(batch.base_sequence, 0);
-                let offset = 40_i64
-                    .checked_add(i64::from(*expected_partition))
-                    .expect("offset should fit");
-                offsets.push((*expected_partition, offset));
-            }
-            socket
-                .write_all(&produce_response_frame_for_partitions(&header, &offsets))
-                .await
-                .unwrap();
-            // handshake + InitProducerId + one coalesced Produce.
-            3
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_idempotent_disconnect_then_retry() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut first_socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut first_socket).await;
-            first_socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut init_request = read_frame(&mut first_socket).await;
-            let init_header =
-                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
-            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
-            let init =
-                InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
-            assert_eq!(init.transactional_id, None);
-            first_socket
-                .write_all(&init_producer_id_response_frame(
-                    init_header.correlation_id,
-                    42,
-                    3,
-                ))
-                .await
-                .unwrap();
-
-            let mut produce_request = read_frame(&mut first_socket).await;
-            let produce_header =
-                RequestHeaderData::read(&mut produce_request, 2).expect("produce header");
-            assert_eq!(produce_header.request_api_key, ApiKey::Produce as i16);
-            let produce =
-                ProduceRequestData::read(&mut produce_request, produce_header.request_api_version)
-                    .expect("produce request");
-            assert_single_idempotent_produce(&produce, 0, 0);
-            drop(first_socket);
-
-            let (mut retry_socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut retry_socket).await;
-            retry_socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-            let mut retry_request = read_frame(&mut retry_socket).await;
-            let retry_header =
-                RequestHeaderData::read(&mut retry_request, 2).expect("retry produce header");
-            assert_eq!(retry_header.request_api_key, ApiKey::Produce as i16);
-            let retry =
-                ProduceRequestData::read(&mut retry_request, retry_header.request_api_version)
-                    .expect("retry produce request");
-            assert_single_idempotent_produce(&retry, 0, 0);
-            retry_socket
-                .write_all(&produce_response_frame(retry_header.correlation_id, 0, 40))
-                .await
-                .unwrap();
-            5
-        });
-        Self { addr, join }
-    }
-
-    /// Two idempotent batches are in flight to one partition under epoch 3; BOTH get
-    /// `UNKNOWN_PRODUCER_ID`, forcing a producer-epoch bump. The mock is ADAPTIVE — it
-    /// answers whatever frame order the producer uses: epoch-3 produces are failed with
-    /// `UNKNOWN_PRODUCER_ID`, `InitProducerId` is answered (epoch 3 first, then 4), and
-    /// epoch-4 produces are acked until both records are delivered. The join handle
-    /// returns the number of `InitProducerId` calls: exactly 2 (one initial + ONE bump)
-    /// proves the sibling batch was re-stamped under the new epoch with a SINGLE bump
-    /// (no chained bump, gap A).
-    async fn serve_idempotent_two_inflight_unknown_producer_then_single_rebump() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut socket).await;
-            socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut init_calls = 0_usize;
-            let mut delivered = 0_usize;
-            let mut next_offset = 40_i64;
-            while delivered < 2 {
-                let mut request = read_frame(&mut socket).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                if header.request_api_key == ApiKey::InitProducerId as i16 {
-                    init_calls = init_calls.saturating_add(1);
-                    // First call assigns epoch 3; the recovery bump assigns epoch 4.
-                    let epoch = if init_calls == 1 { 3 } else { 4 };
-                    socket
-                        .write_all(&init_producer_id_response_frame(
-                            header.correlation_id,
-                            42,
-                            epoch,
-                        ))
-                        .await
-                        .unwrap();
-                    continue;
-                }
-                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                    .expect("produce request");
-                let mut records = produce
-                    .topic_data
-                    .first()
-                    .and_then(|topic| topic.partition_data.first())
-                    .and_then(|partition| partition.records.clone())
-                    .expect("records");
-                let batch = RecordBatch::decode(&mut records).expect("record batch");
-                assert_eq!(batch.producer_id, 42);
-                if batch.producer_epoch < 4 {
-                    // Stale epoch: fail with UNKNOWN_PRODUCER_ID to force the bump.
-                    socket
-                        .write_all(
-                            &produce_error_response_frame_with_log_start_offset_for_version(
-                                header.request_api_version,
-                                header.correlation_id,
-                                0,
-                                ErrorCode::UnknownProducerId,
-                                0,
-                            ),
-                        )
-                        .await
-                        .unwrap();
-                } else {
-                    // Re-stamped under the new epoch: ack it.
-                    socket
-                        .write_all(&produce_response_frame(
-                            header.correlation_id,
-                            0,
-                            next_offset,
-                        ))
-                        .await
-                        .unwrap();
-                    next_offset = next_offset.saturating_add(1);
-                    delivered = delivered.saturating_add(1);
-                }
-            }
-            init_calls
-        });
-        Self { addr, join }
-    }
-
-    /// Two idempotent batches (base sequence 0 and 1) are pipelined IN FLIGHT to one
-    /// partition, then the connection drops so both re-enqueue for retry. The retry
-    /// must re-send them strictly in base-sequence order (Java firstInFlightSequence):
-    /// seq 0 alone, ack it, THEN seq 1 — never seq 1 before seq 0.
-    async fn serve_idempotent_two_inflight_disconnect_then_inorder_retry() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut first, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut first).await;
-            first
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut init_request = read_frame(&mut first).await;
-            let init_header =
-                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
-            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
-            first
-                .write_all(&init_producer_id_response_frame(
-                    init_header.correlation_id,
-                    42,
-                    3,
-                ))
-                .await
-                .unwrap();
-
-            // Two produce requests held in flight (not yet answered), in ascending
-            // base-sequence order: 0 then 1.
-            for expected_base_sequence in [0_i32, 1] {
-                let mut request = read_frame(&mut first).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
-                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                    .expect("produce request");
-                assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
-            }
-            // Drop both in-flight requests so the producer re-enqueues them.
-            drop(first);
-
-            // On retry the producer must re-send seq 0 first (alone), wait for its ack,
-            // then seq 1 — the firstInFlightSequence ordering gate. No re-InitProducerId
-            // (the producer id is cached) and the same epoch 3 (a plain wire retry does
-            // not bump the epoch).
-            let (mut retry, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut retry).await;
-            retry
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-            for (expected_base_sequence, offset) in [(0_i32, 40_i64), (1, 41)] {
-                let mut request = read_frame(&mut retry).await;
-                let header =
-                    RequestHeaderData::read(&mut request, 2).expect("retry produce header");
-                assert_eq!(header.request_api_key, ApiKey::Produce as i16);
-                let produce = ProduceRequestData::read(&mut request, header.request_api_version)
-                    .expect("retry produce request");
-                assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
-                retry
-                    .write_all(&produce_response_frame(header.correlation_id, 0, offset))
-                    .await
-                    .unwrap();
-            }
-            // handshake + InitProducerId + 2 produce (conn 1) + handshake + 2 produce (conn 2).
-            6
-        });
-        Self { addr, join }
-    }
-
-    async fn serve_idempotent_timeout_then_epoch_bump_recovery() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let join = tokio::spawn(async move {
-            let (mut first_socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut first_socket).await;
-            first_socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut init_request = read_frame(&mut first_socket).await;
-            let init_header =
-                RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
-            assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
-            let init =
-                InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
-            assert_eq!(init.transactional_id, None);
-            assert_eq!(init.producer_id, -1);
-            assert_eq!(init.producer_epoch, -1);
-            first_socket
-                .write_all(&init_producer_id_response_frame(
-                    init_header.correlation_id,
-                    42,
-                    3,
-                ))
-                .await
-                .unwrap();
-
-            let mut produce_request = read_frame(&mut first_socket).await;
-            let produce_header =
-                RequestHeaderData::read(&mut produce_request, 2).expect("produce header");
-            assert_eq!(produce_header.request_api_key, ApiKey::Produce as i16);
-            let produce =
-                ProduceRequestData::read(&mut produce_request, produce_header.request_api_version)
-                    .expect("produce request");
-            assert_single_idempotent_produce(&produce, 0, 0);
-            drop(first_socket);
-
-            let (mut recovery_socket, _) = listener.accept().await.unwrap();
-            let handshake = read_frame(&mut recovery_socket).await;
-            recovery_socket
-                .write_all(&api_versions_response_frame(handshake))
-                .await
-                .unwrap();
-
-            let mut bump_request = read_frame(&mut recovery_socket).await;
-            let bump_header =
-                RequestHeaderData::read(&mut bump_request, 2).expect("epoch bump header");
-            assert_eq!(bump_header.request_api_key, ApiKey::InitProducerId as i16);
-            let bump =
-                InitProducerIdRequestData::read(&mut bump_request, 5).expect("epoch bump request");
-            assert_eq!(bump.transactional_id, None);
-            assert_eq!(bump.producer_id, 42);
-            assert_eq!(bump.producer_epoch, 3);
-            recovery_socket
-                .write_all(&init_producer_id_response_frame(
-                    bump_header.correlation_id,
-                    42,
-                    4,
-                ))
-                .await
-                .unwrap();
-
-            let mut retry_request = read_frame(&mut recovery_socket).await;
-            let retry_header =
-                RequestHeaderData::read(&mut retry_request, 2).expect("recovered produce header");
-            assert_eq!(retry_header.request_api_key, ApiKey::Produce as i16);
-            let retry =
-                ProduceRequestData::read(&mut retry_request, retry_header.request_api_version)
-                    .expect("recovered produce request");
-            assert_eq!(retry.acks, -1);
-            let topic_data = retry.topic_data.first().expect("topic produce data");
+            assert_eq!(topic_data.partition_data.len(), 1);
             let partition_data = topic_data
                 .partition_data
                 .first()
                 .expect("partition produce data");
+            assert_eq!(partition_data.index, 0);
+            correlation_ids.push(header.correlation_id);
+        }
+        for (index, correlation_id) in correlation_ids.into_iter().enumerate() {
+            let offset = 40_i64
+                .checked_add(i64::try_from(index).expect("offset index"))
+                .expect("offset should fit");
+            socket
+                .write_all(&produce_response_frame(correlation_id, 0, offset))
+                .await
+                .unwrap();
+        }
+        produce_requests
+            .checked_add(1)
+            .expect("handled request count should fit")
+    })
+    .await
+}
+
+async fn serve_pipelined_idempotent_produce(partitions: Vec<i32>) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut socket).await;
+        socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut init_request = read_frame(&mut socket).await;
+        let init_header =
+            RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+        assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+        let init = InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
+        assert_eq!(init.transactional_id, None);
+        socket
+            .write_all(&init_producer_id_response_frame(
+                init_header.correlation_id,
+                42,
+                3,
+            ))
+            .await
+            .unwrap();
+
+        // The producer groups all ready batches for a broker into ONE
+        // ProduceRequest carrying every partition (Java RecordAccumulator.drain
+        // -> one request per node), so the pipelined partitions arrive in a
+        // single coalesced request rather than one request per partition.
+        let mut request = read_frame(&mut socket).await;
+        let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+        assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+        let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+            .expect("produce request");
+        assert_eq!(produce.acks, -1);
+        assert_eq!(produce.topic_data.len(), 1);
+        let topic_data = produce.topic_data.first().expect("topic produce data");
+        assert_eq!(topic_data.topic_id, TOPIC_ID);
+        assert_eq!(topic_data.partition_data.len(), partitions.len());
+        let mut offsets = Vec::with_capacity(partitions.len());
+        for (index, expected_partition) in partitions.iter().enumerate() {
+            let partition_data = topic_data
+                .partition_data
+                .iter()
+                .find(|entry| entry.index == *expected_partition)
+                .expect("partition produce data");
             let mut records = partition_data.records.clone().expect("records");
             let batch = RecordBatch::decode(&mut records).expect("record batch");
             assert_eq!(batch.producer_id, 42);
-            assert_eq!(batch.producer_epoch, 4);
+            assert_eq!(batch.producer_epoch, 3);
             assert_eq!(batch.base_sequence, 0);
-            recovery_socket
-                .write_all(&produce_response_frame(retry_header.correlation_id, 0, 41))
-                .await
-                .unwrap();
-            6
-        });
-        Self { addr, join }
-    }
-
-    const fn addr(&self) -> std::net::SocketAddr {
-        self.addr
-    }
-
-    async fn join(self) -> usize {
-        self.join.await.unwrap()
-    }
+            let offset = 40_i64
+                .checked_add(i64::try_from(index).expect("offset index"))
+                .expect("offset should fit");
+            offsets.push((*expected_partition, offset));
+        }
+        socket
+            .write_all(&produce_response_frame_for_partitions(&header, &offsets))
+            .await
+            .unwrap();
+        // handshake + InitProducerId + one coalesced Produce.
+        3
+    })
+    .await
 }
 
-async fn read_frame(socket: &mut TcpStream) -> Bytes {
-    let len = socket.read_i32().await.unwrap();
-    let len = usize::try_from(len).unwrap();
-    let mut bytes = vec![0; len];
-    let _bytes_read = socket.read_exact(&mut bytes).await.unwrap();
-    Bytes::from(bytes)
+async fn serve_pipelined_idempotent_produce_reversed(partitions: Vec<i32>) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut socket).await;
+        socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut init_request = read_frame(&mut socket).await;
+        let init_header =
+            RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+        assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+        let init = InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
+        assert_eq!(init.transactional_id, None);
+        socket
+            .write_all(&init_producer_id_response_frame(
+                init_header.correlation_id,
+                42,
+                3,
+            ))
+            .await
+            .unwrap();
+
+        // Both partitions coalesce into one ProduceRequest (Java groups a
+        // broker's batches into a single request), so the partition responses
+        // are mapped back to their per-partition deliveries inside one frame
+        // rather than across reordered separate responses.
+        let mut request = read_frame(&mut socket).await;
+        let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+        assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+        let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+            .expect("produce request");
+        assert_eq!(produce.acks, -1);
+        assert_eq!(produce.topic_data.len(), 1);
+        let topic_data = produce.topic_data.first().expect("topic produce data");
+        assert_eq!(topic_data.topic_id, TOPIC_ID);
+        assert_eq!(topic_data.partition_data.len(), partitions.len());
+        // Reverse the per-partition response order within the coalesced frame so
+        // the producer must still map each partition response to its delivery.
+        let mut offsets = Vec::with_capacity(partitions.len());
+        for expected_partition in partitions.iter().rev() {
+            let partition_data = topic_data
+                .partition_data
+                .iter()
+                .find(|entry| entry.index == *expected_partition)
+                .expect("partition produce data");
+            let mut records = partition_data.records.clone().expect("records");
+            let batch = RecordBatch::decode(&mut records).expect("record batch");
+            assert_eq!(batch.producer_id, 42);
+            assert_eq!(batch.producer_epoch, 3);
+            assert_eq!(batch.base_sequence, 0);
+            let offset = 40_i64
+                .checked_add(i64::from(*expected_partition))
+                .expect("offset should fit");
+            offsets.push((*expected_partition, offset));
+        }
+        socket
+            .write_all(&produce_response_frame_for_partitions(&header, &offsets))
+            .await
+            .unwrap();
+        // handshake + InitProducerId + one coalesced Produce.
+        3
+    })
+    .await
+}
+
+async fn serve_idempotent_disconnect_then_retry() -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut first_socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut first_socket).await;
+        first_socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut init_request = read_frame(&mut first_socket).await;
+        let init_header =
+            RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+        assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+        let init = InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
+        assert_eq!(init.transactional_id, None);
+        first_socket
+            .write_all(&init_producer_id_response_frame(
+                init_header.correlation_id,
+                42,
+                3,
+            ))
+            .await
+            .unwrap();
+
+        let mut produce_request = read_frame(&mut first_socket).await;
+        let produce_header =
+            RequestHeaderData::read(&mut produce_request, 2).expect("produce header");
+        assert_eq!(produce_header.request_api_key, ApiKey::Produce as i16);
+        let produce =
+            ProduceRequestData::read(&mut produce_request, produce_header.request_api_version)
+                .expect("produce request");
+        assert_single_idempotent_produce(&produce, 0, 0);
+        drop(first_socket);
+
+        let (mut retry_socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut retry_socket).await;
+        retry_socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+        let mut retry_request = read_frame(&mut retry_socket).await;
+        let retry_header =
+            RequestHeaderData::read(&mut retry_request, 2).expect("retry produce header");
+        assert_eq!(retry_header.request_api_key, ApiKey::Produce as i16);
+        let retry = ProduceRequestData::read(&mut retry_request, retry_header.request_api_version)
+            .expect("retry produce request");
+        assert_single_idempotent_produce(&retry, 0, 0);
+        retry_socket
+            .write_all(&produce_response_frame(retry_header.correlation_id, 0, 40))
+            .await
+            .unwrap();
+        5
+    })
+    .await
+}
+
+async fn serve_idempotent_two_inflight_unknown_producer_then_single_rebump() -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut socket).await;
+        socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut init_calls = 0_usize;
+        let mut delivered = 0_usize;
+        let mut next_offset = 40_i64;
+        while delivered < 2 {
+            let mut request = read_frame(&mut socket).await;
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            if header.request_api_key == ApiKey::InitProducerId as i16 {
+                init_calls = init_calls.saturating_add(1);
+                // First call assigns epoch 3; the recovery bump assigns epoch 4.
+                let epoch = if init_calls == 1 { 3 } else { 4 };
+                socket
+                    .write_all(&init_producer_id_response_frame(
+                        header.correlation_id,
+                        42,
+                        epoch,
+                    ))
+                    .await
+                    .unwrap();
+                continue;
+            }
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            let mut records = produce
+                .topic_data
+                .first()
+                .and_then(|topic| topic.partition_data.first())
+                .and_then(|partition| partition.records.clone())
+                .expect("records");
+            let batch = RecordBatch::decode(&mut records).expect("record batch");
+            assert_eq!(batch.producer_id, 42);
+            if batch.producer_epoch < 4 {
+                // Stale epoch: fail with UNKNOWN_PRODUCER_ID to force the bump.
+                socket
+                    .write_all(
+                        &produce_error_response_frame_with_log_start_offset_for_version(
+                            header.request_api_version,
+                            header.correlation_id,
+                            0,
+                            ErrorCode::UnknownProducerId,
+                            0,
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                // Re-stamped under the new epoch: ack it.
+                socket
+                    .write_all(&produce_response_frame(
+                        header.correlation_id,
+                        0,
+                        next_offset,
+                    ))
+                    .await
+                    .unwrap();
+                next_offset = next_offset.saturating_add(1);
+                delivered = delivered.saturating_add(1);
+            }
+        }
+        init_calls
+    })
+    .await
+}
+
+async fn serve_idempotent_two_inflight_disconnect_then_inorder_retry() -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut first).await;
+        first
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut init_request = read_frame(&mut first).await;
+        let init_header =
+            RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+        assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+        first
+            .write_all(&init_producer_id_response_frame(
+                init_header.correlation_id,
+                42,
+                3,
+            ))
+            .await
+            .unwrap();
+
+        // Two produce requests held in flight (not yet answered), in ascending
+        // base-sequence order: 0 then 1.
+        for expected_base_sequence in [0_i32, 1] {
+            let mut request = read_frame(&mut first).await;
+            let header = RequestHeaderData::read(&mut request, 2).expect("produce header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("produce request");
+            assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
+        }
+        // Drop both in-flight requests so the producer re-enqueues them.
+        drop(first);
+
+        // On retry the producer must re-send seq 0 first (alone), wait for its ack,
+        // then seq 1 — the firstInFlightSequence ordering gate. No re-InitProducerId
+        // (the producer id is cached) and the same epoch 3 (a plain wire retry does
+        // not bump the epoch).
+        let (mut retry, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut retry).await;
+        retry
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+        for (expected_base_sequence, offset) in [(0_i32, 40_i64), (1, 41)] {
+            let mut request = read_frame(&mut retry).await;
+            let header = RequestHeaderData::read(&mut request, 2).expect("retry produce header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            let produce = ProduceRequestData::read(&mut request, header.request_api_version)
+                .expect("retry produce request");
+            assert_single_idempotent_produce(&produce, 0, expected_base_sequence);
+            retry
+                .write_all(&produce_response_frame(header.correlation_id, 0, offset))
+                .await
+                .unwrap();
+        }
+        // handshake + InitProducerId + 2 produce (conn 1) + handshake + 2 produce (conn 2).
+        6
+    })
+    .await
+}
+
+async fn serve_idempotent_timeout_then_epoch_bump_recovery() -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut first_socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut first_socket).await;
+        first_socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut init_request = read_frame(&mut first_socket).await;
+        let init_header =
+            RequestHeaderData::read(&mut init_request, 2).expect("init producer header");
+        assert_eq!(init_header.request_api_key, ApiKey::InitProducerId as i16);
+        let init = InitProducerIdRequestData::read(&mut init_request, 5).expect("init producer id");
+        assert_eq!(init.transactional_id, None);
+        assert_eq!(init.producer_id, -1);
+        assert_eq!(init.producer_epoch, -1);
+        first_socket
+            .write_all(&init_producer_id_response_frame(
+                init_header.correlation_id,
+                42,
+                3,
+            ))
+            .await
+            .unwrap();
+
+        let mut produce_request = read_frame(&mut first_socket).await;
+        let produce_header =
+            RequestHeaderData::read(&mut produce_request, 2).expect("produce header");
+        assert_eq!(produce_header.request_api_key, ApiKey::Produce as i16);
+        let produce =
+            ProduceRequestData::read(&mut produce_request, produce_header.request_api_version)
+                .expect("produce request");
+        assert_single_idempotent_produce(&produce, 0, 0);
+        drop(first_socket);
+
+        let (mut recovery_socket, _) = listener.accept().await.unwrap();
+        let handshake = read_frame(&mut recovery_socket).await;
+        recovery_socket
+            .write_all(&api_versions_response_frame(handshake))
+            .await
+            .unwrap();
+
+        let mut bump_request = read_frame(&mut recovery_socket).await;
+        let bump_header = RequestHeaderData::read(&mut bump_request, 2).expect("epoch bump header");
+        assert_eq!(bump_header.request_api_key, ApiKey::InitProducerId as i16);
+        let bump =
+            InitProducerIdRequestData::read(&mut bump_request, 5).expect("epoch bump request");
+        assert_eq!(bump.transactional_id, None);
+        assert_eq!(bump.producer_id, 42);
+        assert_eq!(bump.producer_epoch, 3);
+        recovery_socket
+            .write_all(&init_producer_id_response_frame(
+                bump_header.correlation_id,
+                42,
+                4,
+            ))
+            .await
+            .unwrap();
+
+        let mut retry_request = read_frame(&mut recovery_socket).await;
+        let retry_header =
+            RequestHeaderData::read(&mut retry_request, 2).expect("recovered produce header");
+        assert_eq!(retry_header.request_api_key, ApiKey::Produce as i16);
+        let retry = ProduceRequestData::read(&mut retry_request, retry_header.request_api_version)
+            .expect("recovered produce request");
+        assert_eq!(retry.acks, -1);
+        let topic_data = retry.topic_data.first().expect("topic produce data");
+        let partition_data = topic_data
+            .partition_data
+            .first()
+            .expect("partition produce data");
+        let mut records = partition_data.records.clone().expect("records");
+        let batch = RecordBatch::decode(&mut records).expect("record batch");
+        assert_eq!(batch.producer_id, 42);
+        assert_eq!(batch.producer_epoch, 4);
+        assert_eq!(batch.base_sequence, 0);
+        recovery_socket
+            .write_all(&produce_response_frame(retry_header.correlation_id, 0, 41))
+            .await
+            .unwrap();
+        6
+    })
+    .await
 }
