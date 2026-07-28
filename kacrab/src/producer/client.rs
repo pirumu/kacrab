@@ -193,8 +193,6 @@ impl Producer {
         config: &ClientConfig,
     ) -> Result<TypedProducer<K, V, KS, VS>>
     where
-        K: Sync,
-        V: Sync,
         KS: ConfiguredProducerSerializer<K>,
         VS: ConfiguredProducerSerializer<V>,
     {
@@ -247,8 +245,6 @@ impl Producer {
         value_serializer: VS,
     ) -> Result<TypedProducer<K, V, KS, VS>>
     where
-        K: Sync,
-        V: Sync,
         KS: ProducerSerializer<K>,
         VS: ProducerSerializer<V>,
     {
@@ -276,8 +272,6 @@ impl Producer {
         I: IntoIterator<Item = (CK, CV)>,
         CK: Into<ConfigKey>,
         CV: Into<ConfigValue>,
-        K: Sync,
-        V: Sync,
         KS: ProducerSerializer<K>,
         VS: ProducerSerializer<V>,
     {
@@ -304,8 +298,6 @@ impl Producer {
         I: IntoIterator<Item = (CK, CV)>,
         CK: Into<ConfigKey>,
         CV: Into<ConfigValue>,
-        K: Sync,
-        V: Sync,
         KS: ConfiguredProducerSerializer<K>,
         VS: ConfiguredProducerSerializer<V>,
     {
@@ -324,8 +316,6 @@ impl Producer {
         properties: Properties,
     ) -> Result<TypedProducer<K, V, KS, VS>>
     where
-        K: Sync,
-        V: Sync,
         KS: ConfiguredProducerSerializer<K>,
         VS: ConfiguredProducerSerializer<V>,
     {
@@ -341,8 +331,6 @@ impl Producer {
         value_serializer: VS,
     ) -> TypedProducer<K, V, KS, VS>
     where
-        K: Sync,
-        V: Sync,
         KS: ProducerSerializer<K>,
         VS: ProducerSerializer<V>,
     {
@@ -2067,8 +2055,6 @@ impl ProducerBuilder {
         value_serializer: VS,
     ) -> Result<TypedProducer<K, V, KS, VS>>
     where
-        K: Sync,
-        V: Sync,
         KS: ProducerSerializer<K>,
         VS: ProducerSerializer<V>,
     {
@@ -2093,8 +2079,6 @@ impl ProducerBuilder {
         self,
     ) -> Result<TypedProducer<K, V, KS, VS>>
     where
-        K: Sync,
-        V: Sync,
         KS: ConfiguredProducerSerializer<K>,
         VS: ConfiguredProducerSerializer<V>,
     {

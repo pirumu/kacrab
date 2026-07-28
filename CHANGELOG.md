@@ -159,6 +159,18 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **`TypedProducer` no longer demands `K: Sync, V: Sync`.** Both parameters appear
+  only inside `PhantomData<fn(K, V)>` — nothing in the type or its methods ever
+  shares a `K` or a `V` across threads — so the bound constrained nothing while
+  leaking out of the struct declaration into eight public constructor signatures
+  (`Producer::from_properties_with_serializers`, `from_map_with_serializers`,
+  `from_map_with_configured_serializers`,
+  `from_properties_with_configured_serializers`, `from_parts_with_serializers`,
+  `ProducerBuilder::build_with_serializers`,
+  `build_with_configured_serializers`, and the internal config path). Rust API
+  guideline C-STRUCT-BOUNDS; a `!Sync` key or value type now works, and a
+  compile-level test pins it.
+
 - **`ProducerInterceptor::configure` and `on_update` could not be overridden
   outside kacrab.** Both are public trait methods, but their parameter types —
   `InterceptorConfigs` and `ClusterResource` — were never re-exported from
