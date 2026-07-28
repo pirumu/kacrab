@@ -3669,7 +3669,7 @@ impl ProducerSenderState {
             .await
         {
             Ok(prepared) => Ok(prepared),
-            Err(error) => Err(Self::requeue_prepare_error(accumulator, error)),
+            Err(error) => Err(Self::requeue_prepare_error(dispatcher, accumulator, error).await),
         }
     }
 
@@ -3722,11 +3722,12 @@ impl ProducerSenderState {
             .await
         {
             Ok(prepared) => Ok(prepared),
-            Err(error) => Err(Self::requeue_prepare_error(accumulator, error)),
+            Err(error) => Err(Self::requeue_prepare_error(dispatcher, accumulator, error).await),
         }
     }
 
-    fn requeue_prepare_error(
+    async fn requeue_prepare_error(
+        dispatcher: &ProducerDispatcher,
         accumulator: &SharedAccumulator,
         error: DispatchPrepareError,
     ) -> ProducerError {
@@ -3748,7 +3749,30 @@ impl ProducerSenderState {
             }
             return error;
         }
-        if let Err(requeue_error) = accumulator.requeue_front(batches) {
+        // A retriable prepare failure (typically UnknownTopic while metadata
+        // never resolves — e.g. the topic does not exist and auto-create is
+        // off) must not requeue unboundedly: the delivery future neither
+        // resolved nor errored for tens of minutes. Expire batches by
+        // delivery.timeout.ms like every retry arm; only still-live batches
+        // go back to the accumulator.
+        let now = std::time::Instant::now();
+        let delivery_timeout = dispatcher.delivery_timeout_bound();
+        let (mut expired, alive): (Vec<_>, Vec<_>) = batches
+            .into_iter()
+            .partition(|batch| now.duration_since(batch.first_append_at) >= delivery_timeout);
+        for batch in &mut expired {
+            let timeout_error = ProducerError::DeliveryTimeout {
+                topic: batch.topic.clone(),
+                partition: batch.partition,
+            };
+            dispatcher
+                .poison_transaction_after_terminal_produce_failure(&timeout_error)
+                .await;
+            if let Some(sender) = batch.delivery.take() {
+                sender.send_error(&timeout_error);
+            }
+        }
+        if let Err(requeue_error) = accumulator.requeue_front(alive) {
             return requeue_error;
         }
         error
