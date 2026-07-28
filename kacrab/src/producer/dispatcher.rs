@@ -1233,10 +1233,12 @@ impl ProducerDispatcher {
     }
 
     /// Drain ready accumulator batches, route them by leader, and send produce requests.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Dispatch retry loop keeps leadership and idempotent retry branches together."
-    )]
+    ///
+    /// Delegates to the one retry loop in [`Self::dispatch_drained`] and only adds what
+    /// owning an accumulator changes: a requeue hands the batches back instead of failing
+    /// them. Keeping a second copy of the loop here is what let the `MESSAGE_TOO_LARGE`
+    /// epoch-bump heal drift out of this path (it healed the idempotent sequence gap in
+    /// the drained loop and not in this one).
     pub async fn dispatch_ready(
         &self,
         accumulator: &SharedAccumulator,
@@ -1247,197 +1249,22 @@ impl ProducerDispatcher {
             return Ok(Vec::new());
         }
         self.sweep_colocated_head_batches(accumulator, &mut batches);
-        if let Some(batch) = self.expired_batch(&batches, now) {
-            return Err(ProducerError::DeliveryTimeout {
-                topic: batch.topic.clone(),
-                partition: batch.partition,
-            });
-        }
-
-        let mut attempts_remaining = self.retry_attempts;
-        let mut retry_backoff = self.retry_backoff_state();
         let enqueue_ticket = self.enqueue_sequencer.reserve_ticket();
-        loop {
-            match self.dispatch_batches(&mut batches, enqueue_ticket).await {
-                Ok(receipts) => return Ok(receipts),
-                Err(DispatchError::Requeue) => {
-                    if self.metrics_are_enabled() {
-                        self.metrics.record_requeue();
-                    }
-                    accumulator.requeue_front(batches)?;
-                    return Ok(Vec::new());
-                },
-                Err(DispatchError::SplitAndRequeue { topic, partition }) => {
-                    let compression_ratio = self.reset_compression_ratio_after_message_too_large(
-                        &batches, &topic, partition,
-                    );
-                    let Some(split) = split_message_too_large_batches(
-                        batches,
-                        &topic,
-                        partition,
-                        self.partition_sticky_batch_size,
-                        compression_ratio,
-                    ) else {
-                        if self.metrics_are_enabled() {
-                            self.metrics.record_error();
-                        }
-                        return Err(ProducerError::Broker {
-                            topic,
-                            partition,
-                            error: ErrorCode::MessageTooLarge,
-                        });
-                    };
-                    if self.metrics_are_enabled() {
-                        self.metrics.record_requeue();
-                        // One increment per split event, never `split.len()`: Kafka
-                        // Sender.completeBatch discards the int returned by
-                        // RecordAccumulator.splitAndReenqueue and records the constant 1.0.
-                        self.metrics.record_batch_split();
-                    }
-                    accumulator.requeue_front(split)?;
-                    return Ok(Vec::new());
-                },
-                Err(DispatchError::RetryableLeadership {
-                    topic,
-                    partition,
-                    error,
-                    metadata_updated,
-                }) => {
-                    if !metadata_updated {
-                        self.wire.invalidate_topic_partition(&topic, partition);
-                    }
-                    if attempts_remaining == 0 {
-                        if self.metrics_are_enabled() {
-                            self.metrics.record_error_for_topic(Some(&topic));
-                        }
-                        self.release_idempotent_partition_after_definite_error(
-                            &batches, &topic, partition,
-                        )
-                        .await;
-                        return Err(ProducerError::Broker {
-                            topic,
-                            partition,
-                            error,
-                        });
-                    }
-                    attempts_remaining = attempts_remaining.saturating_sub(1);
-                    if self.metrics_are_enabled() {
-                        self.metrics.record_retry_for_topic(Some(&topic));
-                    }
-                    // Leader changed for the ongoing retry -> retry immediately
-                    // (Kafka skips backoff); otherwise back off normally.
-                    let retry_wait = if metadata_updated {
-                        self.check_delivery_timeout_before_retry(&batches, false)
-                            .await
-                    } else {
-                        self.wait_before_retry(&batches, &mut retry_backoff, false)
-                            .await
-                    };
-                    if let Some(error) = retry_wait {
-                        if self.metrics_are_enabled() {
-                            self.metrics.record_error_for_topic(Some(&topic));
-                        }
-                        self.release_idempotent_partition_after_definite_error(
-                            &batches, &topic, partition,
-                        )
-                        .await;
-                        return Err(error);
-                    }
-                },
-                Err(DispatchError::RetryableIdempotent {
-                    topic,
-                    partition,
-                    leader_id,
-                    error,
-                    reset_sequence,
-                }) => {
-                    let retry = IdempotentRetry {
-                        topic,
-                        partition,
-                        leader_id,
-                        error,
-                        reset_sequence,
-                    };
-                    if attempts_remaining == 0 {
-                        if self.metrics_are_enabled() {
-                            self.metrics.record_error_for_topic(Some(&retry.topic));
-                        }
-                        return Err(retry.broker_error());
-                    }
-                    attempts_remaining = attempts_remaining.saturating_sub(1);
-                    if self.metrics_are_enabled() {
-                        self.metrics.record_retry_for_topic(Some(&retry.topic));
-                    }
-                    if retry.reset_sequence {
-                        self.recover_idempotent_partition(
-                            &mut batches,
-                            &retry.topic,
-                            retry.partition,
-                            retry.leader_id,
-                        )
-                        .await?;
-                    }
-                    if let Some(error) = self
-                        .wait_before_retry(&batches, &mut retry_backoff, false)
-                        .await
-                    {
-                        if self.metrics_are_enabled() {
-                            self.metrics.record_error_for_topic(Some(&retry.topic));
-                        }
-                        self.recover_idempotent_partition_after_retry_timeout(&mut batches, &retry)
-                            .await?;
-                        return Err(error);
-                    }
-                },
-                Err(DispatchError::RetryableBroker {
-                    topic,
-                    partition,
-                    error,
-                }) => {
-                    if let Some(error) = self
-                        .handle_retryable_broker_retry(
-                            &batches,
-                            &mut attempts_remaining,
-                            &mut retry_backoff,
-                            &topic,
-                            partition,
-                            error,
-                        )
-                        .await
-                    {
-                        return Err(error);
-                    }
-                },
-                Err(DispatchError::RetryableWire(error)) => {
-                    if let Some(error) = self
-                        .handle_retryable_wire_retry(
-                            &batches,
-                            &mut attempts_remaining,
-                            &mut retry_backoff,
-                            error,
-                        )
-                        .await
-                    {
-                        return Err(error);
-                    }
-                },
-                Err(DispatchError::Producer(error)) => {
-                    if self.metrics_are_enabled() {
-                        self.metrics.record_error();
-                    }
-                    return Err(error);
-                },
-            }
-            // Same in-task-retry ordering gate as `dispatch_drained_inner`: a batch
-            // that no longer holds its partition's first in-flight sequence must go
-            // back through the accumulator instead of re-sending here.
-            if self.retry_requires_sequence_order_requeue(&batches).await {
+        match self.dispatch_drained(batches, now, enqueue_ticket).await {
+            DispatchOutcome::Delivered(result) => result,
+            DispatchOutcome::Requeue(batches) => {
                 if self.metrics_are_enabled() {
                     self.metrics.record_requeue();
                 }
                 accumulator.requeue_front(batches)?;
-                return Ok(Vec::new());
-            }
+                Ok(Vec::new())
+            },
+            // The split arm already recorded its own requeue and `batch-split` meters
+            // inside the shared loop, so this only hands the children back.
+            DispatchOutcome::RequeueSplit(split) => {
+                accumulator.requeue_front(split)?;
+                Ok(Vec::new())
+            },
         }
     }
 
@@ -1876,6 +1703,11 @@ impl ProducerDispatcher {
             // the gap rather than wedging later batches on OUT_OF_ORDER.
             if self.idempotence.enabled && self.idempotence.transactional_id.is_none() {
                 self.producer_state.lock().await.request_epoch_bump();
+            }
+            // Terminal produce failure, counted like every other terminal arm of the
+            // dispatch loop (this is what the now-deleted `dispatch_ready` copy did).
+            if self.metrics_are_enabled() {
+                self.metrics.record_error();
             }
             return DispatchOutcome::Delivered(Err(ProducerError::Broker {
                 topic,
