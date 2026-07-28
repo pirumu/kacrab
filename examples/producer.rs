@@ -12,6 +12,17 @@
 //! cargo run -p kacrab-examples --example producer -- \
 //!   127.0.0.1:9092 kacrab-example 0 10
 //! ```
+//!
+//! Set [`TRANSACTIONAL_ID_ENV`] to run the same writes inside a transaction
+//! instead of on the plain idempotent path:
+//!
+//! ```text
+//! KACRAB_TRANSACTIONAL_ID=kacrab-example-txn \
+//!   cargo run -p kacrab-examples --example producer
+//! ```
+//!
+//! See `--example transactions` for the full exactly-once
+//! consume-transform-produce loop.
 
 use std::{env, error::Error};
 
@@ -29,16 +40,18 @@ const COMPRESSION_TYPE: &str = "none";
 const REQUEST_TIMEOUT_MS: &str = "30000";
 const DELIVERY_TIMEOUT_MS: &str = "120000";
 
-// Set this to `Some("your-transactional-id")` to run the same writes inside a
-// transaction. Leave it as `None` for the normal idempotent producer path.
-const TRANSACTIONAL_ID: Option<&str> = None;
+/// Set this environment variable to a transactional id to run the same writes
+/// inside a transaction. Unset — the default — takes the normal idempotent
+/// producer path.
+const TRANSACTIONAL_ID_ENV: &str = "KACRAB_TRANSACTIONAL_ID";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = ExampleArgs::parse(env::args().skip(1))?;
-    let producer = build_producer(&args.bootstrap).await?;
+    let transactional_id = transactional_id();
+    let producer = build_producer(&args.bootstrap, transactional_id.as_deref()).await?;
 
-    if TRANSACTIONAL_ID.is_some() {
+    if transactional_id.is_some() {
         producer.init_transactions().await?;
         producer.begin_transaction()?;
     }
@@ -46,12 +59,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let deliveries = match write_records(&producer, &args).await {
         Ok(deliveries) => deliveries,
         Err(error) => {
-            abort_transaction_if_open(&producer).await;
+            abort_transaction_if_open(&producer, transactional_id.as_deref()).await;
             return Err(error);
         },
     };
 
-    if TRANSACTIONAL_ID.is_some() {
+    if transactional_id.is_some() {
         producer.commit_transaction().await?;
     } else {
         producer.flush().await?;
@@ -65,7 +78,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn build_producer(bootstrap: &str) -> Result<Producer, Box<dyn Error>> {
+/// The transactional id from the environment, if one was set. An empty value is
+/// treated as unset so `KACRAB_TRANSACTIONAL_ID=` does not build a producer with
+/// an invalid id.
+fn transactional_id() -> Option<String> {
+    env::var(TRANSACTIONAL_ID_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+async fn build_producer(
+    bootstrap: &str,
+    transactional_id: Option<&str>,
+) -> Result<Producer, Box<dyn Error>> {
     let mut builder = Producer::builder()
         .set("bootstrap.servers", bootstrap)
         .set("client.id", CLIENT_ID)
@@ -80,7 +105,7 @@ async fn build_producer(bootstrap: &str) -> Result<Producer, Box<dyn Error>> {
         .set("request.timeout.ms", REQUEST_TIMEOUT_MS)
         .set("delivery.timeout.ms", DELIVERY_TIMEOUT_MS);
 
-    if let Some(transactional_id) = TRANSACTIONAL_ID {
+    if let Some(transactional_id) = transactional_id {
         builder = builder.set("transactional.id", transactional_id);
     }
 
@@ -134,8 +159,8 @@ fn record(topic: &str, partition: i32, sequence: usize, prefix: &str) -> Produce
         .value(format!("{prefix}-{sequence}"))
 }
 
-async fn abort_transaction_if_open(producer: &Producer) {
-    if TRANSACTIONAL_ID.is_none() {
+async fn abort_transaction_if_open(producer: &Producer, transactional_id: Option<&str>) {
+    if transactional_id.is_none() {
         return;
     }
     if let Err(error) = producer.abort_transaction().await {
