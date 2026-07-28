@@ -1223,7 +1223,7 @@ impl ProducerDispatcher {
 
     /// Drain ready accumulator batches, route them by leader, and send produce requests.
     ///
-    /// Delegates to the one retry loop in [`Self::dispatch_drained`] and only adds what
+    /// Delegates to the one retry loop in `dispatch_drained` and only adds what
     /// owning an accumulator changes: a requeue hands the batches back instead of failing
     /// them. Keeping a second copy of the loop here is what let the `MESSAGE_TOO_LARGE`
     /// epoch-bump heal drift out of this path (it healed the idempotent sequence gap in

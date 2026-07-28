@@ -723,7 +723,7 @@ impl RecordAccumulator {
     /// Drain at most one ready front batch per partition.
     ///
     /// The dispatch selector emits at most one new request per partition per
-    /// cycle, so draining every ready batch (like [`drain_ready`]) only to
+    /// cycle, so draining every ready batch (like [`Self::drain_ready`]) only to
     /// re-enqueue all but one is O(N) wasted work per dispatch. This drains
     /// exactly what one selection consumes — the lowest-sequence (front) batch of
     /// each partition that is ready — keeping the re-dispatch hot path O(partitions)
