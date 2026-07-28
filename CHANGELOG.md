@@ -121,6 +121,17 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **Typed producer builders never configured their registered interceptors.**
+  `ProducerBuilder::build_with_serializers` and
+  `build_with_configured_serializers` were drifted copies of `build`'s pipeline
+  that skipped the `ProducerInterceptor::configure` pass, so an interceptor
+  registered on a typed producer was never handed its `client.id` — contradicting
+  that method's own contract — and left `interceptor_configs` at its default, so a
+  later `producer_mut().add_interceptor(...)` configured with `client_id: None`
+  too. All three builders now share one pipeline, which parameterizes the only
+  real difference between them: how `key.serializer` / `value.serializer` class
+  configs are stripped.
+
 - **The gate-label support map is now generated, not hand-maintained.** The
   feature-aware validation below originally shipped with a hand-written
   label→feature map in `kacrab/src/config.rs`, one more place config knowledge
