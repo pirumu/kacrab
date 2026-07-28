@@ -49,5 +49,8 @@ pub use self::{
     error::{ConsumerError, Result},
     interceptor::{ConsumerInterceptor, InterceptorConfigs},
     metrics::ConsumerMetricsSnapshot,
-    record::{ConsumerRecord, ConsumerRecords, OffsetAndTimestamp, RecordHeader, TimestampType},
+    record::{
+        ConsumerRecord, ConsumerRecords, OffsetAndTimestamp, PartitionRecords, RecordHeader,
+        TimestampType,
+    },
 };

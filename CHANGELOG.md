@@ -288,6 +288,20 @@ release date and links to relevant pull requests or issues.
   version handed to `send_to_broker` is a ceiling the connection resolves
   against the broker's advertised range — but nothing proved it.
 
+  The last fork left standing was `ShareRecords`, a 90-line copy of
+  `ConsumerRecords` with the element type swapped: the same
+  `BTreeMap<TopicPartition, Vec<_>>` grouping, the same count, the same
+  `empty`/`count`/`is_empty`/`partitions`/`records`/`iter`, and the same two
+  `IntoIterator` impls, minus the one comment explaining why a whole-partition
+  push moves its vector instead of copying record by record. Both are now
+  `PartitionRecords<T>`, written once, and `ConsumerRecords` and `ShareRecords`
+  are public type aliases for it. Callers are unaffected: the method
+  signatures, the `IntoIterator` `Item` and `IntoIter` associated types, and
+  the derived traits are what they were. Two cosmetic differences remain —
+  `{:?}` prints `PartitionRecords { .. }` rather than the alias name, and
+  rustdoc lists the two as type aliases of one struct rather than as two
+  structs.
+
 ### Fixed
 
 - **`dispatch_ready` never healed the sequence gap an unsplittable oversized batch
