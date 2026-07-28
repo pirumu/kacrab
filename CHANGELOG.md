@@ -327,6 +327,12 @@ release date and links to relevant pull requests or issues.
   concern), and the second, uncompressed re-encode of every batch that reporting
   `compression-rate` performed on each dispatch — the identical number now falls out of
   a constant header plus a varint sum per record, with no encode, allocation or CRC.
+  Merging the two `append_internal` bodies cost the fire-and-forget append its inlining
+  — one body carrying the `SendFuture` channel construction is over LLVM's threshold, so
+  every record paid an out-of-line call returning the wider delivery tuple through memory
+  (+23% on `append_and_drain/1024`, +27% at 16384) — so the delivery arm is selected by a
+  const parameter, which folds it away for the fire-and-forget instance and restores the
+  two-copy codegen without restoring the two copies.
 
 - **Two admin group operations were broken on every broker older than Apache
   Kafka 4.1, in opposite directions.**

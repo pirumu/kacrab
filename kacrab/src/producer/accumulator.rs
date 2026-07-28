@@ -564,7 +564,7 @@ impl RecordAccumulator {
         now: Instant,
         compression_sizing: CompressionSizing,
     ) -> Result<AppendStatus> {
-        self.append_internal_inner(record, now, compression_sizing, None)
+        self.append_internal_inner::<false>(record, now, compression_sizing, 0)
             .map(|(_delivery, status)| status)
     }
 
@@ -575,19 +575,29 @@ impl RecordAccumulator {
         metadata_capacity: usize,
         compression_sizing: CompressionSizing,
     ) -> Result<(Option<SendFuture>, AppendStatus)> {
-        self.append_internal_inner(record, now, compression_sizing, Some(metadata_capacity))
+        self.append_internal_inner::<true>(record, now, compression_sizing, metadata_capacity)
     }
 
-    /// The one append path. `delivery_metadata_capacity` is `Some` when the caller wants a
-    /// delivery handle for the record's eventual broker ack, and `None` for the
-    /// fire-and-forget appends — the only difference between the two, and the reason this
-    /// was previously two copies that had to be kept in step by hand.
-    fn append_internal_inner(
+    /// The one append path. `WANT_DELIVERY` is `true` when the caller wants a delivery
+    /// handle for the record's eventual broker ack, and `false` for the fire-and-forget
+    /// appends — the only difference between the two, and the reason this was previously
+    /// two copies that had to be kept in step by hand.
+    ///
+    /// It is a *const* parameter rather than an `Option<usize>` argument on purpose. As a
+    /// runtime argument this body carried the `SendFuture` channel construction — an
+    /// `Arc<DeliveryState>` of five mutexes — on the fire-and-forget path too, which put it
+    /// over LLVM's inline threshold: `append_at` stopped inlining it and paid an
+    /// out-of-line call returning the wider `(Option<SendFuture>, AppendStatus)` through
+    /// memory on *every* record, ~13ns an append (+23% on `append_and_drain/1024`, +27% at
+    /// 16384). Monomorphising restores the two-copy codegen the duplication used to give
+    /// while keeping the one source body: the `false` instance folds the delivery arm away
+    /// entirely and is inlined again. Do not collapse this back to a runtime `Option`.
+    fn append_internal_inner<const WANT_DELIVERY: bool>(
         &mut self,
         record: ProducerRecord,
         now: Instant,
         compression_sizing: CompressionSizing,
-        delivery_metadata_capacity: Option<usize>,
+        metadata_capacity: usize,
     ) -> Result<(Option<SendFuture>, AppendStatus)> {
         let record = record_with_append_timestamp(record);
         let key = TopicPartition {
@@ -623,7 +633,7 @@ impl RecordAccumulator {
         };
         batch.compression_sizing = compression_sizing;
         batch.batch_bytes = batch.batch_bytes.saturating_add(target.record_batch_bytes);
-        let delivery = delivery_metadata_capacity.map(|metadata_capacity| {
+        let delivery = WANT_DELIVERY.then(|| {
             if let Some(sender) = &mut batch.delivery {
                 sender.delivery_for_record(&record)
             } else {
