@@ -87,31 +87,6 @@ impl ProducerPartitionerState {
         )
     }
 
-    #[cfg(test)]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Test-only entrypoint pins ratio-aware sticky sizing without constructing a \
-                  dispatcher."
-    )]
-    pub(crate) fn partition_for_record_with_compression_ratio(
-        &mut self,
-        metadata: &crate::wire::ClusterMetadata,
-        record: &ProducerRecord,
-        ignore_keys: bool,
-        adaptive: bool,
-        sticky_batch_size: usize,
-        compression_ratio: f32,
-    ) -> Result<i32> {
-        self.partition_for_record(
-            metadata,
-            record,
-            ignore_keys,
-            adaptive,
-            sticky_batch_size,
-            compression_ratio,
-        )
-    }
-
     pub(crate) fn try_assign_cached_sticky_partition(
         &mut self,
         record: &mut ProducerRecord,
@@ -137,6 +112,23 @@ impl ProducerPartitionerState {
         true
     }
 
+    /// A sticky partition freshly rotated onto the next partition, sized as an empty
+    /// batch. Kafka's `StickyPartitionCache` rotates on exactly three triggers — no
+    /// cached partition, a batch-ready hint, and the 2x-batch byte budget — and all three
+    /// must produce the same state or the byte budget drifts against the batch it sizes.
+    fn fresh_sticky(
+        &mut self,
+        topic: &str,
+        topic_metadata: &TopicMetadata,
+        adaptive: bool,
+    ) -> Result<StickyPartitionState> {
+        Ok(StickyPartitionState {
+            partition: self.next_partition(topic, topic_metadata, adaptive)?,
+            bytes: RECORD_BATCH_OVERHEAD_BYTES,
+            switch_on_next: false,
+        })
+    }
+
     pub(crate) fn assign_topic_partitions(
         &mut self,
         assignment: TopicPartitionAssignment<'_>,
@@ -151,14 +143,9 @@ impl ProducerPartitionerState {
             compression_ratio,
         } = assignment;
         ensure_partitions(topic, record::UNASSIGNED_PARTITION, topic_metadata)?;
-        let existing_sticky = self.valid_sticky(topic, topic_metadata);
-        let mut sticky = match existing_sticky {
+        let mut sticky = match self.valid_sticky(topic, topic_metadata) {
             Some(sticky) => sticky,
-            None => StickyPartitionState {
-                partition: self.next_partition(topic, topic_metadata, adaptive)?,
-                bytes: RECORD_BATCH_OVERHEAD_BYTES,
-                switch_on_next: false,
-            },
+            None => self.fresh_sticky(topic, topic_metadata, adaptive)?,
         };
         let mut sticky_used = false;
 
@@ -172,11 +159,7 @@ impl ProducerPartitionerState {
             }
 
             if sticky.switch_on_next {
-                sticky = StickyPartitionState {
-                    partition: self.next_partition(topic, topic_metadata, adaptive)?,
-                    bytes: RECORD_BATCH_OVERHEAD_BYTES,
-                    switch_on_next: false,
-                };
+                sticky = self.fresh_sticky(topic, topic_metadata, adaptive)?;
             }
             sticky_used = true;
             record.partition = sticky.partition;
@@ -184,67 +167,13 @@ impl ProducerPartitionerState {
                 .bytes
                 .saturating_add(estimate_sticky_record_bytes(record, compression_ratio));
             if sticky.bytes >= sticky_batch_size.max(1).saturating_mul(2) {
-                sticky = StickyPartitionState {
-                    partition: self.next_partition(topic, topic_metadata, adaptive)?,
-                    bytes: RECORD_BATCH_OVERHEAD_BYTES,
-                    switch_on_next: false,
-                };
+                sticky = self.fresh_sticky(topic, topic_metadata, adaptive)?;
             }
         }
 
         if sticky_used {
             let _previous = self.sticky_by_topic.insert(topic.to_owned(), sticky);
         }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn assign_sticky_topic_partitions(
-        &mut self,
-        assignment: TopicPartitionAssignment<'_>,
-        records: &mut [ProducerRecord],
-    ) -> Result<()> {
-        let TopicPartitionAssignment {
-            topic,
-            topic_metadata,
-            adaptive,
-            sticky_batch_size,
-            compression_ratio,
-            ..
-        } = assignment;
-        ensure_partitions(topic, record::UNASSIGNED_PARTITION, topic_metadata)?;
-        let existing_sticky = self.valid_sticky(topic, topic_metadata);
-        let mut sticky = match existing_sticky {
-            Some(sticky) => sticky,
-            None => StickyPartitionState {
-                partition: self.next_partition(topic, topic_metadata, adaptive)?,
-                bytes: RECORD_BATCH_OVERHEAD_BYTES,
-                switch_on_next: false,
-            },
-        };
-
-        for record in records {
-            if sticky.switch_on_next {
-                sticky = StickyPartitionState {
-                    partition: self.next_partition(topic, topic_metadata, adaptive)?,
-                    bytes: RECORD_BATCH_OVERHEAD_BYTES,
-                    switch_on_next: false,
-                };
-            }
-            record.partition = sticky.partition;
-            sticky.bytes = sticky
-                .bytes
-                .saturating_add(estimate_sticky_record_bytes(record, compression_ratio));
-            if sticky.bytes >= sticky_batch_size.max(1).saturating_mul(2) {
-                sticky = StickyPartitionState {
-                    partition: self.next_partition(topic, topic_metadata, adaptive)?,
-                    bytes: RECORD_BATCH_OVERHEAD_BYTES,
-                    switch_on_next: false,
-                };
-            }
-        }
-
-        let _previous = self.sticky_by_topic.insert(topic.to_owned(), sticky);
         Ok(())
     }
 
@@ -263,33 +192,20 @@ impl ProducerPartitionerState {
     ) -> Result<i32> {
         ensure_partitions(topic, record.partition, topic_metadata)?;
 
-        let existing_sticky = self.valid_sticky(topic, topic_metadata);
-        let mut sticky = match existing_sticky {
+        let mut sticky = match self.valid_sticky(topic, topic_metadata) {
             Some(sticky) => sticky,
-            None => StickyPartitionState {
-                partition: self.next_partition(topic, topic_metadata, adaptive)?,
-                bytes: RECORD_BATCH_OVERHEAD_BYTES,
-                switch_on_next: false,
-            },
+            None => self.fresh_sticky(topic, topic_metadata, adaptive)?,
         };
 
         if sticky.switch_on_next {
-            sticky = StickyPartitionState {
-                partition: self.next_partition(topic, topic_metadata, adaptive)?,
-                bytes: RECORD_BATCH_OVERHEAD_BYTES,
-                switch_on_next: false,
-            };
+            sticky = self.fresh_sticky(topic, topic_metadata, adaptive)?;
         }
         let partition = sticky.partition;
         sticky.bytes = sticky
             .bytes
             .saturating_add(estimate_sticky_record_bytes(record, compression_ratio));
         if sticky.bytes >= sticky_batch_size.max(1).saturating_mul(2) {
-            sticky = StickyPartitionState {
-                partition: self.next_partition(topic, topic_metadata, adaptive)?,
-                bytes: RECORD_BATCH_OVERHEAD_BYTES,
-                switch_on_next: false,
-            };
+            sticky = self.fresh_sticky(topic, topic_metadata, adaptive)?;
         }
         let _previous = self.sticky_by_topic.insert(topic.to_owned(), sticky);
         Ok(partition)
@@ -368,22 +284,6 @@ impl ProducerPartitionerState {
         let _previous = self.load_stats_by_topic.insert(topic.to_owned(), stats);
     }
 
-    #[cfg(test)]
-    pub(crate) fn update_partition_load_stats_from_accumulator(
-        &mut self,
-        topic: &str,
-        topic_metadata: &TopicMetadata,
-        accumulator: &SharedAccumulator,
-    ) {
-        self.update_partition_load_stats_from_accumulator_at(PartitionLoadRefresh {
-            topic,
-            topic_metadata,
-            accumulator,
-            now: Instant::now(),
-            availability_timeout: Duration::ZERO,
-        });
-    }
-
     pub(crate) fn update_partition_load_stats_from_accumulator_at(
         &mut self,
         refresh: PartitionLoadRefresh<'_>,
@@ -408,16 +308,6 @@ impl ProducerPartitionerState {
             &load.partition_ids,
             load.length,
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn update_broker_drain_stats(
-        &mut self,
-        broker_id: i32,
-        now: Instant,
-        can_drain: bool,
-    ) {
-        self.update_broker_latency_stats(broker_id, now, can_drain);
     }
 
     pub(crate) fn update_broker_latency_stats(

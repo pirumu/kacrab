@@ -963,7 +963,7 @@ async fn producer_sender_refreshes_and_assigns_topic_partitions_with_metadata() 
     ];
 
     sender
-        .refresh_and_assign_topic_partitions_with_metadata(&metadata, "orders", &mut records, true)
+        .refresh_and_assign_topic_partitions_with_metadata(&metadata, "orders", &mut records)
         .await
         .expect("sender should refresh load stats and assign topic partitions");
 

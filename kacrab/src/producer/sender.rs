@@ -695,19 +695,12 @@ impl ProducerSender {
         metadata: &crate::wire::ClusterMetadata,
         topic: &str,
         records: &mut [ProducerRecord],
-        sticky: bool,
     ) -> Result<(), ProducerError> {
         self.refresh_topic_load_stats_with_metadata(metadata, topic)
             .await?;
-        if sticky {
-            self.dispatcher
-                .assign_sticky_topic_partitions_with_metadata(metadata, topic, records)
-                .await
-        } else {
-            self.dispatcher
-                .assign_topic_partitions_with_metadata(metadata, topic, records)
-                .await
-        }
+        self.dispatcher
+            .assign_topic_partitions_with_metadata(metadata, topic, records)
+            .await
     }
 
     #[cfg(test)]

@@ -792,32 +792,6 @@ impl ProducerDispatcher {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) async fn assign_sticky_topic_partitions_with_metadata(
-        &self,
-        metadata: &crate::wire::ClusterMetadata,
-        topic: &str,
-        records: &mut [ProducerRecord],
-    ) -> Result<()> {
-        let topic_metadata = metadata
-            .topic(topic)
-            .ok_or_else(|| ProducerError::UnknownTopic(topic.to_owned()))?;
-        let mut state = self.partitioner_state.lock().await;
-        state.assign_sticky_topic_partitions(
-            TopicPartitionAssignment {
-                topic,
-                topic_metadata,
-                ignore_keys: self.partitioner_ignore_keys,
-                adaptive: self.partitioner_adaptive_partitioning_enable,
-                sticky_batch_size: self.partition_sticky_batch_size,
-                compression_ratio: self.compression_ratio_estimation(topic),
-            },
-            records,
-        )?;
-        drop(state);
-        Ok(())
-    }
-
     /// Refresh adaptive sticky partition load stats from the current accumulator queues.
     pub async fn refresh_partition_load_stats<I, S>(
         &self,

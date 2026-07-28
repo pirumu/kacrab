@@ -523,14 +523,7 @@ fn sticky_partitioner_uses_compression_ratio_estimate_for_batch_budget() {
     let uncompressed_partitions: Vec<_> = (0..4)
         .map(|_| {
             uncompressed
-                .partition_for_record_with_compression_ratio(
-                    &metadata,
-                    &record,
-                    false,
-                    false,
-                    sticky_batch_size,
-                    1.0,
-                )
+                .partition_for_record(&metadata, &record, false, false, sticky_batch_size, 1.0)
                 .expect("partition")
         })
         .collect();
@@ -539,14 +532,7 @@ fn sticky_partitioner_uses_compression_ratio_estimate_for_batch_budget() {
     let compressed_partitions: Vec<_> = (0..4)
         .map(|_| {
             compressed
-                .partition_for_record_with_compression_ratio(
-                    &metadata,
-                    &record,
-                    false,
-                    false,
-                    sticky_batch_size,
-                    0.25,
-                )
+                .partition_for_record(&metadata, &record, false, false, sticky_batch_size, 0.25)
                 .expect("partition")
         })
         .collect();
@@ -776,7 +762,13 @@ fn adaptive_sticky_updates_load_stats_from_accumulator_queues() {
         .expect("append partition 2");
 
     let mut state = ProducerPartitionerState::default();
-    state.update_partition_load_stats_from_accumulator("orders", topic_metadata, &accumulator);
+    state.update_partition_load_stats_from_accumulator_at(PartitionLoadRefresh {
+        topic: "orders",
+        topic_metadata,
+        accumulator: &accumulator,
+        now: Instant::now(),
+        availability_timeout: Duration::ZERO,
+    });
 
     let partition = state
         .adaptive_partition_for_random("orders", topic_metadata, 4)
@@ -813,7 +805,13 @@ fn adaptive_sticky_keeps_drained_empty_partition_queues_like_java() {
     assert_eq!(drained[0].partition, 0);
 
     let mut state = ProducerPartitionerState::default();
-    state.update_partition_load_stats_from_accumulator("orders", topic_metadata, &accumulator);
+    state.update_partition_load_stats_from_accumulator_at(PartitionLoadRefresh {
+        topic: "orders",
+        topic_metadata,
+        accumulator: &accumulator,
+        now: Instant::now(),
+        availability_timeout: Duration::ZERO,
+    });
 
     let partition = state
         .adaptive_partition_for_random("orders", topic_metadata, 0)
@@ -838,13 +836,13 @@ fn adaptive_sticky_excludes_partitions_whose_leader_exceeds_availability_timeout
     }
 
     let mut state = ProducerPartitionerState::default();
-    state.update_broker_drain_stats(
+    state.update_broker_latency_stats(
         8,
         now.checked_sub(Duration::from_secs(2))
             .expect("test time before now"),
         true,
     );
-    state.update_broker_drain_stats(8, now, false);
+    state.update_broker_latency_stats(8, now, false);
     state.update_partition_load_stats_from_accumulator_at(PartitionLoadRefresh {
         topic: "orders",
         topic_metadata,
