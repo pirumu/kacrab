@@ -26,6 +26,11 @@ into a JSON snapshot. Prefer that snapshot over hand-maintaining large
 config catalogs: pin the upstream source ref, regenerate, then review
 the diff.
 
+A third `protocol-support` subcommand reports, per API key, which
+protocol versions the schemas declare and which versions the committed
+client actually implements. It is read-only reporting — it never writes
+into the runtime crates.
+
 ## Usage
 
 Regenerate the protocol crate from the same pinned Kafka release used by
@@ -92,6 +97,26 @@ generated diffs remain reproducible.
 fields as `ConfigStatus::Native`; official keys that are present in
 Kafka but not yet exposed stay reviewable or feature-gated instead of
 silently becoming stable Rust API.
+
+Report the protocol versions this client speaks, per API key:
+
+```sh
+cargo run -p kacrab-codegen -- protocol-support \
+    --output docs/protocol-support.json
+```
+
+The report is built from the same schema parser the `protocol`
+subcommand uses, then cross-checked against the `client_api_info` table
+committed in `kacrab-protocol/src/generated.rs`. Every row carries the
+schema's `validVersions` and `flexibleVersions`, the min/max the client
+implements, and a `client_matches_schema` flag; rows where the two
+disagree also carry a human-readable reason. Override the inputs with
+`--schemas-dir` and `--client-api-info`, or pass `--dry-run` to print
+the JSON instead of writing it.
+
+The default `--output` lives under `docs/`, which this repository keeps
+untracked: the report is a regenerable artifact, so regenerate it rather
+than committing it.
 
 ## When to regenerate
 

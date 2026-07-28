@@ -27,6 +27,13 @@
 //!     --output-dir  /tmp/kacrab-out \
 //!     --dry-run
 //! ```
+//!
+//! Report which protocol versions the committed client implements:
+//!
+//! ```text
+//! cargo run -p kacrab-codegen -- protocol-support \
+//!     --output docs/protocol-support.json
+//! ```
 
 use std::{
     collections::HashSet,
@@ -39,7 +46,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use heck::ToSnakeCase;
 use kacrab_codegen::{
-    codegen, errors_java, format, ir::message::MessageSpec, kafka_config, parser,
+    codegen, errors_java, format, ir::message::MessageSpec, kafka_config, parser, protocol_support,
     upstream::KafkaSource,
 };
 
@@ -57,6 +64,8 @@ enum Command {
     Protocol(ProtocolCli),
     /// Extract Kafka client config metadata from upstream Java sources.
     Config(ConfigCli),
+    /// Report per-API protocol version support as machine-readable JSON.
+    ProtocolSupport(ProtocolSupportCli),
 }
 
 /// Command-line interface for the Kafka schema -> Rust source generator.
@@ -175,6 +184,40 @@ struct ConfigCli {
     dry_run: bool,
 }
 
+/// Protocol version support reporter.
+///
+/// Answers "which Kafka protocol versions does this client actually speak?"
+/// from the bundled schema snapshot, and cross-checks the answer against the
+/// `client_api_info` table committed in the generated protocol crate.
+#[derive(Args, Debug)]
+struct ProtocolSupportCli {
+    /// Directory of Kafka message JSON specs to report on.
+    #[arg(long, default_value = DEFAULT_SCHEMAS_DIR)]
+    schemas_dir: PathBuf,
+
+    /// Generated Rust file holding the `client_api_info` table.
+    #[arg(long, default_value = DEFAULT_CLIENT_API_INFO)]
+    client_api_info: PathBuf,
+
+    /// JSON file to write.
+    ///
+    /// The default lives under `docs/`, which this repository keeps untracked;
+    /// the report is a regenerable local artifact, not a committed one.
+    #[arg(long, default_value = DEFAULT_SUPPORT_REPORT)]
+    output: PathBuf,
+
+    /// Print the report to stdout instead of writing `--output`.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+/// Bundled offline schema snapshot, relative to the workspace root.
+const DEFAULT_SCHEMAS_DIR: &str = "kacrab-codegen/schemas";
+/// Generated protocol module holding `client_api_info`, relative to the workspace root.
+const DEFAULT_CLIENT_API_INFO: &str = "kacrab-protocol/src/generated.rs";
+/// Default protocol support report path, relative to the workspace root.
+const DEFAULT_SUPPORT_REPORT: &str = "docs/protocol-support.json";
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if let Err(err) = run(&cli) {
@@ -188,7 +231,45 @@ fn run(cli: &Cli) -> Result<()> {
     match &cli.command {
         Command::Protocol(protocol) => run_protocol(protocol),
         Command::Config(config) => run_config(config),
+        Command::ProtocolSupport(support) => run_protocol_support(support),
     }
+}
+
+fn run_protocol_support(cli: &ProtocolSupportCli) -> Result<()> {
+    let specs = parser::parse_all_specs(&cli.schemas_dir)
+        .with_context(|| format!("parse schemas in {}", cli.schemas_dir.display()))?;
+    let generated = fs::read_to_string(&cli.client_api_info)
+        .with_context(|| format!("read {}", cli.client_api_info.display()))?;
+    let client = protocol_support::parse_client_api_info(&generated).with_context(|| {
+        format!(
+            "read client_api_info from {}",
+            cli.client_api_info.display()
+        )
+    })?;
+
+    let provenance = protocol_support::ReportProvenance {
+        schemas_dir: cli.schemas_dir.display().to_string(),
+        client_api_info_source: cli.client_api_info.display().to_string(),
+        source_ref: protocol_support::read_source_ref(&cli.schemas_dir),
+    };
+    let document = protocol_support::build_report(&specs, &client, &provenance);
+    let json =
+        serde_json::to_string_pretty(&document).context("serialize protocol support report")?;
+
+    if cli.dry_run {
+        println!("{json}");
+        return Ok(());
+    }
+
+    create_parent_dir(&cli.output)?;
+    fs::write(&cli.output, json).with_context(|| format!("write {}", cli.output.display()))?;
+    eprintln!(
+        "wrote {} ({} APIs, {} mismatches)",
+        cli.output.display(),
+        document.api_count,
+        document.mismatch_count
+    );
+    Ok(())
 }
 
 fn run_protocol(cli: &ProtocolCli) -> Result<()> {
