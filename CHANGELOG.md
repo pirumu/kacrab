@@ -121,6 +121,31 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **A produce response could bind receipts to the wrong topic.** Matching a
+  response to its route accepted topic-id equality unconditionally, but a broker
+  that reports no topic ids leaves both sides at `KafkaUuid::ZERO` — so the first
+  topic in a multi-topic produce response matched *every* route and every receipt
+  took its offsets. The id disjunct now only counts when the id is non-zero,
+  leaving the topic name to disambiguate as it always did on older brokers.
+
+- **The SCRAM digest could silently degrade to an empty hash.** `digest_bytes`
+  produces the `stored_key` behind every client proof, but its catch-all arm
+  returned `Vec::new()` where its sibling `hmac_bytes` returns
+  `WireError::UnsupportedSaslMechanism`. A mechanism it cannot hash therefore
+  yielded a well-formed but wrong proof, which a broker can only report as bad
+  credentials. It is now fallible in exactly the same way.
+
+- **kacrab did not compile for Android or any other unhandled unix target.** The
+  hand-rolled `EINPROGRESS` table in `wire::socket` covered only the Apple/BSD
+  and Linux arms, so `cargo check --target aarch64-linux-android` — a target the
+  same file already handles for its post-connect socket options — failed with
+  `cannot find value EINPROGRESS in module libc_errno`. The table now covers the
+  Apple, BSD, and Linux lineages explicitly and falls through to `None` for
+  anything else, which leaves connect-in-progress detection on its `ErrorKind`
+  check rather than comparing against an errno that means something else there.
+  The unit test asserts the target being built for is covered, so a future gap
+  fails the test suite instead of the build.
+
 - **Typed producer builders never configured their registered interceptors.**
   `ProducerBuilder::build_with_serializers` and
   `build_with_configured_serializers` were drifted copies of `build`'s pipeline

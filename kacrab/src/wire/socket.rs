@@ -175,7 +175,7 @@ fn is_connect_in_progress(error: &io::Error) -> bool {
 const fn is_in_progress_errno(errno: i32) -> bool {
     #[cfg(unix)]
     {
-        errno == libc_errno::EINPROGRESS
+        matches!(libc_errno::EINPROGRESS, Some(in_progress) if errno == in_progress)
     }
     #[cfg(not(unix))]
     {
@@ -184,13 +184,55 @@ const fn is_in_progress_errno(errno: i32) -> bool {
     }
 }
 
+/// `EINPROGRESS` has no portable numeric value, so it has to be tabulated per
+/// target: the BSD lineage uses 36 and the Linux lineage uses 115.
+///
+/// Every arm must be exhaustive over `cfg(unix)` or the module stops compiling
+/// on the targets it forgot — Android is `cfg(unix)` and is already targeted
+/// elsewhere in this file, yet it matched neither of the original two arms. A
+/// unix target outside both tables now falls through to `None` instead, which
+/// leaves [`is_connect_in_progress`] on its `ErrorKind` check alone rather than
+/// comparing against an errno that means something else there. The unit test
+/// asserts the host being built for is covered, so falling through is loud.
 #[cfg(unix)]
 mod libc_errno {
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
-    pub(super) const EINPROGRESS: i32 = 36;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "visionos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+    ))]
+    pub(super) const EINPROGRESS: Option<i32> = Some(36);
 
-    #[cfg(target_os = "linux")]
-    pub(super) const EINPROGRESS: i32 = 115;
+    #[cfg(any(
+        target_os = "android",
+        target_os = "fuchsia",
+        target_os = "hurd",
+        target_os = "linux",
+    ))]
+    pub(super) const EINPROGRESS: Option<i32> = Some(115);
+
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "visionos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_os = "android",
+        target_os = "fuchsia",
+        target_os = "hurd",
+        target_os = "linux",
+    )))]
+    pub(super) const EINPROGRESS: Option<i32> = None;
 }
 
 #[cfg(test)]
@@ -289,10 +331,19 @@ mod tests {
         );
     }
 
+    /// A non-blocking `connect(2)` reports "in progress" as a raw errno whose
+    /// value differs per unix target, so a target missing from the table would
+    /// make an ordinary connect look like a hard failure. Asserting the table
+    /// covers the target being built for turns that omission into a test
+    /// failure rather than a silent runtime one.
     #[cfg(unix)]
     #[test]
     fn unix_errno_detection_matches_platform_einprogress() {
-        assert!(super::is_in_progress_errno(super::libc_errno::EINPROGRESS));
+        let errno = super::libc_errno::EINPROGRESS
+            .expect("every unix target kacrab builds for must map EINPROGRESS");
+
+        assert!(super::is_in_progress_errno(errno));
         assert!(!super::is_in_progress_errno(0));
+        assert!(is_connect_in_progress(&io::Error::from_raw_os_error(errno)));
     }
 }

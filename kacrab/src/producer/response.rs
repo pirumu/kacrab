@@ -184,12 +184,17 @@ fn check_partition_error(
     Ok(())
 }
 
+/// A zero topic id means "the broker reported no id", not "this topic". Letting
+/// it match would make the first response in a multi-topic batch answer for
+/// every route and bind receipts to the wrong topic, so the id only counts when
+/// both sides carry a real one.
 fn matches_topic(
     topic_id: KafkaUuid,
     name: &kacrab_protocol::KafkaString,
     route: &ProduceRoute,
 ) -> bool {
-    topic_id == route.topic_id || name.as_str() == route.topic.as_str()
+    (topic_id != KafkaUuid::ZERO && topic_id == route.topic_id)
+        || name.as_str() == route.topic.as_str()
 }
 
 #[cfg(test)]
@@ -478,6 +483,55 @@ mod tests {
         assert!(receipts.iter().all(|receipt| receipt.timestamp_ms == -1));
     }
 
+    /// A broker that reports no topic ids leaves every `topic_id` at
+    /// `KafkaUuid::ZERO`, so an id-equality match would make the first topic
+    /// response in the batch answer for *every* route and bind receipts to the
+    /// wrong topic. Only the name can disambiguate here.
+    #[test]
+    fn produce_receipts_match_by_name_when_the_broker_reports_no_topic_ids() {
+        let response = ProduceResponseData {
+            responses: vec![
+                TopicProduceResponse {
+                    name: KafkaString::from("orders".to_owned()),
+                    topic_id: KafkaUuid::ZERO,
+                    partition_responses: vec![PartitionProduceResponse {
+                        index: 0,
+                        error_code: 0,
+                        base_offset: 11,
+                        log_append_time_ms: -1,
+                        ..PartitionProduceResponse::default()
+                    }],
+                    _unknown_tagged_fields: Vec::new(),
+                },
+                TopicProduceResponse {
+                    name: KafkaString::from("events".to_owned()),
+                    topic_id: KafkaUuid::ZERO,
+                    partition_responses: vec![PartitionProduceResponse {
+                        index: 0,
+                        error_code: 0,
+                        base_offset: 55,
+                        log_append_time_ms: -1,
+                        ..PartitionProduceResponse::default()
+                    }],
+                    _unknown_tagged_fields: Vec::new(),
+                },
+            ],
+            ..ProduceResponseData::default()
+        };
+        let routes = vec![
+            route_without_topic_id("orders", 0),
+            route_without_topic_id("events", 0),
+        ];
+
+        let receipts = produce_receipts(&response, &routes).expect("receipts");
+
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(&*receipts[0].topic, "orders");
+        assert_eq!(receipts[0].offset, 11);
+        assert_eq!(&*receipts[1].topic, "events");
+        assert_eq!(receipts[1].offset, 55);
+    }
+
     fn route(topic: &str, partition: i32) -> ProduceRoute {
         ProduceRoute {
             topic: topic.to_owned(),
@@ -487,6 +541,13 @@ mod tests {
             base_sequence: None,
             request_offset_delta: 0,
             record_count: 0,
+        }
+    }
+
+    fn route_without_topic_id(topic: &str, partition: i32) -> ProduceRoute {
+        ProduceRoute {
+            topic_id: KafkaUuid::ZERO,
+            ..route(topic, partition)
         }
     }
 }
