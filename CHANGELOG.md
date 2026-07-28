@@ -11,24 +11,35 @@ release date and links to relevant pull requests or issues.
 
 ### Changed — breaking
 
-- **The 26 `Metrics::sensor_add_*` methods collapsed into one
-  `sensor_add_stat(sensor, metric_name, kind, config)`.** The matrix differed
-  only in which statistic it selected and in whether it built the
-  `MetricConfig` from a bare `MetricQuota`, so the statistic is now a value —
-  the new `StatKind` enum — and the config is always passed explicitly.
-  `sensor_add_value`, `sensor_add_avg`, `sensor_add_max`, and `sensor_add_meter`
-  remain as thin wrappers because kacrab's own Kafka-named producer registry
-  calls them; the other 22 are removed. Translate a call by passing the matching
-  `StatKind` and `MetricConfig::new()`, adding `.with_quota(quota)` where you
-  used a `*_with_quota` variant.
+- **The metrics registry is no longer public API.** `kacrab::producer` exported
+  eleven metrics types, but only four are reachable from anything the crate
+  actually offers: `KafkaMetric`, `MetricName`, `MetricValue`, and
+  `MetricReporter`, which `Producer::register_kafka_metric_for_subscription` and
+  `Producer::add_metric_reporter` take. The other seven — `Metrics`, `SensorId`,
+  `MetricConfig`, `MetricQuota`, `MetricNameTemplate`, `MetricsError`, and
+  `SensorRecordingLevel` — were a metrics *library* nobody could reach, because
+  no API ever handed out a `Metrics`. They are now internal, and the ~1,200
+  lines behind them that no caller exercised are gone: metric-name templates,
+  quotas and quota checking, the token bucket, frequency distributions, sensor
+  parents, recording levels, and the registry's own reporter plumbing (the
+  producer keeps its reporters itself). `KafkaMetric::from_fn_with_config`,
+  `metric_config`, and `set_metric_config` go with `MetricConfig`;
+  `KafkaMetric::from_fn` is unaffected.
 
-  Two behaviours changed with it. `StatKind::TokenBucket { quota }` now carries
-  its quota, because `sensor_add_token_bucket` used to accept a config without
-  one and register a bucket that could never move — `record` returned early and
-  the metric read `f64::MAX` forever, a silent misconfiguration with no error
-  and no way to notice. And `Frequencies.forBooleanValues`
-  (`sensor_add_boolean_frequencies`) is removed along with the frequency stat
-  behind it; nothing in kacrab produced a frequency metric.
+  What remains is the registry the producer publishes through, and it gained
+  the one thing it was missing: **per-topic sensors now expire.** Previously
+  every topic a producer had ever sent to kept five metrics alive forever, so a
+  producer with dated, per-tenant, or otherwise unbounded topic names leaked for
+  the life of the process while its metrics looked healthy. Topic sensors are
+  now registered with an hour of inactive expiration and swept every 30 seconds,
+  matching Kafka's expire-sensor task; client-level sensors never expire.
+
+  Internally the 26 near-identical `sensor_add_*` methods behind that surface
+  became one `sensor_add_stat(sensor, metric_name, kind)` taking a `StatKind`,
+  which also removed a trap: `sensor_add_token_bucket` accepted a config with no
+  quota, and a quota-free token bucket never moves — `record` returned before
+  touching the bucket and the metric read `f64::MAX` forever, with no error at
+  any point.
 
 - **The TLS crypto provider is now an explicit feature.** `rustls` no longer comes
   with a backend baked in. Pick one: `aws-lc-rs-tls` reproduces the previous
