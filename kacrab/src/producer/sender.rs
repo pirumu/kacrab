@@ -933,28 +933,21 @@ impl ProducerSender {
     pub(crate) async fn drive_sender_loop_once<LatencyObserver, RequeueObserver, BatchObserver>(
         &mut self,
         now: std::time::Instant,
-        observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
+        mut observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
     ) -> Result<SenderWaitSignal, ProducerError>
     where
         LatencyObserver: FnMut(std::time::Duration),
         RequeueObserver: FnMut(),
         BatchObserver: FnMut(&[ReadyBatch]),
     {
-        let ReadyDispatchObservers {
-            latency: mut observe_latency,
-            requeue: mut observe_requeue,
-            batches: mut observe_batches,
-        } = observers;
         let wait = self
-            .drive_wake_until_waiting(
-                now,
-                ReadyDispatchObservers::new(
-                    &mut observe_latency,
-                    &mut observe_requeue,
-                    &mut observe_batches,
-                ),
-            )
+            .drive_wake_until_waiting(now, observers.reborrow())
             .await?;
+        let ReadyDispatchObservers {
+            latency: observe_latency,
+            requeue: observe_requeue,
+            ..
+        } = observers;
         self.wait_for_sender_loop_wait(wait, now, observe_latency, observe_requeue)
             .await
     }
@@ -962,44 +955,25 @@ impl ProducerSender {
     pub(crate) async fn wait_for_buffer_progress<LatencyObserver, RequeueObserver, BatchObserver>(
         &mut self,
         deadline: std::time::Instant,
-        observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
+        mut observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
     ) -> Result<(), ProducerError>
     where
         LatencyObserver: FnMut(std::time::Duration),
         RequeueObserver: FnMut(),
         BatchObserver: FnMut(&[ReadyBatch]),
     {
-        let ReadyDispatchObservers {
-            latency: mut observe_latency,
-            requeue: mut observe_requeue,
-            batches: mut observe_batches,
-        } = observers;
         loop {
             let now = std::time::Instant::now();
             match self.buffer_wait_action(now, deadline) {
                 BufferWaitAction::WaitForDispatch => {
                     let _signal = self
-                        .drive_sender_loop_once(
-                            now,
-                            ReadyDispatchObservers::new(
-                                &mut observe_latency,
-                                &mut observe_requeue,
-                                &mut observe_batches,
-                            ),
-                        )
+                        .drive_sender_loop_once(now, observers.reborrow())
                         .await?;
                     return Ok(());
                 },
                 BufferWaitAction::PollReady => {
                     let _wait = self
-                        .drive_wake_until_waiting(
-                            now,
-                            ReadyDispatchObservers::new(
-                                &mut observe_latency,
-                                &mut observe_requeue,
-                                &mut observe_batches,
-                            ),
-                        )
+                        .drive_wake_until_waiting(now, observers.reborrow())
                         .await?;
                     return Ok(());
                 },
@@ -1015,18 +989,13 @@ impl ProducerSender {
         &mut self,
         record: &ProducerRecord,
         deadline: std::time::Instant,
-        observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
+        mut observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
     ) -> Result<(), ProducerError>
     where
         LatencyObserver: FnMut(std::time::Duration),
         RequeueObserver: FnMut(),
         BatchObserver: FnMut(&[ReadyBatch]),
     {
-        let ReadyDispatchObservers {
-            latency: mut observe_latency,
-            requeue: mut observe_requeue,
-            batches: mut observe_batches,
-        } = observers;
         let metrics = self.metrics_handle();
         let mut buffer_wait = None;
         let compression_ratio = self
@@ -1047,15 +1016,8 @@ impl ProducerSender {
                     if buffer_wait.is_none() {
                         buffer_wait = Some(metrics.start_buffer_wait());
                     }
-                    self.wait_for_buffer_progress(
-                        deadline,
-                        ReadyDispatchObservers::new(
-                            &mut observe_latency,
-                            &mut observe_requeue,
-                            &mut observe_batches,
-                        ),
-                    )
-                    .await?;
+                    self.wait_for_buffer_progress(deadline, observers.reborrow())
+                        .await?;
                 },
                 AppendBackpressureAction::Backpressure => return Err(ProducerError::Backpressure),
             }
@@ -1120,18 +1082,13 @@ impl ProducerSender {
     >(
         &mut self,
         append: AppendUntrackedBatchApply<'_>,
-        observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
+        mut observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
     ) -> Result<(), ProducerError>
     where
         LatencyObserver: FnMut(std::time::Duration),
         RequeueObserver: FnMut(),
         BatchObserver: FnMut(&[ReadyBatch]),
     {
-        let ReadyDispatchObservers {
-            latency: mut observe_latency,
-            requeue: mut observe_requeue,
-            batches: mut observe_batches,
-        } = observers;
         let AppendUntrackedBatchApply {
             budget,
             append,
@@ -1143,24 +1100,10 @@ impl ProducerSender {
             deadline,
         } = append;
         let status = self
-            .append_untracked_record_with_capacity_wait(
-                record,
-                now,
-                deadline,
-                ReadyDispatchObservers::new(
-                    &mut observe_latency,
-                    &mut observe_requeue,
-                    &mut observe_batches,
-                ),
-            )
+            .append_untracked_record_with_capacity_wait(record, now, deadline, observers.reborrow())
             .await?;
-        self.apply_batch_append_status(
-            budget,
-            status,
-            sticky_topic,
-            ReadyDispatchObservers::new(observe_latency, observe_requeue, observe_batches),
-        )
-        .await
+        self.apply_batch_append_status(budget, status, sticky_topic, observers)
+            .await
     }
 
     pub(crate) async fn append_delivery_record_with_capacity_wait<
@@ -1223,7 +1166,7 @@ impl ProducerSender {
         &mut self,
         append: AppendCallbackDeliveryRecord<'_>,
         before_dispatch: BeforeDispatch,
-        observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
+        mut observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
     ) -> Result<SendFuture, ProducerError>
     where
         LatencyObserver: FnMut(std::time::Duration),
@@ -1231,11 +1174,6 @@ impl ProducerSender {
         BatchObserver: FnMut(&[ReadyBatch]),
         BeforeDispatch: FnOnce(&SendFuture),
     {
-        let ReadyDispatchObservers {
-            latency: mut observe_latency,
-            requeue: mut observe_requeue,
-            batches: mut observe_batches,
-        } = observers;
         let AppendCallbackDeliveryRecord {
             record,
             now,
@@ -1247,11 +1185,7 @@ impl ProducerSender {
                 record,
                 now,
                 deadline,
-                ReadyDispatchObservers::new(
-                    &mut observe_latency,
-                    &mut observe_requeue,
-                    &mut observe_batches,
-                ),
+                observers.reborrow(),
             )
             .await?;
         before_dispatch(&delivery);
@@ -1259,7 +1193,7 @@ impl ProducerSender {
             decision,
             sticky_topic,
             false,
-            ReadyDispatchObservers::new(observe_latency, observe_requeue, observe_batches),
+            observers,
         )
         .await?;
         Ok(delivery)
@@ -1815,6 +1749,19 @@ impl<LatencyObserver, RequeueObserver, BatchObserver>
             requeue: observe_requeue,
             batches: observe_batches,
         }
+    }
+
+    /// Lend the three observers to an inner call without giving them up.
+    ///
+    /// `FnMut` is implemented for `&mut F`, so a reborrowed bundle is itself a valid
+    /// `ReadyDispatchObservers` while the original stays usable afterwards. Every call
+    /// that forwards observers into a nested step used to destructure this struct into
+    /// three locals and rebuild it by hand at each forwarding site.
+    pub(crate) const fn reborrow(
+        &mut self,
+    ) -> ReadyDispatchObservers<&mut LatencyObserver, &mut RequeueObserver, &mut BatchObserver>
+    {
+        ReadyDispatchObservers::new(&mut self.latency, &mut self.requeue, &mut self.batches)
     }
 }
 
@@ -2479,18 +2426,13 @@ impl ProducerSenderState {
         &mut self,
         accumulator: &SharedAccumulator,
         wait: AppendCapacityWait<'_>,
-        observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
+        mut observers: ReadyDispatchObservers<LatencyObserver, RequeueObserver, BatchObserver>,
     ) -> Result<(), ProducerError>
     where
         LatencyObserver: FnMut(std::time::Duration),
         RequeueObserver: FnMut(),
         BatchObserver: FnMut(&[ReadyBatch]),
     {
-        let ReadyDispatchObservers {
-            latency: mut observe_latency,
-            requeue: mut observe_requeue,
-            batches: mut observe_batches,
-        } = observers;
         let compression_ratio = wait
             .dispatcher
             .compression_ratio_estimation(wait.record.topic.as_ref());
@@ -2508,11 +2450,7 @@ impl ProducerSenderState {
                         wait.dispatcher,
                         accumulator,
                         wait.deadline,
-                        ReadyDispatchObservers::new(
-                            &mut observe_latency,
-                            &mut observe_requeue,
-                            &mut observe_batches,
-                        ),
+                        observers.reborrow(),
                     )
                     .await?;
                 },
@@ -2754,16 +2692,10 @@ impl ProducerSenderState {
         Ok(DispatchStart::Spawned)
     }
 
-    fn try_join_next(
-        &mut self,
-    ) -> Option<Result<(tokio::task::Id, TimedDispatchOutcome), JoinError>> {
-        self.in_flight.try_join_next_with_id()
-    }
-
     fn collect_finished_dispatches(&mut self) -> Vec<Result<TimedDispatchOutcome, JoinError>> {
         let mut completed = Vec::new();
-        while let Some(result) = self.try_join_next() {
-            completed.push(self.complete_joined_dispatch_with_id(result));
+        while let Some(result) = self.in_flight.try_join_next_with_id() {
+            completed.push(self.complete_joined_dispatch(result));
         }
         completed
     }
@@ -2778,42 +2710,18 @@ impl ProducerSenderState {
             .collect()
     }
 
-    async fn join_next(
-        &mut self,
-    ) -> Option<Result<(tokio::task::Id, TimedDispatchOutcome), JoinError>> {
-        self.in_flight.join_next_with_id().await
-    }
-
-    #[cfg(test)]
-    async fn join_next_without_id(&mut self) -> Option<Result<TimedDispatchOutcome, JoinError>> {
-        self.in_flight.join_next().await
-    }
-
-    async fn wait_for_joined_dispatch_completion(
-        &mut self,
-    ) -> Option<Result<(tokio::task::Id, TimedDispatchOutcome), JoinError>> {
-        self.join_next().await
-    }
-
-    #[cfg(test)]
-    async fn wait_for_dispatch_completion(
-        &mut self,
-    ) -> Option<Result<TimedDispatchOutcome, JoinError>> {
-        self.join_next_without_id().await
-    }
-
     pub(crate) async fn wait_for_completed_dispatch(
         &mut self,
     ) -> Option<Result<TimedDispatchOutcome, ProducerError>> {
-        let result = self.wait_for_joined_dispatch_completion().await?;
-        Some(self.complete_dispatch_result_with_id(result))
+        let result = self.in_flight.join_next_with_id().await?;
+        Some(self.complete_dispatch_result(result))
     }
 
     #[cfg(test)]
     pub(crate) async fn wait_for_next_dispatch(
         &mut self,
     ) -> Option<Result<TimedDispatchOutcome, JoinError>> {
-        self.join_next_without_id().await
+        self.in_flight.join_next().await
     }
 
     #[cfg(test)]
@@ -2821,7 +2729,7 @@ impl ProducerSenderState {
         if self.in_flight.len() < self.max_in_flight_requests {
             return None;
         }
-        self.join_next_without_id().await
+        self.in_flight.join_next().await
     }
 
     pub(crate) async fn wait_for_completed_dispatch_slot(
@@ -2846,35 +2754,7 @@ impl ProducerSenderState {
         }
     }
 
-    #[cfg(test)]
     fn complete_joined_dispatch(
-        &mut self,
-        result: Result<TimedDispatchOutcome, JoinError>,
-    ) -> Result<TimedDispatchOutcome, JoinError> {
-        match &result {
-            Ok(outcome) => {
-                // Release the per-partition depth exactly once: via the matched reservations
-                // when present, otherwise (tests that reserved depth directly) release here.
-                let reservations =
-                    self.release_in_flight_reservations_for_partitions(&outcome.partitions);
-                if reservations.is_empty() {
-                    self.release_dispatch_partitions(outcome.partitions.clone());
-                } else if matches!(&outcome.outcome, DispatchOutcome::Delivered(_)) {
-                    for reservation in reservations {
-                        self.mark_completed_batch_identities(reservation.identities);
-                    }
-                }
-            },
-            Err(error) => {
-                if let Some(reservation) = self.release_in_flight_reservation(error.id()) {
-                    self.mark_completed_batch_identities(reservation.identities);
-                }
-            },
-        }
-        result
-    }
-
-    fn complete_joined_dispatch_with_id(
         &mut self,
         result: Result<(tokio::task::Id, TimedDispatchOutcome), JoinError>,
     ) -> Result<TimedDispatchOutcome, JoinError> {
@@ -2907,20 +2787,11 @@ impl ProducerSenderState {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn complete_dispatch_result(
-        &mut self,
-        result: Result<TimedDispatchOutcome, JoinError>,
-    ) -> Result<TimedDispatchOutcome, ProducerError> {
-        self.complete_joined_dispatch(result)
-            .map_err(|error| ProducerError::DispatchTask(error.to_string()))
-    }
-
-    fn complete_dispatch_result_with_id(
+    fn complete_dispatch_result(
         &mut self,
         result: Result<(tokio::task::Id, TimedDispatchOutcome), JoinError>,
     ) -> Result<TimedDispatchOutcome, ProducerError> {
-        self.complete_joined_dispatch_with_id(result)
+        self.complete_joined_dispatch(result)
             .map_err(|error| ProducerError::DispatchTask(error.to_string()))
     }
 
@@ -3630,29 +3501,6 @@ impl ProducerSenderState {
         self.release_dispatch_partitions(reservation.partitions.clone());
         self.release_in_flight_batch_identities(reservation.identities.iter().copied());
         Some(reservation)
-    }
-
-    #[cfg(test)]
-    fn release_in_flight_reservations_for_partitions(
-        &mut self,
-        partitions: &[InFlightPartitionKey],
-    ) -> Vec<InFlightDispatchReservation> {
-        if partitions.is_empty() {
-            return Vec::new();
-        }
-        let mut reservations = Vec::new();
-        while let Some(task_id) =
-            self.in_flight_reservations
-                .iter()
-                .find_map(|(task_id, reservation)| {
-                    (reservation.partitions == partitions).then_some(*task_id)
-                })
-        {
-            if let Some(reservation) = self.release_in_flight_reservation(task_id) {
-                reservations.push(reservation);
-            }
-        }
-        reservations
     }
 
     pub(crate) fn select_dispatchable_batches(

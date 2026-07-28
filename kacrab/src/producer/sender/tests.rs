@@ -172,12 +172,10 @@ async fn sender_state_reports_in_flight_dispatches_for_flush_waits() {
     });
     assert!(state.has_in_flight_dispatches());
 
-    let joined = state
-        .wait_for_next_dispatch()
-        .await
-        .expect("in-flight task should be present");
     let _completed = state
-        .complete_joined_dispatch(joined)
+        .wait_for_completed_dispatch()
+        .await
+        .expect("in-flight task should be present")
         .expect("in-flight task should not panic");
     assert!(!state.has_in_flight_dispatches());
 }
@@ -2378,28 +2376,6 @@ async fn sender_state_waits_for_next_dispatch_task() {
 }
 
 #[tokio::test]
-async fn sender_state_waits_for_dispatch_completion() {
-    let mut state = ProducerSenderState::new(1);
-    assert!(state.wait_for_dispatch_completion().await.is_none());
-
-    let _abort = state.spawn_in_flight(async {
-        TimedDispatchOutcome {
-            outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
-            latency: Duration::ZERO,
-            partitions: Vec::new(),
-        }
-    });
-
-    let joined = state
-        .wait_for_dispatch_completion()
-        .await
-        .expect("in-flight task should be present")
-        .expect("in-flight task should not panic");
-    assert!(matches!(joined.outcome, DispatchOutcome::Delivered(Ok(_))));
-    assert_eq!(state.in_flight_len(), 0);
-}
-
-#[tokio::test]
 async fn spawn_dispatch_task_reserves_partitions_until_completion() {
     let mut state = ProducerSenderState::new(1);
     let reserved = ready_batch("orders", 0);
@@ -2420,12 +2396,10 @@ async fn spawn_dispatch_task_reserves_partitions_until_completion() {
     assert!(blocked.dispatchable.is_empty());
     assert_eq!(blocked.deferred.len(), 1);
 
-    let joined = state
-        .wait_for_next_dispatch()
-        .await
-        .expect("in-flight task should be present");
     let completed = state
-        .complete_joined_dispatch(joined)
+        .wait_for_completed_dispatch()
+        .await
+        .expect("in-flight task should be present")
         .expect("completed dispatch should not panic");
     assert!(matches!(
         completed.outcome,
@@ -2460,12 +2434,10 @@ async fn spawn_drained_dispatch_owns_dispatch_task_body_and_partition_reservatio
     let blocked = state.select_dispatchable_batches(vec![ready_batch("orders", 0)]);
     assert!(blocked.dispatchable.is_empty());
 
-    let joined = state
-        .wait_for_next_dispatch()
-        .await
-        .expect("in-flight task should be present");
     let completed = state
-        .complete_joined_dispatch(joined)
+        .wait_for_completed_dispatch()
+        .await
+        .expect("in-flight task should be present")
         .expect("completed dispatch should not panic");
     assert!(matches!(
         completed.outcome,
@@ -3290,79 +3262,8 @@ async fn prepare_all_dispatch_or_requeue_restores_batches_on_prepare_error() {
     assert_eq!(accumulator.buffered_records(), 1);
 }
 
-#[test]
-fn completing_joined_dispatch_releases_reserved_partitions() {
-    let mut state = ProducerSenderState::new(1);
-    let reserved = ready_batch("orders", 0);
-    let partition = super::InFlightPartitionKey::from(&reserved);
-    state.reserve_dispatch_partitions(std::slice::from_ref(&partition));
-
-    let blocked = state.select_dispatchable_batches(vec![ready_batch("orders", 0)]);
-    assert!(blocked.dispatchable.is_empty());
-    assert_eq!(blocked.deferred.len(), 1);
-
-    let completed = state
-        .complete_joined_dispatch(Ok(TimedDispatchOutcome {
-            outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
-            latency: Duration::ZERO,
-            partitions: vec![partition],
-        }))
-        .expect("completed dispatch should not panic");
-    assert!(matches!(
-        completed.outcome,
-        DispatchOutcome::Delivered(Ok(_))
-    ));
-
-    let unblocked = state.select_dispatchable_batches(vec![ready_batch("orders", 0)]);
-    assert_eq!(unblocked.dispatchable.len(), 1);
-    assert!(unblocked.deferred.is_empty());
-}
-
 #[tokio::test]
-async fn complete_dispatch_result_normalizes_join_errors_and_releases_partitions() {
-    let mut state = ProducerSenderState::new(1);
-    let reserved = ready_batch("orders", 0);
-    let partition = super::InFlightPartitionKey::from(&reserved);
-    let partition_for_task = partition.clone();
-    let _abort = state
-        .spawn_dispatch_task(std::slice::from_ref(&partition), async move {
-            TimedDispatchOutcome {
-                outcome: DispatchOutcome::Delivered(Ok(Vec::new())),
-                latency: Duration::ZERO,
-                partitions: vec![partition_for_task],
-            }
-        })
-        .expect("dispatch task should spawn");
-
-    let joined = state
-        .wait_for_next_dispatch()
-        .await
-        .expect("in-flight task should be present");
-    let completed = state
-        .complete_dispatch_result(joined)
-        .expect("completed dispatch should not panic");
-    assert!(matches!(
-        completed.outcome,
-        DispatchOutcome::Delivered(Ok(_))
-    ));
-    let unblocked = state.select_dispatchable_batches(vec![ready_batch("orders", 0)]);
-    assert_eq!(unblocked.dispatchable.len(), 1);
-
-    let _abort = state.spawn_in_flight(async {
-        panic!("dispatch task panic");
-    });
-    let joined = state
-        .wait_for_next_dispatch()
-        .await
-        .expect("panicked task should be present");
-    assert!(matches!(
-        state.complete_dispatch_result(joined),
-        Err(ProducerError::DispatchTask(_))
-    ));
-}
-
-#[tokio::test]
-async fn complete_dispatch_result_releases_reserved_partitions_after_dispatch_panic() {
+async fn completing_a_panicked_dispatch_releases_its_reserved_partitions() {
     let mut state = ProducerSenderState::new_with_idempotent_ordering(1, true);
     let reserved = ready_batch("orders", 0);
     let partition = super::InFlightPartitionKey::from(&reserved);
@@ -3376,14 +3277,11 @@ async fn complete_dispatch_result_releases_reserved_partitions_after_dispatch_pa
     assert!(blocked.dispatchable.is_empty());
     assert_eq!(blocked.deferred.len(), 1);
 
-    let joined = state
-        .wait_for_next_dispatch()
+    let completed = state
+        .wait_for_completed_dispatch()
         .await
         .expect("panicked task should be present");
-    assert!(matches!(
-        state.complete_dispatch_result(joined),
-        Err(ProducerError::DispatchTask(_))
-    ));
+    assert!(matches!(completed, Err(ProducerError::DispatchTask(_))));
 
     let unblocked = state.select_dispatchable_batches(vec![ready_batch("orders", 0)]);
     assert_eq!(unblocked.dispatchable.len(), 1);
