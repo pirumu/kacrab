@@ -135,6 +135,17 @@ release date and links to relevant pull requests or issues.
   yielded a well-formed but wrong proof, which a broker can only report as bad
   credentials. It is now fallible in exactly the same way.
 
+- **kacrab did not compile for Android or any other unhandled unix target.** The
+  hand-rolled `EINPROGRESS` table in `wire::socket` covered only the Apple/BSD
+  and Linux arms, so `cargo check --target aarch64-linux-android` — a target the
+  same file already handles for its post-connect socket options — failed with
+  `cannot find value EINPROGRESS in module libc_errno`. The table now covers the
+  Apple, BSD, and Linux lineages explicitly and falls through to `None` for
+  anything else, which leaves connect-in-progress detection on its `ErrorKind`
+  check rather than comparing against an errno that means something else there.
+  The unit test asserts the target being built for is covered, so a future gap
+  fails the test suite instead of the build.
+
 - **Typed producer builders never configured their registered interceptors.**
   `ProducerBuilder::build_with_serializers` and
   `build_with_configured_serializers` were drifted copies of `build`'s pipeline
