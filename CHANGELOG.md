@@ -625,6 +625,13 @@ release date and links to relevant pull requests or issues.
   buffer can hold (a header is at least two varints), which cannot reject a
   satisfiable count. Found by the new `record_batch_framed` fuzz target; covered
   by `absurd_header_count_fails_without_a_giant_allocation`.
+- **A failed response read leaked its pooled buffer.** `read_frame` acquired a
+  read buffer from the wire pool and then used `?` on the payload read, so every
+  short read, timeout, or torn connection dropped the buffer outside the pool
+  instead of returning it — the write path had the explicit release-on-every-exit
+  pattern, the read path did not. The read path now mirrors it. Covered by
+  `read_frame_returns_the_pooled_buffer_when_the_payload_is_truncated`.
+
 - `Consumer::poll` is now cancel-safe with respect to records. `reap_fetch` moved
   the in-flight `Fetch` handle out of the consumer before awaiting it, so
   dropping a `poll` future mid-await — the ordinary fate of the losing arm of a
@@ -634,6 +641,45 @@ release date and links to relevant pull requests or issues.
   now joined through `&mut` and stays owned by the consumer, so a cancelled poll
   costs nothing and the next poll folds the fetch in. Covered by
   `reap_fetch_survives_a_cancelled_await`.
+
+### Performance
+
+- **The response read path no longer zeroes every frame before filling it, and
+  the read buffer pool no longer allocates a replacement per frame.** `read_frame`
+  ran `payload.resize(length, 0)` before `read_exact`, so a 100 MiB fetch paid a
+  100 MiB `memset` for bytes that were about to be overwritten; it now fills the
+  buffer's uninitialized spare capacity with `read_buf`, bounded per read so it
+  still stops exactly at the frame boundary. Releasing the buffer afterwards used
+  to allocate: what comes back is the tail left by `split_to(len).freeze()`, which
+  never matches a size class, so the pool threw it away and built a fresh
+  class-sized `BytesMut` on *every* frame. The read pool now parks the tail and
+  reclaims its allocation on the next acquire, once the frame it was split from
+  has been dropped. The write pool deliberately keeps the old behaviour: the
+  producer recovers its write buffers out of the frozen record `Bytes` with
+  `Bytes::try_into_mut`, which only succeeds while nothing else owns the
+  allocation, so parking that tail would pin it and defeat the recovery.
+
+  On the new `wire_read_frame` bench (64 frames per iteration; minimum of five
+  interleaved before/after runs, because the host was under heavy load and single
+  runs of identical binaries swung by more than 2x): 512 B frames 4.25 us ->
+  2.47 us (-42%), 64 KiB frames 82.9 us -> 63.3 us (-24%), 4 MiB frames 5.18 ms ->
+  4.22 ms (-18%). Holding every frame alive so the pool can never reclaim a tail —
+  the worst case — still gives -3% / -23% / -11%, which is the memset alone.
+
+- **`Producer::flush` waited for the synchronous-send drain by spinning.** It
+  looped on `tokio::task::yield_now` until the queue emptied, which keeps the
+  flushing task permanently runnable and competing with the drain task it is
+  waiting for. It now parks on a `tokio::sync::Notify` the drain signals when the
+  last queued record has been appended.
+
+- **Per-partition consumer lookups no longer allocate a key.** The consumer's
+  subscription state, `ConsumerRecords`, and `ShareRecords` keyed their maps on
+  `(String, i32)`, so every `position`, `is_paused`, `records(...)`, `seek`, and
+  per-poll `advance_position` cloned the topic name just to build a lookup key.
+  They are keyed on `TopicPartition` now, which gained the `PartialOrd`/`Ord`
+  derives this needs; the ordering is identical (topic, then partition). The
+  public `IntoIterator` associated types of `ConsumerRecords` and `ShareRecords`
+  name `TopicPartition` instead of `(String, i32)` as a result.
 
 ### Added
 
