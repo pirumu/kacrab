@@ -363,6 +363,50 @@ environment):
 - `KACRAB_BENCH_CURRENT_THREAD=1` / `KACRAB_BENCH_WORKERS=N` — Tokio runtime
   shape, as in the producer bench.
 
+## A/B Discipline
+
+Every number below is a *comparison*, and comparisons are where benchmarking
+goes wrong. These rules are not general advice — each one was paid for during
+0.4.0 prep, and together they caught a **fabricated −11% consumer regression**
+that three separate runs had already "confirmed" before anyone controlled for
+the harness.
+
+- **Run an A/A control first.** Measure the same build against itself, twice,
+  through the same path you plan to use for A/B. Whatever spread that produces
+  is your noise floor, and no A/B delta smaller than it means anything. The −11%
+  above evaporated the moment an A/A control was run: the floor was ±1.7%, and
+  the "regression" was the harness, not the code.
+- **All arms come from ONE executable path.** Not "the same binary rebuilt", not
+  "the same command with a different flag that changes which code path runs" —
+  one path, with the variable under test as the only thing that differs.
+  Different entry points have different startup costs, different allocator warm
+  up, and different inlining, and every one of those lands on the arm you did
+  not expect.
+- **Randomize or pad the environment block across runs.** The process
+  environment sits below the stack, so its size shifts stack alignment for the
+  whole process. During this cycle **one byte moved a microbenchmark result by
+  2.4×** — the same code, the same input, one extra character in an unrelated
+  environment variable. If the arms of your A/B were launched from shells whose
+  environments differ in size, you are measuring alignment.
+- **Gate on a quiet host.** No editor indexing, no container pulls, no other
+  benchmark, no laptop on battery. Check before the run, not after the result
+  looks interesting.
+- **Prefer workloads long enough to dominate startup.** A 3M-record prefill beats
+  a 150K one, not because throughput changes, but because at 150K the fixed
+  costs — connection setup, metadata, first-batch allocation, JIT on the Java
+  side — are a large enough share of the total that they swamp the difference you
+  are trying to see.
+- **A criterion micro delta is a hypothesis, not a finding.** Before believing
+  one, run a one-variable causal experiment: change exactly the thing you think
+  is responsible, predict the direction and rough size in advance, and check. If
+  the prediction misses, the delta was measuring something else — usually one of
+  the four items above.
+
+The producer and consumer baselines in this file were re-measured under these
+rules on 2026-07-27 and re-verified at 0.4.0: producer within ±1.5% over four
+interleaved real-broker pairs, consumer inside the ±1.7% A/A noise floor, and
+the accumulator microbenchmark back at baseline.
+
 ## Real-Kafka Producer Baselines
 
 Measured 2026-07-02 against native Apache Kafka 4.3.0 single-node KRaft on the
