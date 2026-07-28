@@ -7,6 +7,7 @@
 - [The map](./overview.md)
 - [First contact: the wire layer](./wire.md)
 - [Learning the language: protocol codegen](./codegen.md)
+- [Which brokers kacrab speaks to](./broker-compatibility.md)
 
 # Part II — The producer's road
 
@@ -45,4 +46,5 @@
 # Reference
 
 - [Design decisions & Java parity](./design-decisions.md)
+- [Cancellation & drop semantics](./cancellation.md)
 - [Glossary](./glossary.md)

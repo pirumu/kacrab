@@ -104,10 +104,15 @@ sensitivity traps that the pure-unit tests could not:
 Every operation's wire round-trip is exercised against a real broker
 (`kacrab/tests/real_kafka_admin*.rs`, run with `--ignored`):
 
-- `real_kafka_admin_smoke` — core ops over `docker-compose.kafka.yml`.
+- `real_kafka_admin_smoke` — core ops over `docker-compose.kafka.yml`. This one
+  runs on **every** leg of the broker-version matrix (3.6.2, 3.9.0, 4.0.0,
+  4.3.0), not just the newest.
 - `real_kafka_admin_extended` — ACLs, quotas, SCRAM, transactions, and the
   share/streams group families over `docker-compose.kafka-admin.yml` (a broker
-  with `StandardAuthorizer` and the share/streams features enabled).
+  with `StandardAuthorizer` and the share/streams features enabled). Pinned to
+  4.3.0: the fixture depends on 4.3.0 broker defaults, so an older image would
+  produce a broker missing the features the suite is about rather than an
+  older-broker signal.
 - `real_kafka_admin_token` — delegation tokens over SASL against
   `docker-compose.auth.yml`.
 
@@ -115,3 +120,13 @@ Operations that need cluster state the test cannot easily create (a live group
 member, a hanging transaction) are asserted at the wire layer: a well-formed
 broker error code proves the request encoded and the response decoded correctly,
 even when the operation cannot semantically succeed.
+
+Because the smoke suite meets brokers that predate some of its operations, it is
+**capability-aware**: an operation the broker genuinely cannot express —
+`list_config_resources(Topic)` on 3.9.0 (API 74 at v0 only, which has no
+`resource_types` field) and both that and `list_client_metrics_resources` on
+3.6.2 (API 74 does not exist before 3.7) — is reported as a named `SKIPPED` line
+plus a capability summary rather than a failure. Everything else must still pass.
+The rule the skips follow, and why two earlier failures on those legs were client
+bugs rather than broker limitations, is in
+[Which brokers kacrab speaks to](./broker-compatibility.md#capability-aware-admin-smoke).

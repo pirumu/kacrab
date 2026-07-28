@@ -60,6 +60,12 @@ flowchart TB
   encode/decode, compression codecs, and CRC32C. Zero hand-written byte
   patching. See [Learning the language](./codegen.md).
 
+The types are generated from Apache Kafka 4.3.0, but no request version is
+hardcoded: `wire` negotiates every API per connection from that broker's own
+`ApiVersions` response, with Kafka **2.4** as the enforced floor. Which releases
+are exercised, and which features need a newer broker, is
+[Which brokers kacrab speaks to](./broker-compatibility.md).
+
 ## The parts left blank
 
 Kafka Streams is deliberately outside this map — it is a separate product built
