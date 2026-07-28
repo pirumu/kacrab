@@ -81,16 +81,33 @@ impl ConsumerRecord {
     }
 }
 
-/// The batch of records returned by one [`Consumer::poll`](super::Consumer::poll)
-/// call, grouped by partition and iterable in partition order — the analogue of
-/// Kafka's `ConsumerRecords`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ConsumerRecords {
-    by_partition: BTreeMap<TopicPartition, Vec<ConsumerRecord>>,
+/// A poll's worth of records grouped by partition and iterable in partition
+/// then offset order — the container behind [`ConsumerRecords`] and
+/// `ShareRecords`.
+///
+/// The two batches differ only in what a single element carries (a share record
+/// adds its KIP-932 delivery count), so they are one container over two element
+/// types rather than two copies of the same code. Neither alias adds a method,
+/// so `PartitionRecords` carries the whole surface of both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionRecords<T> {
+    by_partition: BTreeMap<TopicPartition, Vec<T>>,
     count: usize,
 }
 
-impl ConsumerRecords {
+// Hand-written rather than derived: `#[derive(Default)]` would bound the impl on
+// `T: Default`, and neither element type is (nor should be) constructible from
+// nothing. An empty batch does not need one.
+impl<T> Default for PartitionRecords<T> {
+    fn default() -> Self {
+        Self {
+            by_partition: BTreeMap::new(),
+            count: 0,
+        }
+    }
+}
+
+impl<T> PartitionRecords<T> {
     /// Build an empty batch.
     #[must_use]
     pub fn empty() -> Self {
@@ -98,12 +115,7 @@ impl ConsumerRecords {
     }
 
     /// Append records for one partition (kept in the given order).
-    pub(crate) fn push_partition(
-        &mut self,
-        topic: String,
-        partition: i32,
-        records: Vec<ConsumerRecord>,
-    ) {
+    pub(crate) fn push_partition(&mut self, topic: String, partition: i32, records: Vec<T>) {
         if records.is_empty() {
             return;
         }
@@ -143,37 +155,40 @@ impl ConsumerRecords {
 
     /// Records for a single partition, in offset order.
     #[must_use]
-    pub fn records(&self, partition: &TopicPartition) -> &[ConsumerRecord] {
+    pub fn records(&self, partition: &TopicPartition) -> &[T] {
         self.by_partition.get(partition).map_or(&[], Vec::as_slice)
     }
 
     /// Iterate every record across all partitions, in partition then offset order.
-    pub fn iter(&self) -> impl Iterator<Item = &ConsumerRecord> {
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.by_partition.values().flatten()
     }
 }
 
-impl<'a> IntoIterator for &'a ConsumerRecords {
-    type Item = &'a ConsumerRecord;
-    type IntoIter = std::iter::Flatten<
-        std::collections::btree_map::Values<'a, TopicPartition, Vec<ConsumerRecord>>,
-    >;
+impl<'a, T> IntoIterator for &'a PartitionRecords<T> {
+    type Item = &'a T;
+    type IntoIter =
+        std::iter::Flatten<std::collections::btree_map::Values<'a, TopicPartition, Vec<T>>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.by_partition.values().flatten()
     }
 }
 
-impl IntoIterator for ConsumerRecords {
-    type Item = ConsumerRecord;
-    type IntoIter = std::iter::Flatten<
-        std::collections::btree_map::IntoValues<TopicPartition, Vec<ConsumerRecord>>,
-    >;
+impl<T> IntoIterator for PartitionRecords<T> {
+    type Item = T;
+    type IntoIter =
+        std::iter::Flatten<std::collections::btree_map::IntoValues<TopicPartition, Vec<T>>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.by_partition.into_values().flatten()
     }
 }
+
+/// The batch of records returned by one [`Consumer::poll`](super::Consumer::poll)
+/// call, grouped by partition and iterable in partition order — the analogue of
+/// Kafka's `ConsumerRecords`.
+pub type ConsumerRecords = PartitionRecords<ConsumerRecord>;
 
 #[cfg(test)]
 mod tests {
@@ -227,6 +242,49 @@ mod tests {
         assert_eq!(by_ref, vec![0, 1, 5]);
         let owned: Vec<i64> = records.into_iter().map(|record| record.offset).collect();
         assert_eq!(owned, vec![0, 1, 5]);
+    }
+
+    /// `ConsumerRecords` and `ShareRecords` are the same container, so the shape
+    /// pinned here is the shape both publish. The `IntoIterator` associated
+    /// types are public API — a caller can name them — and `Default` has to hold
+    /// even though neither element type is `Default`, which is why
+    /// [`PartitionRecords`] writes that impl by hand instead of deriving it.
+    #[test]
+    fn the_batch_alias_keeps_the_published_container_shape() {
+        const fn assert_shape<B>()
+        where
+            B: Default
+                + Clone
+                + std::fmt::Debug
+                + PartialEq
+                + Eq
+                + IntoIterator<
+                    Item = ConsumerRecord,
+                    IntoIter = std::iter::Flatten<
+                        std::collections::btree_map::IntoValues<
+                            TopicPartition,
+                            Vec<ConsumerRecord>,
+                        >,
+                    >,
+                >,
+            for<'a> &'a B: IntoIterator<
+                    Item = &'a ConsumerRecord,
+                    IntoIter = std::iter::Flatten<
+                        std::collections::btree_map::Values<
+                            'a,
+                            TopicPartition,
+                            Vec<ConsumerRecord>,
+                        >,
+                    >,
+                >,
+        {
+        }
+        assert_shape::<ConsumerRecords>();
+
+        assert!(
+            ConsumerRecords::default().is_empty(),
+            "the hand-written Default must still build an empty batch"
+        );
     }
 
     #[test]

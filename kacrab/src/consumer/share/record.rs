@@ -8,9 +8,10 @@
 //! its delivery count cannot answer the question share groups exist to answer
 //! ("is this a poison message?").
 
-use std::collections::BTreeMap;
-
-use crate::{common::TopicPartition, consumer::record::ConsumerRecord};
+use crate::{
+    common::TopicPartition,
+    consumer::record::{ConsumerRecord, PartitionRecords},
+};
 
 /// How the application disposes of one delivered record, mirroring Kafka's
 /// `AcknowledgeType`.
@@ -83,95 +84,9 @@ impl ShareRecord {
 ///
 /// Unlike [`ConsumerRecords`](crate::consumer::ConsumerRecords) this is not a
 /// slice of a larger client-side buffer: every record in it is locked to this
-/// member at the broker, so the whole acquisition is handed over at once.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ShareRecords {
-    by_partition: BTreeMap<TopicPartition, Vec<ShareRecord>>,
-    count: usize,
-}
-
-impl ShareRecords {
-    /// Build an empty batch.
-    #[must_use]
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    /// Append records for one partition (kept in the given order).
-    pub(super) fn push_partition(
-        &mut self,
-        topic: String,
-        partition: i32,
-        records: Vec<ShareRecord>,
-    ) {
-        if records.is_empty() {
-            return;
-        }
-        self.count = self.count.saturating_add(records.len());
-        match self
-            .by_partition
-            .entry(TopicPartition::new(topic, partition))
-        {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                let _records = entry.insert(records);
-            },
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                entry.get_mut().extend(records);
-            },
-        }
-    }
-
-    /// Total number of records across all partitions.
-    #[must_use]
-    pub const fn count(&self) -> usize {
-        self.count
-    }
-
-    /// Whether this batch has no records.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
-    /// The set of partitions with at least one record in this batch.
-    #[must_use]
-    pub fn partitions(&self) -> Vec<TopicPartition> {
-        self.by_partition.keys().cloned().collect()
-    }
-
-    /// Records for a single partition, in offset order.
-    #[must_use]
-    pub fn records(&self, partition: &TopicPartition) -> &[ShareRecord] {
-        self.by_partition.get(partition).map_or(&[], Vec::as_slice)
-    }
-
-    /// Iterate every record across all partitions, in partition then offset order.
-    pub fn iter(&self) -> impl Iterator<Item = &ShareRecord> {
-        self.by_partition.values().flatten()
-    }
-}
-
-impl<'a> IntoIterator for &'a ShareRecords {
-    type Item = &'a ShareRecord;
-    type IntoIter = std::iter::Flatten<
-        std::collections::btree_map::Values<'a, TopicPartition, Vec<ShareRecord>>,
-    >;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.by_partition.values().flatten()
-    }
-}
-
-impl IntoIterator for ShareRecords {
-    type Item = ShareRecord;
-    type IntoIter = std::iter::Flatten<
-        std::collections::btree_map::IntoValues<TopicPartition, Vec<ShareRecord>>,
-    >;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.by_partition.into_values().flatten()
-    }
-}
+/// member at the broker, so the whole acquisition is handed over at once. The
+/// grouping and iteration are the consumer's, so both share one container.
+pub type ShareRecords = PartitionRecords<ShareRecord>;
 
 #[cfg(test)]
 mod tests {
