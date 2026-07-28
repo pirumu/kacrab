@@ -304,6 +304,28 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **`send_offsets_to_transaction` silently dropped transactional sends that were
+  still in flight — `commit_transaction` then reported success for an empty
+  transaction.** The produce dispatch path failed any batch that arrived while a
+  transaction operation was pending (`InvalidTransactionState("previous
+  transaction operation is pending and must be retried")`), so the
+  consume-transform-produce pattern of firing sends and calling
+  `send_offsets_to_transaction` before awaiting them lost every record: the
+  deliveries failed, the offsets committed, the commit returned `Ok`, and the
+  broker log was empty. Produce dispatches now wait for the pending operation
+  (the Java client orders produce after the pending AddOffsets/TxnOffsetCommit
+  in the same sender loop) and only a pending `EndTransaction` stays terminal.
+  Two supporting invariants landed with it, both Java parity: a transactional
+  batch that fails terminally now poisons the transaction
+  (`Sender.failBatch` -> `maybeTransitionToAbortableError`) so
+  `commit_transaction` fails instead of committing a transaction that lost a
+  record — the abort that clears it also bumps the producer epoch, healing the
+  dead batch's sequence gap — and the epoch-bump `InitProducerId` retries
+  `CONCURRENT_TRANSACTIONS` explicitly (upstream keeps it out of the generic
+  retriable table; `InitProducerIdHandler` reenqueues it per-handler), since the
+  coordinator answers exactly that while the abort's markers are still being
+  written. Both paths are pinned by new real-broker regression tests.
+
 - **Transactional produce requests never set the KIP-98 `isTransactional`
   record-batch attribute, so aborting a transaction did not hide its records.**
   The producer sent transaction markers (`AddPartitionsToTxn`, `EndTxn`) but

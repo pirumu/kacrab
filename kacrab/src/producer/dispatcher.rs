@@ -1646,12 +1646,16 @@ impl ProducerDispatcher {
                         )
                         .await
                     {
+                        self.poison_transaction_after_terminal_produce_failure(&error)
+                            .await;
                         fail_deliveries(&mut batches, &error);
                         return DispatchOutcome::Delivered(Err(error));
                     }
                 },
                 Err(DispatchError::Producer(error)) => {
                     self.record_metrics(ProducerMetrics::record_error);
+                    self.poison_transaction_after_terminal_produce_failure(&error)
+                        .await;
                     fail_deliveries(&mut batches, &error);
                     return DispatchOutcome::Delivered(Err(error));
                 },
@@ -1692,11 +1696,14 @@ impl ProducerDispatcher {
             // Terminal produce failure, counted like every other terminal arm of the
             // dispatch loop (this is what the now-deleted `dispatch_ready` copy did).
             self.record_metrics(ProducerMetrics::record_error);
-            return DispatchOutcome::Delivered(Err(ProducerError::Broker {
+            let error = ProducerError::Broker {
                 topic,
                 partition,
                 error: ErrorCode::MessageTooLarge,
-            }));
+            };
+            self.poison_transaction_after_terminal_produce_failure(&error)
+                .await;
+            return DispatchOutcome::Delivered(Err(error));
         };
         self.record_metrics(|metrics| {
             metrics.record_requeue();
@@ -2893,29 +2900,67 @@ impl ProducerDispatcher {
             topic: route.topic.clone(),
             partition: route.partition,
         };
-        {
-            let mut state = self.producer_state.lock().await;
-            fail_pending_transaction_operation(&mut state)?;
-            if !state.in_transaction {
-                return Err(ProducerError::InvalidTransactionState(
-                    "produce called outside an open transaction",
-                ));
+        // A produce dispatch that lands while a transaction operation is in
+        // flight must WAIT for it, not fail: send() has already accepted the
+        // records, so failing here silently drops committed-transaction data
+        // (the Java client orders produce after the pending AddOffsets/
+        // TxnOffsetCommit in the same sender loop). Only a pending
+        // EndTransaction is terminal — the transaction is closing and these
+        // records can no longer join it.
+        loop {
+            let waiter = {
+                let mut state = self.producer_state.lock().await;
+                clear_acked_pending_transaction_operation(&mut state);
+                match state.pending_operation {
+                    // The operation's own failure is not this batch's failure;
+                    // the arm below surfaces any resulting abortable or fatal
+                    // state on the next pass. A pending operation with no
+                    // result handle cannot be waited on and falls through to
+                    // `fail_pending_transaction_operation`, mirroring
+                    // `begin_pending_transaction_operation`'s defensive arm.
+                    Some(operation)
+                        if !matches!(operation, TransactionOperation::EndTransaction { .. })
+                            && state.pending_result.is_some() =>
+                    {
+                        state.pending_result.clone()
+                    },
+                    _end_resultless_or_none => {
+                        // Decide and register under the SAME lock hold that
+                        // observed no waitable operation — releasing first
+                        // would let a fresh send_offsets slip in and turn this
+                        // batch's wait back into the terminal failure that
+                        // silently dropped committed-transaction data.
+                        fail_transaction_state_if_needed(&state, false)?;
+                        fail_pending_transaction_operation(&mut state)?;
+                        if !state.in_transaction {
+                            return Err(ProducerError::InvalidTransactionState(
+                                "produce called outside an open transaction",
+                            ));
+                        }
+                        if state.identity.is_none() {
+                            return Err(ProducerError::InvalidTransactionState(
+                                "init_transactions must run before produce",
+                            ));
+                        }
+                        if state.transaction_contains_partition(&key) {
+                            return Ok(());
+                        }
+                        if self.idempotence.transaction_two_phase_commit {
+                            let _inserted = state.partitions_in_transaction.insert(key);
+                            state.transaction_started = true;
+                            return Ok(());
+                        }
+                        let _inserted = state.mark_new_transaction_partition(key.clone());
+                        None
+                    },
+                }
+            };
+            match waiter {
+                Some(result) => {
+                    let _completion = result.wait().await;
+                },
+                None => break,
             }
-            if state.identity.is_none() {
-                return Err(ProducerError::InvalidTransactionState(
-                    "init_transactions must run before produce",
-                ));
-            }
-            if state.transaction_contains_partition(&key) {
-                return Ok(());
-            }
-            if self.idempotence.transaction_two_phase_commit {
-                let _inserted = state.partitions_in_transaction.insert(key);
-                state.transaction_started = true;
-                drop(state);
-                return Ok(());
-            }
-            let _inserted = state.mark_new_transaction_partition(key.clone());
         }
 
         let mut coordinator_id = self.coordinator_id().await?;
@@ -3197,6 +3242,44 @@ impl ProducerDispatcher {
         }
     }
 
+    /// Kafka fails the WHOLE transaction when any transactional batch fails
+    /// terminally (`Sender.failBatch` -> `maybeTransitionToAbortableError`):
+    /// without this, `commit_transaction` reports success for a transaction
+    /// whose records never reached the log. Client-side failures carry no
+    /// broker code, so `INVALID_TXN_STATE` stands in; only an abort (or the
+    /// transaction never having opened) clears the poison.
+    async fn poison_transaction_after_terminal_produce_failure(&self, error: &ProducerError) {
+        if self.idempotence.transactional_id.is_none() {
+            return;
+        }
+        let code = match error {
+            ProducerError::Broker { error, .. } => *error,
+            _other_client_side => ErrorCode::InvalidTxnState,
+        };
+        let mut state = self.producer_state.lock().await;
+        if state.in_transaction && state.fatal_error.is_none() {
+            if state.coordinator_lacks_epoch_bump_support {
+                // The failed batch consumed a sequence the log never saw, and
+                // healing that gap needs the epoch bump this coordinator
+                // cannot perform — escalate like every other abortable error
+                // in that position (Kafka canHandleAbortableError() == false).
+                state.abortable_error = None;
+                state.fatal_error = Some(code);
+                state.transaction_state = TransactionState::FatalError;
+            } else {
+                if state.abortable_error.is_none() {
+                    state.abortable_error = Some(code);
+                }
+                state.transaction_state = TransactionState::AbortableError;
+                // The abort that clears this poison must also bump the epoch:
+                // the dead batch's sequence was never written, so the next
+                // transaction would otherwise open on OUT_OF_ORDER_SEQUENCE
+                // (Kafka failBatch(adjustSequenceNumbers=true)).
+                state.epoch_bump_required = true;
+            }
+        }
+    }
+
     async fn record_abortable_transaction_error(&self, error: ErrorCode) {
         let mut state = self.producer_state.lock().await;
         if state.in_transaction {
@@ -3373,7 +3456,16 @@ impl ProducerDispatcher {
                 self.sleep_retry_backoff(&mut retry_backoff).await?;
                 continue;
             }
-            if !has_retry_budget(attempts_remaining) || !error.is_retriable() {
+            // CONCURRENT_TRANSACTIONS is deliberately NOT in the generated
+            // retriable table (upstream ConcurrentTransactionsException is not
+            // a RetriableException); Java retries it per-handler instead
+            // (TransactionManager.InitProducerIdHandler reenqueues). The
+            // coordinator answers it while the previous transaction's markers
+            // are still being written — exactly when the post-abort epoch bump
+            // runs — so failing here would wedge the recovery path.
+            let handler_retriable =
+                error.is_retriable() || matches!(error, ErrorCode::ConcurrentTransactions);
+            if !has_retry_budget(attempts_remaining) || !handler_retriable {
                 let transaction_error = transaction_control_error_for_client(error);
                 self.record_init_producer_error(transaction_error).await;
                 return Err(ProducerError::Transaction {
