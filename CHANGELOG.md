@@ -135,6 +135,17 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **`ConfigError` and `ParseConfigValueError` are now `std::error::Error`.** Both
+  implemented `Display` but not `Error`, so they could not be boxed into
+  `Box<dyn Error>`, could not be `?`-converted in a `main`, and produced no source
+  chain in `anyhow`/`eyre`. Both now derive `thiserror::Error` with the same
+  messages, and `AdminError::Config` marks its payload `#[source]` so
+  `AdminError::source()` hands back the underlying `ConfigError` (downcastable).
+  The repo's own `examples/config.rs` was the proof of the gap: it wrapped every
+  fallible call in `map_err(|error| error.to_string())` to reach a
+  `Result<(), String>` main. Those six shims are gone and the example returns
+  `Box<dyn Error>` like normal Rust.
+
 - **A consumer configured for a group protocol the broker cannot serve only found
   out mid-poll, and was never told what to change.** `group.protocol=consumer`
   (KIP-848) and the KIP-932 `ShareConsumer` both went through a coordinator lookup

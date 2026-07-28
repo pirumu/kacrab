@@ -21,7 +21,12 @@ use kacrab::config::{
     KAFKA_CONFIG_SOURCE_REF, ProducerConfig, UnknownKeyPolicy, catalog_for,
 };
 
-fn main() -> Result<(), String> {
+/// Boxed error so every fallible call below can use `?` directly: the config
+/// error types implement `std::error::Error`, so no `map_err(|e| e.to_string())`
+/// shim is needed to reach `main`'s error type.
+type ExampleResult = Result<(), Box<dyn std::error::Error>>;
+
+fn main() -> ExampleResult {
     let filter = env::args().nth(1);
 
     println!("Kafka config source: {KAFKA_CONFIG_SOURCE_REF}");
@@ -34,7 +39,7 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-fn show_client_config_facade() -> Result<(), String> {
+fn show_client_config_facade() -> ExampleResult {
     println!("== Java-style ClientConfig facade ==");
 
     let config = ClientConfig::new()
@@ -49,9 +54,7 @@ fn show_client_config_facade() -> Result<(), String> {
         println!("{key} = {}", value.as_str());
     }
 
-    let producer = config
-        .producer_config()
-        .map_err(|error| error.to_string())?;
+    let producer = config.producer_config()?;
     println!(
         "typed producer: bootstrap={:?}, client.id={}, acks={}, idempotence={}",
         producer.bootstrap_servers.as_slice(),
@@ -68,9 +71,7 @@ fn show_client_config_facade() -> Result<(), String> {
         .set("bootstrap.servers", "127.0.0.1:9092")
         .set("metrics.sample.window.ms", "30000")
         .set("some.unknown.key", "value");
-    let (_producer, report) = lenient
-        .producer_config_with_warnings(UnknownKeyPolicy::Report)
-        .map_err(|error| error.to_string())?;
+    let (_producer, report) = lenient.producer_config_with_warnings(UnknownKeyPolicy::Report)?;
     println!(
         "warnings collected with report policy: {}",
         report.warnings().len()
@@ -83,7 +84,7 @@ fn show_client_config_facade() -> Result<(), String> {
     Ok(())
 }
 
-fn show_typed_config_builders() -> Result<(), String> {
+fn show_typed_config_builders() -> ExampleResult {
     println!("== Typed config builders ==");
 
     let producer = ProducerConfig::builder()
@@ -91,8 +92,7 @@ fn show_typed_config_builders() -> Result<(), String> {
         .client_id("typed-producer")
         .acks("all")
         .enable_idempotence(true)
-        .build()
-        .map_err(|error| error.to_string())?;
+        .build()?;
     println!(
         "ProducerConfig: bootstrap={:?}, client.id={}, acks={}",
         producer.bootstrap_servers.as_slice(),
@@ -104,8 +104,7 @@ fn show_typed_config_builders() -> Result<(), String> {
         .bootstrap_servers("127.0.0.1:9092")
         .group_id("config-example-group")
         .client_id("typed-consumer")
-        .build()
-        .map_err(|error| error.to_string())?;
+        .build()?;
     println!(
         "ConsumerConfig: bootstrap={:?}, group.id={}, client.id={}",
         consumer.bootstrap_servers.as_slice(),
@@ -116,8 +115,7 @@ fn show_typed_config_builders() -> Result<(), String> {
     let admin = AdminConfig::builder()
         .bootstrap_servers("127.0.0.1:9092")
         .client_id("typed-admin")
-        .build()
-        .map_err(|error| error.to_string())?;
+        .build()?;
     println!(
         "AdminConfig: bootstrap={:?}, client.id={}",
         admin.bootstrap_servers.as_slice(),
@@ -128,7 +126,7 @@ fn show_typed_config_builders() -> Result<(), String> {
     Ok(())
 }
 
-fn show_catalogs(filter: Option<&str>) -> Result<(), String> {
+fn show_catalogs(filter: Option<&str>) -> ExampleResult {
     println!("== Full config catalog ==");
     println!(
         "status: native = typed now, native-review = exposed but review-targeted, feature/future \
@@ -148,7 +146,8 @@ fn show_catalogs(filter: Option<&str>) -> Result<(), String> {
         Some(other) => {
             return Err(format!(
                 "unknown client kind `{other}`; use producer, consumer, admin, or all"
-            ));
+            )
+            .into());
         },
     }
 
