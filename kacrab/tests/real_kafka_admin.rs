@@ -24,17 +24,22 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use kacrab::admin::{
-    AclBinding, AclBindingFilter, AclOperation, AclPatternType, AclPermissionType, AclResourceType,
-    AdminClient, AdminError, AlterClientQuotasOptions, AlterConfigOp, AlterConfigsOptions,
-    ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilterComponent, ClientQuotaMatch,
-    ClientQuotaOp, ConfigResource, CreatePartitionsOptions, CreateTopicsOptions,
-    DescribeClientQuotasOptions, DescribeConsumerGroupsOptions, DescribeTopicsOptions,
-    ElectionType, FeatureUpdate, FeatureUpdateUpgradeType, ListConsumerGroupOffsetsOptions,
-    ListConsumerGroupsOptions, ListTopicsOptions, ListTransactionsOptions, MemberToRemove,
-    NewPartitions, NewTopic, OffsetAndMetadata, OffsetSpec, ResourceType, ScramCredentialDeletion,
-    ScramCredentialUpsertion, ScramMechanism, TopicPartition, UpdateFeaturesOptions,
+use kacrab::{
+    admin::{
+        AclBinding, AclBindingFilter, AclOperation, AclPatternType, AclPermissionType,
+        AclResourceType, AdminClient, AdminError, AlterClientQuotasOptions, AlterConfigOp,
+        AlterConfigsOptions, ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilterComponent,
+        ClientQuotaMatch, ClientQuotaOp, ConfigResource, CreatePartitionsOptions,
+        CreateTopicsOptions, DescribeClientQuotasOptions, DescribeConsumerGroupsOptions,
+        DescribeTopicsOptions, ElectionType, FeatureUpdate, FeatureUpdateUpgradeType,
+        ListConsumerGroupOffsetsOptions, ListConsumerGroupsOptions, ListTopicsOptions,
+        ListTransactionsOptions, MemberToRemove, NewPartitions, NewTopic, OffsetAndMetadata,
+        OffsetSpec, ResourceType, ScramCredentialDeletion, ScramCredentialUpsertion,
+        ScramMechanism, TopicPartition, UpdateFeaturesOptions,
+    },
+    wire::WireError,
 };
+use kacrab_protocol::ProtocolError;
 
 #[tokio::test]
 #[ignore = "requires local Kafka from docker-compose.kafka.yml"]
@@ -42,6 +47,9 @@ async fn real_kafka_admin_smoke() {
     let bootstrap = bootstrap_addr();
     let topic = unique_topic();
     println!("real Kafka admin smoke: bootstrap={bootstrap}, topic={topic}");
+    // Every op below that a broker in the CI matrix may not be able to express
+    // is recorded here and summarised on the last line of the run.
+    let mut capabilities = CapabilityLog::default();
 
     let admin = AdminClient::from_map([("bootstrap.servers", bootstrap.clone())])
         .await
@@ -77,11 +85,24 @@ async fn real_kafka_admin_smoke() {
     );
     assert!(!quorum.voters.is_empty(), "KRaft quorum must have voters");
 
-    let config_resources = admin
-        .list_config_resources(vec![ResourceType::Topic])
-        .await
-        .expect("list_config_resources");
-    println!("  list_config_resources(Topic): {}", config_resources.len());
+    // `ListConfigResources` (API 74) is the one core-suite op the matrix cannot
+    // run everywhere: the API does not exist before broker 3.7, and 3.7–4.0
+    // advertise only v0, whose request has no `resource_types` field — v0 can
+    // ask for client-metrics resources and nothing else. Both forms are
+    // exercised so a broker that can serve one but not the other still proves
+    // the half it can serve.
+    if let Some(config_resources) = capabilities.run(
+        "list_config_resources(Topic)",
+        admin.list_config_resources(vec![ResourceType::Topic]).await,
+    ) {
+        println!("  list_config_resources(Topic): {}", config_resources.len());
+    }
+    if let Some(client_metrics) = capabilities.run(
+        "list_client_metrics_resources",
+        admin.list_client_metrics_resources().await,
+    ) {
+        println!("  list_client_metrics_resources: {}", client_metrics.len());
+    }
 
     // --- create / describe / list topics ---
     admin
@@ -257,6 +278,7 @@ async fn real_kafka_admin_smoke() {
     println!("  delete_topics: {topic} — OK");
 
     println!("real Kafka admin smoke: ALL OK");
+    println!("{}", capabilities.summary());
 }
 
 /// Extended admin coverage against the authorizer/share/streams-enabled broker
@@ -557,6 +579,77 @@ async fn real_kafka_admin_extended() {
     println!("real Kafka admin extended: ALL OK");
 }
 
+/// Record of which capability-gated smoke ops this broker could run.
+///
+/// The smoke test runs on every leg of the broker matrix (3.6.2 / 3.9 / 4.0 /
+/// 4.3), and a few ops simply do not exist on the older ones. Rather than gate
+/// them on a hardcoded version number — which would encode a guess about the
+/// broker instead of asking it — each such op is run and its *typed*
+/// incompatibility errors are read as a verified "this broker cannot do that".
+/// The log turns those outcomes into one summary line per run so the CI step
+/// summary shows what each leg actually covered.
+#[derive(Default)]
+struct CapabilityLog {
+    /// One entry per capability-gated op, in call order: `(label, ran)`.
+    outcomes: Vec<(&'static str, bool)>,
+}
+
+impl CapabilityLog {
+    /// Run a capability-gated admin op, returning `None` when the broker itself
+    /// said it cannot express the request.
+    ///
+    /// Exactly two typed errors mean "verified unsupported", and both come from
+    /// kacrab's own version negotiation rather than from a broker rejecting the
+    /// bytes:
+    ///
+    /// * [`WireError::UnsupportedApiVersion`](kacrab::wire::WireError::UnsupportedApiVersion) — the
+    ///   broker's `ApiVersions` response offered no version of the API that kacrab speaks, or did
+    ///   not list the API key at all (e.g. `ListConfigResources` on 3.6.2, which predates the API).
+    /// * `ProtocolError::FieldVersion` — the negotiated version has no field for something the
+    ///   request must say, so the request is refused before it goes out rather than silently
+    ///   answering a different question (e.g. `ListConfigResources.resource_types` on a v0-only
+    ///   broker). kacrab mirrors Java's `UnsupportedVersionException` here by design.
+    ///
+    /// Every other error — including any broker error code — is a real failure
+    /// and panics, so the 4.3.0 leg, where nothing is skipped, keeps proving
+    /// exactly what it proved before this gating existed.
+    fn run<T>(&mut self, label: &'static str, result: Result<T, AdminError>) -> Option<T> {
+        match result {
+            Ok(value) => {
+                self.outcomes.push((label, true));
+                Some(value)
+            },
+            Err(
+                error @ AdminError::Wire(
+                    WireError::UnsupportedApiVersion { .. }
+                    | WireError::Protocol(ProtocolError::FieldVersion(_)),
+                ),
+            ) => {
+                println!("  SKIPPED (broker does not support {label}): {error}");
+                self.outcomes.push((label, false));
+                None
+            },
+            Err(other) => panic!("{label}: {other:?}"),
+        }
+    }
+
+    /// One line naming every capability-gated op and whether this broker ran it.
+    fn summary(&self) -> String {
+        let skipped = self.outcomes.iter().filter(|(_, ran)| !ran).count();
+        let per_op = self
+            .outcomes
+            .iter()
+            .map(|(label, ran)| format!("{label}={}", if *ran { "ran" } else { "SKIPPED" }))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "real Kafka admin smoke: capability summary ({} skipped of {}): {per_op}",
+            skipped,
+            self.outcomes.len()
+        )
+    }
+}
+
 /// Assert an admin op's request/response was understood at the wire layer: a
 /// success or a broker error code both prove correct encode/decode, while a
 /// `Wire`/protocol error means an encoding bug.
@@ -571,7 +664,7 @@ fn assert_wire_ok<T: std::fmt::Debug>(label: &str, result: Result<T, AdminError>
         },
         // The broker advertised no supported version for this (optional) API —
         // that is the version negotiation working, not an encoding bug.
-        Err(AdminError::Wire(error @ kacrab::wire::WireError::UnsupportedApiVersion { .. })) => {
+        Err(AdminError::Wire(error @ WireError::UnsupportedApiVersion { .. })) => {
             println!("  {label}: {error} (negotiated out)");
         },
         Err(other) => panic!("{label}: wire/encoding failure: {other:?}"),
