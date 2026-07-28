@@ -100,17 +100,35 @@ fn transactional_id() -> String {
 ///   attribute bit (markers were written but governed nothing, so aborted data stayed visible).
 /// - `read_uncommitted` must SEE the aborted record — the negative control proving this test can
 ///   distinguish a working implementation from a broken one, rather than passing vacuously.
-#[cfg(feature = "consumer")]
+#[cfg(all(feature = "consumer", feature = "admin"))]
 #[tokio::test]
 #[ignore = "requires the broker from docker-compose.kafka.yml"]
 async fn real_kafka_aborted_transaction_is_invisible_to_read_committed() {
     use std::time::Duration;
 
-    use kacrab::{common::TopicPartition, consumer::Consumer};
+    use kacrab::{
+        admin::{AdminClient, CreateTopicsOptions, NewTopic},
+        common::TopicPartition,
+        consumer::Consumer,
+    };
 
     let bootstrap = bootstrap_addr();
     let topic = format!("kacrab-eos-{}", unique_suffix());
     let transactional_id = format!("kacrab-eos-txn-{}", unique_suffix());
+
+    // The compose fixtures run with auto.create.topics.enable=false, so a
+    // fresh topic must be created explicitly — producing to a missing topic
+    // never resolves metadata and the delivery future waits forever.
+    let admin = AdminClient::from_map([("bootstrap.servers", bootstrap.to_string().as_str())])
+        .await
+        .expect("admin should connect");
+    admin
+        .create_topics(
+            vec![NewTopic::new(topic.clone(), 1, 1)],
+            CreateTopicsOptions::default(),
+        )
+        .await
+        .expect("create_topics should succeed");
 
     let producer = Producer::builder()
         .set("bootstrap.servers", bootstrap.to_string())
