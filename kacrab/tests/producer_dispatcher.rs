@@ -2611,6 +2611,131 @@ async fn kafka_producer_commits_transactional_send() {
     assert_eq!(leader_7.join().await, 2);
 }
 
+/// `AddPartitionsToTxn` only grew the batched `transactions` array in v4
+/// (KIP-890 verification); v0-3 carry the transaction inline in the
+/// `v3_and_below_*` fields and answer with the flat
+/// `results_by_topic_v3_and_below`. A coordinator that negotiates v3 or lower
+/// must be sent — and read in — that shape, or no transaction can add a single
+/// partition on any broker older than 3.6.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Transaction wire-flow fixture keeps ordered broker handlers inline for readability."
+)]
+async fn kafka_producer_transactional_send_uses_pre_batched_add_partitions_to_txn_shapes() {
+    let coordinator = MockBroker::serve_many(vec![
+        Box::new(pre_batched_add_partitions_to_txn_api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::InitProducerId as i16);
+            init_producer_id_response_frame(header.correlation_id, 77, 4)
+        }),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::AddPartitionsToTxn as i16);
+            assert_eq!(header.request_api_version, 3);
+            let add = AddPartitionsToTxnRequestData::read(&mut request, 3)
+                .expect("add partitions to txn should use the negotiated version");
+            assert!(add.transactions.is_empty());
+            assert_eq!(
+                add.v3_and_below_transactional_id,
+                KafkaString::from("txn-orders".to_owned())
+            );
+            assert_eq!(add.v3_and_below_producer_id, 77);
+            assert_eq!(add.v3_and_below_producer_epoch, 4);
+            assert_eq!(
+                add.v3_and_below_topics[0].name,
+                KafkaString::from("orders".to_owned())
+            );
+            assert_eq!(add.v3_and_below_topics[0].partitions, vec![0]);
+            pre_batched_add_partitions_to_txn_response_frame(header.correlation_id)
+        }),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::EndTxn as i16);
+            end_txn_response_frame_for_request(&header)
+        }),
+    ])
+    .await;
+    let leader_7 = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            assert_eq!(header.request_api_key, ApiKey::Produce as i16);
+            produce_response_frame_for_request(&header, 0, 90)
+        }),
+    ])
+    .await;
+    let bootstrap = MockBroker::serve_many(vec![
+        Box::new(api_versions_response_frame),
+        Box::new({
+            let coordinator = coordinator.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::FindCoordinator as i16);
+                find_coordinator_response_frame(header.correlation_id, 9, coordinator)
+            }
+        }),
+        Box::new({
+            let leader_7 = leader_7.addr();
+            move |mut request| {
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
+                let response = metadata_response([(7, leader_7)]);
+                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+
+    let wire = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(1, bootstrap.addr())],
+    );
+    let producer = Producer::from_parts(
+        wire,
+        ProducerRuntimeConfig {
+            accumulator: AccumulatorConfig::default()
+                .batch_size(1)
+                .buffer_memory(16 * 1024),
+            acks: -1,
+            timeout_ms: 30_000,
+            retry_attempts: 0,
+            retry_backoff: Duration::from_millis(100),
+            retry_backoff_max: Duration::from_secs(1),
+            delivery_timeout: Duration::from_mins(2),
+            max_block: Duration::from_mins(1),
+            partitioner_ignore_keys: false,
+            partitioner_adaptive_partitioning_enable: true,
+            partitioner_availability_timeout: Duration::ZERO,
+            max_in_flight_requests_per_connection: 5,
+            max_request_size: 1_048_576,
+            enable_metrics_push: true,
+            compression: ProducerCompression::default(),
+            idempotence: ProducerIdempotenceConfig {
+                enabled: true,
+                transactional_id: Some("txn-orders".to_owned()),
+                transaction_timeout_ms: 60_000,
+                transaction_two_phase_commit: false,
+            },
+        },
+    );
+
+    producer.init_transactions().await.unwrap();
+    producer.begin_transaction().unwrap();
+    let delivery = producer
+        .send(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"a")))
+        .unwrap();
+    producer.flush().await.unwrap();
+    producer.commit_transaction().await.unwrap();
+
+    assert_eq!(delivery.await.unwrap().offset, 90);
+    assert_eq!(bootstrap.join().await, 3);
+    assert_eq!(coordinator.join().await, 4);
+    assert_eq!(leader_7.join().await, 2);
+}
+
 #[tokio::test]
 async fn kafka_producer_init_transactions_retries_coordinator_load_in_progress_past_retries() {
     // Regression: the transactional `InitProducerId` bootstrap must survive a
@@ -8386,6 +8511,41 @@ fn pre_batched_find_coordinator_api_versions_response_frame(mut request: Bytes) 
         }
     }
     response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+}
+
+/// `ApiVersions` for a broker that predates the batched `AddPartitionsToTxn`
+/// (KIP-890 verification, broker 3.6): everything else as usual,
+/// `AddPartitionsToTxn` capped at v3.
+fn pre_batched_add_partitions_to_txn_api_versions_response_frame(mut request: Bytes) -> BytesMut {
+    let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+    let mut response = api_versions_response_data();
+    for api in &mut response.api_keys {
+        if api.api_key == ApiKey::AddPartitionsToTxn as i16 {
+            api.max_version = 3;
+        }
+    }
+    response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+}
+
+/// The flat `AddPartitionsToTxn` response shape used up to v3: the topic results
+/// of the one transaction in the top-level `results_by_topic_v3_and_below`
+/// array, and no top-level `error_code` at all (that arrived with v4).
+fn pre_batched_add_partitions_to_txn_response_frame(correlation_id: i32) -> BytesMut {
+    let response = AddPartitionsToTxnResponseData {
+        results_by_topic_v3_and_below: vec![AddPartitionsToTxnTopicResult {
+            name: KafkaString::from("orders".to_owned()),
+            results_by_partition: vec![
+                kacrab_protocol::generated::AddPartitionsToTxnPartitionResult {
+                    partition_index: 0,
+                    partition_error_code: 0,
+                    _unknown_tagged_fields: Vec::new(),
+                },
+            ],
+            _unknown_tagged_fields: Vec::new(),
+        }],
+        ..AddPartitionsToTxnResponseData::default()
+    };
+    response_frame(ApiKey::AddPartitionsToTxn, 3, correlation_id, &response)
 }
 
 /// The flat `FindCoordinator` response shape used up to v3: one coordinator in

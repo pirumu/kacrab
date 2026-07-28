@@ -7,9 +7,9 @@ use kacrab_protocol::{
     KafkaString, KafkaUuid, Result,
     generated::{
         AddOffsetsToTxnRequestData, AddOffsetsToTxnResponseData, AddPartitionsToTxnRequestData,
-        AddPartitionsToTxnResponseData, AddRaftVoterRequestData, AddRaftVoterResponseData,
-        AlterClientQuotasRequestData, AlterClientQuotasResponseData, AlterConfigsRequestData,
-        AlterConfigsResponseData, AlterPartitionReassignmentsRequestData,
+        AddPartitionsToTxnResponseData, AddPartitionsToTxnTransaction, AddRaftVoterRequestData,
+        AddRaftVoterResponseData, AlterClientQuotasRequestData, AlterClientQuotasResponseData,
+        AlterConfigsRequestData, AlterConfigsResponseData, AlterPartitionReassignmentsRequestData,
         AlterPartitionReassignmentsResponseData, AlterReplicaLogDirsRequestData,
         AlterReplicaLogDirsResponseData, AlterShareGroupOffsetsRequestData,
         AlterShareGroupOffsetsResponseData, AlterUserScramCredentialsRequestData,
@@ -109,7 +109,6 @@ impl_passthrough_message! {
     ApiVersionsRequestData => ApiVersionsResponseData,
     MetadataRequestData => MetadataResponseData,
     InitProducerIdRequestData => InitProducerIdResponseData,
-    AddPartitionsToTxnRequestData => AddPartitionsToTxnResponseData,
     AddOffsetsToTxnRequestData => AddOffsetsToTxnResponseData,
     TxnOffsetCommitRequestData => TxnOffsetCommitResponseData,
     EndTxnRequestData => EndTxnResponseData,
@@ -136,6 +135,32 @@ impl RequestMessage for FindCoordinatorRequestData {
 }
 
 impl ResponseMessage for FindCoordinatorResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
+// `AddPartitionsToTxn` is another two-shape request: v0-3 carry the one
+// transaction inline in the `v3_and_below_*` fields, v4+ (KIP-890 verification)
+// the batched `transactions` array, and the generated encoder rejects whichever
+// one its version does not carry. The request is rewritten into the negotiated
+// version's form here, mirroring Java's `AddPartitionsToTxnRequest`
+// (`Builder.forClient` builds the `v3AndBelow*` shape, `normalizeRequest` lifts
+// it into a singleton `transactions` array). The response is pass-through —
+// callers read both shapes through
+// `producer::dispatcher::transactions::add_partitions_to_txn_topic_results`.
+impl RequestMessage for AddPartitionsToTxnRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_add_partitions_to_txn_request(self, version).write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_add_partitions_to_txn_request(self, version).encoded_len(version)
+    }
+}
+
+impl ResponseMessage for AddPartitionsToTxnResponseData {
     fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
         Self::read(buf, version)
     }
@@ -299,6 +324,64 @@ fn normalize_find_coordinator_request(
     normalized.key = key.clone();
     normalized.coordinator_keys.clear();
     Cow::Owned(normalized)
+}
+
+/// First `AddPartitionsToTxn` version carrying the batched `transactions` array
+/// instead of the inline `v3_and_below_*` fields (KIP-890, broker 3.6).
+const ADD_PARTITIONS_TO_TXN_BATCHED_MIN_VERSION: i16 = 4;
+
+/// Rewrite an `AddPartitionsToTxn` request into the transaction form the
+/// negotiated `version` speaks: the inline `v3_and_below_*` fields up to v3, the
+/// batched `transactions` array from v4 on.
+///
+/// The two shapes are exactly the two Java builds — `Builder.forClient` fills
+/// `setV3AndBelow*` and caps itself at v3, `Builder.forBroker` fills
+/// `transactions` — and `AddPartitionsToTxnRequest.normalizeRequest` /
+/// `singletonTransaction` is the same field-for-field mapping between them that
+/// runs here.
+///
+/// A request naming several transactions cannot be expressed below v4, so it is
+/// left untouched for the generated encoder to reject rather than silently
+/// dropping the transactions it cannot carry; only a broker ever batches them,
+/// and a broker never talks to a v3 peer. `verify_only` has no v3-and-below
+/// field either and is dropped with the rest of the array — a coordinator that
+/// predates KIP-890 has no verification path to ask for, and the producer never
+/// sets it.
+fn normalize_add_partitions_to_txn_request(
+    request: &AddPartitionsToTxnRequestData,
+    version: i16,
+) -> Cow<'_, AddPartitionsToTxnRequestData> {
+    if version >= ADD_PARTITIONS_TO_TXN_BATCHED_MIN_VERSION {
+        if request.v3_and_below_transactional_id == KafkaString::default() {
+            return Cow::Borrowed(request);
+        }
+        let mut normalized = request.clone();
+        let transaction = AddPartitionsToTxnTransaction {
+            transactional_id: core::mem::take(&mut normalized.v3_and_below_transactional_id),
+            producer_id: normalized.v3_and_below_producer_id,
+            producer_epoch: normalized.v3_and_below_producer_epoch,
+            verify_only: false,
+            topics: core::mem::take(&mut normalized.v3_and_below_topics),
+            _unknown_tagged_fields: Vec::new(),
+        };
+        normalized.v3_and_below_producer_id = 0;
+        normalized.v3_and_below_producer_epoch = 0;
+        if normalized.transactions.is_empty() {
+            normalized.transactions.push(transaction);
+        }
+        return Cow::Owned(normalized);
+    }
+    let [transaction] = request.transactions.as_slice() else {
+        return Cow::Borrowed(request);
+    };
+    Cow::Owned(AddPartitionsToTxnRequestData {
+        transactions: Vec::new(),
+        v3_and_below_transactional_id: transaction.transactional_id.clone(),
+        v3_and_below_producer_id: transaction.producer_id,
+        v3_and_below_producer_epoch: transaction.producer_epoch,
+        v3_and_below_topics: transaction.topics.clone(),
+        _unknown_tagged_fields: request._unknown_tagged_fields.clone(),
+    })
 }
 
 /// First `OffsetFetch` version carrying the batched `groups` array instead of
@@ -479,6 +562,7 @@ mod tests {
     use kacrab_protocol::{
         KafkaString, KafkaUuid,
         generated::{
+            AddPartitionsToTxnRequestData, AddPartitionsToTxnTopic, AddPartitionsToTxnTransaction,
             FetchRequestData, FindCoordinatorRequestData, ListOffsetsRequestData,
             OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopic,
             OffsetFetchRequestTopics, SyncGroupRequestData,
@@ -701,6 +785,128 @@ mod tests {
         let decoded =
             FetchRequestData::read(&mut encoded, 11).expect("fetch request should decode");
         assert_eq!(decoded.rack_id, KafkaString::from("rack-1".to_owned()));
+    }
+
+    fn add_partitions_to_txn_request() -> AddPartitionsToTxnRequestData {
+        AddPartitionsToTxnRequestData {
+            transactions: vec![AddPartitionsToTxnTransaction {
+                transactional_id: KafkaString::from("txn-orders".to_owned()),
+                producer_id: 77,
+                producer_epoch: 4,
+                verify_only: false,
+                topics: vec![AddPartitionsToTxnTopic {
+                    name: KafkaString::from("orders".to_owned()),
+                    partitions: vec![0, 1],
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            ..AddPartitionsToTxnRequestData::default()
+        }
+    }
+
+    fn encode_add_partitions_to_txn(
+        request: &AddPartitionsToTxnRequestData,
+        version: i16,
+    ) -> Bytes {
+        let mut buf = BytesMut::new();
+        request
+            .write_request(&mut buf, version)
+            .expect("add partitions to txn should encode for the negotiated version");
+        assert_eq!(
+            RequestMessage::encoded_len(request, version).expect("encoded length"),
+            buf.len()
+        );
+        buf.freeze()
+    }
+
+    #[test]
+    fn add_partitions_to_txn_request_inlines_the_transaction_below_batched_versions() {
+        let request = add_partitions_to_txn_request();
+
+        for version in 0..=3 {
+            let mut encoded = encode_add_partitions_to_txn(&request, version);
+            let decoded = AddPartitionsToTxnRequestData::read(&mut encoded, version)
+                .expect("add partitions to txn should decode");
+            assert!(decoded.transactions.is_empty());
+            assert_eq!(
+                decoded.v3_and_below_transactional_id,
+                KafkaString::from("txn-orders".to_owned())
+            );
+            assert_eq!(decoded.v3_and_below_producer_id, 77);
+            assert_eq!(decoded.v3_and_below_producer_epoch, 4);
+            assert_eq!(
+                decoded.v3_and_below_topics[0].name,
+                KafkaString::from("orders".to_owned())
+            );
+            assert_eq!(decoded.v3_and_below_topics[0].partitions, vec![0, 1]);
+        }
+    }
+
+    #[test]
+    fn add_partitions_to_txn_request_uses_transactions_from_batched_versions() {
+        let request = add_partitions_to_txn_request();
+
+        for version in 4..=5 {
+            let mut encoded = encode_add_partitions_to_txn(&request, version);
+            let decoded = AddPartitionsToTxnRequestData::read(&mut encoded, version)
+                .expect("add partitions to txn should decode");
+            assert_eq!(decoded.transactions.len(), 1);
+            assert_eq!(decoded.transactions[0].producer_id, 77);
+            assert_eq!(
+                decoded.v3_and_below_transactional_id,
+                KafkaString::default()
+            );
+        }
+    }
+
+    #[test]
+    fn add_partitions_to_txn_request_promotes_the_inline_transaction_to_batched_versions() {
+        let request = AddPartitionsToTxnRequestData {
+            v3_and_below_transactional_id: KafkaString::from("txn-orders".to_owned()),
+            v3_and_below_producer_id: 77,
+            v3_and_below_producer_epoch: 4,
+            v3_and_below_topics: vec![AddPartitionsToTxnTopic {
+                name: KafkaString::from("orders".to_owned()),
+                partitions: vec![0],
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            ..AddPartitionsToTxnRequestData::default()
+        };
+
+        let mut encoded = encode_add_partitions_to_txn(&request, 5);
+
+        let decoded =
+            AddPartitionsToTxnRequestData::read(&mut encoded, 5).expect("v5 request should decode");
+        assert_eq!(
+            decoded.transactions[0].transactional_id,
+            KafkaString::from("txn-orders".to_owned())
+        );
+        assert_eq!(decoded.transactions[0].producer_id, 77);
+        assert_eq!(decoded.transactions[0].producer_epoch, 4);
+        assert_eq!(decoded.transactions[0].topics[0].partitions, vec![0]);
+    }
+
+    #[test]
+    fn add_partitions_to_txn_request_rejects_batched_transactions_below_batched_versions() {
+        let request = AddPartitionsToTxnRequestData {
+            transactions: vec![
+                AddPartitionsToTxnTransaction {
+                    transactional_id: KafkaString::from("txn-a".to_owned()),
+                    ..AddPartitionsToTxnTransaction::default()
+                },
+                AddPartitionsToTxnTransaction {
+                    transactional_id: KafkaString::from("txn-b".to_owned()),
+                    ..AddPartitionsToTxnTransaction::default()
+                },
+            ],
+            ..AddPartitionsToTxnRequestData::default()
+        };
+        let mut buf = BytesMut::new();
+
+        let error = request.write_request(&mut buf, 3);
+
+        assert!(error.is_err());
     }
 
     fn offset_fetch_request() -> OffsetFetchRequestData {
