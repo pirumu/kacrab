@@ -80,6 +80,18 @@ release date and links to relevant pull requests or issues.
   `ApiKey::ControlledShutdown` for the one place the key is still needed: the
   legacy request-header v0 rule that `ControlledShutdown` v0 frames use.
 
+- **`ProducerError` and `ConsumerError` are sealed with `#[non_exhaustive]`.**
+  Removing `ProducerError::UnsupportedOperation` (below) already cost a break;
+  sealing both enums in the same release makes it the last one an added or
+  removed variant will ever cost. A `match` on either now needs a `_ =>` arm.
+  Constructing a variant is unaffected — `#[non_exhaustive]` on an enum
+  constrains matching, not construction.
+
+  `ProducerError::Config` and `ConsumerError::Config` also mark their payload
+  `#[source]`, so `source()` returns the underlying `ConfigError` (downcastable),
+  matching `AdminError::Config`. `WireError` and the producer's `MetricsError`
+  are deliberately left for a separate pass.
+
 - **The public admin and config types are now `#[non_exhaustive]`.** The crate had
   exactly three `#[non_exhaustive]` attributes in it, none of them on the admin
   surface — so every one of the 1,880 lines of options/result types in

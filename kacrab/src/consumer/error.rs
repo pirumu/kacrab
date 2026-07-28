@@ -9,6 +9,7 @@ use crate::{config::ConfigError, wire::WireError};
 pub type Result<T> = std::result::Result<T, ConsumerError>;
 
 /// Errors from consumer operations.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum ConsumerError {
     /// Lower-level wire/session failure.
@@ -18,6 +19,7 @@ pub enum ConsumerError {
     #[error("consumer config error: {error}")]
     Config {
         /// Configuration validation error.
+        #[source]
         error: ConfigError,
     },
     /// A broker returned a non-success error code for a consumer request.
@@ -96,5 +98,38 @@ impl ConsumerError {
             error,
             message: message.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::missing_assert_message,
+        reason = "Unit test fixtures fail fastest with contextual expect calls."
+    )]
+
+    use std::error::Error as _;
+
+    use super::ConsumerError;
+    use crate::config::{ClientKind, ConfigError};
+
+    #[test]
+    fn config_variant_exposes_the_config_error_as_its_source() {
+        let cause = ConfigError::MissingRequired {
+            client: ClientKind::Consumer,
+            key: "bootstrap.servers",
+        };
+        let error = ConsumerError::Config {
+            error: cause.clone(),
+        };
+
+        let source = error.source().expect("Config variant reports a source");
+
+        assert_eq!(source.to_string(), cause.to_string());
+        assert!(
+            source.downcast_ref::<ConfigError>().is_some(),
+            "the source downcasts back to the concrete ConfigError"
+        );
     }
 }
