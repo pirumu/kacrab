@@ -36,7 +36,7 @@ fn bench_accumulator_append_and_drain(c: &mut Criterion) {
                         let now = Instant::now();
                         for record in records {
                             let appended = black_box(accumulator.append_at(record, now).is_ok());
-                            debug_assert!(appended, "benchmark accumulator append should fit");
+                            assert!(appended, "benchmark accumulator append should fit");
                         }
                         let ready = accumulator
                             .drain_ready(now.checked_add(Duration::from_millis(6)).unwrap_or(now));

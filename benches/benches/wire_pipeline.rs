@@ -12,19 +12,14 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use kacrab::wire::{BrokerEndpoint, ConnectionConfig, WireClient};
+use kacrab_benches::{MockBroker, read_frame, response_frame};
 use kacrab_protocol::{
-    KafkaString, frame,
+    KafkaString,
     generated::{
         ApiKey, ApiVersion, ApiVersionsRequestData, ApiVersionsResponseData, RequestHeaderData,
-        ResponseHeaderData,
     },
-    version::response_header_version,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    runtime::Builder,
-};
+use tokio::{io::AsyncWriteExt, runtime::Builder};
 
 const REQUESTS: u64 = 1_024;
 
@@ -50,7 +45,7 @@ fn bench_wire_pipeline(c: &mut Criterion) {
 }
 
 async fn run_pipeline_once(requests: usize) {
-    let server = MockBroker::serve_pipelined_api_versions(requests).await;
+    let server = serve_pipelined_api_versions(requests).await;
     let client = WireClient::connect_with_brokers(
         ConnectionConfig::default()
             .max_in_flight_requests_per_connection(requests)
@@ -84,58 +79,51 @@ async fn run_pipeline_once(requests: usize) {
         let _response = black_box(response);
     }
     let handled = server.join().await;
-    debug_assert_eq!(handled, requests.saturating_add(1));
+    // `assert`, not `debug_assert`: benches build under the release-derived `bench`
+    // profile, where `debug_assertions` is off and a `debug_assert` never runs. A
+    // broker that answered fewer requests than the client issued would otherwise
+    // leave the measurement silently short.
+    assert_eq!(
+        handled,
+        requests.saturating_add(1),
+        "the mock broker should answer the handshake plus every pipelined request"
+    );
 }
 
-struct MockBroker {
-    addr: std::net::SocketAddr,
-    join: tokio::task::JoinHandle<usize>,
-}
+/// Reads `requests` `ApiVersions` requests before writing any response, so the
+/// client only makes progress if it really pipelines.
+async fn serve_pipelined_api_versions(requests: usize) -> MockBroker {
+    MockBroker::serve_with(move |listener| async move {
+        let (mut socket, _) = listener.accept().await.expect("accept mock client");
+        let handshake = read_frame(&mut socket).await.expect("handshake frame");
+        let response = api_versions_response(handshake);
+        socket.write_all(&response).await.expect("write handshake");
 
-impl MockBroker {
-    async fn serve_pipelined_api_versions(requests: usize) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind mock broker");
-        let addr = listener.local_addr().expect("mock broker addr");
-        let join = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept mock client");
-            let handshake = read_frame(&mut socket).await;
-            let response = api_versions_response(handshake);
-            socket.write_all(&response).await.expect("write handshake");
-
-            let mut correlation_ids = Vec::with_capacity(requests);
-            for _ in 0..requests {
-                let mut request = read_frame(&mut socket).await;
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                correlation_ids.push(header.correlation_id);
-            }
-            for correlation_id in correlation_ids {
-                let response = ApiVersionsResponseData {
-                    error_code: 0,
-                    api_keys: vec![ApiVersion {
-                        api_key: ApiKey::ApiVersions as i16,
-                        min_version: 0,
-                        max_version: 4,
-                        _unknown_tagged_fields: Vec::new(),
-                    }],
-                    ..ApiVersionsResponseData::default()
-                };
-                let frame = response_frame(ApiKey::ApiVersions, 3, correlation_id, &response);
-                socket.write_all(&frame).await.expect("write response");
-            }
-            requests.saturating_add(1)
-        });
-        Self { addr, join }
-    }
-
-    const fn addr(&self) -> std::net::SocketAddr {
-        self.addr
-    }
-
-    async fn join(self) -> usize {
-        self.join.await.expect("mock broker join")
-    }
+        let mut correlation_ids = Vec::with_capacity(requests);
+        for _ in 0..requests {
+            let mut request = read_frame(&mut socket)
+                .await
+                .expect("pipelined request frame");
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            correlation_ids.push(header.correlation_id);
+        }
+        for correlation_id in correlation_ids {
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![ApiVersion {
+                    api_key: ApiKey::ApiVersions as i16,
+                    min_version: 0,
+                    max_version: 4,
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                ..ApiVersionsResponseData::default()
+            };
+            let frame = response_frame(ApiKey::ApiVersions, 3, correlation_id, &response);
+            socket.write_all(&frame).await.expect("write response");
+        }
+        requests.saturating_add(1)
+    })
+    .await
 }
 
 fn api_versions_response(mut request: Bytes) -> BytesMut {
@@ -151,37 +139,6 @@ fn api_versions_response(mut request: Bytes) -> BytesMut {
         ..ApiVersionsResponseData::default()
     };
     response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
-}
-
-fn response_frame(
-    api_key: ApiKey,
-    api_version: i16,
-    correlation_id: i32,
-    response: &ApiVersionsResponseData,
-) -> BytesMut {
-    let mut header = BytesMut::new();
-    ResponseHeaderData {
-        correlation_id,
-        _unknown_tagged_fields: Vec::new(),
-    }
-    .write(
-        &mut header,
-        response_header_version(api_key as i16, api_version),
-    )
-    .expect("response header write");
-    let mut body = BytesMut::new();
-    response
-        .write(&mut body, api_version)
-        .expect("response body");
-    frame::encode_request(&header, &body).expect("response frame")
-}
-
-async fn read_frame(socket: &mut TcpStream) -> Bytes {
-    let len = socket.read_i32().await.expect("frame length");
-    let len = usize::try_from(len).expect("positive frame length");
-    let mut bytes = vec![0; len];
-    let _bytes_read = socket.read_exact(&mut bytes).await.expect("frame payload");
-    Bytes::from(bytes)
 }
 
 criterion_group!(benches, bench_wire_pipeline);
