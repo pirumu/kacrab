@@ -32,80 +32,224 @@ pub enum ProducerMetricValue {
     Ratio(f64),
 }
 
-/// Point-in-time producer metrics for operational diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[non_exhaustive]
-pub struct ProducerMetricsSnapshot {
+/// Field type for one metric kind.
+macro_rules! producer_metric_ty {
+    (Count) => {
+        u64
+    };
+    (Gauge) => {
+        usize
+    };
+    (Duration) => {
+        Duration
+    };
+    (Ratio) => {
+        f64
+    };
+}
+
+/// `ProducerMetricsSnapshot::ZERO` value for one metric kind.
+macro_rules! producer_metric_zero {
+    (Count) => {
+        0
+    };
+    (Gauge) => {
+        0
+    };
+    (Duration) => {
+        Duration::ZERO
+    };
+    (Ratio) => {
+        0.0
+    };
+}
+
+/// `delta_since` rule for one metric kind.
+///
+/// `Count` and `Duration` are monotonic accumulators, so they subtract the
+/// baseline (saturating, because a baseline above the current value means the
+/// caller mixed up two producers rather than that time ran backwards). `Gauge`
+/// and `Ratio` are point-in-time readings with no meaningful difference, so the
+/// baseline is ignored and the current value is reported as-is.
+macro_rules! producer_metric_delta {
+    (Count, $current:expr, $baseline:expr) => {
+        $current.saturating_sub($baseline)
+    };
+    (Duration, $current:expr, $baseline:expr) => {
+        $current.saturating_sub($baseline)
+    };
+    (Gauge, $current:expr, $_baseline:expr) => {
+        $current
+    };
+    (Ratio, $current:expr, $_baseline:expr) => {
+        $current
+    };
+}
+
+/// Declare the producer's stable metric surface exactly once.
+///
+/// Each row is `#[doc] name: Kind = "OTLP description";`, and the kind decides
+/// four things at once: the snapshot field type, its [`ZERO`] value, the
+/// [`ProducerMetricValue`] variant it reads back as, and the [`delta_since`]
+/// rule. From that one table this generates [`ProducerMetricsSnapshot`] itself
+/// plus every list that used to be kept in sync by hand: `ZERO`, `delta_since`,
+/// `metric`, `as_metric_map`, `is_internal_metric_name`, and
+/// `producer_metric_description`.
+///
+/// Adding a metric is therefore a one-line edit, and a metric that is *not* in
+/// the table does not exist: there is no way to grow the snapshot struct without
+/// also growing every reader of it, which is exactly what the six hand-kept
+/// lists this replaces could not guarantee.
+///
+/// [`ZERO`]: ProducerMetricsSnapshot::ZERO
+/// [`delta_since`]: ProducerMetricsSnapshot::delta_since
+macro_rules! producer_metric_table {
+    ($($(#[$field_meta:meta])* $field:ident: $kind:ident = $description:literal;)+) => {
+        /// Point-in-time producer metrics for operational diagnostics.
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        #[non_exhaustive]
+        pub struct ProducerMetricsSnapshot {
+            $($(#[$field_meta])* pub $field: producer_metric_ty!($kind),)+
+        }
+
+        impl ProducerMetricsSnapshot {
+            /// An all-zero snapshot.
+            ///
+            /// This type is `#[non_exhaustive]`, so downstream crates cannot build one with a
+            /// struct expression. `ZERO` is usable in const context as their baseline value.
+            pub const ZERO: Self = Self {
+                $($field: producer_metric_zero!($kind),)+
+            };
+
+            /// Return the difference between this snapshot and an earlier `baseline`.
+            ///
+            /// The two field kinds are treated differently, which is the part that is easy to
+            /// get wrong:
+            ///
+            /// - **Monotonic counters** (every `Count` and `Duration` metric: the `*_count`,
+            ///   `*_bytes`, `records_appended`, and `*_total_latency` fields) are
+            ///   `saturating_sub(baseline)`, so a baseline above the current value clamps to
+            ///   zero instead of wrapping.
+            /// - **Gauges and instantaneous values** (every `Gauge` and `Ratio` metric) are
+            ///   point-in-time readings, not accumulators, so the baseline is ignored and the
+            ///   current value is reported as-is.
+            ///
+            /// The rule is a property of each metric's kind in the table, so a new metric
+            /// cannot be added without choosing one.
+            #[must_use]
+            pub const fn delta_since(&self, baseline: &Self) -> Self {
+                Self {
+                    $($field: producer_metric_delta!($kind, self.$field, baseline.$field),)+
+                }
+            }
+
+            /// Return one named metric value from this snapshot.
+            #[must_use]
+            pub fn metric(&self, name: &str) -> Option<ProducerMetricValue> {
+                $(if name == stringify!($field) { return Some(ProducerMetricValue::$kind(self.$field)); })+
+                None
+            }
+
+            /// Return a read-only-by-value registry of stable producer metrics.
+            #[must_use]
+            pub fn as_metric_map(&self) -> BTreeMap<&'static str, ProducerMetricValue> {
+                BTreeMap::from([
+                    $((stringify!($field), ProducerMetricValue::$kind(self.$field)),)+
+                ])
+            }
+
+            /// Return whether `name` is one of the metrics this snapshot owns.
+            ///
+            /// Derived from [`Self::metric`] rather than from a second name list, so the two
+            /// answers cannot disagree.
+            pub(crate) fn is_internal_metric_name(name: &str) -> bool {
+                Self::ZERO.metric(name).is_some()
+            }
+        }
+
+        /// OTLP description for one stable producer metric name.
+        fn producer_metric_description(name: &str) -> &'static str {
+            $(if name == stringify!($field) { return $description; })+
+            ""
+        }
+    };
+}
+
+producer_metric_table! {
     /// Records accepted into the producer accumulator.
-    pub records_appended: u64,
+    records_appended: Count = "records accepted into the producer accumulator";
     /// Produce requests sent to brokers.
-    pub produce_request_count: u64,
+    produce_request_count: Count = "produce requests sent to brokers";
     /// Encoded produce request bytes sent to brokers.
-    pub produce_request_bytes: u64,
+    produce_request_bytes: Count = "encoded produce request bytes sent to brokers";
     /// Serialized record batches sent in produce requests.
-    pub produce_batch_count: u64,
+    produce_batch_count: Count = "record batches sent in produce requests";
     /// Encoded record batch bytes sent in produce requests.
-    pub produce_batch_bytes: u64,
+    produce_batch_bytes: Count = "encoded record batch bytes sent in produce requests";
     /// Encoded record batch payload bytes grouped into produce requests.
-    pub produce_request_payload_bytes: u64,
+    produce_request_payload_bytes: Count =
+        "encoded record batch payload bytes grouped into produce requests";
     /// Produce request grouping splits forced by the max request size limit.
-    pub produce_request_split_count: u64,
+    produce_request_split_count: Count =
+        "produce request grouping splits forced by max request size";
     /// Record batch splits forced by a broker `MESSAGE_TOO_LARGE` response.
-    pub record_batch_split_count: u64,
+    record_batch_split_count: Count =
+        "record batch splits forced by a broker MESSAGE_TOO_LARGE response";
     /// Records included in produce requests sent to brokers.
-    pub produce_record_count: u64,
+    produce_record_count: Count = "records included in produce requests";
     /// Retry attempts after retryable produce failures.
-    pub produce_retry_count: u64,
+    produce_retry_count: Count = "retry attempts after retryable produce failures";
     /// Produce responses or dispatches that reported an error.
-    pub produce_error_count: u64,
+    produce_error_count: Count = "produce responses or dispatches that reported an error";
     /// Batches requeued because metadata/routing was not yet complete.
-    pub requeue_count: u64,
+    requeue_count: Count = "batches requeued because routing was incomplete";
     /// Backpressure stalls while enqueueing produce requests to broker sessions.
-    pub in_flight_stall_count: u64,
+    in_flight_stall_count: Count = "backpressure stalls while enqueueing produce requests";
     /// Bytes currently buffered in the accumulator.
-    pub queue_depth_bytes: usize,
+    queue_depth_bytes: Gauge = "bytes currently buffered in the accumulator";
     /// Records currently buffered in the accumulator.
-    pub queue_depth_records: usize,
+    queue_depth_records: Gauge = "records currently buffered in the accumulator";
     /// Producer buffer memory currently available for new batch reservations.
-    pub buffer_available_bytes: usize,
+    buffer_available_bytes: Gauge = "producer buffer memory available for new batch reservations";
     /// API tasks currently blocked waiting for producer buffer memory.
-    pub waiting_threads: usize,
+    waiting_threads: Gauge = "API tasks blocked waiting for producer buffer memory";
     /// Batches currently buffered or in flight.
-    pub incomplete_batches: usize,
+    incomplete_batches: Gauge = "batches currently buffered or in flight";
     /// Producer dispatch tasks currently in flight.
-    pub in_flight_dispatches: usize,
+    in_flight_dispatches: Gauge = "producer dispatch tasks currently in flight";
     /// Average drained batch fill ratio, capped at `1.0`.
-    pub average_batch_fill_ratio: f64,
+    average_batch_fill_ratio: Ratio = "average drained batch fill ratio";
     /// Average encoded/uncompressed batch compression ratio.
-    pub average_compression_ratio: f64,
+    average_compression_ratio: Ratio = "average encoded/uncompressed batch compression ratio";
     /// Number of explicit flush calls.
-    pub flush_count: u64,
+    flush_count: Count = "explicit flush calls";
     /// Total wall-clock latency spent in flush calls.
-    pub flush_total_latency: Duration,
+    flush_total_latency: Duration = "total wall-clock latency spent in flush calls";
     /// Number of successful API-thread metadata wait operations.
-    pub metadata_wait_count: u64,
+    metadata_wait_count: Count = "metadata wait operations";
     /// Total wall-clock latency spent waiting for metadata in API calls.
-    pub metadata_wait_total_latency: Duration,
+    metadata_wait_total_latency: Duration = "total latency spent waiting for metadata";
     /// Number of `init_transactions` calls.
-    pub transaction_init_count: u64,
+    transaction_init_count: Count = "init_transactions calls";
     /// Total wall-clock latency spent in `init_transactions`.
-    pub transaction_init_total_latency: Duration,
+    transaction_init_total_latency: Duration = "total latency spent in init_transactions";
     /// Number of `begin_transaction` calls.
-    pub transaction_begin_count: u64,
+    transaction_begin_count: Count = "begin_transaction calls";
     /// Total wall-clock latency spent in `begin_transaction`.
-    pub transaction_begin_total_latency: Duration,
+    transaction_begin_total_latency: Duration = "total latency spent in begin_transaction";
     /// Number of `send_offsets_to_transaction` calls with non-empty offsets.
-    pub send_offsets_to_transaction_count: u64,
+    send_offsets_to_transaction_count: Count = "send_offsets_to_transaction calls";
     /// Total wall-clock latency spent in `send_offsets_to_transaction`.
-    pub send_offsets_to_transaction_total_latency: Duration,
+    send_offsets_to_transaction_total_latency: Duration =
+        "total latency spent in send_offsets_to_transaction";
     /// Number of `commit_transaction` calls.
-    pub transaction_commit_count: u64,
+    transaction_commit_count: Count = "commit_transaction calls";
     /// Total wall-clock latency spent in `commit_transaction`.
-    pub transaction_commit_total_latency: Duration,
+    transaction_commit_total_latency: Duration = "total latency spent in commit_transaction";
     /// Number of `abort_transaction` calls.
-    pub transaction_abort_count: u64,
+    transaction_abort_count: Count = "abort_transaction calls";
     /// Total wall-clock latency spent in `abort_transaction`.
-    pub transaction_abort_total_latency: Duration,
+    transaction_abort_total_latency: Duration = "total latency spent in abort_transaction";
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -118,318 +262,6 @@ pub(crate) struct ProducerQueueMetrics {
 }
 
 impl ProducerMetricsSnapshot {
-    /// An all-zero snapshot.
-    ///
-    /// This type is `#[non_exhaustive]`, so downstream crates cannot build one with a
-    /// struct expression. `ZERO` is usable in const context as their baseline value.
-    pub const ZERO: Self = Self {
-        records_appended: 0,
-        produce_request_count: 0,
-        produce_request_bytes: 0,
-        produce_batch_count: 0,
-        produce_batch_bytes: 0,
-        produce_request_payload_bytes: 0,
-        produce_request_split_count: 0,
-        record_batch_split_count: 0,
-        produce_record_count: 0,
-        produce_retry_count: 0,
-        produce_error_count: 0,
-        requeue_count: 0,
-        in_flight_stall_count: 0,
-        queue_depth_bytes: 0,
-        queue_depth_records: 0,
-        buffer_available_bytes: 0,
-        waiting_threads: 0,
-        incomplete_batches: 0,
-        in_flight_dispatches: 0,
-        average_batch_fill_ratio: 0.0,
-        average_compression_ratio: 0.0,
-        flush_count: 0,
-        flush_total_latency: Duration::ZERO,
-        metadata_wait_count: 0,
-        metadata_wait_total_latency: Duration::ZERO,
-        transaction_init_count: 0,
-        transaction_init_total_latency: Duration::ZERO,
-        transaction_begin_count: 0,
-        transaction_begin_total_latency: Duration::ZERO,
-        send_offsets_to_transaction_count: 0,
-        send_offsets_to_transaction_total_latency: Duration::ZERO,
-        transaction_commit_count: 0,
-        transaction_commit_total_latency: Duration::ZERO,
-        transaction_abort_count: 0,
-        transaction_abort_total_latency: Duration::ZERO,
-    };
-
-    /// Return the difference between this snapshot and an earlier `baseline`.
-    ///
-    /// The two field kinds are treated differently, which is the part that is easy to
-    /// get wrong:
-    ///
-    /// - **Monotonic counters** (every `*_count`, `*_bytes`, `records_appended`, and the
-    ///   `*_total_latency` durations) are `saturating_sub(baseline)`, so a baseline above the
-    ///   current value clamps to zero instead of wrapping.
-    /// - **Gauges and instantaneous values** (`queue_depth_bytes`, `queue_depth_records`,
-    ///   `buffer_available_bytes`, `waiting_threads`, `incomplete_batches`, `in_flight_dispatches`,
-    ///   `average_batch_fill_ratio`, `average_compression_ratio`) are point-in-time readings, not
-    ///   accumulators, so the baseline is ignored and the current value is reported as-is.
-    ///
-    /// The body is an exhaustive struct literal on purpose: this type is
-    /// `#[non_exhaustive]`, so only code inside this crate can write one, and a newly
-    /// added field is a compile error here instead of a silent zero in every caller.
-    #[must_use]
-    pub const fn delta_since(&self, baseline: &Self) -> Self {
-        Self {
-            records_appended: self
-                .records_appended
-                .saturating_sub(baseline.records_appended),
-            produce_request_count: self
-                .produce_request_count
-                .saturating_sub(baseline.produce_request_count),
-            produce_request_bytes: self
-                .produce_request_bytes
-                .saturating_sub(baseline.produce_request_bytes),
-            produce_batch_count: self
-                .produce_batch_count
-                .saturating_sub(baseline.produce_batch_count),
-            produce_batch_bytes: self
-                .produce_batch_bytes
-                .saturating_sub(baseline.produce_batch_bytes),
-            produce_request_payload_bytes: self
-                .produce_request_payload_bytes
-                .saturating_sub(baseline.produce_request_payload_bytes),
-            produce_request_split_count: self
-                .produce_request_split_count
-                .saturating_sub(baseline.produce_request_split_count),
-            record_batch_split_count: self
-                .record_batch_split_count
-                .saturating_sub(baseline.record_batch_split_count),
-            produce_record_count: self
-                .produce_record_count
-                .saturating_sub(baseline.produce_record_count),
-            produce_retry_count: self
-                .produce_retry_count
-                .saturating_sub(baseline.produce_retry_count),
-            produce_error_count: self
-                .produce_error_count
-                .saturating_sub(baseline.produce_error_count),
-            requeue_count: self.requeue_count.saturating_sub(baseline.requeue_count),
-            in_flight_stall_count: self
-                .in_flight_stall_count
-                .saturating_sub(baseline.in_flight_stall_count),
-            queue_depth_bytes: self.queue_depth_bytes,
-            queue_depth_records: self.queue_depth_records,
-            buffer_available_bytes: self.buffer_available_bytes,
-            waiting_threads: self.waiting_threads,
-            incomplete_batches: self.incomplete_batches,
-            in_flight_dispatches: self.in_flight_dispatches,
-            average_batch_fill_ratio: self.average_batch_fill_ratio,
-            average_compression_ratio: self.average_compression_ratio,
-            flush_count: self.flush_count.saturating_sub(baseline.flush_count),
-            flush_total_latency: self
-                .flush_total_latency
-                .saturating_sub(baseline.flush_total_latency),
-            metadata_wait_count: self
-                .metadata_wait_count
-                .saturating_sub(baseline.metadata_wait_count),
-            metadata_wait_total_latency: self
-                .metadata_wait_total_latency
-                .saturating_sub(baseline.metadata_wait_total_latency),
-            transaction_init_count: self
-                .transaction_init_count
-                .saturating_sub(baseline.transaction_init_count),
-            transaction_init_total_latency: self
-                .transaction_init_total_latency
-                .saturating_sub(baseline.transaction_init_total_latency),
-            transaction_begin_count: self
-                .transaction_begin_count
-                .saturating_sub(baseline.transaction_begin_count),
-            transaction_begin_total_latency: self
-                .transaction_begin_total_latency
-                .saturating_sub(baseline.transaction_begin_total_latency),
-            send_offsets_to_transaction_count: self
-                .send_offsets_to_transaction_count
-                .saturating_sub(baseline.send_offsets_to_transaction_count),
-            send_offsets_to_transaction_total_latency: self
-                .send_offsets_to_transaction_total_latency
-                .saturating_sub(baseline.send_offsets_to_transaction_total_latency),
-            transaction_commit_count: self
-                .transaction_commit_count
-                .saturating_sub(baseline.transaction_commit_count),
-            transaction_commit_total_latency: self
-                .transaction_commit_total_latency
-                .saturating_sub(baseline.transaction_commit_total_latency),
-            transaction_abort_count: self
-                .transaction_abort_count
-                .saturating_sub(baseline.transaction_abort_count),
-            transaction_abort_total_latency: self
-                .transaction_abort_total_latency
-                .saturating_sub(baseline.transaction_abort_total_latency),
-        }
-    }
-
-    /// Return one named metric value from this snapshot.
-    #[must_use]
-    pub fn metric(&self, name: &str) -> Option<ProducerMetricValue> {
-        match name {
-            "records_appended" => Some(ProducerMetricValue::Count(self.records_appended)),
-            "produce_request_count" => Some(ProducerMetricValue::Count(self.produce_request_count)),
-            "produce_request_bytes" => Some(ProducerMetricValue::Count(self.produce_request_bytes)),
-            "produce_batch_count" => Some(ProducerMetricValue::Count(self.produce_batch_count)),
-            "produce_batch_bytes" => Some(ProducerMetricValue::Count(self.produce_batch_bytes)),
-            "produce_request_payload_bytes" => Some(ProducerMetricValue::Count(
-                self.produce_request_payload_bytes,
-            )),
-            "produce_request_split_count" => {
-                Some(ProducerMetricValue::Count(self.produce_request_split_count))
-            },
-            "record_batch_split_count" => {
-                Some(ProducerMetricValue::Count(self.record_batch_split_count))
-            },
-            "produce_record_count" => Some(ProducerMetricValue::Count(self.produce_record_count)),
-            "produce_retry_count" => Some(ProducerMetricValue::Count(self.produce_retry_count)),
-            "produce_error_count" => Some(ProducerMetricValue::Count(self.produce_error_count)),
-            "requeue_count" => Some(ProducerMetricValue::Count(self.requeue_count)),
-            "in_flight_stall_count" => Some(ProducerMetricValue::Count(self.in_flight_stall_count)),
-            "queue_depth_bytes" => Some(ProducerMetricValue::Gauge(self.queue_depth_bytes)),
-            "queue_depth_records" => Some(ProducerMetricValue::Gauge(self.queue_depth_records)),
-            "buffer_available_bytes" => {
-                Some(ProducerMetricValue::Gauge(self.buffer_available_bytes))
-            },
-            "waiting_threads" => Some(ProducerMetricValue::Gauge(self.waiting_threads)),
-            "incomplete_batches" => Some(ProducerMetricValue::Gauge(self.incomplete_batches)),
-            "in_flight_dispatches" => Some(ProducerMetricValue::Gauge(self.in_flight_dispatches)),
-            "average_batch_fill_ratio" => {
-                Some(ProducerMetricValue::Ratio(self.average_batch_fill_ratio))
-            },
-            "average_compression_ratio" => {
-                Some(ProducerMetricValue::Ratio(self.average_compression_ratio))
-            },
-            "flush_count" => Some(ProducerMetricValue::Count(self.flush_count)),
-            "flush_total_latency" => Some(ProducerMetricValue::Duration(self.flush_total_latency)),
-            "metadata_wait_count" => Some(ProducerMetricValue::Count(self.metadata_wait_count)),
-            "metadata_wait_total_latency" => Some(ProducerMetricValue::Duration(
-                self.metadata_wait_total_latency,
-            )),
-            "transaction_init_count" => {
-                Some(ProducerMetricValue::Count(self.transaction_init_count))
-            },
-            "transaction_init_total_latency" => Some(ProducerMetricValue::Duration(
-                self.transaction_init_total_latency,
-            )),
-            "transaction_begin_count" => {
-                Some(ProducerMetricValue::Count(self.transaction_begin_count))
-            },
-            "transaction_begin_total_latency" => Some(ProducerMetricValue::Duration(
-                self.transaction_begin_total_latency,
-            )),
-            "send_offsets_to_transaction_count" => Some(ProducerMetricValue::Count(
-                self.send_offsets_to_transaction_count,
-            )),
-            "send_offsets_to_transaction_total_latency" => Some(ProducerMetricValue::Duration(
-                self.send_offsets_to_transaction_total_latency,
-            )),
-            "transaction_commit_count" => {
-                Some(ProducerMetricValue::Count(self.transaction_commit_count))
-            },
-            "transaction_commit_total_latency" => Some(ProducerMetricValue::Duration(
-                self.transaction_commit_total_latency,
-            )),
-            "transaction_abort_count" => {
-                Some(ProducerMetricValue::Count(self.transaction_abort_count))
-            },
-            "transaction_abort_total_latency" => Some(ProducerMetricValue::Duration(
-                self.transaction_abort_total_latency,
-            )),
-            _ => None,
-        }
-    }
-
-    /// Return a read-only-by-value registry of stable producer metrics.
-    #[must_use]
-    pub fn as_metric_map(&self) -> BTreeMap<&'static str, ProducerMetricValue> {
-        [
-            "records_appended",
-            "produce_request_count",
-            "produce_request_bytes",
-            "produce_batch_count",
-            "produce_batch_bytes",
-            "produce_request_payload_bytes",
-            "produce_request_split_count",
-            "record_batch_split_count",
-            "produce_record_count",
-            "produce_retry_count",
-            "produce_error_count",
-            "requeue_count",
-            "in_flight_stall_count",
-            "queue_depth_bytes",
-            "queue_depth_records",
-            "buffer_available_bytes",
-            "waiting_threads",
-            "incomplete_batches",
-            "in_flight_dispatches",
-            "average_batch_fill_ratio",
-            "average_compression_ratio",
-            "flush_count",
-            "flush_total_latency",
-            "metadata_wait_count",
-            "metadata_wait_total_latency",
-            "transaction_init_count",
-            "transaction_init_total_latency",
-            "transaction_begin_count",
-            "transaction_begin_total_latency",
-            "send_offsets_to_transaction_count",
-            "send_offsets_to_transaction_total_latency",
-            "transaction_commit_count",
-            "transaction_commit_total_latency",
-            "transaction_abort_count",
-            "transaction_abort_total_latency",
-        ]
-        .into_iter()
-        .filter_map(|name| self.metric(name).map(|value| (name, value)))
-        .collect()
-    }
-
-    pub(crate) fn is_internal_metric_name(name: &str) -> bool {
-        matches!(
-            name,
-            "records_appended"
-                | "produce_request_count"
-                | "produce_request_bytes"
-                | "produce_batch_count"
-                | "produce_batch_bytes"
-                | "produce_request_payload_bytes"
-                | "produce_request_split_count"
-                | "record_batch_split_count"
-                | "produce_record_count"
-                | "produce_retry_count"
-                | "produce_error_count"
-                | "requeue_count"
-                | "in_flight_stall_count"
-                | "queue_depth_bytes"
-                | "queue_depth_records"
-                | "buffer_available_bytes"
-                | "waiting_threads"
-                | "incomplete_batches"
-                | "in_flight_dispatches"
-                | "average_batch_fill_ratio"
-                | "average_compression_ratio"
-                | "flush_count"
-                | "flush_total_latency"
-                | "metadata_wait_count"
-                | "metadata_wait_total_latency"
-                | "transaction_init_count"
-                | "transaction_init_total_latency"
-                | "transaction_begin_count"
-                | "transaction_begin_total_latency"
-                | "send_offsets_to_transaction_count"
-                | "send_offsets_to_transaction_total_latency"
-                | "transaction_commit_count"
-                | "transaction_commit_total_latency"
-                | "transaction_abort_count"
-                | "transaction_abort_total_latency"
-        )
-    }
-
     /// Serialize this snapshot as an uncompressed OTLP `MetricsData` protobuf payload.
     ///
     /// Count metrics are exported as cumulative monotonic `Sum` metrics. Gauge,
@@ -532,55 +364,6 @@ fn encode_kafka_metric(
             );
         });
     });
-}
-
-fn producer_metric_description(name: &str) -> &'static str {
-    match name {
-        "records_appended" => "records accepted into the producer accumulator",
-        "produce_request_count" => "produce requests sent to brokers",
-        "produce_request_bytes" => "encoded produce request bytes sent to brokers",
-        "produce_batch_count" => "record batches sent in produce requests",
-        "produce_batch_bytes" => "encoded record batch bytes sent in produce requests",
-        "produce_request_payload_bytes" => {
-            "encoded record batch payload bytes grouped into produce requests"
-        },
-        "produce_request_split_count" => {
-            "produce request grouping splits forced by max request size"
-        },
-        "record_batch_split_count" => {
-            "record batch splits forced by a broker MESSAGE_TOO_LARGE response"
-        },
-        "produce_record_count" => "records included in produce requests",
-        "produce_retry_count" => "retry attempts after retryable produce failures",
-        "produce_error_count" => "produce responses or dispatches that reported an error",
-        "requeue_count" => "batches requeued because routing was incomplete",
-        "in_flight_stall_count" => "backpressure stalls while enqueueing produce requests",
-        "queue_depth_bytes" => "bytes currently buffered in the accumulator",
-        "queue_depth_records" => "records currently buffered in the accumulator",
-        "buffer_available_bytes" => "producer buffer memory available for new batch reservations",
-        "waiting_threads" => "API tasks blocked waiting for producer buffer memory",
-        "incomplete_batches" => "batches currently buffered or in flight",
-        "in_flight_dispatches" => "producer dispatch tasks currently in flight",
-        "average_batch_fill_ratio" => "average drained batch fill ratio",
-        "average_compression_ratio" => "average encoded/uncompressed batch compression ratio",
-        "flush_count" => "explicit flush calls",
-        "flush_total_latency" => "total wall-clock latency spent in flush calls",
-        "metadata_wait_count" => "metadata wait operations",
-        "metadata_wait_total_latency" => "total latency spent waiting for metadata",
-        "transaction_init_count" => "init_transactions calls",
-        "transaction_init_total_latency" => "total latency spent in init_transactions",
-        "transaction_begin_count" => "begin_transaction calls",
-        "transaction_begin_total_latency" => "total latency spent in begin_transaction",
-        "send_offsets_to_transaction_count" => "send_offsets_to_transaction calls",
-        "send_offsets_to_transaction_total_latency" => {
-            "total latency spent in send_offsets_to_transaction"
-        },
-        "transaction_commit_count" => "commit_transaction calls",
-        "transaction_commit_total_latency" => "total latency spent in commit_transaction",
-        "transaction_abort_count" => "abort_transaction calls",
-        "transaction_abort_total_latency" => "total latency spent in abort_transaction",
-        _ => "",
-    }
 }
 
 const fn producer_metric_unit(value: ProducerMetricValue) -> &'static str {
@@ -1229,7 +1012,61 @@ mod tests {
         KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
         MetricValue, Metrics, MetricsError, ProducerMetricValue, ProducerMetrics,
         ProducerMetricsSnapshot, ProducerQueueMetrics, SensorRecordingLevel,
+        producer_metric_description,
     };
+
+    /// Every field of [`ProducerMetricsSnapshot`], read back out of its derived
+    /// `Debug` output.
+    ///
+    /// The snapshot is `#[non_exhaustive]`, so a test cannot destructure it to
+    /// force a compile error on a new field, and Rust has no field reflection.
+    /// The pretty `Debug` shape (`Name {\n    field: value,\n    ...\n}`) is the
+    /// one place the *actual* field list is observable at runtime, which is what
+    /// makes this an exhaustiveness check rather than another hand-kept list.
+    fn snapshot_field_names() -> Vec<String> {
+        format!("{:#?}", ProducerMetricsSnapshot::ZERO)
+            .lines()
+            .filter_map(|line| line.trim().split_once(": "))
+            .map(|(field, _value)| field.to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn every_snapshot_field_is_a_named_metric_with_a_description() {
+        let fields = snapshot_field_names();
+        assert!(
+            fields.len() >= 35,
+            "Debug parsing found only {} fields, so this test is not checking anything",
+            fields.len()
+        );
+
+        for field in &fields {
+            assert!(
+                ProducerMetricsSnapshot::ZERO.metric(field).is_some(),
+                "snapshot field '{field}' is not readable through metric()"
+            );
+            assert!(
+                ProducerMetricsSnapshot::is_internal_metric_name(field),
+                "snapshot field '{field}' is not recognised as an internal metric name"
+            );
+            assert!(
+                !producer_metric_description(field).is_empty(),
+                "snapshot field '{field}' has no OTLP description"
+            );
+        }
+
+        let metric_map = ProducerMetricsSnapshot::ZERO.as_metric_map();
+        let mapped = metric_map
+            .keys()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        let mut expected = fields;
+        expected.sort();
+        assert_eq!(
+            mapped, expected,
+            "as_metric_map must expose exactly the snapshot fields"
+        );
+    }
 
     #[test]
     fn metric_name_identity_matches_java_name_group_and_tags_only() {
