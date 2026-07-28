@@ -121,15 +121,7 @@ async fn kafka_producer_send_buffers_until_flush() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -200,15 +192,7 @@ async fn kafka_producer_background_sender_dispatches_after_linger_without_flush(
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -280,15 +264,7 @@ async fn kafka_producer_background_sender_dispatches_ready_batch_without_linger_
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -353,15 +329,7 @@ async fn kafka_producer_send_with_callback_invokes_callback_and_returns_delivery
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -436,15 +404,7 @@ async fn kafka_producer_builder_accepts_java_style_config() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -846,12 +806,10 @@ async fn kafka_producer_get_telemetry_subscriptions_disables_after_invalid_reque
 async fn kafka_producer_partitions_for_returns_topic_metadata() {
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            let response = metadata_response([(7, "127.0.0.1:9092".parse().expect("socket addr"))]);
-            response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-        }),
+        Box::new(metadata_handler(metadata_response([(
+            7,
+            "127.0.0.1:9092".parse().expect("socket addr"),
+        )]))),
     ])
     .await;
 
@@ -881,12 +839,10 @@ async fn kafka_producer_interceptor_send_error_uses_assigned_partition_like_java
     let captured = Arc::new(Mutex::new(None));
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            let response = metadata_response([(7, "127.0.0.1:9092".parse().expect("socket addr"))]);
-            response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-        }),
+        Box::new(metadata_handler(metadata_response([(
+            7,
+            "127.0.0.1:9092".parse().expect("socket addr"),
+        )]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -954,18 +910,10 @@ async fn kafka_producer_builder_uses_native_partitioner_instead_of_jvm_class_loa
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_8 = leader_8.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([
-                    (7, "127.0.0.1:9092".parse().expect("socket addr")),
-                    (8, leader_8),
-                ]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([
+            (7, "127.0.0.1:9092".parse().expect("socket addr")),
+            (8, leader_8.addr()),
+        ]))),
     ])
     .await;
 
@@ -1036,15 +984,7 @@ async fn kafka_producer_send_auto_batches_per_record_sends_until_flush() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -1144,15 +1084,7 @@ async fn kafka_producer_send_with_callback_auto_batches_until_flush() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -1220,15 +1152,7 @@ async fn kafka_producer_pipelines_ready_batches_until_flush() {
     let leader_7 = serve_pipelined_produce(2).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -1310,15 +1234,10 @@ async fn kafka_producer_single_send_budget_coalesces_ready_partitions() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
 
@@ -1416,15 +1335,11 @@ async fn kafka_producer_10kib_records_keep_observed_requests_under_max_request_s
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader_partitions(7, leader_7, PARTITIONS);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader_partitions(
+            7,
+            leader_7.addr(),
+            PARTITIONS,
+        ))),
     ])
     .await;
 
@@ -1527,15 +1442,10 @@ async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() 
     let leader_7 = serve_pipelined_idempotent_produce(vec![0, 1]).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
 
@@ -1650,15 +1560,10 @@ async fn idempotent_kafka_producer_sweeps_unready_colocated_partition_on_the_liv
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
 
@@ -1748,15 +1653,10 @@ async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correla
     let leader_7 = serve_pipelined_idempotent_produce_reversed(vec![0, 1]).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
 
@@ -1825,10 +1725,16 @@ async fn idempotent_kafka_producer_retries_disconnected_in_flight_batch_with_sam
     let leader_7 = serve_idempotent_disconnect_then_retry().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
         // A disconnect now invalidates the partition's leader (Java requests a
         // metadata update on server disconnect), so the retry re-fetches metadata.
-        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -1887,10 +1793,16 @@ async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_t
     let leader_7 = serve_idempotent_timeout_then_epoch_bump_recovery().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
         // The disconnect invalidates the cached leader, so the second send
         // re-fetches metadata before producing.
-        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -1964,10 +1876,16 @@ async fn idempotent_kafka_producer_resends_multi_inflight_batches_in_sequence_or
     let leader_7 = serve_idempotent_two_inflight_disconnect_then_inorder_retry().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
         // The disconnect invalidates the cached leader, so the in-order retry
         // re-fetches metadata before re-sending the two in-flight batches.
-        Box::new(metadata_same_leader_handler(leader_7.addr())),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -2038,15 +1956,10 @@ async fn idempotent_kafka_producer_restamps_sibling_inflight_batch_after_single_
     let leader_7 = serve_idempotent_two_inflight_unknown_producer_then_single_rebump().await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -2147,15 +2060,7 @@ async fn idempotent_kafka_producer_retries_leadership_error_with_current_leader_
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -2227,25 +2132,8 @@ async fn kafka_producer_flush_retries_requeued_batch_until_metadata_resolves() {
     // dispatch requeues it. The refreshed metadata then names leader 7.
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            response_frame(
-                ApiKey::Metadata,
-                13,
-                header.correlation_id,
-                &empty_metadata_response(),
-            )
-        }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(empty_metadata_response())),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -2308,15 +2196,7 @@ async fn kafka_producer_metrics_snapshot_reports_queue_and_dispatch_counters() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -2398,15 +2278,7 @@ async fn dispatcher_records_batch_metrics_after_request_build_with_actual_encode
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -2537,15 +2409,7 @@ async fn kafka_producer_commits_transactional_send() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -2613,10 +2477,6 @@ async fn kafka_producer_commits_transactional_send() {
 /// must be sent — and read in — that shape, or no transaction can add a single
 /// partition on any broker older than 3.6.
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Transaction wire-flow fixture keeps ordered broker handlers inline for readability."
-)]
 async fn kafka_producer_transactional_send_uses_pre_batched_add_partitions_to_txn_shapes() {
     let coordinator = MockBroker::serve_many(vec![
         Box::new(pre_batched_add_partitions_to_txn_api_versions_response_frame),
@@ -2671,15 +2531,7 @@ async fn kafka_producer_transactional_send_uses_pre_batched_add_partitions_to_tx
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -2862,19 +2714,7 @@ async fn kafka_producer_commit_timeout_can_retry_same_operation_like_java() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                response_frame(
-                    ApiKey::Metadata,
-                    13,
-                    header.correlation_id,
-                    &metadata_response([(7, leader_7)]),
-                )
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -2995,19 +2835,7 @@ async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                response_frame(
-                    ApiKey::Metadata,
-                    13,
-                    header.correlation_id,
-                    &metadata_response([(7, leader_7)]),
-                )
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -3141,19 +2969,7 @@ async fn kafka_producer_abort_holds_end_txn_until_in_flight_batches_drain_like_j
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                response_frame(
-                    ApiKey::Metadata,
-                    13,
-                    header.correlation_id,
-                    &metadata_response([(7, leader_7)]),
-                )
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -3225,10 +3041,6 @@ async fn kafka_producer_abort_holds_end_txn_until_in_flight_batches_drain_like_j
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Transaction V2 produce fixture keeps ordered broker handlers inline."
-)]
 async fn kafka_producer_transaction_v2_skips_add_partitions_to_txn_like_java() {
     let coordinator = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -3304,15 +3116,7 @@ async fn kafka_producer_transaction_v2_skips_add_partitions_to_txn_like_java() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -3419,15 +3223,7 @@ async fn kafka_producer_transaction_v2_installs_end_txn_epoch_like_java() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -3539,15 +3335,7 @@ async fn kafka_producer_transactional_unknown_producer_id_is_abortable_like_java
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -3602,10 +3390,6 @@ async fn kafka_producer_transactional_unknown_producer_id_is_abortable_like_java
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Abortable unsupported-format fixture verifies EndTxn epoch-bump request."
-)]
 async fn kafka_producer_transactional_unsupported_message_format_is_abortable_like_java() {
     let coordinator = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -3659,15 +3443,7 @@ async fn kafka_producer_transactional_unsupported_message_format_is_abortable_li
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -3744,17 +3520,12 @@ async fn kafka_producer_add_partitions_fatal_error_blocks_abort() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader = "127.0.0.1:9092"
+        Box::new(metadata_handler(metadata_response([(
+            7,
+            "127.0.0.1:9092"
                 .parse::<std::net::SocketAddr>()
-                .expect("leader addr");
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+                .expect("leader addr"),
+        )]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -3826,17 +3597,12 @@ async fn kafka_producer_fatal_transaction_error_blocks_later_send_like_java() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader = "127.0.0.1:9092"
+        Box::new(metadata_handler(metadata_response([(
+            7,
+            "127.0.0.1:9092"
                 .parse::<std::net::SocketAddr>()
-                .expect("leader addr");
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+                .expect("leader addr"),
+        )]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -3920,15 +3686,7 @@ async fn kafka_producer_retries_retriable_add_partitions_error() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -3994,15 +3752,7 @@ async fn kafka_producer_retries_concurrent_transactions_add_partitions_error_lik
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -4072,15 +3822,7 @@ async fn kafka_producer_add_partitions_reloads_transaction_coordinator() {
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
         Box::new({
             let coordinator = refreshed_coordinator.addr();
             move |mut request| {
@@ -4714,15 +4456,7 @@ async fn kafka_producer_add_offsets_unknown_producer_id_bumps_epoch_after_abort_
                 find_coordinator_response_frame(header.correlation_id, 9, coordinator)
             }
         }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -6508,16 +6242,10 @@ async fn dispatcher_drains_ready_batches_by_leader_broker() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            let leader_8 = leader_8.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7), (8, leader_8)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([
+            (7, leader_7.addr()),
+            (8, leader_8.addr()),
+        ]))),
     ])
     .await;
 
@@ -6599,15 +6327,10 @@ async fn dispatcher_sweeps_unready_partitions_of_a_dispatching_broker_like_java(
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response_same_leader(7, leader_7);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response_same_leader(
+            7,
+            leader_7.addr(),
+        ))),
     ])
     .await;
 
@@ -6683,15 +6406,7 @@ async fn dispatcher_pipelines_owned_batches_to_same_broker() {
     let leader_7 = serve_pipelined_produce(2).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -6774,15 +6489,7 @@ async fn dispatcher_initializes_idempotent_producer_and_sequences_partition_batc
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -6865,15 +6572,7 @@ async fn dispatcher_completes_duplicate_sequence_number_as_success_like_java() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -6922,10 +6621,6 @@ async fn dispatcher_completes_duplicate_sequence_number_as_success_like_java() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Idempotent local-failure sequence recovery fixture keeps broker handlers inline."
-)]
 async fn dispatcher_does_not_consume_sequence_after_local_record_too_large_error_like_java() {
     let leader_7 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -6956,15 +6651,7 @@ async fn dispatcher_does_not_consume_sequence_after_local_record_too_large_error
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7037,13 +6724,10 @@ async fn dispatcher_does_not_consume_sequence_after_local_record_too_large_error
 async fn dispatcher_releases_encoded_buffers_after_later_local_record_too_large_error() {
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            let leader: std::net::SocketAddr = "127.0.0.1:9".parse().expect("leader addr");
-            let response = metadata_response([(7, leader)]);
-            response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-        }),
+        Box::new(metadata_handler(metadata_response([(
+            7,
+            "127.0.0.1:9".parse().expect("leader addr"),
+        )]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7168,15 +6852,7 @@ async fn dispatcher_splits_and_requeues_message_too_large_multi_record_batch() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7288,15 +6964,7 @@ async fn dispatch_ready_bumps_epoch_after_unsplittable_message_too_large() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7366,11 +7034,6 @@ async fn dispatch_ready_bumps_epoch_after_unsplittable_message_too_large() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Idempotent UnknownProducerId epoch-bump fixture keeps ordered broker handlers \
-              inline."
-)]
 async fn dispatcher_bumps_epoch_and_retries_unknown_producer_id() {
     let leader_7 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -7429,15 +7092,7 @@ async fn dispatcher_bumps_epoch_and_retries_unknown_producer_id() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7535,15 +7190,7 @@ async fn dispatcher_retries_unknown_producer_id_without_epoch_bump_when_log_star
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7590,10 +7237,6 @@ async fn dispatcher_retries_unknown_producer_id_without_epoch_bump_when_log_star
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Idempotent sequence recovery fixture keeps ordered broker handlers inline."
-)]
 async fn dispatcher_releases_sequence_after_leadership_retry_timeout_like_java() {
     let leader_7 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -7636,24 +7279,8 @@ async fn dispatcher_releases_sequence_after_leadership_retry_timeout_like_java()
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7773,15 +7400,7 @@ async fn dispatcher_recovers_unknown_producer_id_timeout_with_unknown_log_start_
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -7865,15 +7484,7 @@ async fn dispatcher_sends_compressed_record_batches_from_runtime_config() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
 
@@ -7940,25 +7551,14 @@ async fn dispatcher_invalidates_metadata_on_leadership_error() {
     let leader_8 = MockBroker::serve_many(vec![Box::new(api_versions_response_frame)]).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            let leader_8 = leader_8.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7), (8, leader_8)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
-        Box::new({
-            let leader_8 = leader_8.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = moved_metadata_response(8, leader_8);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([
+            (7, leader_7.addr()),
+            (8, leader_8.addr()),
+        ]))),
+        Box::new(metadata_handler(moved_metadata_response(
+            8,
+            leader_8.addr(),
+        ))),
     ])
     .await;
 
@@ -8028,25 +7628,14 @@ async fn dispatcher_retries_leadership_error_after_metadata_refresh() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            let leader_8 = leader_8.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7), (8, leader_8)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
-        Box::new({
-            let leader_8 = leader_8.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = moved_metadata_response(8, leader_8);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([
+            (7, leader_7.addr()),
+            (8, leader_8.addr()),
+        ]))),
+        Box::new(metadata_handler(moved_metadata_response(
+            8,
+            leader_8.addr(),
+        ))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8086,16 +7675,7 @@ async fn dispatcher_retries_leadership_error_after_metadata_refresh() {
 async fn dispatcher_requeues_batch_when_metadata_is_missing() {
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            response_frame(
-                ApiKey::Metadata,
-                13,
-                header.correlation_id,
-                &empty_metadata_response(),
-            )
-        }),
+        Box::new(metadata_handler(empty_metadata_response())),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8130,16 +7710,7 @@ async fn dispatcher_requeues_batch_when_metadata_is_missing() {
 async fn dispatcher_owned_batches_reports_flush_incomplete_when_metadata_is_missing() {
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            response_frame(
-                ApiKey::Metadata,
-                13,
-                header.correlation_id,
-                &empty_metadata_response(),
-            )
-        }),
+        Box::new(metadata_handler(empty_metadata_response())),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8167,16 +7738,7 @@ async fn dispatcher_owned_batches_reports_flush_incomplete_when_metadata_is_miss
 async fn dispatcher_dispatch_all_requeues_and_reports_flush_incomplete() {
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new(|mut request| {
-            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-            assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-            response_frame(
-                ApiKey::Metadata,
-                13,
-                header.correlation_id,
-                &empty_metadata_response(),
-            )
-        }),
+        Box::new(metadata_handler(empty_metadata_response())),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8217,15 +7779,7 @@ async fn kafka_producer_delivery_future_receives_terminal_broker_error_like_java
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8302,15 +7856,7 @@ async fn kafka_producer_send_with_callback_receives_terminal_broker_error_like_j
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8396,15 +7942,7 @@ async fn kafka_producer_delivery_future_preserves_terminal_wire_connection_close
     let leader_7 = MockBroker::serve_many(vec![Box::new(api_versions_response_frame)]).await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8475,15 +8013,7 @@ async fn dispatcher_owned_batches_report_leadership_error_without_retry() {
     .await;
     let bootstrap = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
-        Box::new({
-            let leader_7 = leader_7.addr();
-            move |mut request| {
-                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
-                assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-                let response = metadata_response([(7, leader_7)]);
-                response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
-            }
-        }),
+        Box::new(metadata_handler(metadata_response([(7, leader_7.addr())]))),
     ])
     .await;
     let wire = WireClient::connect_with_brokers(
@@ -8747,17 +8277,18 @@ fn metadata_response<const N: usize>(
     }
 }
 
-/// A `serve_many` handler that answers one `Metadata` request with leader 7 at
-/// `leader_addr`. Shared by the disconnect/retry idempotent tests, which now see
-/// an extra metadata fetch because a wire disconnect invalidates the partition's
-/// cached leader before retrying.
-fn metadata_same_leader_handler(
-    leader_addr: std::net::SocketAddr,
-) -> impl FnOnce(Bytes) -> BytesMut + Send {
+/// A `serve_many` handler that asserts one `Metadata` request arrived and
+/// answers it with `response`.
+///
+/// The reply never depends on the request, so every metadata handler in this
+/// file was the same six lines wrapped around one interesting expression: the
+/// cluster view the test hands the client. Writing them out inline hid that
+/// expression, and the copies had already diverged on whether the response was
+/// bound to a `let` first and on how the leader address was captured.
+fn metadata_handler(response: MetadataResponseData) -> impl FnOnce(Bytes) -> BytesMut + Send {
     move |mut request| {
         let header = RequestHeaderData::read(&mut request, 2).expect("request header");
         assert_eq!(header.request_api_key, ApiKey::Metadata as i16);
-        let response = metadata_response_same_leader(7, leader_addr);
         response_frame(ApiKey::Metadata, 13, header.correlation_id, &response)
     }
 }
