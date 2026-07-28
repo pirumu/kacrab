@@ -89,12 +89,10 @@ fn main() {
         let bootstrap = bootstrap_addr();
         let topic = topic();
         let scenarios = scenarios();
-        let delivery_mode = benchmark_api();
         let reporting_interval = reporting_interval();
         println!(
             "real Kafka benchmark: bootstrap={bootstrap}, topic={topic}, \
-             producer_config=kafka-defaults, delivery_mode={delivery_mode}, \
-             reporting_interval_ms={}",
+             producer_config=kafka-defaults, delivery_mode=per-record, reporting_interval_ms={}",
             reporting_interval.as_millis()
         );
         if split_probe_enabled() {
@@ -118,7 +116,6 @@ fn main() {
                     bootstrap,
                     topic: &topic,
                     scenario: scenario.clone(),
-                    delivery_mode,
                     reporting_interval,
                 })
                 .await;
@@ -144,7 +141,6 @@ struct BenchmarkRun<'a> {
     bootstrap: SocketAddr,
     scenario: Scenario,
     topic: &'a str,
-    delivery_mode: DeliveryMode,
     reporting_interval: Duration,
 }
 
@@ -156,7 +152,6 @@ struct BenchmarkRunSummary {
 
 async fn run_scenario(run: BenchmarkRun<'_>) -> BenchmarkRunSummary {
     let value = payload_value(run.scenario.value_size);
-    let value_size = value.len();
     // Print the config that actually binds — defaults plus every benchmark override,
     // including the split probe's batch.size. Once per run, before the measured window.
     let producer_config = effective_producer_config(run.bootstrap);
@@ -182,15 +177,9 @@ async fn run_scenario(run: BenchmarkRun<'_>) -> BenchmarkRunSummary {
         .java_perf
         .expect("tracked benchmark should produce Java-style stats");
     print_result(&BenchmarkResult {
-        scenario: &run.scenario,
-        value_size,
-        elapsed: send.elapsed,
-        outer_chunks: send.outer_chunks,
-        latency: None,
-        java_perf: Some(java_perf),
+        java_perf,
         metrics,
         metrics_enabled: true,
-        delivery_mode: run.delivery_mode,
     });
     BenchmarkRunSummary { java_perf, metrics }
 }
@@ -380,8 +369,6 @@ fn format_effective_config_snapshot(config: &ProducerConfig) -> String {
 
 #[derive(Debug, Clone, Copy)]
 struct SendLoopResult {
-    outer_chunks: usize,
-    elapsed: Duration,
     java_perf: Option<ProducerPerformanceSummary>,
 }
 
@@ -483,8 +470,6 @@ async fn run_per_record_tracked_send_loop(
     let elapsed = started.elapsed();
     let java_perf = java_perf.summary(elapsed);
     SendLoopResult {
-        outer_chunks: sent,
-        elapsed,
         java_perf: Some(java_perf),
     }
 }
@@ -571,8 +556,6 @@ async fn run_per_record_tracked_send_loop_concurrent(
     let java_perf = java_perf.summary(elapsed);
     (
         SendLoopResult {
-            outer_chunks: total,
-            elapsed,
             java_perf: Some(java_perf),
         },
         producer,
@@ -628,28 +611,6 @@ fn warmup_record_count(run: &BenchmarkRun<'_>) -> usize {
         .batch_messages
         .min(run.scenario.messages)
         .clamp(1, 16_384)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeliveryMode {
-    PerRecord,
-}
-
-impl std::fmt::Display for DeliveryMode {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::PerRecord => formatter.write_str("per-record"),
-        }
-    }
-}
-
-fn benchmark_api() -> DeliveryMode {
-    benchmark_api_for(env::var("KACRAB_BENCH_API").ok().as_deref())
-}
-
-const fn benchmark_api_for(value: Option<&str>) -> DeliveryMode {
-    let _ = value;
-    DeliveryMode::PerRecord
 }
 
 fn benchmark_record(topic: Arc<str>, index: usize) -> ProducerRecord {
@@ -912,58 +873,6 @@ fn topic() -> String {
 
 fn payload_value(default_size: usize) -> Bytes {
     Bytes::from(vec![b'x'; default_size])
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct LatencySummary {
-    samples: usize,
-    avg_ms: f64,
-    p50_ms: f64,
-    p95_ms: f64,
-    p99_ms: f64,
-    p999_ms: f64,
-    max_ms: f64,
-}
-
-#[cfg(test)]
-fn latency_summary<I>(samples: I) -> Option<LatencySummary>
-where
-    I: IntoIterator<Item = Duration>,
-{
-    let mut samples: Vec<_> = samples.into_iter().collect();
-    if samples.is_empty() {
-        return None;
-    }
-    samples.sort_unstable();
-    let total_ms: f64 = samples.iter().copied().map(duration_ms).sum();
-    let sample_count = samples.len();
-    let avg_ms = total_ms / f64::from(u32::try_from(sample_count).ok()?);
-    let max_ms = duration_ms(*samples.last()?);
-    Some(LatencySummary {
-        samples: sample_count,
-        avg_ms,
-        p50_ms: percentile_ms(&samples, 500),
-        p95_ms: percentile_ms(&samples, 950),
-        p99_ms: percentile_ms(&samples, 990),
-        p999_ms: percentile_ms(&samples, 999),
-        max_ms,
-    })
-}
-
-#[cfg(test)]
-fn percentile_ms(samples: &[Duration], per_mille: usize) -> f64 {
-    let len = samples.len();
-    let rank = per_mille
-        .checked_mul(len)
-        .and_then(|scaled| scaled.checked_add(999))
-        .map_or(len, |scaled| scaled / 1000);
-    let index = rank.saturating_sub(1).min(len.saturating_sub(1));
-    duration_ms(samples[index])
-}
-
-#[cfg(test)]
-fn duration_ms(duration: Duration) -> f64 {
-    duration.as_secs_f64() * 1000.0
 }
 
 const JAVA_LATENCY_SAMPLE_CAP: usize = 500_000;
@@ -1251,19 +1160,13 @@ fn f64_from_i64(value: i64) -> f64 {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct BenchmarkResult<'a> {
-    scenario: &'a Scenario,
-    value_size: usize,
-    outer_chunks: usize,
-    latency: Option<LatencySummary>,
-    java_perf: Option<ProducerPerformanceSummary>,
+struct BenchmarkResult {
+    java_perf: ProducerPerformanceSummary,
     metrics: ProducerMetricsSnapshot,
     metrics_enabled: bool,
-    delivery_mode: DeliveryMode,
-    elapsed: Duration,
 }
 
-fn print_result(result: &BenchmarkResult<'_>) {
+fn print_result(result: &BenchmarkResult) {
     println!("{}", format_result_line(result));
 }
 
@@ -1303,39 +1206,17 @@ fn format_average_counter_line(metrics: &[ProducerMetricsSnapshot]) -> String {
     line
 }
 
-fn format_result_line(result: &BenchmarkResult<'_>) -> String {
-    if let Some(java_perf) = result.java_perf {
-        return format_java_perf_result_line(result, java_perf);
-    }
-    let (messages_per_second, megabytes_per_second) = scenario_throughput(result);
-    if let Some(latency) = result.latency {
-        return format_dispatch_latency_result_line(
-            result,
-            latency,
-            messages_per_second,
-            megabytes_per_second,
-        );
-    }
-    format_throughput_result_line(result, messages_per_second, megabytes_per_second)
-}
-
-fn scenario_throughput(result: &BenchmarkResult<'_>) -> (f64, f64) {
-    let seconds = result.elapsed.as_secs_f64();
-    let messages = f64::from(
-        u32::try_from(result.scenario.messages).expect("scenario message count should fit in u32"),
-    );
-    let megabytes = result
-        .scenario
-        .messages
-        .checked_mul(result.value_size)
-        .and_then(|bytes| u32::try_from(bytes).ok())
-        .map(|bytes| f64::from(bytes) / (1024.0 * 1024.0))
-        .expect("scenario bytes should not overflow");
-    (messages / seconds, megabytes / seconds)
+/// The benchmark prints one line per run.
+///
+/// Every run goes through the tracked Java-parity path, so the summary always
+/// carries `java_perf`; the throughput-only and dispatch-latency shapes this
+/// used to dispatch between had no caller left.
+fn format_result_line(result: &BenchmarkResult) -> String {
+    format_java_perf_result_line(result, result.java_perf)
 }
 
 fn format_java_perf_result_line(
-    result: &BenchmarkResult<'_>,
+    result: &BenchmarkResult,
     java_perf: ProducerPerformanceSummary,
 ) -> String {
     let mut line = format!(
@@ -1357,88 +1238,6 @@ fn format_java_perf_result_line(
         line.push(')');
     }
     line
-}
-
-fn format_dispatch_latency_result_line(
-    result: &BenchmarkResult<'_>,
-    latency: LatencySummary,
-    messages_per_second: f64,
-    megabytes_per_second: f64,
-) -> String {
-    if result.metrics_enabled {
-        let mut line = format!(
-            "{} [{}]: {:.0} messages/s, {:.3} MiB/s ({:.3}s, api_chunks={}, \
-             dispatch_latency_samples={}, dispatch_latency_avg={:.2} ms, \
-             dispatch_latency_p50={:.2} ms, dispatch_latency_p95={:.2} ms, \
-             dispatch_latency_p99={:.2} ms, dispatch_latency_p999={:.2} ms, \
-             dispatch_latency_max={:.2} ms, ",
-            result.scenario.name,
-            result.delivery_mode,
-            messages_per_second,
-            megabytes_per_second,
-            result.elapsed.as_secs_f64(),
-            result.outer_chunks,
-            latency.samples,
-            latency.avg_ms,
-            latency.p50_ms,
-            latency.p95_ms,
-            latency.p99_ms,
-            latency.p999_ms,
-            latency.max_ms
-        );
-        append_metrics(&mut line, &result.metrics);
-        line.push(')');
-        return line;
-    }
-    format!(
-        "{} [{}]: {:.0} messages/s, {:.3} MiB/s ({:.3}s, api_chunks={}, \
-         dispatch_latency_samples={}, dispatch_latency_avg={:.2} ms, dispatch_latency_p50={:.2} \
-         ms, dispatch_latency_p95={:.2} ms, dispatch_latency_p99={:.2} ms, \
-         dispatch_latency_p999={:.2} ms, dispatch_latency_max={:.2} ms)",
-        result.scenario.name,
-        result.delivery_mode,
-        messages_per_second,
-        megabytes_per_second,
-        result.elapsed.as_secs_f64(),
-        result.outer_chunks,
-        latency.samples,
-        latency.avg_ms,
-        latency.p50_ms,
-        latency.p95_ms,
-        latency.p99_ms,
-        latency.p999_ms,
-        latency.max_ms
-    )
-}
-
-fn format_throughput_result_line(
-    result: &BenchmarkResult<'_>,
-    messages_per_second: f64,
-    megabytes_per_second: f64,
-) -> String {
-    if result.metrics_enabled {
-        let mut line = format!(
-            "{} [{}]: {:.0} messages/s, {:.3} MiB/s ({:.3}s, api_chunks={}, ",
-            result.scenario.name,
-            result.delivery_mode,
-            messages_per_second,
-            megabytes_per_second,
-            result.elapsed.as_secs_f64(),
-            result.outer_chunks
-        );
-        append_metrics(&mut line, &result.metrics);
-        line.push(')');
-        return line;
-    }
-    format!(
-        "{} [{}]: {:.0} messages/s, {:.3} MiB/s ({:.3}s, api_chunks={})",
-        result.scenario.name,
-        result.delivery_mode,
-        messages_per_second,
-        megabytes_per_second,
-        result.elapsed.as_secs_f64(),
-        result.outer_chunks
-    )
 }
 
 fn append_metrics(line: &mut String, metrics: &ProducerMetricsSnapshot) {
@@ -1576,13 +1375,12 @@ mod tests {
     use kacrab::producer::{ProducerError, RecordMetadata};
 
     use super::{
-        BENCH_RUNS, BenchmarkResult, DeliveryMode, LatencySummary, ProducerMetricsSnapshot,
-        ProducerPerformanceStats, ProducerPerformanceStatsHandle, Scenario, SplitProbeOverrides,
-        TrackedCompletionStart, benchmark_api_for, benchmark_producer_config,
-        benchmark_producer_overrides_from, format_average_counter_line,
+        BENCH_RUNS, BenchmarkResult, ProducerMetricsSnapshot, ProducerPerformanceStats,
+        ProducerPerformanceStatsHandle, SplitProbeOverrides, TrackedCompletionStart,
+        benchmark_producer_config, benchmark_producer_overrides_from, format_average_counter_line,
         format_effective_config_snapshot, format_result_line, kafka_max_request_size,
-        latency_summary, producer_config_with_overrides, record_tracked_callback_completion,
-        scenarios, split_probe_config, split_probe_config_dump, split_probe_overrides_from,
+        producer_config_with_overrides, record_tracked_callback_completion, scenarios,
+        split_probe_config, split_probe_config_dump, split_probe_overrides_from,
         split_probe_producer_settings, split_probe_scenario,
     };
 
@@ -1611,21 +1409,6 @@ mod tests {
     #[test]
     fn benchmark_averages_over_five_runs() {
         assert_eq!(BENCH_RUNS, 5);
-    }
-
-    #[test]
-    fn benchmark_api_defaults_to_per_record_java_parity() {
-        assert_eq!(benchmark_api_for(None), DeliveryMode::PerRecord);
-        assert_eq!(DeliveryMode::PerRecord.to_string(), "per-record");
-    }
-
-    #[test]
-    fn benchmark_api_ignores_removed_batched_public_api() {
-        assert_eq!(benchmark_api_for(Some("batched")), DeliveryMode::PerRecord);
-        assert_eq!(
-            benchmark_api_for(Some("send-batch")),
-            DeliveryMode::PerRecord
-        );
     }
 
     #[test]
@@ -1705,81 +1488,15 @@ mod tests {
     }
 
     #[test]
-    fn latency_summary_reports_nearest_rank_percentiles() {
-        let summary = latency_summary([
-            Duration::from_millis(5),
-            Duration::from_millis(1),
-            Duration::from_millis(3),
-            Duration::from_millis(2),
-            Duration::from_millis(4),
-        ])
-        .expect("latency summary");
-
-        assert_eq!(summary.samples, 5);
-        assert_float_eq(summary.avg_ms, 3.0);
-        assert_float_eq(summary.p50_ms, 3.0);
-        assert_float_eq(summary.p95_ms, 5.0);
-        assert_float_eq(summary.p99_ms, 5.0);
-        assert_float_eq(summary.p999_ms, 5.0);
-        assert_float_eq(summary.max_ms, 5.0);
-    }
-
-    #[test]
-    fn formatted_result_names_rust_latency_as_dispatch_latency() {
-        let scenario = Scenario {
-            name: "test scenario".to_owned(),
-            messages: 1_000,
-            value_size: 10,
-            batch_messages: 100,
-        };
-        let line = format_result_line(&BenchmarkResult {
-            scenario: &scenario,
-            value_size: 10,
-            outer_chunks: 10,
-            latency: Some(LatencySummary {
-                samples: 4,
-                avg_ms: 1.0,
-                p50_ms: 1.0,
-                p95_ms: 2.0,
-                p99_ms: 3.0,
-                p999_ms: 4.0,
-                max_ms: 5.0,
-            }),
-            java_perf: None,
-            metrics: ProducerMetricsSnapshot::ZERO,
-            metrics_enabled: false,
-            delivery_mode: DeliveryMode::PerRecord,
-            elapsed: Duration::from_secs(1),
-        });
-
-        assert!(line.contains("api_chunks=10"));
-        assert!(line.contains("dispatch_latency_samples=4"));
-        assert!(line.contains("dispatch_latency_avg=1.00 ms"));
-        assert!(!line.contains("latency samples="));
-    }
-
-    #[test]
     fn tracked_result_reports_java_producer_performance_total_line() {
-        let scenario = Scenario {
-            name: "tracked scenario".to_owned(),
-            messages: 1_000,
-            value_size: 10,
-            batch_messages: 100,
-        };
         let stats = ProducerPerformanceStats::new(1_000, Duration::from_secs(5), false);
         let started = Instant::now();
         let _report = stats.record_completion(started, started + Duration::from_millis(5), 10);
         let _report = stats.record_completion(started, started + Duration::from_millis(1), 10);
         let line = format_result_line(&BenchmarkResult {
-            scenario: &scenario,
-            value_size: 10,
-            outer_chunks: 1_000,
-            latency: None,
-            java_perf: Some(stats.summary(Duration::from_secs(1))),
+            java_perf: stats.summary(Duration::from_secs(1)),
             metrics: ProducerMetricsSnapshot::ZERO,
             metrics_enabled: false,
-            delivery_mode: DeliveryMode::PerRecord,
-            elapsed: Duration::from_secs(1),
         });
 
         assert!(line.starts_with("2 records sent, "));
@@ -2036,12 +1753,6 @@ mod tests {
 
     #[test]
     fn tracked_result_metrics_use_parity_counter_schema() {
-        let scenario = Scenario {
-            name: "tracked scenario".to_owned(),
-            messages: 1_000,
-            value_size: 10,
-            batch_messages: 100,
-        };
         let stats = ProducerPerformanceStats::new(1_000, Duration::from_secs(5), false);
         let started = Instant::now();
         let _report = stats.record_completion(started, started + Duration::from_millis(5), 10);
@@ -2061,15 +1772,9 @@ mod tests {
         metrics.average_compression_ratio = 0.75;
 
         let line = format_result_line(&BenchmarkResult {
-            scenario: &scenario,
-            value_size: 10,
-            outer_chunks: 1_000,
-            latency: None,
-            java_perf: Some(stats.summary(Duration::from_secs(1))),
+            java_perf: stats.summary(Duration::from_secs(1)),
             metrics,
             metrics_enabled: true,
-            delivery_mode: DeliveryMode::PerRecord,
-            elapsed: Duration::from_secs(1),
         });
 
         assert!(line.contains("produce_requests=2"));
