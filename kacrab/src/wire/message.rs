@@ -58,6 +58,7 @@ use kacrab_protocol::{
         SyncGroupResponseData, TxnOffsetCommitRequestData, TxnOffsetCommitResponseData,
         UnregisterBrokerRequestData, UnregisterBrokerResponseData, UpdateFeaturesRequestData,
         UpdateFeaturesResponseData, WriteTxnMarkersRequestData, WriteTxnMarkersResponseData,
+        leave_group_request::MemberIdentity,
     },
     version::UnsupportedFieldVersion,
 };
@@ -189,6 +190,30 @@ impl ResponseMessage for OffsetFetchResponseData {
     }
 }
 
+// `LeaveGroup` is a two-shape request too: v0-2 carry a singular `member_id`,
+// v3+ (KIP-345 static membership) the batched `members` array, and the generated
+// encoder rejects whichever one its version does not carry. The request is
+// rewritten into the negotiated version's form here, mirroring Java's
+// `LeaveGroupRequest.Builder.build` / `normalizedData`. The response is
+// pass-through — callers read both shapes through
+// `admin::client::leave_group_member_results`.
+impl RequestMessage for LeaveGroupRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_leave_group_request(self, version).write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_leave_group_request(self, version).encoded_len(version)
+    }
+}
+
+impl ResponseMessage for LeaveGroupResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
 // Produce is not a straight pass-through: depending on the negotiated version
 // the wire form carries either the topic name (v < 13) or the topic id (v >= 13),
 // so the unused field is cleared before the generated encoder runs (see
@@ -248,7 +273,6 @@ impl_passthrough_message! {
     DescribeDelegationTokenRequestData => DescribeDelegationTokenResponseData,
     AlterReplicaLogDirsRequestData => AlterReplicaLogDirsResponseData,
     WriteTxnMarkersRequestData => WriteTxnMarkersResponseData,
-    LeaveGroupRequestData => LeaveGroupResponseData,
     ConsumerGroupDescribeRequestData => ConsumerGroupDescribeResponseData,
     ListConfigResourcesRequestData => ListConfigResourcesResponseData,
     DescribeQuorumRequestData => DescribeQuorumResponseData,
@@ -382,6 +406,59 @@ fn normalize_add_partitions_to_txn_request(
         v3_and_below_topics: transaction.topics.clone(),
         _unknown_tagged_fields: request._unknown_tagged_fields.clone(),
     })
+}
+
+/// First `LeaveGroup` version carrying the batched `members` array instead of
+/// the singular `member_id` (KIP-345, broker 2.4).
+const LEAVE_GROUP_BATCHED_MIN_VERSION: i16 = 3;
+
+/// Rewrite a `LeaveGroup` request into the member form the negotiated `version`
+/// speaks: the singular `member_id` up to v2, the batched `members` array from
+/// v3 on.
+///
+/// Mirrors Java's `LeaveGroupRequest.Builder.build`, which sends
+/// `setMemberId(members.get(0).memberId())` below v3 and raises
+/// `UnsupportedVersionException` for more than one member. A request naming
+/// several members is left untouched here for the generated encoder to reject,
+/// rather than silently dropping the ones it cannot carry.
+///
+/// A member identified only by its `group_instance_id` is left untouched too.
+/// v0-2 has no field for it, and the static membership that gives a
+/// `group_instance_id` meaning is the very thing v3 introduced, so a
+/// pre-KIP-345 coordinator cannot be asked to evict one. Downgrading would send
+/// that member's (typically empty) `member_id` instead and evict the wrong
+/// member — or nothing — so the encoder refuses the request instead. This is
+/// stricter than Java, which downgrades unconditionally.
+fn normalize_leave_group_request(
+    request: &LeaveGroupRequestData,
+    version: i16,
+) -> Cow<'_, LeaveGroupRequestData> {
+    if version >= LEAVE_GROUP_BATCHED_MIN_VERSION {
+        if request.member_id == KafkaString::default() {
+            return Cow::Borrowed(request);
+        }
+        let mut normalized = request.clone();
+        let member_id = core::mem::take(&mut normalized.member_id);
+        if normalized.members.is_empty() {
+            normalized.members.push(MemberIdentity {
+                member_id,
+                group_instance_id: None,
+                reason: None,
+                _unknown_tagged_fields: Vec::new(),
+            });
+        }
+        return Cow::Owned(normalized);
+    }
+    let [member] = request.members.as_slice() else {
+        return Cow::Borrowed(request);
+    };
+    if member.group_instance_id.is_some() {
+        return Cow::Borrowed(request);
+    }
+    let mut normalized = request.clone();
+    normalized.member_id = member.member_id.clone();
+    normalized.members.clear();
+    Cow::Owned(normalized)
 }
 
 /// First `OffsetFetch` version carrying the batched `groups` array instead of
@@ -563,9 +640,10 @@ mod tests {
         KafkaString, KafkaUuid,
         generated::{
             AddPartitionsToTxnRequestData, AddPartitionsToTxnTopic, AddPartitionsToTxnTransaction,
-            FetchRequestData, FindCoordinatorRequestData, ListOffsetsRequestData,
-            OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopic,
-            OffsetFetchRequestTopics, SyncGroupRequestData,
+            FetchRequestData, FindCoordinatorRequestData, LeaveGroupRequestData,
+            ListOffsetsRequestData, OffsetFetchRequestData, OffsetFetchRequestGroup,
+            OffsetFetchRequestTopic, OffsetFetchRequestTopics, SyncGroupRequestData,
+            leave_group_request::MemberIdentity,
         },
     };
 
@@ -905,6 +983,124 @@ mod tests {
         let mut buf = BytesMut::new();
 
         let error = request.write_request(&mut buf, 3);
+
+        assert!(error.is_err());
+    }
+
+    fn leave_group_request() -> LeaveGroupRequestData {
+        LeaveGroupRequestData {
+            group_id: KafkaString::from("group-a".to_owned()),
+            members: vec![MemberIdentity {
+                member_id: KafkaString::from("member-1".to_owned()),
+                group_instance_id: None,
+                reason: None,
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            ..LeaveGroupRequestData::default()
+        }
+    }
+
+    fn encode_leave_group(request: &LeaveGroupRequestData, version: i16) -> Bytes {
+        let mut buf = BytesMut::new();
+        request
+            .write_request(&mut buf, version)
+            .expect("leave group request should encode for the negotiated version");
+        assert_eq!(
+            RequestMessage::encoded_len(request, version).expect("encoded length"),
+            buf.len()
+        );
+        buf.freeze()
+    }
+
+    #[test]
+    fn leave_group_request_uses_the_singular_member_below_batched_versions() {
+        let request = leave_group_request();
+
+        for version in 0..=2 {
+            let mut encoded = encode_leave_group(&request, version);
+            let decoded = LeaveGroupRequestData::read(&mut encoded, version)
+                .expect("leave group request should decode");
+            assert_eq!(decoded.member_id, KafkaString::from("member-1".to_owned()));
+            assert!(decoded.members.is_empty());
+        }
+    }
+
+    #[test]
+    fn leave_group_request_uses_members_from_batched_versions() {
+        let request = leave_group_request();
+
+        for version in 3..=5 {
+            let mut encoded = encode_leave_group(&request, version);
+            let decoded = LeaveGroupRequestData::read(&mut encoded, version)
+                .expect("leave group request should decode");
+            assert_eq!(decoded.member_id, KafkaString::default());
+            assert_eq!(
+                decoded.members[0].member_id,
+                KafkaString::from("member-1".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn leave_group_request_promotes_the_singular_member_to_batched_versions() {
+        let request = LeaveGroupRequestData {
+            group_id: KafkaString::from("group-a".to_owned()),
+            member_id: KafkaString::from("member-1".to_owned()),
+            ..LeaveGroupRequestData::default()
+        };
+
+        let mut encoded = encode_leave_group(&request, 5);
+
+        let decoded =
+            LeaveGroupRequestData::read(&mut encoded, 5).expect("v5 request should decode");
+        assert_eq!(decoded.member_id, KafkaString::default());
+        assert_eq!(
+            decoded.members[0].member_id,
+            KafkaString::from("member-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn leave_group_request_rejects_batched_members_below_batched_versions() {
+        let request = LeaveGroupRequestData {
+            group_id: KafkaString::from("group-a".to_owned()),
+            members: vec![
+                MemberIdentity {
+                    member_id: KafkaString::from("member-1".to_owned()),
+                    ..MemberIdentity::default()
+                },
+                MemberIdentity {
+                    member_id: KafkaString::from("member-2".to_owned()),
+                    ..MemberIdentity::default()
+                },
+            ],
+            ..LeaveGroupRequestData::default()
+        };
+        let mut buf = BytesMut::new();
+
+        let error = request.write_request(&mut buf, 2);
+
+        assert!(error.is_err());
+    }
+
+    /// Static membership is what v3 introduced, so a `group_instance_id` cannot
+    /// be expressed below it. Downgrading would send the member's (typically
+    /// empty) `member_id` and evict the wrong member, so the encoder refuses.
+    #[test]
+    fn leave_group_request_rejects_a_static_member_below_batched_versions() {
+        let request = LeaveGroupRequestData {
+            group_id: KafkaString::from("group-a".to_owned()),
+            members: vec![MemberIdentity {
+                member_id: KafkaString::default(),
+                group_instance_id: Some(KafkaString::from("instance-1".to_owned())),
+                reason: None,
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            ..LeaveGroupRequestData::default()
+        };
+        let mut buf = BytesMut::new();
+
+        let error = request.write_request(&mut buf, 2);
 
         assert!(error.is_err());
     }

@@ -22,12 +22,13 @@ use kacrab_protocol::{
     KafkaString, KafkaUuid, frame,
     generated::{
         ApiKey, ApiVersion, ApiVersionsResponseData, FindCoordinatorRequestData,
-        FindCoordinatorResponseData, MetadataResponseBroker, MetadataResponseData,
-        MetadataResponsePartition, MetadataResponseTopic, OffsetFetchRequestData,
-        OffsetFetchRequestGroup, OffsetFetchRequestTopics, OffsetFetchResponseData,
-        OffsetFetchResponsePartition, OffsetFetchResponseTopic, ProduceRequestData,
-        ProduceResponseData, RequestHeaderData, ResponseHeaderData, SaslAuthenticateRequestData,
-        SaslAuthenticateResponseData, SaslHandshakeRequestData, SaslHandshakeResponseData,
+        FindCoordinatorResponseData, LeaveGroupRequestData, LeaveGroupResponseData,
+        MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition,
+        MetadataResponseTopic, OffsetFetchRequestData, OffsetFetchRequestGroup,
+        OffsetFetchRequestTopics, OffsetFetchResponseData, OffsetFetchResponsePartition,
+        OffsetFetchResponseTopic, ProduceRequestData, ProduceResponseData, RequestHeaderData,
+        ResponseHeaderData, SaslAuthenticateRequestData, SaslAuthenticateResponseData,
+        SaslHandshakeRequestData, SaslHandshakeResponseData, leave_group_request::MemberIdentity,
     },
     version::{request_header_version, response_header_version},
 };
@@ -371,6 +372,88 @@ async fn wire_client_sends_flat_offset_fetch_group_to_pre_batched_broker() {
     assert!(response.groups.is_empty());
     assert_eq!(response.topics.len(), 1);
     assert_eq!(response.topics[0].partitions[0].committed_offset, 42);
+    assert_eq!(broker.join().await, 2);
+}
+
+/// `LeaveGroup` only grew the batched `members` array in v3 (KIP-345, broker
+/// 2.4). A broker that negotiates v2 or lower must be sent the singular
+/// `member_id` instead — the admin client passes its client-side ceiling (v5),
+/// so the request has to be rewritten for the version the connection actually
+/// negotiated, or the encoder rejects it and
+/// `remove_members_from_consumer_group` dies on every broker older than 2.4.
+#[tokio::test]
+async fn wire_client_sends_singular_leave_group_member_to_pre_batched_broker() {
+    let broker = MockBroker::serve_many(vec![
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![
+                    ApiVersion {
+                        api_key: ApiKey::ApiVersions as i16,
+                        min_version: 0,
+                        max_version: 4,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                    ApiVersion {
+                        api_key: ApiKey::LeaveGroup as i16,
+                        min_version: 0,
+                        max_version: 2,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                ..ApiVersionsResponseData::default()
+            };
+            response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+        }),
+        Box::new(|mut request| {
+            let header_version = request_header_version(ApiKey::LeaveGroup as i16, 2);
+            let header = RequestHeaderData::read(&mut request, header_version)
+                .expect("leave group request header should use negotiated version");
+            assert_eq!(header.request_api_version, 2);
+            let leave = LeaveGroupRequestData::read(&mut request, 2)
+                .expect("leave group body should use negotiated version");
+            assert_eq!(leave.group_id, KafkaString::from("group-a".to_owned()));
+            assert_eq!(leave.member_id, KafkaString::from("member-1".to_owned()));
+            assert!(leave.members.is_empty());
+            // v0-2 has no per-member array: the coordinator folds the one
+            // member's error into the top-level code.
+            let response = LeaveGroupResponseData {
+                error_code: 25,
+                ..LeaveGroupResponseData::default()
+            };
+            response_frame(ApiKey::LeaveGroup, 2, header.correlation_id, &response)
+        }),
+    ])
+    .await;
+    let client = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(7, broker.addr())],
+    );
+    let request = LeaveGroupRequestData {
+        group_id: KafkaString::from("group-a".to_owned()),
+        members: vec![MemberIdentity {
+            member_id: KafkaString::from("member-1".to_owned()),
+            group_instance_id: None,
+            reason: None,
+            _unknown_tagged_fields: Vec::new(),
+        }],
+        ..LeaveGroupRequestData::default()
+    };
+
+    let response: LeaveGroupResponseData = client
+        .send_to_broker(
+            7,
+            ApiKey::LeaveGroup,
+            kacrab_protocol::version::client_api_info(ApiKey::LeaveGroup).max_version,
+            &request,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.error_code, 25);
+    assert!(response.members.is_empty());
     assert_eq!(broker.join().await, 2);
 }
 
@@ -2712,6 +2795,12 @@ impl ApiVersions for ShareGroupHeartbeatResponseData {
     fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
         self.write(buf, version)
             .expect("share group heartbeat response");
+    }
+}
+
+impl ApiVersions for LeaveGroupResponseData {
+    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
+        self.write(buf, version).expect("leave group response");
     }
 }
 

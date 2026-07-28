@@ -88,6 +88,7 @@ use kacrab_protocol::{
         describe_user_scram_credentials_request::UserName,
         elect_leaders_request::TopicPartitions as ElectLeadersTopicPartitions,
         leave_group_request::MemberIdentity,
+        leave_group_response::MemberResponse,
         list_groups_response::ListedGroup,
         write_txn_markers_request::{WritableTxnMarker, WritableTxnMarkerTopic},
     },
@@ -1751,8 +1752,10 @@ impl AdminClient {
                 |response: &LeaveGroupResponseData| is_coordinator_error(response.error_code),
             )
             .await?;
+        // Java's `LeaveGroupResponse.error()` gives the top-level error priority
+        // over the per-member ones, so it is checked first.
         check_code(group_id, response.error_code, None)?;
-        for member in &response.members {
+        for member in leave_group_member_results(&response, &request.members) {
             check_code(group_id, member.error_code, None)?;
         }
         Ok(())
@@ -3272,6 +3275,37 @@ fn all_group_listings(groups: &[ListedGroup]) -> Vec<ConsumerGroupListing> {
     groups.iter().map(group_listing).collect()
 }
 
+/// Read the per-member results out of either `LeaveGroup` response shape.
+///
+/// v3+ (KIP-345) answers with the `members` array. v0-2 has no per-member field
+/// at all — Kafka's own comment on `LeaveGroupResponse` says so outright ("for
+/// older version response, we may populate member level error towards top
+/// level"), and `LeaveGroupResponse(memberResponses, topLevelError, .., version)`
+/// is where the broker folds it — so the one member the v0-2 request could name
+/// is given back its identity here with the top-level code as its own.
+///
+/// That single member is the only one a v0-2 request can carry
+/// (`normalize_leave_group_request` refuses to downgrade anything else), so the
+/// member that was asked about is the member that was answered. Any other
+/// request shape yields no per-member results rather than a guess.
+fn leave_group_member_results(
+    response: &LeaveGroupResponseData,
+    requested: &[MemberIdentity],
+) -> Vec<MemberResponse> {
+    if !response.members.is_empty() {
+        return response.members.clone();
+    }
+    let [member] = requested else {
+        return Vec::new();
+    };
+    vec![MemberResponse {
+        member_id: member.member_id.clone(),
+        group_instance_id: member.group_instance_id.clone(),
+        error_code: response.error_code,
+        _unknown_tagged_fields: Vec::new(),
+    }]
+}
+
 /// Read the offsets answered for `group_id` out of either `OffsetFetch` response
 /// shape.
 ///
@@ -4150,6 +4184,75 @@ mod tests {
 
         assert_eq!(topics[0].name.as_str(), "orders");
         assert_eq!(topics[0].topic_id, topic_id);
+    }
+
+    #[test]
+    fn leave_group_member_results_read_the_batched_response_shape() {
+        let response = LeaveGroupResponseData {
+            members: vec![MemberResponse {
+                member_id: KafkaString::from("member-1".to_owned()),
+                group_instance_id: None,
+                error_code: 25,
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            ..LeaveGroupResponseData::default()
+        };
+
+        let members = leave_group_member_results(&response, &[]);
+
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].error_code, 25);
+    }
+
+    /// v0-2 has no per-member array; the coordinator folds the one member's
+    /// error into the top-level code, so the member that was asked about gets
+    /// its identity back with that code as its own.
+    #[test]
+    fn leave_group_member_results_synthesize_the_pre_batched_single_member() {
+        let response = LeaveGroupResponseData {
+            error_code: 25,
+            ..LeaveGroupResponseData::default()
+        };
+        let requested = [MemberIdentity {
+            member_id: KafkaString::from("member-1".to_owned()),
+            group_instance_id: Some(KafkaString::from("instance-1".to_owned())),
+            reason: None,
+            _unknown_tagged_fields: Vec::new(),
+        }];
+
+        let members = leave_group_member_results(&response, &requested);
+
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].member_id.as_str(), "member-1");
+        assert_eq!(
+            members[0]
+                .group_instance_id
+                .as_ref()
+                .map(KafkaString::as_str),
+            Some("instance-1")
+        );
+        assert_eq!(members[0].error_code, 25);
+    }
+
+    /// More than one member cannot reach a v0-2 coordinator at all
+    /// (`normalize_leave_group_request` refuses to downgrade it), so an empty
+    /// per-member array there is reported as "no results", never guessed at.
+    #[test]
+    fn leave_group_member_results_do_not_guess_for_several_requested_members() {
+        let requested = [
+            MemberIdentity {
+                member_id: KafkaString::from("member-1".to_owned()),
+                ..MemberIdentity::default()
+            },
+            MemberIdentity {
+                member_id: KafkaString::from("member-2".to_owned()),
+                ..MemberIdentity::default()
+            },
+        ];
+
+        let members = leave_group_member_results(&LeaveGroupResponseData::default(), &requested);
+
+        assert!(members.is_empty());
     }
 
     #[test]
