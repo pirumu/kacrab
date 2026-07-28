@@ -26,6 +26,8 @@ use kacrab_protocol::{
         FindCoordinatorResponseData, LeaveGroupRequestData, LeaveGroupResponseData,
         ListConfigResourcesRequestData, ListConfigResourcesResponseData, MetadataResponseBroker,
         MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
+        OffsetCommitRequestData, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+        OffsetCommitResponseData, OffsetCommitResponsePartition, OffsetCommitResponseTopic,
         OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
         OffsetFetchResponseData, OffsetFetchResponsePartition, OffsetFetchResponseTopic,
         ProduceRequestData, ProduceResponseData, RequestHeaderData, ResponseHeaderData,
@@ -547,6 +549,116 @@ async fn wire_client_sends_flat_delete_topic_names_to_pre_topic_id_broker() {
         Some(KafkaString::from("orders".to_owned()))
     );
     assert_eq!(response.responses[0].error_code, 0);
+    assert_eq!(broker.join().await, 2);
+}
+
+/// `OffsetCommit` swapped its topic key in v10 (KIP-1140, broker 4.1): from v10
+/// a topic is keyed by `topic_id` and below it by `name`. The admin client
+/// passes its client-side ceiling and fills both keys, so a broker that
+/// negotiates v9 or lower must still receive the topic *name* — sending the
+/// empty string there commits nothing and the broker answers
+/// `UNKNOWN_TOPIC_OR_PARTITION`, which is what `alter_consumer_group_offsets`
+/// did on every broker older than 4.1.
+#[tokio::test]
+async fn wire_client_sends_offset_commit_topic_name_to_pre_topic_id_broker() {
+    let broker = MockBroker::serve_many(vec![
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![
+                    ApiVersion {
+                        api_key: ApiKey::ApiVersions as i16,
+                        min_version: 0,
+                        max_version: 4,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                    ApiVersion {
+                        api_key: ApiKey::OffsetCommit as i16,
+                        min_version: 0,
+                        max_version: 9,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                ..ApiVersionsResponseData::default()
+            };
+            response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+        }),
+        Box::new(|mut request| {
+            let header_version = request_header_version(ApiKey::OffsetCommit as i16, 9);
+            let header = RequestHeaderData::read(&mut request, header_version)
+                .expect("offset commit request header should use negotiated version");
+            assert_eq!(header.request_api_version, 9);
+            let commit = OffsetCommitRequestData::read(&mut request, 9)
+                .expect("offset commit body should use negotiated version");
+            assert_eq!(commit.group_id, KafkaString::from("group-a".to_owned()));
+            assert_eq!(commit.topics.len(), 1);
+            // The whole point: v9 keys the topic by name, so the name has to be
+            // on the wire even though metadata resolved an id for it.
+            assert_eq!(
+                commit.topics[0].name,
+                KafkaString::from("orders".to_owned())
+            );
+            assert_eq!(commit.topics[0].partitions.len(), 1);
+            assert_eq!(commit.topics[0].partitions[0].partition_index, 0);
+            assert_eq!(commit.topics[0].partitions[0].committed_offset, 42);
+            let response = OffsetCommitResponseData {
+                topics: vec![OffsetCommitResponseTopic {
+                    name: KafkaString::from("orders".to_owned()),
+                    topic_id: KafkaUuid::ZERO,
+                    partitions: vec![OffsetCommitResponsePartition {
+                        partition_index: 0,
+                        error_code: 0,
+                        _unknown_tagged_fields: Vec::new(),
+                    }],
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                ..OffsetCommitResponseData::default()
+            };
+            response_frame(ApiKey::OffsetCommit, 9, header.correlation_id, &response)
+        }),
+    ])
+    .await;
+    let client = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(7, broker.addr())],
+    );
+    // The shape `admin::client::offset_commit_topics` builds: both topic keys,
+    // because the negotiated version is not known when the request is built.
+    let request = OffsetCommitRequestData {
+        group_id: KafkaString::from("group-a".to_owned()),
+        generation_id_or_member_epoch: -1,
+        member_id: KafkaString::default(),
+        group_instance_id: None,
+        retention_time_ms: -1,
+        topics: vec![OffsetCommitRequestTopic {
+            name: KafkaString::from("orders".to_owned()),
+            topic_id: KafkaUuid::from_parts(1, 2),
+            partitions: vec![OffsetCommitRequestPartition {
+                partition_index: 0,
+                committed_offset: 42,
+                committed_leader_epoch: -1,
+                committed_metadata: None,
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            _unknown_tagged_fields: Vec::new(),
+        }],
+        _unknown_tagged_fields: Vec::new(),
+    };
+
+    let response: OffsetCommitResponseData = client
+        .send_to_broker(
+            7,
+            ApiKey::OffsetCommit,
+            kacrab_protocol::version::client_api_info(ApiKey::OffsetCommit).max_version,
+            &request,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.topics.len(), 1);
+    assert_eq!(response.topics[0].partitions[0].error_code, 0);
     assert_eq!(broker.join().await, 2);
 }
 
@@ -2997,6 +3109,12 @@ impl ApiVersions for LeaveGroupResponseData {
 impl ApiVersions for OffsetFetchResponseData {
     fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
         self.write(buf, version).expect("offset fetch response");
+    }
+}
+
+impl ApiVersions for OffsetCommitResponseData {
+    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
+        self.write(buf, version).expect("offset commit response");
     }
 }
 

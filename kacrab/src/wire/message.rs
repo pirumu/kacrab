@@ -237,6 +237,31 @@ impl ResponseMessage for DeleteTopicsResponseData {
     }
 }
 
+// `OffsetCommit` swapped its topic key in v10 (KIP-1140): from v10 a topic is
+// keyed by `topic_id` and below it by `name`, and a call site only learns the
+// negotiated version after it has built the request. Both keys are filled by
+// `admin::client::offset_commit_topics` and the one the negotiated version does
+// not carry is cleared here, the way `normalize_produce_request` does for
+// `Produce` v13 and `normalize_offset_fetch_request` for `OffsetFetch` v10. The
+// response is pass-through: `OffsetCommitResponseTopic` carries whichever key
+// its version speaks and the caller matches results positionally.
+impl RequestMessage for OffsetCommitRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_offset_commit_request(self, version).write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_offset_commit_request(self, version).encoded_len(version)
+    }
+}
+
+impl ResponseMessage for OffsetCommitResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
 // `LeaveGroup` is a two-shape request too: v0-2 carry a singular `member_id`,
 // v3+ (KIP-345 static membership) the batched `members` array, and the generated
 // encoder rejects whichever one its version does not carry. The request is
@@ -293,7 +318,6 @@ impl_passthrough_message! {
     ListGroupsRequestData => ListGroupsResponseData,
     DescribeGroupsRequestData => DescribeGroupsResponseData,
     DeleteGroupsRequestData => DeleteGroupsResponseData,
-    OffsetCommitRequestData => OffsetCommitResponseData,
     OffsetDeleteRequestData => OffsetDeleteResponseData,
     IncrementalAlterConfigsRequestData => IncrementalAlterConfigsResponseData,
     ElectLeadersRequestData => ElectLeadersResponseData,
@@ -748,6 +772,49 @@ fn offset_fetch_topic_needs_key_clear(topic: &OffsetFetchRequestTopics, version:
     }
 }
 
+/// First `OffsetCommit` version that keys topics by `topic_id` instead of by
+/// `name` (KIP-1140, broker 4.1).
+const OFFSET_COMMIT_TOPIC_ID_MIN_VERSION: i16 = 10;
+
+/// Clear the `OffsetCommit` topic key the negotiated `version` does not put on
+/// the wire: the `name` from v10 (KIP-1140) on, the `topic_id` below it.
+///
+/// `admin::client::offset_commit_topics` fills both keys because it builds the
+/// request before the connection has negotiated a version. Keeping exactly the
+/// one the version speaks is what makes that safe: it is the same contract
+/// [`normalize_produce_request`] enforces for `Produce` v13 and
+/// [`normalize_offset_fetch_request`] for `OffsetFetch` v10, so no call site has
+/// to guess which key it will end up sending.
+///
+/// The request is borrowed unchanged when it is already in the wire form for
+/// `version`; a clone is only taken when a key actually has to be cleared. The
+/// cleared key carries no bytes for its version, so the borrowed and cleared
+/// forms encode to the identical length and body.
+fn normalize_offset_commit_request(
+    request: &OffsetCommitRequestData,
+    version: i16,
+) -> Cow<'_, OffsetCommitRequestData> {
+    let needs_clear = request.topics.iter().any(|topic| {
+        if version >= OFFSET_COMMIT_TOPIC_ID_MIN_VERSION {
+            topic.name != KafkaString::default()
+        } else {
+            topic.topic_id != KafkaUuid::ZERO
+        }
+    });
+    if !needs_clear {
+        return Cow::Borrowed(request);
+    }
+    let mut normalized = request.clone();
+    for topic in &mut normalized.topics {
+        if version >= OFFSET_COMMIT_TOPIC_ID_MIN_VERSION {
+            topic.name = KafkaString::default();
+        } else {
+            topic.topic_id = KafkaUuid::ZERO;
+        }
+    }
+    Cow::Owned(normalized)
+}
+
 /// Clear the topic key that the negotiated `version` does not put on the wire so
 /// the generated encoder does not reject a request that still carries both the
 /// topic name and topic id.
@@ -797,7 +864,8 @@ mod tests {
             AddPartitionsToTxnRequestData, AddPartitionsToTxnTopic, AddPartitionsToTxnTransaction,
             DeleteTopicState, DeleteTopicsRequestData, FetchRequestData,
             FindCoordinatorRequestData, LeaveGroupRequestData, ListConfigResourcesRequestData,
-            ListOffsetsRequestData, OffsetFetchRequestData, OffsetFetchRequestGroup,
+            ListOffsetsRequestData, OffsetCommitRequestData, OffsetCommitRequestPartition,
+            OffsetCommitRequestTopic, OffsetFetchRequestData, OffsetFetchRequestGroup,
             OffsetFetchRequestTopic, OffsetFetchRequestTopics, SyncGroupRequestData,
             leave_group_request::MemberIdentity,
         },
@@ -1566,6 +1634,80 @@ mod tests {
 
         assert!(error.is_err());
         assert!(request.write_request(&mut BytesMut::new(), 2).is_ok());
+    }
+
+    /// The admin request builder fills both topic keys because it does not yet
+    /// know the negotiated version; each version must still put exactly its own
+    /// key on the wire. Below v10 that is the name — the key kacrab used to drop
+    /// as soon as metadata resolved an id, which committed to the empty topic
+    /// name on every broker older than 4.1.
+    #[test]
+    fn offset_commit_request_keys_topics_by_name_below_the_topic_id_version() {
+        let request = offset_commit_request();
+
+        // v2 is kacrab's client-side floor for this API; v9 the last version
+        // before KIP-1140 swapped the key.
+        for version in 2_i16..=9 {
+            let mut encoded = encode_offset_commit(&request, version);
+
+            let decoded = OffsetCommitRequestData::read(&mut encoded, version)
+                .expect("offset commit request should decode");
+            assert_eq!(decoded.topics.len(), 1);
+            assert_eq!(
+                decoded.topics[0].name,
+                KafkaString::from("orders".to_owned())
+            );
+            assert_eq!(decoded.topics[0].topic_id, KafkaUuid::ZERO);
+            assert_eq!(decoded.topics[0].partitions[0].committed_offset, 42);
+        }
+    }
+
+    #[test]
+    fn offset_commit_request_keys_topics_by_id_from_the_topic_id_version() {
+        let request = offset_commit_request();
+
+        let mut encoded = encode_offset_commit(&request, 10);
+
+        let decoded = OffsetCommitRequestData::read(&mut encoded, 10)
+            .expect("offset commit request should decode");
+        assert_eq!(decoded.topics[0].name, KafkaString::default());
+        assert_eq!(decoded.topics[0].topic_id, KafkaUuid::from_parts(7, 7));
+        assert_eq!(decoded.topics[0].partitions[0].committed_offset, 42);
+    }
+
+    fn offset_commit_request() -> OffsetCommitRequestData {
+        OffsetCommitRequestData {
+            group_id: KafkaString::from("group-a".to_owned()),
+            generation_id_or_member_epoch: -1,
+            member_id: KafkaString::default(),
+            group_instance_id: None,
+            retention_time_ms: -1,
+            topics: vec![OffsetCommitRequestTopic {
+                name: KafkaString::from("orders".to_owned()),
+                topic_id: KafkaUuid::from_parts(7, 7),
+                partitions: vec![OffsetCommitRequestPartition {
+                    partition_index: 0,
+                    committed_offset: 42,
+                    committed_leader_epoch: -1,
+                    committed_metadata: None,
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+
+    fn encode_offset_commit(request: &OffsetCommitRequestData, version: i16) -> Bytes {
+        let mut buf = BytesMut::new();
+        request
+            .write_request(&mut buf, version)
+            .expect("offset commit request should encode for the negotiated version");
+        assert_eq!(
+            RequestMessage::encoded_len(request, version).expect("encoded length"),
+            buf.len()
+        );
+        buf.freeze()
     }
 
     #[test]

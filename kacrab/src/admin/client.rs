@@ -3442,20 +3442,18 @@ fn offset_commit_topics(
         {
             topic.partitions.push(partition);
         } else {
-            // OffsetCommit v10 removed the topic `name` (keyed by id) and the
-            // strict codec rejects a non-default name at v10; send the name only
-            // when the id is unknown (older brokers / unresolved topic).
+            // Which key goes on the wire is a per-version choice — `OffsetCommit`
+            // v10 (KIP-1140) keys topics by id and drops the name, every version
+            // below it keys by name and has no id field — and the version is
+            // only known once the connection has negotiated it. Fill both and
+            // let `wire::message` clear the one the negotiated version does not
+            // carry, exactly as `group_offset_fetch_topics` does.
             let topic_id = topic_ids
                 .get(&topic_partition.topic)
                 .copied()
                 .unwrap_or(KafkaUuid::ZERO);
-            let name = if topic_id == KafkaUuid::ZERO {
-                topic_partition.topic.clone().into()
-            } else {
-                KafkaString::default()
-            };
             topics.push(OffsetCommitRequestTopic {
-                name,
+                name: topic_partition.topic.clone().into(),
                 topic_id,
                 partitions: vec![partition],
                 _unknown_tagged_fields: Vec::new(),
@@ -4366,6 +4364,27 @@ mod tests {
         // Absent leader epoch maps to the -1 sentinel.
         assert_eq!(orders.partitions[1].committed_leader_epoch, -1);
         assert_eq!(orders.partitions[1].committed_metadata, None);
+    }
+
+    /// Which topic key `OffsetCommit` carries is a per-version choice the
+    /// request builder cannot make (v10 keys by id, everything below by name),
+    /// so it fills both and `wire::message` clears the one the negotiated
+    /// version does not carry. Dropping the name as soon as metadata resolved
+    /// an id sent an empty topic name to every broker that negotiates v9 or
+    /// lower, and those answer `UNKNOWN_TOPIC_OR_PARTITION`.
+    #[test]
+    fn offset_commit_topics_carry_both_topic_keys() {
+        let topic_id = KafkaUuid::from_parts(1, 2);
+        let topic_ids = HashMap::from([("orders".to_owned(), topic_id)]);
+
+        let topics = offset_commit_topics(
+            vec![(TopicPartition::new("orders", 0), OffsetAndMetadata::new(10))],
+            &topic_ids,
+        );
+
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].name.as_str(), "orders");
+        assert_eq!(topics[0].topic_id, topic_id);
     }
 
     #[test]
