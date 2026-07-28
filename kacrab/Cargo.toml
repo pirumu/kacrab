@@ -161,3 +161,18 @@ required-features = ["producer"]
 [[test]]
 name = "real_kafka_share_consumer"
 required-features = ["producer", "share-consumer", "admin"]
+
+# The TLS suite connects over `SSL`/`SASL_SSL`, which needs a compiled-in crypto
+# provider — without one the handshake never starts and every test fails at
+# config validation with `no TLS crypto provider is compiled in`. Cargo's
+# `required-features` is a conjunction and cannot say "either provider", so this
+# names `aws-lc-rs-tls`: the documented default, and what the real-broker
+# workflow runs the suite under.
+#
+# `real_kafka_sasl` deliberately has no entry. It authenticates over a
+# `SASL_PLAINTEXT` listener and supplies its OAUTHBEARER token through a JAAS
+# option rather than signing one locally, so it needs no provider and no
+# optional dependency — it builds and runs on default features.
+[[test]]
+name = "real_kafka_tls"
+required-features = ["aws-lc-rs-tls"]

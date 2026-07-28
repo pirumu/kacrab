@@ -7,6 +7,12 @@
 //! test confirms the broker actually rejects bad credentials (i.e. auth is
 //! enforced, not bypassed).
 //!
+//! Unlike the sibling TLS suite, these need no feature: the listener is
+//! `SASL_PLAINTEXT`, so no crypto provider is involved, and the OAUTHBEARER token
+//! arrives through a JAAS option rather than being signed locally (the one token
+//! source that would need `aws-lc-rs-tls`). Hence no `required-features` entry in
+//! `Cargo.toml` — default features are enough.
+//!
 //! Run them after `docker compose -f docker-compose.auth.yml up -d` with:
 //!   `cargo test -p kacrab --test real_kafka_sasl -- --ignored --nocapture`
 

@@ -8,8 +8,11 @@
 //! is what proves the compressed record batches are Kafka-compatible.
 //!
 //! Run after `docker compose -f docker-compose.kafka.yml up -d`, built with the
-//! compression features:
-//!   `cargo test -p kacrab --features producer,gzip,snappy,lz4,zstd \
+//! compression features. Add `consumer` too: the reverse direction — kacrab
+//! decoding batches the CLI producer compressed — is a `#[cfg(feature =
+//! "consumer")]` test in this file, so without it that half silently does not
+//! exist.
+//!   `cargo test -p kacrab --features producer,consumer,gzip,snappy,lz4,zstd \
 //!      --test real_kafka_compression -- --ignored --nocapture`
 
 #![allow(
