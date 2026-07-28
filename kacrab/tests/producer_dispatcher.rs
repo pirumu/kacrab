@@ -138,20 +138,8 @@ async fn kafka_producer_send_buffers_until_flush() {
                 .linger(Duration::from_mins(1))
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     producer.enable_metrics();
@@ -209,20 +197,10 @@ async fn kafka_producer_background_sender_dispatches_after_linger_without_flush(
                 .linger(Duration::from_millis(10))
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_secs(1),
             max_block: Duration::from_secs(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -281,20 +259,10 @@ async fn kafka_producer_background_sender_dispatches_ready_batch_without_linger_
                 .linger(Duration::ZERO)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_secs(1),
             max_block: Duration::from_secs(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -346,20 +314,8 @@ async fn kafka_producer_send_with_callback_invokes_callback_and_returns_delivery
                 .linger(Duration::from_mins(1))
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     let callback_receipts = Arc::new(Mutex::new(Vec::new()));
@@ -1001,20 +957,8 @@ async fn kafka_producer_send_auto_batches_per_record_sends_until_flush() {
                 .linger(Duration::from_mins(1))
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -1101,20 +1045,8 @@ async fn kafka_producer_send_with_callback_auto_batches_until_flush() {
                 .linger(Duration::from_mins(1))
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -1171,20 +1103,9 @@ async fn kafka_producer_pipelines_ready_batches_until_flush() {
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 2,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -1256,20 +1177,9 @@ async fn kafka_producer_single_send_budget_coalesces_ready_partitions() {
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 2,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     producer.enable_metrics();
@@ -1359,20 +1269,9 @@ async fn kafka_producer_10kib_records_keep_observed_requests_under_max_request_s
                 .linger(Duration::from_mins(1))
                 .buffer_memory(2 * MAX_REQUEST_SIZE),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
             max_request_size: MAX_REQUEST_SIZE,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     producer.enable_metrics();
@@ -1463,26 +1362,8 @@ async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() 
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 2,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let partitions = producer.partitions_for("orders").await.unwrap();
@@ -1513,11 +1394,6 @@ async fn idempotent_kafka_producer_pipelines_different_partitions_until_flush() 
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Proving the live sender path sweeps needs mock broker, metadata, idempotent \
-              producer config, and request capture in one integration scenario."
-)]
 async fn idempotent_kafka_producer_sweeps_unready_colocated_partition_on_the_live_sender_path() {
     const BATCH_SIZE: usize = 512;
 
@@ -1581,26 +1457,7 @@ async fn idempotent_kafka_producer_sweeps_unready_colocated_partition_on_the_liv
                 .batch_size(BATCH_SIZE)
                 .linger(Duration::from_secs(30))
                 .buffer_memory(64 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
 
@@ -1674,26 +1531,8 @@ async fn idempotent_kafka_producer_maps_reordered_pipelined_responses_by_correla
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 2,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let partitions = producer.partitions_for("orders").await.unwrap();
@@ -1751,26 +1590,12 @@ async fn idempotent_kafka_producer_retries_disconnected_in_flight_batch_with_sam
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
             retry_backoff: Duration::from_millis(1),
             retry_backoff_max: Duration::from_millis(1),
             delivery_timeout: Duration::from_secs(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
 
@@ -1819,26 +1644,12 @@ async fn idempotent_kafka_producer_recovers_unresolved_sequence_after_delivery_t
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
             retry_backoff: Duration::from_millis(1),
             retry_backoff_max: Duration::from_millis(1),
             delivery_timeout: Duration::from_millis(1),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
 
@@ -1902,28 +1713,13 @@ async fn idempotent_kafka_producer_resends_multi_inflight_batches_in_sequence_or
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 5,
             retry_backoff: Duration::from_millis(1),
             retry_backoff_max: Duration::from_millis(1),
             // Generous so the disconnect is a plain wire retry, not a delivery timeout
             // (which would bump the epoch and reset the sequences).
             delivery_timeout: Duration::from_mins(10),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
 
@@ -1976,26 +1772,11 @@ async fn idempotent_kafka_producer_restamps_sibling_inflight_batch_after_single_
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 10,
             retry_backoff: Duration::from_millis(1),
             retry_backoff_max: Duration::from_millis(1),
             delivery_timeout: Duration::from_secs(30),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
 
@@ -2077,26 +1858,12 @@ async fn idempotent_kafka_producer_retries_leadership_error_with_current_leader_
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
             retry_backoff: Duration::from_millis(1),
             retry_backoff_max: Duration::from_millis(1),
             delivery_timeout: Duration::from_secs(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
 
@@ -2148,20 +1915,10 @@ async fn kafka_producer_flush_retries_requeued_batch_until_metadata_resolves() {
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_secs(5),
             max_block: Duration::from_secs(2),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     producer.enable_metrics();
@@ -2213,20 +1970,8 @@ async fn kafka_producer_metrics_snapshot_reports_queue_and_dispatch_counters() {
                 .linger(Duration::from_mins(1))
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     producer.enable_metrics();
@@ -2424,26 +2169,13 @@ async fn kafka_producer_commits_transactional_send() {
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -2546,26 +2278,13 @@ async fn kafka_producer_transactional_send_uses_pre_batched_add_partitions_to_tx
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -2632,26 +2351,16 @@ async fn kafka_producer_init_transactions_retries_coordinator_load_in_progress_p
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
             retry_backoff: Duration::from_millis(50),
             retry_backoff_max: Duration::from_millis(50),
-            delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_secs(10),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -2667,10 +2376,6 @@ async fn kafka_producer_init_transactions_retries_coordinator_load_in_progress_p
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Transaction timeout retry fixture keeps ordered broker handlers inline."
-)]
 async fn kafka_producer_commit_timeout_can_retry_same_operation_like_java() {
     let coordinator = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -2729,26 +2434,14 @@ async fn kafka_producer_commit_timeout_can_retry_same_operation_like_java() {
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_millis(30),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -2788,10 +2481,6 @@ async fn kafka_producer_commit_timeout_can_retry_same_operation_like_java() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Abort timeout retry fixture keeps ordered broker handlers inline."
-)]
 async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
     let coordinator = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -2850,26 +2539,14 @@ async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_millis(30),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -2909,11 +2586,6 @@ async fn kafka_producer_abort_timeout_can_retry_same_operation_like_java() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Abort drain-order fixture needs separate coordinator, leader, and bootstrap \
-              handlers."
-)]
 async fn kafka_producer_abort_holds_end_txn_until_in_flight_batches_drain_like_java() {
     let produce_done = Arc::new(AtomicBool::new(false));
     let coordinator = MockBroker::serve_many(vec![
@@ -2984,26 +2656,14 @@ async fn kafka_producer_abort_holds_end_txn_until_in_flight_batches_drain_like_j
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_secs(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -3968,26 +3628,13 @@ async fn kafka_producer_sends_offsets_to_transaction_before_commit() {
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -4197,26 +3844,13 @@ async fn kafka_producer_send_offsets_to_transaction_reports_commit_error() {
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -4259,10 +3893,6 @@ async fn kafka_producer_send_offsets_to_transaction_reports_commit_error() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Send-offsets timeout fixture keeps ordered broker handlers inline."
-)]
 async fn kafka_producer_send_offsets_timeout_can_retry_same_operation_like_java() {
     let coordinator = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -4320,26 +3950,14 @@ async fn kafka_producer_send_offsets_timeout_can_retry_same_operation_like_java(
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_millis(30),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -5367,27 +4985,14 @@ async fn kafka_producer_init_transactions_retries_retriable_coordinator_lookup()
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -5439,27 +5044,14 @@ async fn kafka_producer_init_transactions_uses_pre_batched_find_coordinator_shap
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -5507,27 +5099,14 @@ async fn kafka_producer_init_transactions_timeout_can_retry_same_operation_like_
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
             max_block: Duration::from_millis(30),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -5595,27 +5174,13 @@ async fn kafka_producer_commit_transaction_reports_end_txn_broker_error() {
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -5697,27 +5262,13 @@ async fn kafka_producer_abort_transaction_abortable_error_becomes_fatal_like_jav
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -5977,27 +5528,13 @@ async fn kafka_producer_init_transactions_reports_unretriable_init_producer_erro
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -6083,27 +5620,13 @@ async fn kafka_producer_init_transactions_reports_unretriable_find_coordinator_e
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -6175,27 +5698,13 @@ async fn kafka_producer_init_transactions_rejects_invalid_coordinator_port() {
     let producer = Producer::from_parts(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
 
@@ -6498,32 +6007,7 @@ async fn dispatcher_initializes_idempotent_producer_and_sequences_partition_batc
         "kacrab-test",
         [BrokerEndpoint::new(1, bootstrap.addr())],
     );
-    let dispatcher = ProducerDispatcher::with_config(
-        wire,
-        ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
-        },
-    );
+    let dispatcher = ProducerDispatcher::with_config(wire, test_producer_config());
     let now = Instant::now();
 
     let first = dispatcher
@@ -6583,27 +6067,8 @@ async fn dispatcher_completes_duplicate_sequence_number_as_success_like_java() {
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -6662,27 +6127,9 @@ async fn dispatcher_does_not_consume_sequence_after_local_record_too_large_error
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
             max_request_size: 220,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -6738,27 +6185,16 @@ async fn dispatcher_releases_encoded_buffers_after_later_local_record_too_large_
     let dispatcher = ProducerDispatcher::with_config(
         wire.clone(),
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
             max_request_size: 220,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: false,
                 transactional_id: None,
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -7103,27 +6539,9 @@ async fn dispatcher_bumps_epoch_and_retries_unknown_producer_id() {
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -7201,27 +6619,9 @@ async fn dispatcher_retries_unknown_producer_id_without_epoch_bump_when_log_star
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -7291,27 +6691,10 @@ async fn dispatcher_releases_sequence_after_leadership_retry_timeout_like_java()
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_millis(1),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -7338,10 +6721,6 @@ async fn dispatcher_releases_sequence_after_leadership_retry_timeout_like_java()
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Idempotent unresolved sequence timeout fixture keeps ordered broker handlers inline."
-)]
 async fn dispatcher_recovers_unknown_producer_id_timeout_with_unknown_log_start_like_java() {
     let leader_7 = MockBroker::serve_many(vec![
         Box::new(api_versions_response_frame),
@@ -7411,27 +6790,10 @@ async fn dispatcher_recovers_unknown_producer_id_timeout_with_unknown_log_start_
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts: 1,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_millis(1),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
-            idempotence: ProducerIdempotenceConfig {
-                enabled: true,
-                transactional_id: None,
-                transaction_timeout_ms: 60_000,
-                transaction_two_phase_commit: false,
-            },
+            ..test_producer_config()
         },
     );
     let now = Instant::now();
@@ -7496,25 +6858,13 @@ async fn dispatcher_sends_compressed_record_batches_from_runtime_config() {
     let dispatcher = ProducerDispatcher::with_config(
         wire,
         ProducerRuntimeConfig {
-            accumulator: AccumulatorConfig::default(),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
             compression: ProducerCompression {
                 codec: Compression::Lz4,
                 level: Some(9),
             },
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     let accumulator = SharedAccumulator::with_config(
@@ -7794,20 +7144,9 @@ async fn kafka_producer_delivery_future_receives_terminal_broker_error_like_java
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -7871,20 +7210,9 @@ async fn kafka_producer_send_with_callback_receives_terminal_broker_error_like_j
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
     let callback_errors = Arc::new(Mutex::new(Vec::new()));
@@ -7959,20 +7287,10 @@ async fn kafka_producer_delivery_future_preserves_terminal_wire_connection_close
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
             acks: 1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
             delivery_timeout: Duration::from_secs(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
             max_in_flight_requests_per_connection: 1,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: idempotence_disabled(),
+            ..test_producer_config()
         },
     );
 
@@ -9064,6 +8382,25 @@ fn push_telemetry_response_frame(correlation_id: i32, error: ErrorCode) -> Bytes
     response_frame(ApiKey::PushTelemetry, 0, correlation_id, &response)
 }
 
+/// The runtime config the tests in this file start from.
+///
+/// `ProducerRuntimeConfig::default()` with retries pinned off. Retries are the
+/// one production default a test cannot inherit: it is `usize::MAX` attempts, so
+/// any fixture that answers with a retriable error would spin instead of
+/// failing. Everything else — acks, timeouts, the in-flight limit, request size,
+/// compression, idempotence — is exactly the production default.
+///
+/// Fifty call sites used to restate all sixteen fields, so the two or three that
+/// a given test actually depends on were buried in fourteen that were the same
+/// everywhere, and a real difference between two neighbouring fixtures read like
+/// noise. A test now names only what it exercises.
+fn test_producer_config() -> ProducerRuntimeConfig {
+    ProducerRuntimeConfig {
+        retry_attempts: 0,
+        ..ProducerRuntimeConfig::default()
+    }
+}
+
 const fn idempotence_disabled() -> ProducerIdempotenceConfig {
     ProducerIdempotenceConfig {
         enabled: false,
@@ -9115,26 +8452,14 @@ fn transactional_test_producer_with_retries_batch_size_and_linger(
                 .batch_size(batch_size)
                 .linger(linger)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
             retry_attempts,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: false,
             },
+            ..test_producer_config()
         },
     )
 }
@@ -9146,26 +8471,13 @@ fn transaction_v2_test_producer(wire: WireClient) -> Producer {
             accumulator: AccumulatorConfig::default()
                 .batch_size(1)
                 .buffer_memory(16 * 1024),
-            acks: -1,
-            timeout_ms: 30_000,
-            retry_attempts: 0,
-            retry_backoff: Duration::from_millis(100),
-            retry_backoff_max: Duration::from_secs(1),
-            delivery_timeout: Duration::from_mins(2),
-            max_block: Duration::from_mins(1),
-            partitioner_ignore_keys: false,
-            partitioner_adaptive_partitioning_enable: true,
-            partitioner_availability_timeout: Duration::ZERO,
-            max_in_flight_requests_per_connection: 5,
-            max_request_size: 1_048_576,
-            enable_metrics_push: true,
-            compression: ProducerCompression::default(),
             idempotence: ProducerIdempotenceConfig {
                 enabled: true,
                 transactional_id: Some("txn-orders".to_owned()),
                 transaction_timeout_ms: 60_000,
                 transaction_two_phase_commit: true,
             },
+            ..test_producer_config()
         },
     )
 }
