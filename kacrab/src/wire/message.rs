@@ -160,6 +160,28 @@ impl ResponseMessage for ListOffsetsResponseData {
     }
 }
 
+// `SyncGroup` carries the assignor's `protocol_type`/`protocol_name` only from
+// v5, where the coordinator uses them to fence a member speaking a different
+// protocol. Kafka marks both ignorable, so an older negotiated version is sent
+// the request without them (see `normalize_sync_group_request`) instead of one
+// its encoder rejects. The response is pass-through.
+impl RequestMessage for SyncGroupRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_sync_group_request(self, version).write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_sync_group_request(self, version).encoded_len(version)
+    }
+}
+
+impl ResponseMessage for SyncGroupResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
 // Produce is not a straight pass-through: depending on the negotiated version
 // the wire form carries either the topic name (v < 13) or the topic id (v >= 13),
 // so the unused field is cleared before the generated encoder runs (see
@@ -240,7 +262,6 @@ impl_passthrough_message! {
 impl_passthrough_message! {
     FetchRequestData => FetchResponseData,
     JoinGroupRequestData => JoinGroupResponseData,
-    SyncGroupRequestData => SyncGroupResponseData,
     HeartbeatRequestData => HeartbeatResponseData,
     OffsetForLeaderEpochRequestData => OffsetForLeaderEpochResponseData,
     ConsumerGroupHeartbeatRequestData => ConsumerGroupHeartbeatResponseData,
@@ -312,6 +333,31 @@ fn normalize_list_offsets_request(
     Cow::Owned(normalized)
 }
 
+/// First `SyncGroup` version carrying the assignor's `protocol_type` and
+/// `protocol_name`.
+const SYNC_GROUP_PROTOCOL_MIN_VERSION: i16 = 5;
+
+/// Drop the `SyncGroup` protocol identity for a negotiated `version` that does
+/// not carry it.
+///
+/// Kafka marks both fields ignorable: a coordinator too old to fence on them
+/// simply does not receive them, which is what its own encoder sends, and the
+/// assignment the member is asking for is unchanged.
+fn normalize_sync_group_request(
+    request: &SyncGroupRequestData,
+    version: i16,
+) -> Cow<'_, SyncGroupRequestData> {
+    if version >= SYNC_GROUP_PROTOCOL_MIN_VERSION
+        || (request.protocol_type.is_none() && request.protocol_name.is_none())
+    {
+        return Cow::Borrowed(request);
+    }
+    let mut normalized = request.clone();
+    normalized.protocol_type = None;
+    normalized.protocol_name = None;
+    Cow::Owned(normalized)
+}
+
 /// Clear the topic key that the negotiated `version` does not put on the wire so
 /// the generated encoder does not reject a request that still carries both the
 /// topic name and topic id.
@@ -357,7 +403,7 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use kacrab_protocol::{
         KafkaString,
-        generated::{FindCoordinatorRequestData, ListOffsetsRequestData},
+        generated::{FindCoordinatorRequestData, ListOffsetsRequestData, SyncGroupRequestData},
     };
 
     use super::RequestMessage;
@@ -472,6 +518,64 @@ mod tests {
                 .expect("list offsets request should decode");
             assert_eq!(decoded.timeout_ms, 30_000);
         }
+    }
+
+    #[test]
+    fn sync_group_request_drops_the_protocol_fields_below_their_version() {
+        let request = SyncGroupRequestData {
+            group_id: KafkaString::from("group-a".to_owned()),
+            generation_id: 3,
+            member_id: KafkaString::from("member-1".to_owned()),
+            protocol_type: Some(KafkaString::from("consumer".to_owned())),
+            protocol_name: Some(KafkaString::from("range".to_owned())),
+            ..SyncGroupRequestData::default()
+        };
+
+        for version in 0..=4 {
+            let mut buf = BytesMut::new();
+            request
+                .write_request(&mut buf, version)
+                .expect("sync group request should encode for the negotiated version");
+            assert_eq!(
+                RequestMessage::encoded_len(&request, version).expect("encoded length"),
+                buf.len()
+            );
+            let mut encoded = buf.freeze();
+            let decoded = SyncGroupRequestData::read(&mut encoded, version)
+                .expect("sync group request should decode");
+            assert_eq!(decoded.member_id, KafkaString::from("member-1".to_owned()));
+            assert_eq!(decoded.protocol_type, None);
+            assert_eq!(decoded.protocol_name, None);
+        }
+    }
+
+    #[test]
+    fn sync_group_request_keeps_the_protocol_fields_from_their_version() {
+        let request = SyncGroupRequestData {
+            group_id: KafkaString::from("group-a".to_owned()),
+            generation_id: 3,
+            member_id: KafkaString::from("member-1".to_owned()),
+            protocol_type: Some(KafkaString::from("consumer".to_owned())),
+            protocol_name: Some(KafkaString::from("range".to_owned())),
+            ..SyncGroupRequestData::default()
+        };
+        let mut buf = BytesMut::new();
+
+        request
+            .write_request(&mut buf, 5)
+            .expect("sync group request should encode");
+
+        let mut encoded = buf.freeze();
+        let decoded =
+            SyncGroupRequestData::read(&mut encoded, 5).expect("sync group request should decode");
+        assert_eq!(
+            decoded.protocol_type,
+            Some(KafkaString::from("consumer".to_owned()))
+        );
+        assert_eq!(
+            decoded.protocol_name,
+            Some(KafkaString::from("range".to_owned()))
+        );
     }
 
     #[test]

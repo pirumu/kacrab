@@ -153,6 +153,11 @@ release date and links to relevant pull requests or issues.
   is ignorable, so it is now dropped for the versions that do not carry it, exactly
   as Kafka's own encoder does.
 
+- **`SyncGroup` always carried `protocol_type`/`protocol_name`, which only exist from
+  v5.** The classic consumer group's `SyncGroup` filled both fields on every join, so
+  a broker negotiating v4 or lower (before 2.5) rejected the request and no member
+  could complete a rebalance. Both fields are ignorable and are now dropped below v5.
+
 - **`list_consumer_groups` reported share, streams, and connect groups as consumer
   groups.** The broker's `ListGroups` response carries every group it coordinates
   whatever its protocol, and Java's `listConsumerGroups` filters that response down
