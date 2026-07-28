@@ -2830,7 +2830,7 @@ fn add_partitions_response_reports_top_level_and_partition_errors() {
         ..AddPartitionsToTxnResponseData::default()
     };
     assert!(matches!(
-        ProducerDispatcher::check_add_partitions_response(response, &route),
+        ProducerDispatcher::check_add_partitions_response(response, "txn-a", &route),
         Err(ProducerError::Transaction {
             operation: "add_partitions_to_txn",
             error: ErrorCode::CoordinatorNotAvailable
@@ -2839,7 +2839,7 @@ fn add_partitions_response_reports_top_level_and_partition_errors() {
 
     let response = add_partitions_response("orders", 0, ErrorCode::InvalidTxnState);
     assert!(matches!(
-        ProducerDispatcher::check_add_partitions_response(response, &route),
+        ProducerDispatcher::check_add_partitions_response(response, "txn-a", &route),
         Err(ProducerError::Transaction {
             operation: "add_partitions_to_txn",
             error: ErrorCode::InvalidTxnState
@@ -2853,14 +2853,58 @@ fn add_partitions_response_ignores_unmatched_topics_and_partitions() {
 
     ProducerDispatcher::check_add_partitions_response(
         add_partitions_response("payments", 0, ErrorCode::InvalidTxnState),
+        "txn-a",
         &route,
     )
     .expect("unmatched topic is not this route's failure");
     ProducerDispatcher::check_add_partitions_response(
         add_partitions_response("orders", 1, ErrorCode::InvalidTxnState),
+        "txn-a",
         &route,
     )
     .expect("unmatched partition is not this route's failure");
+}
+
+/// v0-3 answer with the one transaction's topics in the top-level
+/// `results_by_topic_v3_and_below` and leave the batched array empty, so the
+/// transaction that was asked about is the transaction that was answered.
+#[test]
+fn add_partitions_response_reads_the_flat_pre_batched_shape() {
+    let route = route("orders", 0);
+    let response = AddPartitionsToTxnResponseData {
+        results_by_topic_v3_and_below: vec![AddPartitionsToTxnTopicResult {
+            name: KafkaString::from("orders".to_owned()),
+            results_by_partition: vec![AddPartitionsToTxnPartitionResult {
+                partition_index: 0,
+                partition_error_code: i16::from(ErrorCode::InvalidTxnState),
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            _unknown_tagged_fields: Vec::new(),
+        }],
+        ..AddPartitionsToTxnResponseData::default()
+    };
+
+    assert!(matches!(
+        ProducerDispatcher::check_add_partitions_response(response, "txn-a", &route),
+        Err(ProducerError::Transaction {
+            operation: "add_partitions_to_txn",
+            error: ErrorCode::InvalidTxnState
+        })
+    ));
+}
+
+/// A batched answer that names a different transaction is not this
+/// transaction's result, and must not be read as one.
+#[test]
+fn add_partitions_response_ignores_another_transactions_results() {
+    let route = route("orders", 0);
+
+    ProducerDispatcher::check_add_partitions_response(
+        add_partitions_response("orders", 0, ErrorCode::InvalidTxnState),
+        "txn-b",
+        &route,
+    )
+    .expect("another transaction's results are not this transaction's failure");
 }
 
 #[test]

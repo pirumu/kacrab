@@ -192,8 +192,8 @@ release date and links to relevant pull requests or issues.
 
   This is one instance of a class — a field that only exists from some version being
   filled before the negotiated version is known — and every request-build site was
-  audited against the generated per-version encoders for the same mistake. The two
-  further instances it turned up are fixed below; the rest either set the field only
+  audited against the generated per-version encoders for the same mistake. Every
+  instance that audit turned up is fixed below; the rest either set the field only
   where Kafka's own client also raises `UnsupportedVersionException`, or are already
   version-aware.
 
@@ -215,6 +215,51 @@ release date and links to relevant pull requests or issues.
   negotiated `Fetch` version, so a broker older than 2.4 rejected every fetch
   instead of simply serving from the leader. The field is ignorable and is now
   dropped below v11, degrading rack-aware fetching to leader fetching.
+
+- **Five more requests were always sent in their newest shape, each pinning a
+  different broker floor.** `FindCoordinator` above was one API that changed shape
+  between versions rather than merely gaining a field; the class audit that followed
+  it found five more, and every one of them was built in the new shape while the
+  version actually sent is negotiated per broker. Each was rejected by the encoder —
+  `UnsupportedFieldVersion` — before a single byte reached the broker, so the failure
+  was a hard floor, not a degradation:
+
+  - **`OffsetFetch`** filled the `groups` array that arrived in v8, so
+    `Admin::list_consumer_group_offsets` failed on anything older than **broker 3.0** —
+    the one call that pinned the whole admin surface there. It now sends the flat
+    `group_id`/`topics` pair up to v7 (Java's `OffsetFetchRequest.Builder.maybeDowngrade`),
+    drops `require_stable` below v7 as Kafka's own admin client does, refuses an
+    "all topics" fetch below v2 where the encoder would otherwise turn "every topic"
+    into an empty array, and reads the flat v1-7 response as well as the v8+ one.
+    Its topic key is now version-chosen too: v10 (KIP-1140) keys topics by id and
+    refuses a name, everything below keys by name and refuses an id, and picking one
+    at build time was already wrong for the v8/v9 brokers the admin meets in practice.
+  - **`AddPartitionsToTxn`** filled the `transactions` array that arrived in v4, so no
+    transaction could add a partition below **broker 3.6**. It now sends the inline
+    `v3AndBelow` fields up to v3 (Java's `AddPartitionsToTxnRequest.normalizeRequest`
+    in reverse) and reads the flat `results_by_topic_v3_and_below` response too.
+  - **`LeaveGroup`** filled the `members` array that arrived in v3, so
+    `Admin::remove_members_from_consumer_group` failed below **broker 2.4**. It now
+    sends the singular `member_id` up to v2 and synthesizes that member's result from
+    the top-level error code, which is where a v0-2 coordinator puts it. Evicting a
+    member by `group.instance.id` is still refused below v3 — static membership is
+    the very thing v3 introduced, so there is nothing to downgrade to.
+  - **`DeleteTopics`** filled the `topics` objects that arrived in v6, so
+    `Admin::delete_topics` failed below **broker 3.0**. It now sends the flat
+    `topic_names` array up to v5, and still refuses to delete a topic named only by
+    its id there.
+  - **`ListConfigResources`** filled the `resource_types` filter that arrived in v1,
+    so `list_config_resources` and `list_client_metrics_resources` failed on
+    **brokers 3.7 through 4.0**, which advertise the API at v0 only. The filter is
+    now dropped for the one request v0 can express — client metrics, which is all v0
+    lists — and refused for any other, mirroring Java's
+    `ListConfigResourcesRequest.Builder`.
+
+  In every case a request that genuinely cannot be expressed in the older shape —
+  several groups, several transactions, several members, a topic id, a filter naming
+  something v0 cannot list — is still refused rather than silently sent with the
+  parts the wire cannot carry dropped, matching where Kafka's own client raises
+  `UnsupportedVersionException`.
 
 - **The generated encoder rejected every ignorable field below its version instead
   of dropping it.** Kafka's schemas mark a field `"ignorable": true` when a broker

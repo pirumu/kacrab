@@ -16,11 +16,12 @@ use kacrab_protocol::{
     compression::Compression,
     generated::{
         AddOffsetsToTxnRequestData, AddOffsetsToTxnResponseData, AddPartitionsToTxnRequestData,
-        AddPartitionsToTxnResponseData, AddPartitionsToTxnTopic, AddPartitionsToTxnTransaction,
-        ApiKey, EndTxnRequestData, EndTxnResponseData, ErrorCode, FindCoordinatorRequestData,
-        FindCoordinatorResponseData, InitProducerIdRequestData, InitProducerIdResponseData,
-        PartitionProduceData, ProduceRequestData, TopicProduceData, TxnOffsetCommitRequestData,
-        TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic, TxnOffsetCommitResponseData,
+        AddPartitionsToTxnResponseData, AddPartitionsToTxnTopic, AddPartitionsToTxnTopicResult,
+        AddPartitionsToTxnTransaction, ApiKey, EndTxnRequestData, EndTxnResponseData, ErrorCode,
+        FindCoordinatorRequestData, FindCoordinatorResponseData, InitProducerIdRequestData,
+        InitProducerIdResponseData, PartitionProduceData, ProduceRequestData, TopicProduceData,
+        TxnOffsetCommitRequestData, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+        TxnOffsetCommitResponseData,
     },
     version::client_api_info,
 };
@@ -3165,7 +3166,7 @@ impl ProducerDispatcher {
                     &request,
                 )
                 .await?;
-            match Self::check_add_partitions_response(response, route) {
+            match Self::check_add_partitions_response(response, transactional_id, route) {
                 Ok(()) => break,
                 Err(ProducerError::Transaction {
                     error: transaction_error,
@@ -3228,6 +3229,7 @@ impl ProducerDispatcher {
 
     fn check_add_partitions_response(
         response: AddPartitionsToTxnResponseData,
+        transactional_id: &str,
         route: &ProduceRoute,
     ) -> Result<()> {
         let top_level_error = ErrorCode::from(response.error_code);
@@ -3237,24 +3239,24 @@ impl ProducerDispatcher {
                 error: top_level_error,
             });
         }
-        for transaction in response.results_by_transaction {
-            for topic in transaction.topic_results {
-                if topic.name.to_string() != route.topic {
+        let topic_results: Vec<AddPartitionsToTxnTopicResult> =
+            add_partitions_to_txn_topic_results(response, transactional_id);
+        for topic in topic_results {
+            if topic.name.to_string() != route.topic {
+                continue;
+            }
+            for partition in topic.results_by_partition {
+                if partition.partition_index != route.partition {
                     continue;
                 }
-                for partition in topic.results_by_partition {
-                    if partition.partition_index != route.partition {
-                        continue;
-                    }
-                    let error = ErrorCode::from(partition.partition_error_code);
-                    if error.is_error() {
-                        return Err(ProducerError::Transaction {
-                            operation: "add_partitions_to_txn",
-                            error,
-                        });
-                    }
-                    return Ok(());
+                let error = ErrorCode::from(partition.partition_error_code);
+                if error.is_error() {
+                    return Err(ProducerError::Transaction {
+                        operation: "add_partitions_to_txn",
+                        error,
+                    });
                 }
+                return Ok(());
             }
         }
         Ok(())

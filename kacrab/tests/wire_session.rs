@@ -19,13 +19,19 @@ use kacrab_protocol::generated::{
     ConsumerGroupHeartbeatResponseData, ErrorCode, JoinGroupResponseData,
 };
 use kacrab_protocol::{
-    KafkaString, frame,
+    KafkaString, KafkaUuid, frame,
     generated::{
-        ApiKey, ApiVersion, ApiVersionsResponseData, FindCoordinatorRequestData,
-        FindCoordinatorResponseData, MetadataResponseBroker, MetadataResponseData,
-        MetadataResponsePartition, MetadataResponseTopic, ProduceRequestData, ProduceResponseData,
-        RequestHeaderData, ResponseHeaderData, SaslAuthenticateRequestData,
-        SaslAuthenticateResponseData, SaslHandshakeRequestData, SaslHandshakeResponseData,
+        ApiKey, ApiVersion, ApiVersionsResponseData, DeletableTopicResult, DeleteTopicState,
+        DeleteTopicsRequestData, DeleteTopicsResponseData, FindCoordinatorRequestData,
+        FindCoordinatorResponseData, LeaveGroupRequestData, LeaveGroupResponseData,
+        ListConfigResourcesRequestData, ListConfigResourcesResponseData, MetadataResponseBroker,
+        MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
+        OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
+        OffsetFetchResponseData, OffsetFetchResponsePartition, OffsetFetchResponseTopic,
+        ProduceRequestData, ProduceResponseData, RequestHeaderData, ResponseHeaderData,
+        SaslAuthenticateRequestData, SaslAuthenticateResponseData, SaslHandshakeRequestData,
+        SaslHandshakeResponseData, leave_group_request::MemberIdentity,
+        list_config_resources_response::ConfigResource as WireConfigResource,
     },
     version::{request_header_version, response_header_version},
 };
@@ -267,6 +273,364 @@ async fn wire_client_sends_singular_find_coordinator_key_to_pre_batched_broker()
     assert_eq!(response.node_id, 9);
     assert_eq!(response.port, 9092);
     assert!(response.coordinators.is_empty());
+    assert_eq!(broker.join().await, 2);
+}
+
+/// `OffsetFetch` only grew the batched `groups` array in v8 (broker 3.0). A
+/// broker that negotiates v7 or lower must be sent the flat
+/// `group_id`/`topics` form instead — the admin client passes its client-side
+/// ceiling (v10), so the request has to be rewritten for the version the
+/// connection actually negotiated, or the encoder rejects it and
+/// `list_consumer_group_offsets` dies on every broker older than 3.0.
+#[tokio::test]
+async fn wire_client_sends_flat_offset_fetch_group_to_pre_batched_broker() {
+    let broker = MockBroker::serve_many(vec![
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![
+                    ApiVersion {
+                        api_key: ApiKey::ApiVersions as i16,
+                        min_version: 0,
+                        max_version: 4,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                    ApiVersion {
+                        api_key: ApiKey::OffsetFetch as i16,
+                        min_version: 1,
+                        max_version: 7,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                ..ApiVersionsResponseData::default()
+            };
+            response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+        }),
+        Box::new(|mut request| {
+            let header_version = request_header_version(ApiKey::OffsetFetch as i16, 7);
+            let header = RequestHeaderData::read(&mut request, header_version)
+                .expect("offset fetch request header should use negotiated version");
+            assert_eq!(header.request_api_version, 7);
+            let fetch = OffsetFetchRequestData::read(&mut request, 7)
+                .expect("offset fetch body should use negotiated version");
+            assert_eq!(fetch.group_id, KafkaString::from("group-a".to_owned()));
+            assert!(fetch.groups.is_empty());
+            assert!(fetch.require_stable);
+            let topics = fetch.topics.expect("flat topics");
+            assert_eq!(topics.len(), 1);
+            assert_eq!(topics[0].name, KafkaString::from("orders".to_owned()));
+            assert_eq!(topics[0].partition_indexes, vec![3]);
+            let response = OffsetFetchResponseData {
+                topics: vec![OffsetFetchResponseTopic {
+                    name: KafkaString::from("orders".to_owned()),
+                    partitions: vec![OffsetFetchResponsePartition {
+                        partition_index: 3,
+                        committed_offset: 42,
+                        committed_leader_epoch: 7,
+                        metadata: Some(KafkaString::from("meta".to_owned())),
+                        error_code: 0,
+                        _unknown_tagged_fields: Vec::new(),
+                    }],
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                ..OffsetFetchResponseData::default()
+            };
+            response_frame(ApiKey::OffsetFetch, 7, header.correlation_id, &response)
+        }),
+    ])
+    .await;
+    let client = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(7, broker.addr())],
+    );
+    let request = OffsetFetchRequestData {
+        groups: vec![OffsetFetchRequestGroup {
+            group_id: KafkaString::from("group-a".to_owned()),
+            member_id: None,
+            member_epoch: -1,
+            topics: Some(vec![OffsetFetchRequestTopics {
+                name: KafkaString::from("orders".to_owned()),
+                topic_id: KafkaUuid::ZERO,
+                partition_indexes: vec![3],
+                _unknown_tagged_fields: Vec::new(),
+            }]),
+            _unknown_tagged_fields: Vec::new(),
+        }],
+        require_stable: true,
+        ..OffsetFetchRequestData::default()
+    };
+
+    let response: OffsetFetchResponseData = client
+        .send_to_broker(
+            7,
+            ApiKey::OffsetFetch,
+            kacrab_protocol::version::client_api_info(ApiKey::OffsetFetch).max_version,
+            &request,
+        )
+        .await
+        .unwrap();
+
+    assert!(response.groups.is_empty());
+    assert_eq!(response.topics.len(), 1);
+    assert_eq!(response.topics[0].partitions[0].committed_offset, 42);
+    assert_eq!(broker.join().await, 2);
+}
+
+/// `LeaveGroup` only grew the batched `members` array in v3 (KIP-345, broker
+/// 2.4). A broker that negotiates v2 or lower must be sent the singular
+/// `member_id` instead — the admin client passes its client-side ceiling (v5),
+/// so the request has to be rewritten for the version the connection actually
+/// negotiated, or the encoder rejects it and
+/// `remove_members_from_consumer_group` dies on every broker older than 2.4.
+#[tokio::test]
+async fn wire_client_sends_singular_leave_group_member_to_pre_batched_broker() {
+    let broker = MockBroker::serve_many(vec![
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![
+                    ApiVersion {
+                        api_key: ApiKey::ApiVersions as i16,
+                        min_version: 0,
+                        max_version: 4,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                    ApiVersion {
+                        api_key: ApiKey::LeaveGroup as i16,
+                        min_version: 0,
+                        max_version: 2,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                ..ApiVersionsResponseData::default()
+            };
+            response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+        }),
+        Box::new(|mut request| {
+            let header_version = request_header_version(ApiKey::LeaveGroup as i16, 2);
+            let header = RequestHeaderData::read(&mut request, header_version)
+                .expect("leave group request header should use negotiated version");
+            assert_eq!(header.request_api_version, 2);
+            let leave = LeaveGroupRequestData::read(&mut request, 2)
+                .expect("leave group body should use negotiated version");
+            assert_eq!(leave.group_id, KafkaString::from("group-a".to_owned()));
+            assert_eq!(leave.member_id, KafkaString::from("member-1".to_owned()));
+            assert!(leave.members.is_empty());
+            // v0-2 has no per-member array: the coordinator folds the one
+            // member's error into the top-level code.
+            let response = LeaveGroupResponseData {
+                error_code: 25,
+                ..LeaveGroupResponseData::default()
+            };
+            response_frame(ApiKey::LeaveGroup, 2, header.correlation_id, &response)
+        }),
+    ])
+    .await;
+    let client = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(7, broker.addr())],
+    );
+    let request = LeaveGroupRequestData {
+        group_id: KafkaString::from("group-a".to_owned()),
+        members: vec![MemberIdentity {
+            member_id: KafkaString::from("member-1".to_owned()),
+            group_instance_id: None,
+            reason: None,
+            _unknown_tagged_fields: Vec::new(),
+        }],
+        ..LeaveGroupRequestData::default()
+    };
+
+    let response: LeaveGroupResponseData = client
+        .send_to_broker(
+            7,
+            ApiKey::LeaveGroup,
+            kacrab_protocol::version::client_api_info(ApiKey::LeaveGroup).max_version,
+            &request,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.error_code, 25);
+    assert!(response.members.is_empty());
+    assert_eq!(broker.join().await, 2);
+}
+
+/// `DeleteTopics` only grew the `topics` objects — the shape that can name a
+/// topic by id — in v6 (KIP-516, broker 3.0). A broker that negotiates v5 or
+/// lower must be sent the flat `topic_names` array instead, or the encoder
+/// rejects the request and `delete_topics` dies on every broker older than 3.0.
+#[tokio::test]
+async fn wire_client_sends_flat_delete_topic_names_to_pre_topic_id_broker() {
+    let broker = MockBroker::serve_many(vec![
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![
+                    ApiVersion {
+                        api_key: ApiKey::ApiVersions as i16,
+                        min_version: 0,
+                        max_version: 4,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                    ApiVersion {
+                        api_key: ApiKey::DeleteTopics as i16,
+                        min_version: 1,
+                        max_version: 5,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                ..ApiVersionsResponseData::default()
+            };
+            response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+        }),
+        Box::new(|mut request| {
+            let header_version = request_header_version(ApiKey::DeleteTopics as i16, 5);
+            let header = RequestHeaderData::read(&mut request, header_version)
+                .expect("delete topics request header should use negotiated version");
+            assert_eq!(header.request_api_version, 5);
+            let delete = DeleteTopicsRequestData::read(&mut request, 5)
+                .expect("delete topics body should use negotiated version");
+            assert!(delete.topics.is_empty());
+            assert_eq!(
+                delete.topic_names,
+                vec![KafkaString::from("orders".to_owned())]
+            );
+            assert_eq!(delete.timeout_ms, 30_000);
+            // v0-5 key the results by name only; there is no topic id to give.
+            let response = DeleteTopicsResponseData {
+                responses: vec![DeletableTopicResult {
+                    name: Some(KafkaString::from("orders".to_owned())),
+                    topic_id: KafkaUuid::ZERO,
+                    error_code: 0,
+                    error_message: None,
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                ..DeleteTopicsResponseData::default()
+            };
+            response_frame(ApiKey::DeleteTopics, 5, header.correlation_id, &response)
+        }),
+    ])
+    .await;
+    let client = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(7, broker.addr())],
+    );
+    let request = DeleteTopicsRequestData {
+        topics: vec![DeleteTopicState {
+            name: Some(KafkaString::from("orders".to_owned())),
+            topic_id: KafkaUuid::ZERO,
+            _unknown_tagged_fields: Vec::new(),
+        }],
+        timeout_ms: 30_000,
+        ..DeleteTopicsRequestData::default()
+    };
+
+    let response: DeleteTopicsResponseData = client
+        .send_to_broker(
+            7,
+            ApiKey::DeleteTopics,
+            kacrab_protocol::version::client_api_info(ApiKey::DeleteTopics).max_version,
+            &request,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.responses[0].name,
+        Some(KafkaString::from("orders".to_owned()))
+    );
+    assert_eq!(response.responses[0].error_code, 0);
+    assert_eq!(broker.join().await, 2);
+}
+
+/// `ListConfigResources` only grew the `resource_types` filter in v1; v0 has no
+/// such field and means client-metrics resources implicitly. Brokers 3.7-4.0
+/// advertise the API at v0 only, so a client that always fills the filter is
+/// rejected there — and `list_client_metrics_resources` is exactly the call
+/// those brokers can serve.
+#[tokio::test]
+async fn wire_client_drops_list_config_resource_types_for_a_v0_broker() {
+    let broker = MockBroker::serve_many(vec![
+        Box::new(|mut request| {
+            let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+            let response = ApiVersionsResponseData {
+                error_code: 0,
+                api_keys: vec![
+                    ApiVersion {
+                        api_key: ApiKey::ApiVersions as i16,
+                        min_version: 0,
+                        max_version: 4,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                    ApiVersion {
+                        api_key: ApiKey::ListConfigResources as i16,
+                        min_version: 0,
+                        max_version: 0,
+                        _unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                ..ApiVersionsResponseData::default()
+            };
+            response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+        }),
+        Box::new(|mut request| {
+            let header_version = request_header_version(ApiKey::ListConfigResources as i16, 0);
+            let header = RequestHeaderData::read(&mut request, header_version)
+                .expect("list config resources header should use negotiated version");
+            assert_eq!(header.request_api_version, 0);
+            let list = ListConfigResourcesRequestData::read(&mut request, 0)
+                .expect("list config resources body should use negotiated version");
+            assert!(list.resource_types.is_empty());
+            // v0 has no per-resource type either; it defaults to client metrics.
+            let response = ListConfigResourcesResponseData {
+                config_resources: vec![WireConfigResource {
+                    resource_name: KafkaString::from("subscription-1".to_owned()),
+                    resource_type: 16,
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                ..ListConfigResourcesResponseData::default()
+            };
+            response_frame(
+                ApiKey::ListConfigResources,
+                0,
+                header.correlation_id,
+                &response,
+            )
+        }),
+    ])
+    .await;
+    let client = WireClient::connect_with_brokers(
+        ConnectionConfig::default(),
+        "kacrab-test",
+        [BrokerEndpoint::new(7, broker.addr())],
+    );
+    let request = ListConfigResourcesRequestData {
+        resource_types: vec![16],
+        _unknown_tagged_fields: Vec::new(),
+    };
+
+    let response: ListConfigResourcesResponseData = client
+        .send_to_broker(
+            7,
+            ApiKey::ListConfigResources,
+            kacrab_protocol::version::client_api_info(ApiKey::ListConfigResources).max_version,
+            &request,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.config_resources[0].resource_name.as_str(),
+        "subscription-1"
+    );
+    assert_eq!(response.config_resources[0].resource_type, 16);
     assert_eq!(broker.join().await, 2);
 }
 
@@ -2608,6 +2972,31 @@ impl ApiVersions for ShareGroupHeartbeatResponseData {
     fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
         self.write(buf, version)
             .expect("share group heartbeat response");
+    }
+}
+
+impl ApiVersions for ListConfigResourcesResponseData {
+    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
+        self.write(buf, version)
+            .expect("list config resources response");
+    }
+}
+
+impl ApiVersions for DeleteTopicsResponseData {
+    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
+        self.write(buf, version).expect("delete topics response");
+    }
+}
+
+impl ApiVersions for LeaveGroupResponseData {
+    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
+        self.write(buf, version).expect("leave group response");
+    }
+}
+
+impl ApiVersions for OffsetFetchResponseData {
+    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
+        self.write(buf, version).expect("offset fetch response");
     }
 }
 

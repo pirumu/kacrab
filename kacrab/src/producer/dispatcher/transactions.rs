@@ -1,10 +1,10 @@
 use super::{
-    AddPartitionsToTxnRequestData, AddPartitionsToTxnTopic, AddPartitionsToTxnTransaction, Arc,
-    AtomicBool, ErrorCode, KafkaString, Mutex, Notify, OffsetAndMetadata, Ordering,
-    PENDING_TRANSACTION_OPERATION_MESSAGE, ProduceRoute, ProducerError, ProducerIdempotenceState,
-    ProducerIdentity, Result, StdMutex, TopicPartition, TransactionState,
-    TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic, TxnOffsetCommitResponseData,
-    is_txn_offset_commit_coordinator_error,
+    AddPartitionsToTxnRequestData, AddPartitionsToTxnResponseData, AddPartitionsToTxnTopic,
+    AddPartitionsToTxnTopicResult, AddPartitionsToTxnTransaction, Arc, AtomicBool, ErrorCode,
+    KafkaString, Mutex, Notify, OffsetAndMetadata, Ordering, PENDING_TRANSACTION_OPERATION_MESSAGE,
+    ProduceRoute, ProducerError, ProducerIdempotenceState, ProducerIdentity, Result, StdMutex,
+    TopicPartition, TransactionState, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+    TxnOffsetCommitResponseData, is_txn_offset_commit_coordinator_error,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,6 +446,36 @@ pub(crate) fn add_partitions_to_txn_request(
         }],
         ..AddPartitionsToTxnRequestData::default()
     }
+}
+
+/// Read the per-topic results answered for `transactional_id` out of either
+/// `AddPartitionsToTxn` response shape.
+///
+/// v4+ (KIP-890) answers with `results_by_transaction`, keyed by transactional
+/// id. v0-3 answers with the one transaction's topics in the top-level
+/// `results_by_topic_v3_and_below` and leaves the array empty
+/// (`add_partitions_to_txn_response.rs` only decodes `results_by_transaction`
+/// from v4), so that flat form is folded into the same entry — the v3-and-below
+/// request only ever carries one transaction, so the transaction that was asked
+/// about is the transaction that was answered.
+///
+/// v0-3 has no top-level `error_code` either; a coordinator-level failure
+/// arrives as a partition error on every partition instead, which the caller
+/// already checks (Java's `AddPartitionsToTxnRequest.getErrorResponse` builds
+/// exactly that shape below v4).
+pub(crate) fn add_partitions_to_txn_topic_results(
+    response: AddPartitionsToTxnResponseData,
+    transactional_id: &str,
+) -> Vec<AddPartitionsToTxnTopicResult> {
+    if response.results_by_transaction.is_empty() {
+        return response.results_by_topic_v3_and_below;
+    }
+    response
+        .results_by_transaction
+        .into_iter()
+        .find(|result| result.transactional_id.as_str() == transactional_id)
+        .map(|result| result.topic_results)
+        .unwrap_or_default()
 }
 
 pub(crate) fn txn_offset_commit_topics(

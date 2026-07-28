@@ -7,29 +7,29 @@ use kacrab_protocol::{
     KafkaString, KafkaUuid, Result,
     generated::{
         AddOffsetsToTxnRequestData, AddOffsetsToTxnResponseData, AddPartitionsToTxnRequestData,
-        AddPartitionsToTxnResponseData, AddRaftVoterRequestData, AddRaftVoterResponseData,
-        AlterClientQuotasRequestData, AlterClientQuotasResponseData, AlterConfigsRequestData,
-        AlterConfigsResponseData, AlterPartitionReassignmentsRequestData,
+        AddPartitionsToTxnResponseData, AddPartitionsToTxnTransaction, AddRaftVoterRequestData,
+        AddRaftVoterResponseData, AlterClientQuotasRequestData, AlterClientQuotasResponseData,
+        AlterConfigsRequestData, AlterConfigsResponseData, AlterPartitionReassignmentsRequestData,
         AlterPartitionReassignmentsResponseData, AlterReplicaLogDirsRequestData,
         AlterReplicaLogDirsResponseData, AlterShareGroupOffsetsRequestData,
         AlterShareGroupOffsetsResponseData, AlterUserScramCredentialsRequestData,
-        AlterUserScramCredentialsResponseData, ApiVersionsRequestData, ApiVersionsResponseData,
-        ConsumerGroupDescribeRequestData, ConsumerGroupDescribeResponseData,
-        ConsumerGroupHeartbeatRequestData, ConsumerGroupHeartbeatResponseData,
-        CreateAclsRequestData, CreateAclsResponseData, CreateDelegationTokenRequestData,
-        CreateDelegationTokenResponseData, CreatePartitionsRequestData,
-        CreatePartitionsResponseData, CreateTopicsRequestData, CreateTopicsResponseData,
-        DeleteAclsRequestData, DeleteAclsResponseData, DeleteGroupsRequestData,
-        DeleteGroupsResponseData, DeleteRecordsRequestData, DeleteRecordsResponseData,
-        DeleteShareGroupOffsetsRequestData, DeleteShareGroupOffsetsResponseData,
-        DeleteTopicsRequestData, DeleteTopicsResponseData, DescribeAclsRequestData,
-        DescribeAclsResponseData, DescribeClientQuotasRequestData,
-        DescribeClientQuotasResponseData, DescribeClusterRequestData, DescribeClusterResponseData,
-        DescribeConfigsRequestData, DescribeConfigsResponseData,
-        DescribeDelegationTokenRequestData, DescribeDelegationTokenResponseData,
-        DescribeGroupsRequestData, DescribeGroupsResponseData, DescribeLogDirsRequestData,
-        DescribeLogDirsResponseData, DescribeProducersRequestData, DescribeProducersResponseData,
-        DescribeQuorumRequestData, DescribeQuorumResponseData,
+        AlterUserScramCredentialsResponseData, ApiKey, ApiVersionsRequestData,
+        ApiVersionsResponseData, ConsumerGroupDescribeRequestData,
+        ConsumerGroupDescribeResponseData, ConsumerGroupHeartbeatRequestData,
+        ConsumerGroupHeartbeatResponseData, CreateAclsRequestData, CreateAclsResponseData,
+        CreateDelegationTokenRequestData, CreateDelegationTokenResponseData,
+        CreatePartitionsRequestData, CreatePartitionsResponseData, CreateTopicsRequestData,
+        CreateTopicsResponseData, DeleteAclsRequestData, DeleteAclsResponseData,
+        DeleteGroupsRequestData, DeleteGroupsResponseData, DeleteRecordsRequestData,
+        DeleteRecordsResponseData, DeleteShareGroupOffsetsRequestData,
+        DeleteShareGroupOffsetsResponseData, DeleteTopicState, DeleteTopicsRequestData,
+        DeleteTopicsResponseData, DescribeAclsRequestData, DescribeAclsResponseData,
+        DescribeClientQuotasRequestData, DescribeClientQuotasResponseData,
+        DescribeClusterRequestData, DescribeClusterResponseData, DescribeConfigsRequestData,
+        DescribeConfigsResponseData, DescribeDelegationTokenRequestData,
+        DescribeDelegationTokenResponseData, DescribeGroupsRequestData, DescribeGroupsResponseData,
+        DescribeLogDirsRequestData, DescribeLogDirsResponseData, DescribeProducersRequestData,
+        DescribeProducersResponseData, DescribeQuorumRequestData, DescribeQuorumResponseData,
         DescribeShareGroupOffsetsRequestData, DescribeShareGroupOffsetsResponseData,
         DescribeTransactionsRequestData, DescribeTransactionsResponseData,
         DescribeUserScramCredentialsRequestData, DescribeUserScramCredentialsResponseData,
@@ -46,6 +46,7 @@ use kacrab_protocol::{
         ListTransactionsRequestData, ListTransactionsResponseData, MetadataRequestData,
         MetadataResponseData, OffsetCommitRequestData, OffsetCommitResponseData,
         OffsetDeleteRequestData, OffsetDeleteResponseData, OffsetFetchRequestData,
+        OffsetFetchRequestGroup, OffsetFetchRequestTopic, OffsetFetchRequestTopics,
         OffsetFetchResponseData, OffsetForLeaderEpochRequestData, OffsetForLeaderEpochResponseData,
         ProduceRequestData, ProduceResponseData, PushTelemetryRequestData,
         PushTelemetryResponseData, RemoveRaftVoterRequestData, RemoveRaftVoterResponseData,
@@ -57,7 +58,9 @@ use kacrab_protocol::{
         SyncGroupResponseData, TxnOffsetCommitRequestData, TxnOffsetCommitResponseData,
         UnregisterBrokerRequestData, UnregisterBrokerResponseData, UpdateFeaturesRequestData,
         UpdateFeaturesResponseData, WriteTxnMarkersRequestData, WriteTxnMarkersResponseData,
+        leave_group_request::MemberIdentity,
     },
+    version::UnsupportedFieldVersion,
 };
 
 /// A generated Kafka request body that can be encoded by the wire client.
@@ -107,7 +110,6 @@ impl_passthrough_message! {
     ApiVersionsRequestData => ApiVersionsResponseData,
     MetadataRequestData => MetadataResponseData,
     InitProducerIdRequestData => InitProducerIdResponseData,
-    AddPartitionsToTxnRequestData => AddPartitionsToTxnResponseData,
     AddOffsetsToTxnRequestData => AddOffsetsToTxnResponseData,
     TxnOffsetCommitRequestData => TxnOffsetCommitResponseData,
     EndTxnRequestData => EndTxnResponseData,
@@ -139,6 +141,126 @@ impl ResponseMessage for FindCoordinatorResponseData {
     }
 }
 
+// `AddPartitionsToTxn` is another two-shape request: v0-3 carry the one
+// transaction inline in the `v3_and_below_*` fields, v4+ (KIP-890 verification)
+// the batched `transactions` array, and the generated encoder rejects whichever
+// one its version does not carry. The request is rewritten into the negotiated
+// version's form here, mirroring Java's `AddPartitionsToTxnRequest`
+// (`Builder.forClient` builds the `v3AndBelow*` shape, `normalizeRequest` lifts
+// it into a singleton `transactions` array). The response is pass-through —
+// callers read both shapes through
+// `producer::dispatcher::transactions::add_partitions_to_txn_topic_results`.
+impl RequestMessage for AddPartitionsToTxnRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_add_partitions_to_txn_request(self, version).write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_add_partitions_to_txn_request(self, version).encoded_len(version)
+    }
+}
+
+impl ResponseMessage for AddPartitionsToTxnResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
+// `OffsetFetch` is the same two-shape story as `FindCoordinator`: v1-7 carry the
+// flat `group_id`/`topics` pair, v8+ the batched `groups` array, and the
+// generated encoder rejects whichever one its version does not carry. The
+// request is rewritten into the negotiated version's form here, mirroring Java's
+// `OffsetFetchRequest.Builder.maybeDowngrade`. The response is pass-through —
+// callers read both shapes (see `Admin::list_consumer_group_offsets`).
+impl RequestMessage for OffsetFetchRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_offset_fetch_request(self, version)?.write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_offset_fetch_request(self, version)?.encoded_len(version)
+    }
+}
+
+impl ResponseMessage for OffsetFetchResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
+// `ListConfigResources` grew its `resource_types` filter in v1. v0 has no such
+// field: it lists client-metrics resources and nothing else, implicitly. Brokers
+// 3.7 through 4.0 advertise the API at v0 only, so the filter is dropped for the
+// one request v0 can express and refused for the rest, mirroring Java's
+// `ListConfigResourcesRequest.Builder.build`. The response is pass-through —
+// its per-resource `resource_type` defaults to client metrics at v0.
+impl RequestMessage for ListConfigResourcesRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_list_config_resources_request(self, version)?.write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_list_config_resources_request(self, version)?.encoded_len(version)
+    }
+}
+
+impl ResponseMessage for ListConfigResourcesResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
+// `DeleteTopics` is two-shape as well: v1-5 carry the flat `topic_names` array,
+// v6+ (KIP-516) the `topics` objects that can name a topic by id instead, and
+// the generated encoder rejects whichever one its version does not carry. The
+// request is rewritten into the negotiated version's form here, mirroring Java's
+// `DeleteTopicsRequest.Builder.build` / `topics()`. The response is
+// pass-through: `DeletableTopicResult` carries the topic name at every version,
+// so the caller keys results by name in both shapes.
+impl RequestMessage for DeleteTopicsRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_delete_topics_request(self, version)?.write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_delete_topics_request(self, version)?.encoded_len(version)
+    }
+}
+
+impl ResponseMessage for DeleteTopicsResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
+// `LeaveGroup` is a two-shape request too: v0-2 carry a singular `member_id`,
+// v3+ (KIP-345 static membership) the batched `members` array, and the generated
+// encoder rejects whichever one its version does not carry. The request is
+// rewritten into the negotiated version's form here, mirroring Java's
+// `LeaveGroupRequest.Builder.build` / `normalizedData`. The response is
+// pass-through — callers read both shapes through
+// `admin::client::leave_group_member_results`.
+impl RequestMessage for LeaveGroupRequestData {
+    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
+        normalize_leave_group_request(self, version).write(buf, version)?;
+        Ok(())
+    }
+
+    fn encoded_len(&self, version: i16) -> Result<usize> {
+        normalize_leave_group_request(self, version).encoded_len(version)
+    }
+}
+
+impl ResponseMessage for LeaveGroupResponseData {
+    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
+        Self::read(buf, version)
+    }
+}
+
 // Produce is not a straight pass-through: depending on the negotiated version
 // the wire form carries either the topic name (v < 13) or the topic id (v >= 13),
 // so the unused field is cleared before the generated encoder runs (see
@@ -164,7 +286,6 @@ impl ResponseMessage for ProduceResponseData {
 // the macro above generates their wire adapters.
 impl_passthrough_message! {
     CreateTopicsRequestData => CreateTopicsResponseData,
-    DeleteTopicsRequestData => DeleteTopicsResponseData,
     CreatePartitionsRequestData => CreatePartitionsResponseData,
     DescribeClusterRequestData => DescribeClusterResponseData,
     DescribeConfigsRequestData => DescribeConfigsResponseData,
@@ -172,7 +293,6 @@ impl_passthrough_message! {
     ListGroupsRequestData => ListGroupsResponseData,
     DescribeGroupsRequestData => DescribeGroupsResponseData,
     DeleteGroupsRequestData => DeleteGroupsResponseData,
-    OffsetFetchRequestData => OffsetFetchResponseData,
     OffsetCommitRequestData => OffsetCommitResponseData,
     OffsetDeleteRequestData => OffsetDeleteResponseData,
     IncrementalAlterConfigsRequestData => IncrementalAlterConfigsResponseData,
@@ -199,9 +319,7 @@ impl_passthrough_message! {
     DescribeDelegationTokenRequestData => DescribeDelegationTokenResponseData,
     AlterReplicaLogDirsRequestData => AlterReplicaLogDirsResponseData,
     WriteTxnMarkersRequestData => WriteTxnMarkersResponseData,
-    LeaveGroupRequestData => LeaveGroupResponseData,
     ConsumerGroupDescribeRequestData => ConsumerGroupDescribeResponseData,
-    ListConfigResourcesRequestData => ListConfigResourcesResponseData,
     DescribeQuorumRequestData => DescribeQuorumResponseData,
     AddRaftVoterRequestData => AddRaftVoterResponseData,
     RemoveRaftVoterRequestData => RemoveRaftVoterResponseData,
@@ -277,6 +395,359 @@ fn normalize_find_coordinator_request(
     Cow::Owned(normalized)
 }
 
+/// First `AddPartitionsToTxn` version carrying the batched `transactions` array
+/// instead of the inline `v3_and_below_*` fields (KIP-890, broker 3.6).
+const ADD_PARTITIONS_TO_TXN_BATCHED_MIN_VERSION: i16 = 4;
+
+/// Rewrite an `AddPartitionsToTxn` request into the transaction form the
+/// negotiated `version` speaks: the inline `v3_and_below_*` fields up to v3, the
+/// batched `transactions` array from v4 on.
+///
+/// The two shapes are exactly the two Java builds — `Builder.forClient` fills
+/// `setV3AndBelow*` and caps itself at v3, `Builder.forBroker` fills
+/// `transactions` — and `AddPartitionsToTxnRequest.normalizeRequest` /
+/// `singletonTransaction` is the same field-for-field mapping between them that
+/// runs here.
+///
+/// A request naming several transactions cannot be expressed below v4, so it is
+/// left untouched for the generated encoder to reject rather than silently
+/// dropping the transactions it cannot carry; only a broker ever batches them,
+/// and a broker never talks to a v3 peer. `verify_only` has no v3-and-below
+/// field either and is dropped with the rest of the array — a coordinator that
+/// predates KIP-890 has no verification path to ask for, and the producer never
+/// sets it.
+fn normalize_add_partitions_to_txn_request(
+    request: &AddPartitionsToTxnRequestData,
+    version: i16,
+) -> Cow<'_, AddPartitionsToTxnRequestData> {
+    if version >= ADD_PARTITIONS_TO_TXN_BATCHED_MIN_VERSION {
+        if request.v3_and_below_transactional_id == KafkaString::default() {
+            return Cow::Borrowed(request);
+        }
+        let mut normalized = request.clone();
+        let transaction = AddPartitionsToTxnTransaction {
+            transactional_id: core::mem::take(&mut normalized.v3_and_below_transactional_id),
+            producer_id: normalized.v3_and_below_producer_id,
+            producer_epoch: normalized.v3_and_below_producer_epoch,
+            verify_only: false,
+            topics: core::mem::take(&mut normalized.v3_and_below_topics),
+            _unknown_tagged_fields: Vec::new(),
+        };
+        normalized.v3_and_below_producer_id = 0;
+        normalized.v3_and_below_producer_epoch = 0;
+        if normalized.transactions.is_empty() {
+            normalized.transactions.push(transaction);
+        }
+        return Cow::Owned(normalized);
+    }
+    let [transaction] = request.transactions.as_slice() else {
+        return Cow::Borrowed(request);
+    };
+    Cow::Owned(AddPartitionsToTxnRequestData {
+        transactions: Vec::new(),
+        v3_and_below_transactional_id: transaction.transactional_id.clone(),
+        v3_and_below_producer_id: transaction.producer_id,
+        v3_and_below_producer_epoch: transaction.producer_epoch,
+        v3_and_below_topics: transaction.topics.clone(),
+        _unknown_tagged_fields: request._unknown_tagged_fields.clone(),
+    })
+}
+
+/// First `ListConfigResources` version carrying the `resource_types` filter.
+const LIST_CONFIG_RESOURCES_RESOURCE_TYPES_MIN_VERSION: i16 = 1;
+
+/// `ConfigResource.Type.CLIENT_METRICS` wire id — the only resource type
+/// `ListConfigResources` v0 can list.
+const CLIENT_METRICS_RESOURCE_TYPE: i8 = 16;
+
+/// Drop the `ListConfigResources` `resource_types` filter for a negotiated
+/// `version` that does not carry it.
+///
+/// v0 has no filter field: it lists client-metrics resources and nothing else.
+/// A request asking for exactly that is therefore already expressible — the
+/// filter is dropped and the meaning is unchanged — while a request naming any
+/// other type is refused, because dropping the filter there would silently
+/// answer a different question. This is Java's
+/// `ListConfigResourcesRequest.Builder.build`, which sends an empty
+/// `ListConfigResourcesRequestData` at v0 for the client-metrics case and raises
+/// `UnsupportedVersionException` for the rest.
+///
+/// An already-empty filter is left alone: it asks for the broker's default set,
+/// which at v0 is exactly the client-metrics resources.
+fn normalize_list_config_resources_request(
+    request: &ListConfigResourcesRequestData,
+    version: i16,
+) -> Result<Cow<'_, ListConfigResourcesRequestData>> {
+    if version >= LIST_CONFIG_RESOURCES_RESOURCE_TYPES_MIN_VERSION
+        || request.resource_types.is_empty()
+    {
+        return Ok(Cow::Borrowed(request));
+    }
+    if request
+        .resource_types
+        .iter()
+        .any(|resource_type| *resource_type != CLIENT_METRICS_RESOURCE_TYPE)
+    {
+        return Err(UnsupportedFieldVersion::new(
+            ApiKey::ListConfigResources as i16,
+            "resource_types",
+            version,
+        )
+        .into());
+    }
+    let mut normalized = request.clone();
+    normalized.resource_types.clear();
+    Ok(Cow::Owned(normalized))
+}
+
+/// First `DeleteTopics` version carrying the `topics` objects — the shape that
+/// can name a topic by id — instead of the flat `topic_names` array (KIP-516,
+/// broker 3.0).
+const DELETE_TOPICS_TOPIC_ID_MIN_VERSION: i16 = 6;
+
+/// Rewrite a `DeleteTopics` request into the topic form the negotiated `version`
+/// speaks: the flat `topic_names` array up to v5, the `topics` objects from v6
+/// on.
+///
+/// Mirrors Java's `DeleteTopicsRequest`, which promotes `topicNames` into
+/// `topics` from v6 in `Builder.build` and reads the flat array back out as
+/// `DeleteTopicState`s below it in `topics()`.
+///
+/// A topic named only by its id cannot be expressed below v6 — the id is the
+/// whole point of the shape KIP-516 added — so that deletion is refused instead
+/// of silently deleting nothing (or, worse, a topic named by the empty string).
+fn normalize_delete_topics_request(
+    request: &DeleteTopicsRequestData,
+    version: i16,
+) -> Result<Cow<'_, DeleteTopicsRequestData>> {
+    if version >= DELETE_TOPICS_TOPIC_ID_MIN_VERSION {
+        if request.topic_names.is_empty() {
+            return Ok(Cow::Borrowed(request));
+        }
+        let mut normalized = request.clone();
+        let topic_names = core::mem::take(&mut normalized.topic_names);
+        if normalized.topics.is_empty() {
+            normalized.topics = topic_names
+                .into_iter()
+                .map(|name| DeleteTopicState {
+                    name: Some(name),
+                    topic_id: KafkaUuid::ZERO,
+                    _unknown_tagged_fields: Vec::new(),
+                })
+                .collect();
+        }
+        return Ok(Cow::Owned(normalized));
+    }
+    if request.topics.is_empty() {
+        return Ok(Cow::Borrowed(request));
+    }
+    let mut topic_names = Vec::with_capacity(request.topics.len());
+    for topic in &request.topics {
+        let name = topic
+            .name
+            .clone()
+            .filter(|name| name != &KafkaString::default());
+        let Some(name) = name else {
+            return Err(UnsupportedFieldVersion::new(
+                ApiKey::DeleteTopics as i16,
+                "topic_id",
+                version,
+            )
+            .into());
+        };
+        topic_names.push(name);
+    }
+    let mut normalized = request.clone();
+    normalized.topics.clear();
+    normalized.topic_names = topic_names;
+    Ok(Cow::Owned(normalized))
+}
+
+/// First `LeaveGroup` version carrying the batched `members` array instead of
+/// the singular `member_id` (KIP-345, broker 2.4).
+const LEAVE_GROUP_BATCHED_MIN_VERSION: i16 = 3;
+
+/// Rewrite a `LeaveGroup` request into the member form the negotiated `version`
+/// speaks: the singular `member_id` up to v2, the batched `members` array from
+/// v3 on.
+///
+/// Mirrors Java's `LeaveGroupRequest.Builder.build`, which sends
+/// `setMemberId(members.get(0).memberId())` below v3 and raises
+/// `UnsupportedVersionException` for more than one member. A request naming
+/// several members is left untouched here for the generated encoder to reject,
+/// rather than silently dropping the ones it cannot carry.
+///
+/// A member identified only by its `group_instance_id` is left untouched too.
+/// v0-2 has no field for it, and the static membership that gives a
+/// `group_instance_id` meaning is the very thing v3 introduced, so a
+/// pre-KIP-345 coordinator cannot be asked to evict one. Downgrading would send
+/// that member's (typically empty) `member_id` instead and evict the wrong
+/// member — or nothing — so the encoder refuses the request instead. This is
+/// stricter than Java, which downgrades unconditionally.
+fn normalize_leave_group_request(
+    request: &LeaveGroupRequestData,
+    version: i16,
+) -> Cow<'_, LeaveGroupRequestData> {
+    if version >= LEAVE_GROUP_BATCHED_MIN_VERSION {
+        if request.member_id == KafkaString::default() {
+            return Cow::Borrowed(request);
+        }
+        let mut normalized = request.clone();
+        let member_id = core::mem::take(&mut normalized.member_id);
+        if normalized.members.is_empty() {
+            normalized.members.push(MemberIdentity {
+                member_id,
+                group_instance_id: None,
+                reason: None,
+                _unknown_tagged_fields: Vec::new(),
+            });
+        }
+        return Cow::Owned(normalized);
+    }
+    let [member] = request.members.as_slice() else {
+        return Cow::Borrowed(request);
+    };
+    if member.group_instance_id.is_some() {
+        return Cow::Borrowed(request);
+    }
+    let mut normalized = request.clone();
+    normalized.member_id = member.member_id.clone();
+    normalized.members.clear();
+    Cow::Owned(normalized)
+}
+
+/// First `OffsetFetch` version carrying the batched `groups` array instead of
+/// the flat `group_id`/`topics` pair (broker 3.0).
+const OFFSET_FETCH_BATCHED_MIN_VERSION: i16 = 8;
+
+/// First `OffsetFetch` version carrying `require_stable` (KIP-447, broker 2.5).
+const OFFSET_FETCH_REQUIRE_STABLE_MIN_VERSION: i16 = 7;
+
+/// First `OffsetFetch` version whose `topics` is nullable, i.e. that can ask for
+/// every topic the group has committed rather than a named list.
+const OFFSET_FETCH_ALL_TOPICS_MIN_VERSION: i16 = 2;
+
+/// First `OffsetFetch` version that keys topics by `topic_id` instead of `name`
+/// (KIP-1140).
+const OFFSET_FETCH_TOPIC_ID_MIN_VERSION: i16 = 10;
+
+/// Rewrite an `OffsetFetch` request into the group form the negotiated `version`
+/// speaks: the flat `group_id`/`topics` pair up to v7, the batched `groups`
+/// array from v8 on.
+///
+/// Mirrors Java's `OffsetFetchRequest.Builder`:
+///
+/// * `maybeDowngrade` folds a single `groups` entry back into the flat pair; a request naming
+///   several groups cannot be expressed below v8, so it is left untouched for the generated encoder
+///   to reject rather than silently dropping the groups it cannot carry (Java raises
+///   `NoBatchedOffsetFetchRequestException`).
+/// * `throwIfStableOffsetsUnsupported` drops `require_stable` below v7. Kafka's admin client passes
+///   `throwOnFetchStableOffsetsUnsupported = false`, which logs and falls the flag back to `false`
+///   — a coordinator that predates KIP-447 has no unstable offsets to hold back.
+/// * `throwIfRequestingAllTopicsIsUnsupported` refuses an "all topics" fetch below v2, where
+///   `topics` is not nullable. The generated encoder would write an empty array there, turning
+///   "every topic" into "no topics", so this is an error rather than a silent wrong answer.
+///
+/// The per-group `member_id`/`member_epoch` (KIP-848) have no place in the flat
+/// form and are dropped with it, exactly as `maybeDowngrade` does; the classic
+/// group path this serves never sets them.
+///
+/// Topics carry both keys — the name and the id — because which one goes on the
+/// wire is also a per-version choice: v10 (KIP-1140) keys topics by `topic_id`
+/// and refuses a name, every version below it keys by `name` and refuses an id.
+/// The key the negotiated version does not carry is cleared here, the way
+/// [`normalize_produce_request`] does for `Produce` v13, so a call site can fill
+/// both without knowing what it will negotiate.
+fn normalize_offset_fetch_request(
+    request: &OffsetFetchRequestData,
+    version: i16,
+) -> Result<Cow<'_, OffsetFetchRequestData>> {
+    if version >= OFFSET_FETCH_BATCHED_MIN_VERSION {
+        let needs_key_clear = request.groups.iter().any(|group| {
+            group
+                .topics
+                .iter()
+                .flatten()
+                .any(|topic| offset_fetch_topic_needs_key_clear(topic, version))
+        });
+        if request.group_id == KafkaString::default() && !needs_key_clear {
+            return Ok(Cow::Borrowed(request));
+        }
+        let mut normalized = request.clone();
+        if normalized.group_id != KafkaString::default() {
+            let group_id = core::mem::take(&mut normalized.group_id);
+            let topics = normalized.topics.take();
+            if normalized.groups.is_empty() {
+                normalized.groups.push(OffsetFetchRequestGroup {
+                    group_id,
+                    member_id: None,
+                    member_epoch: -1,
+                    topics: topics.map(|topics| {
+                        topics
+                            .into_iter()
+                            .map(|topic| OffsetFetchRequestTopics {
+                                name: topic.name,
+                                topic_id: KafkaUuid::ZERO,
+                                partition_indexes: topic.partition_indexes,
+                                _unknown_tagged_fields: Vec::new(),
+                            })
+                            .collect()
+                    }),
+                    _unknown_tagged_fields: Vec::new(),
+                });
+            }
+        }
+        for group in &mut normalized.groups {
+            for topic in group.topics.iter_mut().flatten() {
+                if version >= OFFSET_FETCH_TOPIC_ID_MIN_VERSION {
+                    topic.name = KafkaString::default();
+                } else {
+                    topic.topic_id = KafkaUuid::ZERO;
+                }
+            }
+        }
+        return Ok(Cow::Owned(normalized));
+    }
+    let mut normalized = Cow::Borrowed(request);
+    if let [group] = request.groups.as_slice() {
+        normalized = Cow::Owned(OffsetFetchRequestData {
+            group_id: group.group_id.clone(),
+            topics: group.topics.as_ref().map(|topics| {
+                topics
+                    .iter()
+                    .map(|topic| OffsetFetchRequestTopic {
+                        name: topic.name.clone(),
+                        partition_indexes: topic.partition_indexes.clone(),
+                        _unknown_tagged_fields: Vec::new(),
+                    })
+                    .collect()
+            }),
+            groups: Vec::new(),
+            require_stable: request.require_stable,
+            _unknown_tagged_fields: request._unknown_tagged_fields.clone(),
+        });
+    }
+    if version < OFFSET_FETCH_ALL_TOPICS_MIN_VERSION && normalized.topics.is_none() {
+        return Err(
+            UnsupportedFieldVersion::new(ApiKey::OffsetFetch as i16, "topics", version).into(),
+        );
+    }
+    if version < OFFSET_FETCH_REQUIRE_STABLE_MIN_VERSION && normalized.require_stable {
+        normalized.to_mut().require_stable = false;
+    }
+    Ok(normalized)
+}
+
+/// Whether an `OffsetFetch` topic still carries the key the negotiated `version`
+/// does not put on the wire (the name from v10, the id below it).
+fn offset_fetch_topic_needs_key_clear(topic: &OffsetFetchRequestTopics, version: i16) -> bool {
+    if version >= OFFSET_FETCH_TOPIC_ID_MIN_VERSION {
+        topic.name != KafkaString::default()
+    } else {
+        topic.topic_id != KafkaUuid::ZERO
+    }
+}
+
 /// Clear the topic key that the negotiated `version` does not put on the wire so
 /// the generated encoder does not reject a request that still carries both the
 /// topic name and topic id.
@@ -321,10 +792,14 @@ mod tests {
 
     use bytes::{Bytes, BytesMut};
     use kacrab_protocol::{
-        KafkaString,
+        KafkaString, KafkaUuid,
         generated::{
-            FetchRequestData, FindCoordinatorRequestData, ListOffsetsRequestData,
-            SyncGroupRequestData,
+            AddPartitionsToTxnRequestData, AddPartitionsToTxnTopic, AddPartitionsToTxnTransaction,
+            DeleteTopicState, DeleteTopicsRequestData, FetchRequestData,
+            FindCoordinatorRequestData, LeaveGroupRequestData, ListConfigResourcesRequestData,
+            ListOffsetsRequestData, OffsetFetchRequestData, OffsetFetchRequestGroup,
+            OffsetFetchRequestTopic, OffsetFetchRequestTopics, SyncGroupRequestData,
+            leave_group_request::MemberIdentity,
         },
     };
 
@@ -544,6 +1019,553 @@ mod tests {
         let decoded =
             FetchRequestData::read(&mut encoded, 11).expect("fetch request should decode");
         assert_eq!(decoded.rack_id, KafkaString::from("rack-1".to_owned()));
+    }
+
+    fn add_partitions_to_txn_request() -> AddPartitionsToTxnRequestData {
+        AddPartitionsToTxnRequestData {
+            transactions: vec![AddPartitionsToTxnTransaction {
+                transactional_id: KafkaString::from("txn-orders".to_owned()),
+                producer_id: 77,
+                producer_epoch: 4,
+                verify_only: false,
+                topics: vec![AddPartitionsToTxnTopic {
+                    name: KafkaString::from("orders".to_owned()),
+                    partitions: vec![0, 1],
+                    _unknown_tagged_fields: Vec::new(),
+                }],
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            ..AddPartitionsToTxnRequestData::default()
+        }
+    }
+
+    fn encode_add_partitions_to_txn(
+        request: &AddPartitionsToTxnRequestData,
+        version: i16,
+    ) -> Bytes {
+        let mut buf = BytesMut::new();
+        request
+            .write_request(&mut buf, version)
+            .expect("add partitions to txn should encode for the negotiated version");
+        assert_eq!(
+            RequestMessage::encoded_len(request, version).expect("encoded length"),
+            buf.len()
+        );
+        buf.freeze()
+    }
+
+    #[test]
+    fn add_partitions_to_txn_request_inlines_the_transaction_below_batched_versions() {
+        let request = add_partitions_to_txn_request();
+
+        for version in 0..=3 {
+            let mut encoded = encode_add_partitions_to_txn(&request, version);
+            let decoded = AddPartitionsToTxnRequestData::read(&mut encoded, version)
+                .expect("add partitions to txn should decode");
+            assert!(decoded.transactions.is_empty());
+            assert_eq!(
+                decoded.v3_and_below_transactional_id,
+                KafkaString::from("txn-orders".to_owned())
+            );
+            assert_eq!(decoded.v3_and_below_producer_id, 77);
+            assert_eq!(decoded.v3_and_below_producer_epoch, 4);
+            assert_eq!(
+                decoded.v3_and_below_topics[0].name,
+                KafkaString::from("orders".to_owned())
+            );
+            assert_eq!(decoded.v3_and_below_topics[0].partitions, vec![0, 1]);
+        }
+    }
+
+    #[test]
+    fn add_partitions_to_txn_request_uses_transactions_from_batched_versions() {
+        let request = add_partitions_to_txn_request();
+
+        for version in 4..=5 {
+            let mut encoded = encode_add_partitions_to_txn(&request, version);
+            let decoded = AddPartitionsToTxnRequestData::read(&mut encoded, version)
+                .expect("add partitions to txn should decode");
+            assert_eq!(decoded.transactions.len(), 1);
+            assert_eq!(decoded.transactions[0].producer_id, 77);
+            assert_eq!(
+                decoded.v3_and_below_transactional_id,
+                KafkaString::default()
+            );
+        }
+    }
+
+    #[test]
+    fn add_partitions_to_txn_request_promotes_the_inline_transaction_to_batched_versions() {
+        let request = AddPartitionsToTxnRequestData {
+            v3_and_below_transactional_id: KafkaString::from("txn-orders".to_owned()),
+            v3_and_below_producer_id: 77,
+            v3_and_below_producer_epoch: 4,
+            v3_and_below_topics: vec![AddPartitionsToTxnTopic {
+                name: KafkaString::from("orders".to_owned()),
+                partitions: vec![0],
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            ..AddPartitionsToTxnRequestData::default()
+        };
+
+        let mut encoded = encode_add_partitions_to_txn(&request, 5);
+
+        let decoded =
+            AddPartitionsToTxnRequestData::read(&mut encoded, 5).expect("v5 request should decode");
+        assert_eq!(
+            decoded.transactions[0].transactional_id,
+            KafkaString::from("txn-orders".to_owned())
+        );
+        assert_eq!(decoded.transactions[0].producer_id, 77);
+        assert_eq!(decoded.transactions[0].producer_epoch, 4);
+        assert_eq!(decoded.transactions[0].topics[0].partitions, vec![0]);
+    }
+
+    #[test]
+    fn add_partitions_to_txn_request_rejects_batched_transactions_below_batched_versions() {
+        let request = AddPartitionsToTxnRequestData {
+            transactions: vec![
+                AddPartitionsToTxnTransaction {
+                    transactional_id: KafkaString::from("txn-a".to_owned()),
+                    ..AddPartitionsToTxnTransaction::default()
+                },
+                AddPartitionsToTxnTransaction {
+                    transactional_id: KafkaString::from("txn-b".to_owned()),
+                    ..AddPartitionsToTxnTransaction::default()
+                },
+            ],
+            ..AddPartitionsToTxnRequestData::default()
+        };
+        let mut buf = BytesMut::new();
+
+        let error = request.write_request(&mut buf, 3);
+
+        assert!(error.is_err());
+    }
+
+    #[test]
+    fn list_config_resources_request_drops_the_client_metrics_filter_below_its_version() {
+        let request = ListConfigResourcesRequestData {
+            resource_types: vec![16],
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let mut buf = BytesMut::new();
+
+        request
+            .write_request(&mut buf, 0)
+            .expect("client-metrics filter should encode for v0");
+        assert_eq!(
+            RequestMessage::encoded_len(&request, 0).expect("encoded length"),
+            buf.len()
+        );
+
+        let mut encoded = buf.freeze();
+        let decoded = ListConfigResourcesRequestData::read(&mut encoded, 0)
+            .expect("list config resources request should decode");
+        assert!(decoded.resource_types.is_empty());
+    }
+
+    #[test]
+    fn list_config_resources_request_keeps_the_filter_from_its_version() {
+        let request = ListConfigResourcesRequestData {
+            resource_types: vec![2, 4],
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let mut buf = BytesMut::new();
+
+        request
+            .write_request(&mut buf, 1)
+            .expect("list config resources request should encode");
+
+        let mut encoded = buf.freeze();
+        let decoded = ListConfigResourcesRequestData::read(&mut encoded, 1)
+            .expect("list config resources request should decode");
+        assert_eq!(decoded.resource_types, vec![2, 4]);
+    }
+
+    /// v0 lists client-metrics resources and nothing else, so dropping a filter
+    /// that names another type would answer a different question.
+    #[test]
+    fn list_config_resources_request_rejects_another_filter_below_its_version() {
+        let request = ListConfigResourcesRequestData {
+            resource_types: vec![16, 32],
+            _unknown_tagged_fields: Vec::new(),
+        };
+        let mut buf = BytesMut::new();
+
+        let error = request.write_request(&mut buf, 0);
+
+        assert!(error.is_err());
+    }
+
+    fn delete_topics_request() -> DeleteTopicsRequestData {
+        DeleteTopicsRequestData {
+            topics: vec![DeleteTopicState {
+                name: Some(KafkaString::from("orders".to_owned())),
+                topic_id: KafkaUuid::ZERO,
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            timeout_ms: 30_000,
+            ..DeleteTopicsRequestData::default()
+        }
+    }
+
+    fn encode_delete_topics(request: &DeleteTopicsRequestData, version: i16) -> Bytes {
+        let mut buf = BytesMut::new();
+        request
+            .write_request(&mut buf, version)
+            .expect("delete topics request should encode for the negotiated version");
+        assert_eq!(
+            RequestMessage::encoded_len(request, version).expect("encoded length"),
+            buf.len()
+        );
+        buf.freeze()
+    }
+
+    #[test]
+    fn delete_topics_request_uses_topic_names_below_the_topic_id_version() {
+        let request = delete_topics_request();
+
+        for version in 1..=5 {
+            let mut encoded = encode_delete_topics(&request, version);
+            let decoded = DeleteTopicsRequestData::read(&mut encoded, version)
+                .expect("delete topics request should decode");
+            assert!(decoded.topics.is_empty());
+            assert_eq!(
+                decoded.topic_names,
+                vec![KafkaString::from("orders".to_owned())]
+            );
+            assert_eq!(decoded.timeout_ms, 30_000);
+        }
+    }
+
+    #[test]
+    fn delete_topics_request_uses_topics_from_the_topic_id_version() {
+        let request = delete_topics_request();
+
+        let mut encoded = encode_delete_topics(&request, 6);
+
+        let decoded =
+            DeleteTopicsRequestData::read(&mut encoded, 6).expect("v6 request should decode");
+        assert!(decoded.topic_names.is_empty());
+        assert_eq!(
+            decoded.topics[0].name,
+            Some(KafkaString::from("orders".to_owned()))
+        );
+    }
+
+    #[test]
+    fn delete_topics_request_promotes_topic_names_to_the_topic_id_version() {
+        let request = DeleteTopicsRequestData {
+            topic_names: vec![KafkaString::from("orders".to_owned())],
+            timeout_ms: 30_000,
+            ..DeleteTopicsRequestData::default()
+        };
+
+        let mut encoded = encode_delete_topics(&request, 6);
+
+        let decoded =
+            DeleteTopicsRequestData::read(&mut encoded, 6).expect("v6 request should decode");
+        assert!(decoded.topic_names.is_empty());
+        assert_eq!(
+            decoded.topics[0].name,
+            Some(KafkaString::from("orders".to_owned()))
+        );
+        assert_eq!(decoded.topics[0].topic_id, KafkaUuid::ZERO);
+    }
+
+    /// The id is the whole point of the shape v6 added, so a topic named only by
+    /// its id cannot be deleted on a broker that predates it.
+    #[test]
+    fn delete_topics_request_rejects_a_topic_id_below_the_topic_id_version() {
+        let request = DeleteTopicsRequestData {
+            topics: vec![DeleteTopicState {
+                name: None,
+                topic_id: KafkaUuid::from_parts(1, 2),
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            timeout_ms: 30_000,
+            ..DeleteTopicsRequestData::default()
+        };
+        let mut buf = BytesMut::new();
+
+        let error = request.write_request(&mut buf, 5);
+
+        assert!(error.is_err());
+        assert!(request.write_request(&mut BytesMut::new(), 6).is_ok());
+    }
+
+    fn leave_group_request() -> LeaveGroupRequestData {
+        LeaveGroupRequestData {
+            group_id: KafkaString::from("group-a".to_owned()),
+            members: vec![MemberIdentity {
+                member_id: KafkaString::from("member-1".to_owned()),
+                group_instance_id: None,
+                reason: None,
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            ..LeaveGroupRequestData::default()
+        }
+    }
+
+    fn encode_leave_group(request: &LeaveGroupRequestData, version: i16) -> Bytes {
+        let mut buf = BytesMut::new();
+        request
+            .write_request(&mut buf, version)
+            .expect("leave group request should encode for the negotiated version");
+        assert_eq!(
+            RequestMessage::encoded_len(request, version).expect("encoded length"),
+            buf.len()
+        );
+        buf.freeze()
+    }
+
+    #[test]
+    fn leave_group_request_uses_the_singular_member_below_batched_versions() {
+        let request = leave_group_request();
+
+        for version in 0..=2 {
+            let mut encoded = encode_leave_group(&request, version);
+            let decoded = LeaveGroupRequestData::read(&mut encoded, version)
+                .expect("leave group request should decode");
+            assert_eq!(decoded.member_id, KafkaString::from("member-1".to_owned()));
+            assert!(decoded.members.is_empty());
+        }
+    }
+
+    #[test]
+    fn leave_group_request_uses_members_from_batched_versions() {
+        let request = leave_group_request();
+
+        for version in 3..=5 {
+            let mut encoded = encode_leave_group(&request, version);
+            let decoded = LeaveGroupRequestData::read(&mut encoded, version)
+                .expect("leave group request should decode");
+            assert_eq!(decoded.member_id, KafkaString::default());
+            assert_eq!(
+                decoded.members[0].member_id,
+                KafkaString::from("member-1".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn leave_group_request_promotes_the_singular_member_to_batched_versions() {
+        let request = LeaveGroupRequestData {
+            group_id: KafkaString::from("group-a".to_owned()),
+            member_id: KafkaString::from("member-1".to_owned()),
+            ..LeaveGroupRequestData::default()
+        };
+
+        let mut encoded = encode_leave_group(&request, 5);
+
+        let decoded =
+            LeaveGroupRequestData::read(&mut encoded, 5).expect("v5 request should decode");
+        assert_eq!(decoded.member_id, KafkaString::default());
+        assert_eq!(
+            decoded.members[0].member_id,
+            KafkaString::from("member-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn leave_group_request_rejects_batched_members_below_batched_versions() {
+        let request = LeaveGroupRequestData {
+            group_id: KafkaString::from("group-a".to_owned()),
+            members: vec![
+                MemberIdentity {
+                    member_id: KafkaString::from("member-1".to_owned()),
+                    ..MemberIdentity::default()
+                },
+                MemberIdentity {
+                    member_id: KafkaString::from("member-2".to_owned()),
+                    ..MemberIdentity::default()
+                },
+            ],
+            ..LeaveGroupRequestData::default()
+        };
+        let mut buf = BytesMut::new();
+
+        let error = request.write_request(&mut buf, 2);
+
+        assert!(error.is_err());
+    }
+
+    /// Static membership is what v3 introduced, so a `group_instance_id` cannot
+    /// be expressed below it. Downgrading would send the member's (typically
+    /// empty) `member_id` and evict the wrong member, so the encoder refuses.
+    #[test]
+    fn leave_group_request_rejects_a_static_member_below_batched_versions() {
+        let request = LeaveGroupRequestData {
+            group_id: KafkaString::from("group-a".to_owned()),
+            members: vec![MemberIdentity {
+                member_id: KafkaString::default(),
+                group_instance_id: Some(KafkaString::from("instance-1".to_owned())),
+                reason: None,
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            ..LeaveGroupRequestData::default()
+        };
+        let mut buf = BytesMut::new();
+
+        let error = request.write_request(&mut buf, 2);
+
+        assert!(error.is_err());
+    }
+
+    fn offset_fetch_request() -> OffsetFetchRequestData {
+        OffsetFetchRequestData {
+            groups: vec![OffsetFetchRequestGroup {
+                group_id: KafkaString::from("group-a".to_owned()),
+                member_id: None,
+                member_epoch: -1,
+                topics: Some(vec![OffsetFetchRequestTopics {
+                    name: KafkaString::from("orders".to_owned()),
+                    topic_id: KafkaUuid::from_parts(7, 7),
+                    partition_indexes: vec![1, 2],
+                    _unknown_tagged_fields: Vec::new(),
+                }]),
+                _unknown_tagged_fields: Vec::new(),
+            }],
+            require_stable: true,
+            ..OffsetFetchRequestData::default()
+        }
+    }
+
+    fn encode_offset_fetch(request: &OffsetFetchRequestData, version: i16) -> Bytes {
+        let mut buf = BytesMut::new();
+        request
+            .write_request(&mut buf, version)
+            .expect("offset fetch request should encode for the negotiated version");
+        assert_eq!(
+            RequestMessage::encoded_len(request, version).expect("encoded length"),
+            buf.len()
+        );
+        buf.freeze()
+    }
+
+    #[test]
+    fn offset_fetch_request_uses_the_flat_group_below_batched_versions() {
+        let request = offset_fetch_request();
+
+        let mut encoded = encode_offset_fetch(&request, 7);
+
+        let decoded =
+            OffsetFetchRequestData::read(&mut encoded, 7).expect("v7 request should decode");
+        assert_eq!(decoded.group_id, KafkaString::from("group-a".to_owned()));
+        assert!(decoded.groups.is_empty());
+        assert!(decoded.require_stable);
+        let topics = decoded.topics.expect("flat topics");
+        assert_eq!(topics[0].name, KafkaString::from("orders".to_owned()));
+        assert_eq!(topics[0].partition_indexes, vec![1, 2]);
+    }
+
+    #[test]
+    fn offset_fetch_request_drops_require_stable_below_its_version() {
+        let request = offset_fetch_request();
+
+        for version in 2..=6 {
+            let mut encoded = encode_offset_fetch(&request, version);
+            let decoded = OffsetFetchRequestData::read(&mut encoded, version)
+                .expect("offset fetch request should decode");
+            assert_eq!(decoded.group_id, KafkaString::from("group-a".to_owned()));
+            assert!(!decoded.require_stable);
+        }
+    }
+
+    #[test]
+    fn offset_fetch_request_uses_groups_from_batched_versions() {
+        let request = offset_fetch_request();
+
+        for version in 8..=9 {
+            let mut encoded = encode_offset_fetch(&request, version);
+            let decoded = OffsetFetchRequestData::read(&mut encoded, version)
+                .expect("offset fetch request should decode");
+            assert_eq!(decoded.group_id, KafkaString::default());
+            assert_eq!(decoded.groups.len(), 1);
+            let topics = decoded.groups[0].topics.as_ref().expect("batched topics");
+            assert_eq!(topics[0].name, KafkaString::from("orders".to_owned()));
+            assert_eq!(topics[0].topic_id, KafkaUuid::ZERO);
+        }
+    }
+
+    #[test]
+    fn offset_fetch_request_keys_topics_by_id_from_the_topic_id_version() {
+        let request = offset_fetch_request();
+
+        let mut encoded = encode_offset_fetch(&request, 10);
+
+        let decoded = OffsetFetchRequestData::read(&mut encoded, 10)
+            .expect("offset fetch request should decode");
+        let topics = decoded.groups[0].topics.as_ref().expect("batched topics");
+        assert_eq!(topics[0].name, KafkaString::default());
+        assert_eq!(topics[0].topic_id, KafkaUuid::from_parts(7, 7));
+    }
+
+    #[test]
+    fn offset_fetch_request_promotes_the_flat_group_to_batched_versions() {
+        let request = OffsetFetchRequestData {
+            group_id: KafkaString::from("group-a".to_owned()),
+            topics: Some(vec![OffsetFetchRequestTopic {
+                name: KafkaString::from("orders".to_owned()),
+                partition_indexes: vec![1],
+                _unknown_tagged_fields: Vec::new(),
+            }]),
+            ..OffsetFetchRequestData::default()
+        };
+
+        let mut encoded = encode_offset_fetch(&request, 8);
+
+        let decoded =
+            OffsetFetchRequestData::read(&mut encoded, 8).expect("v8 request should decode");
+        assert_eq!(decoded.group_id, KafkaString::default());
+        assert_eq!(
+            decoded.groups[0].group_id,
+            KafkaString::from("group-a".to_owned())
+        );
+        let topics = decoded.groups[0].topics.as_ref().expect("batched topics");
+        assert_eq!(topics[0].name, KafkaString::from("orders".to_owned()));
+        assert_eq!(topics[0].partition_indexes, vec![1]);
+    }
+
+    #[test]
+    fn offset_fetch_request_rejects_batched_groups_below_batched_versions() {
+        let request = OffsetFetchRequestData {
+            groups: vec![
+                OffsetFetchRequestGroup {
+                    group_id: KafkaString::from("group-a".to_owned()),
+                    ..OffsetFetchRequestGroup::default()
+                },
+                OffsetFetchRequestGroup {
+                    group_id: KafkaString::from("group-b".to_owned()),
+                    ..OffsetFetchRequestGroup::default()
+                },
+            ],
+            ..OffsetFetchRequestData::default()
+        };
+        let mut buf = BytesMut::new();
+
+        let error = request.write_request(&mut buf, 7);
+
+        assert!(error.is_err());
+    }
+
+    #[test]
+    fn offset_fetch_request_rejects_an_all_topics_fetch_below_its_version() {
+        let request = OffsetFetchRequestData {
+            groups: vec![OffsetFetchRequestGroup {
+                group_id: KafkaString::from("group-a".to_owned()),
+                topics: None,
+                ..OffsetFetchRequestGroup::default()
+            }],
+            ..OffsetFetchRequestData::default()
+        };
+        let mut buf = BytesMut::new();
+
+        let error = request.write_request(&mut buf, 1);
+
+        assert!(error.is_err());
+        assert!(request.write_request(&mut BytesMut::new(), 2).is_ok());
     }
 
     #[test]
