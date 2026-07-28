@@ -175,6 +175,10 @@ name = "real_kafka_producer"
 required-features = ["producer"]
 
 [[test]]
+name = "real_kafka_producer_txn"
+required-features = ["producer", "consumer"]
+
+[[test]]
 name = "real_kafka_share_consumer"
 required-features = ["producer", "share-consumer", "admin"]
 
