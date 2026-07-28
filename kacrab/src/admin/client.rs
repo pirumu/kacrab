@@ -842,8 +842,10 @@ impl AdminClient {
         else {
             return Ok(None);
         };
-        // GROUP_ID_NOT_FOUND here means the group is a classic group.
-        if ErrorCode::from(group.error_code) == ErrorCode::GroupIdNotFound {
+        // GROUP_ID_NOT_FOUND means the group is a classic group;
+        // UNSUPPORTED_VERSION means this broker advertises the API but has no
+        // KIP-848 coordinator behind it. Both send the caller to DescribeGroups.
+        if consumer_group_describe_needs_classic_fallback(group.error_code) {
             return Ok(None);
         }
         check_code(group_id, group.error_code, group.error_message.as_ref())?;
@@ -3442,20 +3444,18 @@ fn offset_commit_topics(
         {
             topic.partitions.push(partition);
         } else {
-            // OffsetCommit v10 removed the topic `name` (keyed by id) and the
-            // strict codec rejects a non-default name at v10; send the name only
-            // when the id is unknown (older brokers / unresolved topic).
+            // Which key goes on the wire is a per-version choice — `OffsetCommit`
+            // v10 (KIP-1140) keys topics by id and drops the name, every version
+            // below it keys by name and has no id field — and the version is
+            // only known once the connection has negotiated it. Fill both and
+            // let `wire::message` clear the one the negotiated version does not
+            // carry, exactly as `group_offset_fetch_topics` does.
             let topic_id = topic_ids
                 .get(&topic_partition.topic)
                 .copied()
                 .unwrap_or(KafkaUuid::ZERO);
-            let name = if topic_id == KafkaUuid::ZERO {
-                topic_partition.topic.clone().into()
-            } else {
-                KafkaString::default()
-            };
             topics.push(OffsetCommitRequestTopic {
-                name,
+                name: topic_partition.topic.clone().into(),
                 topic_id,
                 partitions: vec![partition],
                 _unknown_tagged_fields: Vec::new(),
@@ -3846,6 +3846,30 @@ fn is_coordinator_error(error_code: i16) -> bool {
         ErrorCode::NotCoordinator
             | ErrorCode::CoordinatorNotAvailable
             | ErrorCode::CoordinatorLoadInProgress
+    )
+}
+
+/// Whether a per-group `ConsumerGroupDescribe` error code means "ask
+/// `DescribeGroups` instead" rather than "this describe failed".
+///
+/// Two codes say that, and both mean the new group coordinator cannot answer
+/// for this group:
+///
+/// * `GROUP_ID_NOT_FOUND` — the new coordinator does not know the group, so it is a classic group
+///   and only `DescribeGroups` can describe it.
+/// * `UNSUPPORTED_VERSION` — the broker advertises `ConsumerGroupDescribe` (API 69) but the KIP-848
+///   coordinator that backs it is not enabled, which is the default on 3.7 through 4.0
+///   (`group.coordinator.rebalance.protocols` without `consumer`). Those brokers answer the request
+///   per group with this code instead of refusing the API version, so the `UnsupportedApiVersion`
+///   arm at the send site never sees them. Java treats both the same way — see
+///   `DescribeConsumerGroupsHandler.handleError`, which retries the group through `DescribeGroups`
+///   on `UNSUPPORTED_VERSION`.
+///
+/// Every other code is a real error and is reported.
+fn consumer_group_describe_needs_classic_fallback(error_code: i16) -> bool {
+    matches!(
+        ErrorCode::from(error_code),
+        ErrorCode::GroupIdNotFound | ErrorCode::UnsupportedVersion
     )
 }
 
@@ -4366,6 +4390,53 @@ mod tests {
         // Absent leader epoch maps to the -1 sentinel.
         assert_eq!(orders.partitions[1].committed_leader_epoch, -1);
         assert_eq!(orders.partitions[1].committed_metadata, None);
+    }
+
+    /// Which topic key `OffsetCommit` carries is a per-version choice the
+    /// request builder cannot make (v10 keys by id, everything below by name),
+    /// so it fills both and `wire::message` clears the one the negotiated
+    /// version does not carry. Dropping the name as soon as metadata resolved
+    /// an id sent an empty topic name to every broker that negotiates v9 or
+    /// lower, and those answer `UNKNOWN_TOPIC_OR_PARTITION`.
+    #[test]
+    fn offset_commit_topics_carry_both_topic_keys() {
+        let topic_id = KafkaUuid::from_parts(1, 2);
+        let topic_ids = HashMap::from([("orders".to_owned(), topic_id)]);
+
+        let topics = offset_commit_topics(
+            vec![(TopicPartition::new("orders", 0), OffsetAndMetadata::new(10))],
+            &topic_ids,
+        );
+
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].name.as_str(), "orders");
+        assert_eq!(topics[0].topic_id, topic_id);
+    }
+
+    /// Brokers 3.7 through 4.0 advertise `ConsumerGroupDescribe` (API 69) but
+    /// answer per group with `UNSUPPORTED_VERSION` when the KIP-848 coordinator
+    /// is not enabled — the default there. That never reaches the
+    /// `UnsupportedApiVersion` arm at the send site, so without this the
+    /// describe surfaced the raw broker error instead of falling back to
+    /// `DescribeGroups` the way Java does.
+    #[test]
+    fn consumer_group_describe_falls_back_on_both_unsupported_shapes() {
+        assert!(consumer_group_describe_needs_classic_fallback(i16::from(
+            ErrorCode::GroupIdNotFound
+        )));
+        assert!(consumer_group_describe_needs_classic_fallback(i16::from(
+            ErrorCode::UnsupportedVersion
+        )));
+        // Anything else stays a real error — a fallback would hide it.
+        assert!(!consumer_group_describe_needs_classic_fallback(i16::from(
+            ErrorCode::None
+        )));
+        assert!(!consumer_group_describe_needs_classic_fallback(i16::from(
+            ErrorCode::GroupAuthorizationFailed
+        )));
+        assert!(!consumer_group_describe_needs_classic_fallback(i16::from(
+            ErrorCode::NotCoordinator
+        )));
     }
 
     #[test]
