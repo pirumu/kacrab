@@ -304,6 +304,24 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **Transactional produce requests never set the KIP-98 `isTransactional`
+  record-batch attribute, so aborting a transaction did not hide its records.**
+  The producer sent transaction markers (`AddPartitionsToTxn`, `EndTxn`) but
+  encoded every record batch with attribute bit 4 clear, so the broker stored
+  transactional data as plain idempotent writes: commit and abort markers were
+  written but governed nothing, aborted records stayed visible to
+  `read_committed` consumers, and the last stable offset never held reads back.
+  Batches from a transactional producer now carry the bit, and the consumer
+  implements the client-side half of `read_committed` that the broker contract
+  requires: the aborted-transaction list from `FetchResponse` is threaded into
+  the decode path, control batches are always skipped (both isolation levels),
+  and under `read_committed` batches from a producer inside an aborted range
+  are dropped until that producer's control marker ends the exclusion. Verified
+  end-to-end against a real broker — `kafka-dump-log` now shows
+  `isTransactional: true` on data batches, and a new real-broker regression
+  test asserts `read_committed` sees only committed records while a
+  `read_uncommitted` negative control still sees the aborted one.
+
 - **`dispatch_ready` never healed the sequence gap an unsplittable oversized batch
   leaves behind.** It carried a second copy of the producer's dispatch retry loop, and
   the copy had drifted: when a single-record batch still exceeds `max.request.size` it

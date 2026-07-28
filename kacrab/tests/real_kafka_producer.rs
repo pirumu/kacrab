@@ -95,13 +95,11 @@ fn transactional_id() -> String {
 /// The EOS guarantee itself, asserted from both sides so a broken
 /// implementation cannot pass:
 ///
-/// - `read_committed` must see every committed record and NO aborted record
-///   and NO control marker — this is the assertion whose absence let the
-///   producer ship without the KIP-98 transactional attribute bit (markers
-///   were written but governed nothing, so aborted data stayed visible).
-/// - `read_uncommitted` must SEE the aborted record — the negative control
-///   proving this test can distinguish a working implementation from a broken
-///   one, rather than passing vacuously.
+/// - `read_committed` must see every committed record and NO aborted record and NO control marker —
+///   this is the assertion whose absence let the producer ship without the KIP-98 transactional
+///   attribute bit (markers were written but governed nothing, so aborted data stayed visible).
+/// - `read_uncommitted` must SEE the aborted record — the negative control proving this test can
+///   distinguish a working implementation from a broken one, rather than passing vacuously.
 #[cfg(feature = "consumer")]
 #[tokio::test]
 #[ignore = "requires the broker from docker-compose.kafka.yml"]
@@ -168,10 +166,7 @@ async fn real_kafka_aborted_transaction_is_invisible_to_read_committed() {
             let mut values: Vec<String> = Vec::new();
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
             while std::time::Instant::now() < deadline {
-                let records = consumer
-                    .poll(Duration::from_secs(2))
-                    .await
-                    .expect("poll");
+                let records = consumer.poll(Duration::from_secs(2)).await.expect("poll");
                 for record in records {
                     values.push(
                         record
@@ -199,15 +194,14 @@ async fn real_kafka_aborted_transaction_is_invisible_to_read_committed() {
     assert_eq!(
         committed_view,
         vec!["committed-1".to_owned(), "committed-2".to_owned()],
-        "read_committed must see exactly the committed records — no aborted \
-         data, no control markers"
+        "read_committed must see exactly the committed records — no aborted data, no control \
+         markers"
     );
 
     let uncommitted_view = read("read_uncommitted").await;
     assert!(
         uncommitted_view.iter().any(|v| v == "aborted-1"),
-        "negative control: read_uncommitted must see the aborted record, or \
-         this test could pass against a producer that never wrote it: \
-         {uncommitted_view:?}"
+        "negative control: read_uncommitted must see the aborted record, or this test could pass \
+         against a producer that never wrote it: {uncommitted_view:?}"
     );
 }
