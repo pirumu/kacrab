@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::{config::ConfigError, wire::WireError};
 
 /// Errors from admin client operations.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum AdminError {
     /// Lower-level wire/session failure.

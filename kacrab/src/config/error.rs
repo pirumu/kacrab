@@ -7,6 +7,7 @@ use thiserror::Error;
 use super::ClientKind;
 
 /// Error returned by strict or security-sensitive config validation.
+#[non_exhaustive]
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ConfigError {
     /// Property key is not present in the official catalog for the client.
@@ -68,6 +69,7 @@ pub enum ConfigError {
 }
 
 /// Error returned when parsing a raw config value into a typed Rust value.
+#[non_exhaustive]
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 #[error("failed to parse Kafka config value `{value}` as {target}")]
 pub struct ParseConfigValueError {

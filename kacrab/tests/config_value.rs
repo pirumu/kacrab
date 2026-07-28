@@ -36,13 +36,7 @@ fn parser_errors_name_target_type_and_original_value() {
     let error =
         bool::parse_config_value(&ConfigValue::from("yep")).expect_err("invalid bool should fail");
 
-    assert_eq!(
-        error,
-        ParseConfigValueError {
-            target: "bool",
-            value: "yep".into(),
-        }
-    );
+    assert_eq!(error, ParseConfigValueError::new("bool", "yep"));
     assert!(error.to_string().contains("bool"));
     assert!(error.to_string().contains("yep"));
 }

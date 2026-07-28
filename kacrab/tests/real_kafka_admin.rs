@@ -536,9 +536,7 @@ async fn real_kafka_admin_extended() {
                     2,
                     FeatureUpdateUpgradeType::Upgrade,
                 )],
-                UpdateFeaturesOptions {
-                    validate_only: true,
-                },
+                UpdateFeaturesOptions::default().validate_only(true),
             )
             .await,
     );

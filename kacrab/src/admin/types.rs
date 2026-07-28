@@ -166,6 +166,7 @@ impl NewPartitions {
 
 /// The kind of resource a [`ConfigResource`] addresses, mirroring Kafka's
 /// `ConfigResource.Type` byte values.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceType {
     /// An unrecognized resource type.
@@ -365,6 +366,7 @@ impl AlterConfigOp {
 
 /// A single config key/value pair, used both when altering configs (input) and
 /// when describing them (output).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigEntry {
     /// The config key.
@@ -395,6 +397,7 @@ impl ConfigEntry {
 
 /// Where a described config value originated, mirroring Kafka's
 /// `DescribeConfigsResponse.ConfigSource`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigSource {
     /// Source not reported / not recognized.
@@ -429,6 +432,7 @@ impl ConfigSource {
 
 /// The described configs of one resource: its addressed resource plus the
 /// config entries the broker returned.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ResourceConfig {
     /// The resource these configs belong to.
@@ -443,6 +447,7 @@ pub use crate::common::Node;
 
 /// A description of the cluster: its id, the current controller, and the live
 /// broker nodes.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ClusterDescription {
     /// The cluster id, if the broker reports one.
@@ -456,6 +461,7 @@ pub struct ClusterDescription {
 /// A topic entry returned by
 /// [`AdminClient::list_topics`](super::AdminClient::list_topics), mirroring
 /// Java's `TopicListing`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicListing {
     /// Topic name.
@@ -468,6 +474,7 @@ pub struct TopicListing {
 
 /// Per-partition leadership and replica placement, mirroring Java's
 /// `TopicPartitionInfo`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicPartitionInfo {
     /// Partition index.
@@ -483,6 +490,7 @@ pub struct TopicPartitionInfo {
 /// A full topic description returned by
 /// [`AdminClient::describe_topics`](super::AdminClient::describe_topics),
 /// mirroring Java's `TopicDescription`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicDescription {
     /// Topic name.
@@ -496,42 +504,84 @@ pub struct TopicDescription {
 }
 
 /// Options for [`AdminClient::list_topics`](super::AdminClient::list_topics).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct ListTopicsOptions {
     /// Include internal topics in the listing (Java `listInternal`, default off).
     pub list_internal: bool,
 }
 
+impl ListTopicsOptions {
+    /// Include internal topics in the listing (Java `listInternal`).
+    #[must_use]
+    pub const fn list_internal(mut self, list_internal: bool) -> Self {
+        self.list_internal = list_internal;
+        self
+    }
+}
+
 /// Options for
 /// [`AdminClient::describe_topics`](super::AdminClient::describe_topics).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct DescribeTopicsOptions;
 
 /// Options for [`AdminClient::create_topics`](super::AdminClient::create_topics).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct CreateTopicsOptions {
     /// Validate the request on the broker without actually creating the topics.
     pub validate_only: bool,
 }
 
+impl CreateTopicsOptions {
+    /// Validate the request on the broker without creating the topics.
+    #[must_use]
+    pub const fn validate_only(mut self, validate_only: bool) -> Self {
+        self.validate_only = validate_only;
+        self
+    }
+}
+
 /// Options for
 /// [`AdminClient::create_partitions`](super::AdminClient::create_partitions).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct CreatePartitionsOptions {
     /// Validate the request on the broker without actually adding partitions.
     pub validate_only: bool,
 }
 
+impl CreatePartitionsOptions {
+    /// Validate the request on the broker without adding partitions.
+    #[must_use]
+    pub const fn validate_only(mut self, validate_only: bool) -> Self {
+        self.validate_only = validate_only;
+        self
+    }
+}
+
 /// Options for [`AdminClient::alter_configs`](super::AdminClient::alter_configs).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct AlterConfigsOptions {
     /// Validate the request on the broker without applying the changes.
     pub validate_only: bool,
 }
 
+impl AlterConfigsOptions {
+    /// Validate the request on the broker without applying the changes.
+    #[must_use]
+    pub const fn validate_only(mut self, validate_only: bool) -> Self {
+        self.validate_only = validate_only;
+        self
+    }
+}
+
 /// A consumer group entry returned by
 /// [`AdminClient::list_consumer_groups`](super::AdminClient::list_consumer_groups),
 /// mirroring Java's `ConsumerGroupListing`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerGroupListing {
     /// Consumer group id.
@@ -546,6 +596,7 @@ pub struct ConsumerGroupListing {
 }
 
 /// A consumer/share/streams group state, mirroring Kafka's `GroupState`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[expect(missing_docs, reason = "Variants mirror Kafka's GroupState names 1:1.")]
 pub enum GroupState {
@@ -577,6 +628,7 @@ impl GroupState {
 }
 
 /// A group protocol type, mirroring Kafka's `GroupType`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[expect(missing_docs, reason = "Variants mirror Kafka's GroupType names 1:1.")]
 pub enum GroupType {
@@ -602,6 +654,7 @@ impl GroupType {
 }
 
 /// One member of a consumer group, mirroring Java's `MemberDescription`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberDescription {
     /// The member id assigned by the coordinator.
@@ -628,6 +681,7 @@ pub struct MemberDescription {
 /// A consumer group description returned by
 /// [`AdminClient::describe_consumer_groups`](super::AdminClient::describe_consumer_groups),
 /// mirroring Java's `ConsumerGroupDescription`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerGroupDescription {
     /// Consumer group id.
@@ -656,6 +710,7 @@ pub struct ConsumerGroupDescription {
 
 /// A committed offset for one partition, returned by
 /// [`AdminClient::list_consumer_group_offsets`](super::AdminClient::list_consumer_group_offsets).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupOffset {
     /// The partition the offset belongs to.
@@ -666,6 +721,7 @@ pub struct GroupOffset {
 
 /// Options for
 /// [`AdminClient::list_consumer_groups`](super::AdminClient::list_consumer_groups).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct ListConsumerGroupsOptions {
     /// Only return groups in these states (broker state names); empty = all.
@@ -674,16 +730,46 @@ pub struct ListConsumerGroupsOptions {
     pub types_filter: Vec<String>,
 }
 
+impl ListConsumerGroupsOptions {
+    /// Only return groups in these states (broker state names).
+    #[must_use]
+    pub fn states_filter(mut self, states_filter: Vec<String>) -> Self {
+        self.states_filter = states_filter;
+        self
+    }
+
+    /// Only return groups of these types (broker type names).
+    #[must_use]
+    pub fn types_filter(mut self, types_filter: Vec<String>) -> Self {
+        self.types_filter = types_filter;
+        self
+    }
+}
+
 /// Options for
 /// [`AdminClient::describe_consumer_groups`](super::AdminClient::describe_consumer_groups).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct DescribeConsumerGroupsOptions {
     /// Ask the broker to include the caller's authorized operations.
     pub include_authorized_operations: bool,
 }
 
+impl DescribeConsumerGroupsOptions {
+    /// Ask the broker to include the caller's authorized operations.
+    #[must_use]
+    pub const fn include_authorized_operations(
+        mut self,
+        include_authorized_operations: bool,
+    ) -> Self {
+        self.include_authorized_operations = include_authorized_operations;
+        self
+    }
+}
+
 /// Options for
 /// [`AdminClient::list_consumer_group_offsets`](super::AdminClient::list_consumer_group_offsets).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct ListConsumerGroupOffsetsOptions {
     /// Restrict the fetch to these partitions; empty fetches all committed
@@ -692,6 +778,22 @@ pub struct ListConsumerGroupOffsetsOptions {
     /// Only return offsets for partitions with stable (non-transactional-pending)
     /// commits.
     pub require_stable: bool,
+}
+
+impl ListConsumerGroupOffsetsOptions {
+    /// Restrict the fetch to these partitions.
+    #[must_use]
+    pub fn partitions(mut self, partitions: Vec<TopicPartition>) -> Self {
+        self.partitions = partitions;
+        self
+    }
+
+    /// Only return offsets for partitions with stable commits.
+    #[must_use]
+    pub const fn require_stable(mut self, require_stable: bool) -> Self {
+        self.require_stable = require_stable;
+        self
+    }
 }
 
 /// Which leader election to trigger via
@@ -745,6 +847,7 @@ impl OffsetSpec {
 /// One partition's resolved offset from
 /// [`AdminClient::list_offsets`](super::AdminClient::list_offsets), mirroring
 /// Java's `ListOffsetsResultInfo`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListOffsetsResult {
     /// The partition the offset belongs to.
@@ -759,6 +862,7 @@ pub struct ListOffsetsResult {
 
 /// The new low watermark of a partition after
 /// [`AdminClient::delete_records`](super::AdminClient::delete_records).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletedRecords {
     /// The partition whose records were deleted.
@@ -769,6 +873,7 @@ pub struct DeletedRecords {
 }
 
 /// One active producer's state on a partition, mirroring Java's `ProducerState`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerState {
     /// Producer id.
@@ -788,6 +893,7 @@ pub struct ProducerState {
 
 /// The active producers on one partition, from
 /// [`AdminClient::describe_producers`](super::AdminClient::describe_producers).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionProducerState {
     /// The partition these producers are writing to.
@@ -799,6 +905,7 @@ pub struct PartitionProducerState {
 /// A transaction's description from
 /// [`AdminClient::describe_transactions`](super::AdminClient::describe_transactions),
 /// mirroring Java's `TransactionDescription`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionDescription {
     /// The transactional id.
@@ -822,6 +929,7 @@ pub struct TransactionDescription {
 /// A transaction listing from
 /// [`AdminClient::list_transactions`](super::AdminClient::list_transactions),
 /// mirroring Java's `TransactionListing`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionListing {
     /// The transactional id.
@@ -834,6 +942,7 @@ pub struct TransactionListing {
 
 /// Options for
 /// [`AdminClient::list_transactions`](super::AdminClient::list_transactions).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct ListTransactionsOptions {
     /// Only list transactions in these states (broker state names); empty = all.
@@ -842,8 +951,25 @@ pub struct ListTransactionsOptions {
     pub producer_id_filters: Vec<i64>,
 }
 
+impl ListTransactionsOptions {
+    /// Only list transactions in these states (broker state names).
+    #[must_use]
+    pub fn state_filters(mut self, state_filters: Vec<String>) -> Self {
+        self.state_filters = state_filters;
+        self
+    }
+
+    /// Only list transactions of these producer ids.
+    #[must_use]
+    pub fn producer_id_filters(mut self, producer_id_filters: Vec<i64>) -> Self {
+        self.producer_id_filters = producer_id_filters;
+        self
+    }
+}
+
 /// One replica's on-disk footprint within a log dir, mirroring Java's
 /// `ReplicaInfo`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogDirReplicaInfo {
     /// The replica's size on disk, in bytes.
@@ -858,6 +984,7 @@ pub struct LogDirReplicaInfo {
 
 /// The replicas hosted in one broker log directory, mirroring Java's
 /// `LogDirDescription`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogDirDescription {
     /// The absolute log directory path.
@@ -874,6 +1001,7 @@ pub struct LogDirDescription {
 
 /// One broker's log directories from
 /// [`AdminClient::describe_log_dirs`](super::AdminClient::describe_log_dirs).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerLogDirs {
     /// The broker the log dirs belong to.
@@ -917,6 +1045,7 @@ impl NewPartitionReassignment {
 /// An ongoing partition reassignment from
 /// [`AdminClient::list_partition_reassignments`](super::AdminClient::list_partition_reassignments),
 /// mirroring Java's `PartitionReassignment`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionReassignment {
     /// The partition being reassigned.
@@ -987,13 +1116,24 @@ impl FeatureUpdate {
 
 /// Options for
 /// [`update_features`](super::AdminClient::update_features).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct UpdateFeaturesOptions {
     /// Validate the request on the broker without finalizing the changes.
     pub validate_only: bool,
 }
 
+impl UpdateFeaturesOptions {
+    /// Validate the request on the broker without finalizing the changes.
+    #[must_use]
+    pub const fn validate_only(mut self, validate_only: bool) -> Self {
+        self.validate_only = validate_only;
+        self
+    }
+}
+
 /// The kind of resource an ACL applies to, mirroring Kafka's `ResourceType`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AclResourceType {
     /// Unknown / unrecognized.
@@ -1043,6 +1183,7 @@ impl AclResourceType {
 }
 
 /// How an ACL resource name is matched, mirroring Kafka's `PatternType`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AclPatternType {
     /// Unknown / unrecognized.
@@ -1080,6 +1221,7 @@ impl AclPatternType {
 }
 
 /// An ACL operation, mirroring Kafka's `AclOperation`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[expect(
     missing_docs,
@@ -1146,6 +1288,7 @@ impl AclOperation {
 }
 
 /// Whether an ACL allows or denies, mirroring Kafka's `AclPermissionType`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AclPermissionType {
     /// Unknown / unrecognized.
@@ -1244,6 +1387,7 @@ impl AclBindingFilter {
 /// An ordered set of `(entity_type, entity_name)` pairs (a `None` name addresses
 /// the default entity of that type). Common entity types are
 /// [`USER`](Self::USER), [`CLIENT_ID`](Self::CLIENT_ID), and [`IP`](Self::IP).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ClientQuotaEntity {
     /// The `(entity_type, entity_name)` pairs; `None` name = the type's default.
@@ -1289,6 +1433,7 @@ pub struct ClientQuotaFilterComponent {
 
 /// Options for
 /// [`describe_client_quotas`](super::AdminClient::describe_client_quotas).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct DescribeClientQuotasOptions {
     /// Match only entities whose entity types exactly equal the filter set
@@ -1296,16 +1441,36 @@ pub struct DescribeClientQuotasOptions {
     pub strict: bool,
 }
 
+impl DescribeClientQuotasOptions {
+    /// Match only entities whose entity types exactly equal the filter set.
+    #[must_use]
+    pub const fn strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+}
+
 /// Options for
 /// [`alter_client_quotas`](super::AdminClient::alter_client_quotas).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct AlterClientQuotasOptions {
     /// Validate the request on the broker without applying the changes.
     pub validate_only: bool,
 }
 
+impl AlterClientQuotasOptions {
+    /// Validate the request on the broker without applying the changes.
+    #[must_use]
+    pub const fn validate_only(mut self, validate_only: bool) -> Self {
+        self.validate_only = validate_only;
+        self
+    }
+}
+
 /// A described quota entity and its quota values, returned by
 /// [`describe_client_quotas`](super::AdminClient::describe_client_quotas).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClientQuotaEntry {
     /// The entity the quotas apply to.
@@ -1336,6 +1501,7 @@ pub struct ClientQuotaAlteration {
 }
 
 /// A SCRAM hash mechanism, mirroring Kafka's `ScramMechanism`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScramMechanism {
     /// Unknown / unrecognized.
@@ -1366,6 +1532,7 @@ impl ScramMechanism {
 
 /// One stored SCRAM credential's parameters, mirroring Java's
 /// `ScramCredentialInfo`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScramCredentialInfo {
     /// The hash mechanism.
@@ -1376,6 +1543,7 @@ pub struct ScramCredentialInfo {
 
 /// A user's SCRAM credentials, returned by
 /// [`describe_user_scram_credentials`](super::AdminClient::describe_user_scram_credentials).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserScramCredentials {
     /// The user name.
@@ -1415,6 +1583,7 @@ pub struct ScramCredentialDeletion {
 
 /// A SASL/OAUTHBEARER-style delegation token, mirroring Java's `DelegationToken`
 /// / `TokenInformation`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegationToken {
     /// The token id.
@@ -1437,6 +1606,7 @@ pub struct DelegationToken {
 
 /// Options for
 /// [`create_delegation_token`](super::AdminClient::create_delegation_token).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct CreateDelegationTokenOptions {
     /// The token owner `(principal_type, principal_name)`, or `None` for the
@@ -1446,6 +1616,29 @@ pub struct CreateDelegationTokenOptions {
     pub renewers: Vec<(String, String)>,
     /// The token's max lifetime in ms, or `-1` for the broker default.
     pub max_lifetime_ms: i64,
+}
+
+impl CreateDelegationTokenOptions {
+    /// The token owner `(principal_type, principal_name)`.
+    #[must_use]
+    pub fn owner(mut self, owner: Option<(String, String)>) -> Self {
+        self.owner = owner;
+        self
+    }
+
+    /// Principals allowed to renew the token, as `(type, name)` pairs.
+    #[must_use]
+    pub fn renewers(mut self, renewers: Vec<(String, String)>) -> Self {
+        self.renewers = renewers;
+        self
+    }
+
+    /// The token's max lifetime in ms (`-1` for the broker default).
+    #[must_use]
+    pub const fn max_lifetime_ms(mut self, max_lifetime_ms: i64) -> Self {
+        self.max_lifetime_ms = max_lifetime_ms;
+        self
+    }
 }
 
 /// A replica-to-log-directory assignment for
@@ -1463,6 +1656,7 @@ pub struct ReplicaLogDirAssignment {
 
 /// The result of fencing one producer via
 /// [`fence_producers`](super::AdminClient::fence_producers).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FencedProducer {
     /// The transactional id that was fenced.
@@ -1490,6 +1684,7 @@ pub struct AbortTransactionSpec {
 
 /// A feature's broker-supported version range, mirroring Java's
 /// `SupportedVersionRange`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SupportedVersionRange {
     /// The minimum supported version.
@@ -1500,6 +1695,7 @@ pub struct SupportedVersionRange {
 
 /// A feature's cluster-finalized version range, mirroring Java's
 /// `FinalizedVersionRange`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FinalizedVersionRange {
     /// The minimum finalized version level.
@@ -1511,6 +1707,7 @@ pub struct FinalizedVersionRange {
 /// The cluster's feature metadata from
 /// [`describe_features`](super::AdminClient::describe_features), mirroring Java's
 /// `FeatureMetadata`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeatureMetadata {
     /// The epoch of the finalized feature set, if the broker reports one.
@@ -1558,6 +1755,7 @@ impl MemberToRemove {
 /// The current/future log directory of one replica, returned by
 /// [`describe_replica_log_dirs`](super::AdminClient::describe_replica_log_dirs),
 /// mirroring Java's `ReplicaLogDirInfo`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicaLogDirInfo {
     /// The replica's partition.
@@ -1571,6 +1769,7 @@ pub struct ReplicaLogDirInfo {
 }
 
 /// One replica's state in the metadata quorum.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QuorumReplicaState {
     /// The replica (voter/observer) node id.
@@ -1582,6 +1781,7 @@ pub struct QuorumReplicaState {
 /// The metadata (`KRaft`) quorum state from
 /// [`describe_metadata_quorum`](super::AdminClient::describe_metadata_quorum),
 /// mirroring Java's `QuorumInfo`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuorumInfo {
     /// The current quorum leader node id.
@@ -1611,6 +1811,7 @@ pub struct RaftVoterEndpoint {
 /// A share-group description from
 /// [`describe_share_groups`](super::AdminClient::describe_share_groups)
 /// (Kafka 4.x share groups, KIP-932).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareGroupDescription {
     /// The share group id.
@@ -1633,6 +1834,7 @@ pub struct ShareGroupDescription {
 /// A streams-group description from
 /// [`describe_streams_groups`](super::AdminClient::describe_streams_groups)
 /// (Kafka 4.x streams groups, KIP-1071).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamsGroupDescription {
     /// The streams group id.

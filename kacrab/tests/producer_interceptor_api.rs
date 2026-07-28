@@ -70,11 +70,13 @@ impl ProducerInterceptor for RecordingInterceptor {
         _error: Option<&ProducerError>,
         _headers: &[kacrab::producer::RecordHeader],
     ) {
-        *self.recorded.acked.lock().unwrap() += 1;
+        let mut acked = self.recorded.acked.lock().unwrap();
+        *acked = acked.saturating_add(1);
     }
 
     fn close(&self) {
-        *self.recorded.closed.lock().unwrap() += 1;
+        let mut closed = self.recorded.closed.lock().unwrap();
+        *closed = closed.saturating_add(1);
     }
 }
 

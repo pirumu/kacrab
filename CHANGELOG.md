@@ -80,6 +80,38 @@ release date and links to relevant pull requests or issues.
   `ApiKey::ControlledShutdown` for the one place the key is still needed: the
   legacy request-header v0 rule that `ControlledShutdown` v0 frames use.
 
+- **The public admin and config types are now `#[non_exhaustive]`.** The crate had
+  exactly three `#[non_exhaustive]` attributes in it, none of them on the admin
+  surface — so every one of the 1,880 lines of options/result types in
+  `admin/types.rs` and every public error enum was frozen by its own field and
+  variant list. Kafka adds `AclOperation`s, config sources, and group states; a
+  broker response gains fields. Applying the attribute now, pre-1.0, costs one
+  break instead of one per future addition.
+
+  Marked: all thirteen `…Options` structs; the thirty-four result structs the
+  admin client returns (`TopicDescription`, `ConsumerGroupDescription`,
+  `LogDirDescription`, `QuorumInfo`, `FeatureMetadata`, …); the nine
+  broker-vocabulary enums that already carried an `Unknown` fallback
+  (`ResourceType`, `ConfigSource`, `GroupState`, `GroupType`, `AclResourceType`,
+  `AclPatternType`, `AclOperation`, `AclPermissionType`, `ScramMechanism`);
+  `ConfigError`, `ParseConfigValueError`, `AdminError`; and
+  `WarningSeverity`/`ConfigWarning`/`WarningReport`.
+
+  Input types you build by hand (`NewTopic`, `AclBinding`, `AclBindingFilter`,
+  `ConfigResource`, `ScramCredentialUpsertion`, `RaftVoterEndpoint`, …) are
+  deliberately *not* marked: sealing a type whose whole purpose is to be
+  constructed, without a constructor covering every field, removes the only way
+  to use it.
+
+  **What to change.** A `match` on one of the nine enums or on `ConfigError`/
+  `AdminError` needs a `_ =>` arm. A struct literal or `..Default::default()` for
+  an options struct becomes `Options::default()` plus the new fluent setters —
+  `CreateTopicsOptions::default().validate_only(true)`, mirroring Java's
+  `new CreateTopicsOptions().validateOnly(true)` — and every options field gained
+  one. `DescribeTopicsOptions` is field-less, so it is now
+  `DescribeTopicsOptions::default()` rather than the bare name.
+  `ParseConfigValueError::new(target, value)` replaces its literal.
+
 - **The last three admin methods taking a positional `bool` now take an options
   struct like every one of their siblings.** `describe_client_quotas`,
   `alter_client_quotas`, and `update_features` ended in a bare `true`/`false` at

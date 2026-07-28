@@ -5,6 +5,7 @@ use std::{format, string::String, vec::Vec};
 use super::ClientKind;
 
 /// Warning severity emitted by lenient config parsing.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WarningSeverity {
     /// Non-fatal warning.
@@ -12,6 +13,7 @@ pub enum WarningSeverity {
 }
 
 /// One structured config warning.
+#[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigWarning {
     /// Warning severity.
@@ -25,6 +27,7 @@ pub struct ConfigWarning {
 }
 
 /// Structured warnings returned by lenient property parsing.
+#[non_exhaustive]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WarningReport {
     warnings: Vec<ConfigWarning>,
