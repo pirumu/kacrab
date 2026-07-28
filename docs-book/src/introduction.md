@@ -100,7 +100,7 @@ if you want the destination. The two crown-jewel deep dives are
 
 > **Status**
 >
-> kacrab `0.3.0` is published on [crates.io](https://crates.io/crates/kacrab)
+> kacrab `0.4.0` is published on [crates.io](https://crates.io/crates/kacrab)
 > (producer, consumer, share-consumer, and admin surfaces). Pre-1.0, the public
 > API can still change between minor versions; this book tracks `master`. A
 > Kafka Streams runtime is out of scope — this is a client library — though the
