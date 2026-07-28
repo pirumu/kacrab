@@ -121,6 +121,23 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **A leadership error on one partition dropped the whole cluster metadata cache.**
+  `WireClient::invalidate_topic_partition` documented partition-scoped
+  invalidation but discarded the entire `ClusterMetadata` snapshot, so a single
+  `NOT_LEADER_OR_FOLLOWER` — or any producer requeue or consumer fetch recovery
+  that calls it — forced every unrelated topic to refetch its metadata from the
+  broker as well. On a client fanning out across many topics, one flapping
+  partition turned into a full-cluster metadata storm.
+
+  The metadata manager now records the failing partitions per topic and misses the
+  cache only for the topic that owns them; every other topic keeps being served
+  from the snapshot until its own `metadata.max.age.ms` / `metadata.max.idle.ms`
+  expiry. The refetch itself stays topic-scoped because Kafka's `Metadata` request
+  is topic-keyed and cannot ask for a single partition — but the partition keys are
+  not decoration: a produce response that carries the new leader for a partition
+  (`apply_partition_leader_update`) now retires that partition's invalidation in
+  place, and the topic returns to the cache without a metadata round trip at all.
+
 - **A produce response could bind receipts to the wrong topic.** Matching a
   response to its route accepted topic-id equality unconditionally, but a broker
   that reports no topic ids leaves both sides at `KafkaUuid::ZERO` — so the first

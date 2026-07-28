@@ -45,6 +45,12 @@ pub(crate) struct MetadataManager {
     config: ConnectionConfig,
     snapshot: Option<MetadataSnapshot>,
     topic_last_used: HashMap<String, Instant>,
+    /// Partitions whose cached leadership is known to be wrong after a
+    /// leadership error, keyed by topic. Kafka's `Metadata` RPC is topic-keyed,
+    /// so any entry here forces a refetch of *that topic* — never of the whole
+    /// cluster snapshot — while the partition keys let an in-place leader
+    /// update (`apply_partition_leader_update`) retire the entry without an RPC.
+    stale_partitions: HashMap<String, HashSet<i32>>,
     topic_errors: HashMap<String, ErrorCode>,
     invalid_topics: HashSet<String>,
     unauthorized_topics: HashSet<String>,
@@ -68,6 +74,7 @@ impl MetadataManager {
             config,
             snapshot: None,
             topic_last_used: HashMap::new(),
+            stale_partitions: HashMap::new(),
             topic_errors: HashMap::new(),
             invalid_topics: HashSet::new(),
             unauthorized_topics: HashSet::new(),
@@ -95,6 +102,10 @@ impl MetadataManager {
             .is_some_and(|snapshot| snapshot.metadata.as_ref() == metadata.as_ref());
         self.topic_last_used
             .retain(|topic, _last_used| metadata.topic(topic).is_some());
+        // Every pending invalidation is settled by this snapshot: topics the
+        // response carries are freshly routed, and topics it omits are no longer
+        // in the snapshot at all, so `cached_for` misses them on topic presence.
+        self.stale_partitions.clear();
         self.snapshot = Some(MetadataSnapshot {
             metadata,
             updated_at: now,
@@ -136,7 +147,9 @@ impl MetadataManager {
         }
         let all_present_and_fresh = topics.into_iter().all(|topic| {
             let topic = topic.as_ref();
-            snapshot.metadata.topic(topic).is_some() && self.topic_is_fresh(topic, now)
+            snapshot.metadata.topic(topic).is_some()
+                && self.topic_is_fresh(topic, now)
+                && !self.topic_has_stale_partition(topic)
         });
         if !all_present_and_fresh {
             return None;
@@ -154,9 +167,19 @@ impl MetadataManager {
         }
     }
 
-    pub(crate) fn invalidate_all(&mut self) {
-        self.snapshot = None;
-        self.request_update();
+    /// Record that `(topic, partition)` lost its leader, so the next lookup of
+    /// `topic` refetches instead of routing to the stale leader.
+    ///
+    /// The partition identifies the trigger and is retained per partition;
+    /// the resulting refetch is topic-scoped because Kafka's `Metadata` request
+    /// is topic-keyed and cannot ask for a single partition. Every other topic
+    /// keeps being served from the cached snapshot until its own expiry.
+    pub(crate) fn invalidate_topic_partition(&mut self, topic: &str, partition: i32) {
+        let _was_stale = self
+            .stale_partitions
+            .entry(topic.to_owned())
+            .or_default()
+            .insert(partition);
     }
 
     pub(crate) const fn request_update(&mut self) {
@@ -336,7 +359,27 @@ impl MetadataManager {
         };
         partition.leader_id = change.leader_id;
         partition.leader_epoch = change.leader_epoch;
+        // The cached entry for this partition now names the current leader, so
+        // the invalidation it was carrying is settled without a metadata RPC.
+        self.clear_stale_partition(change.topic, change.partition_index);
         true
+    }
+
+    #[cfg(feature = "producer")]
+    fn clear_stale_partition(&mut self, topic: &str, partition: i32) {
+        let Some(partitions) = self.stale_partitions.get_mut(topic) else {
+            return;
+        };
+        let _was_stale = partitions.remove(&partition);
+        if partitions.is_empty() {
+            let _removed = self.stale_partitions.remove(topic);
+        }
+    }
+
+    fn topic_has_stale_partition(&self, topic: &str) -> bool {
+        self.stale_partitions
+            .get(topic)
+            .is_some_and(|partitions| !partitions.is_empty())
     }
 
     fn topic_is_fresh(&self, topic: &str, now: Instant) -> bool {
@@ -595,6 +638,95 @@ mod tests {
         );
     }
 
+    #[test]
+    fn manager_invalidation_is_scoped_to_the_failing_topic() {
+        let start = Instant::now();
+        let mut manager = MetadataManager::new(
+            ConnectionConfig::default()
+                .metadata_max_age(Duration::from_mins(5))
+                .metadata_max_idle(Duration::from_mins(5)),
+            [broker_endpoint(1)],
+        );
+        manager
+            .store(
+                Arc::new(metadata_with_topics(&["orders", "payments"], 1, 1)),
+                start,
+            )
+            .unwrap();
+        manager.mark_topics_used(["orders", "payments"], start);
+
+        manager.invalidate_topic_partition("orders", 1);
+
+        assert!(
+            manager.cached_for(["payments"], start).is_some(),
+            "an unrelated topic must keep being served from the cached snapshot"
+        );
+        assert!(
+            manager.cached_for(["orders"], start).is_none(),
+            "the topic that lost its leader must be refetched"
+        );
+        assert!(
+            manager.cached_for(["orders", "payments"], start).is_none(),
+            "a lookup that includes the invalidated topic must be refetched"
+        );
+
+        manager
+            .store(
+                Arc::new(metadata_with_topics(&["orders", "payments"], 2, 2)),
+                start,
+            )
+            .unwrap();
+        assert!(
+            manager.cached_for(["orders"], start).is_some(),
+            "a stored refresh must clear the invalidation"
+        );
+    }
+
+    #[cfg(feature = "producer")]
+    #[test]
+    fn manager_leader_update_clears_only_the_invalidated_partition() {
+        let start = Instant::now();
+        let mut manager = MetadataManager::new(
+            ConnectionConfig::default()
+                .metadata_max_age(Duration::from_mins(5))
+                .metadata_max_idle(Duration::from_mins(5)),
+            [broker_endpoint(1)],
+        );
+        manager
+            .store(Arc::new(metadata_with_topics(&["orders"], 1, 3)), start)
+            .unwrap();
+        manager.mark_topics_used(["orders"], start);
+
+        manager.invalidate_topic_partition("orders", 0);
+        manager.invalidate_topic_partition("orders", 1);
+        assert!(manager.cached_for(["orders"], start).is_none());
+
+        let broker_2 = broker_metadata(2);
+        assert!(manager.apply_partition_leader_update(leader_change(
+            "orders",
+            0,
+            2,
+            4,
+            Some(&broker_2)
+        )));
+        assert!(
+            manager.cached_for(["orders"], start).is_none(),
+            "partition 1 is still waiting for a leader"
+        );
+
+        assert!(manager.apply_partition_leader_update(leader_change(
+            "orders",
+            1,
+            2,
+            4,
+            Some(&broker_2)
+        )));
+        assert!(
+            manager.cached_for(["orders"], start).is_some(),
+            "every invalidated partition learned its new leader in place"
+        );
+    }
+
     fn broker_endpoint(node_id: i32) -> BrokerEndpoint {
         BrokerEndpoint::new(
             node_id,
@@ -630,6 +762,10 @@ mod tests {
     }
 
     fn metadata_with_topic(topic: &str, broker_id: i32, leader_epoch: i32) -> ClusterMetadata {
+        metadata_with_topics(&[topic], broker_id, leader_epoch)
+    }
+
+    fn metadata_with_topics(topics: &[&str], broker_id: i32, leader_epoch: i32) -> ClusterMetadata {
         ClusterMetadata {
             cluster_id: Some("cluster-a".to_owned()),
             controller_id: broker_id,
@@ -639,19 +775,32 @@ mod tests {
                 port: 9_092,
                 rack: None,
             }],
-            topics: vec![TopicMetadata {
-                name: topic.to_owned(),
-                topic_id: KafkaUuid::ZERO,
-                is_internal: false,
-                partitions: vec![PartitionMetadata {
-                    partition_index: 0,
-                    leader_id: broker_id,
-                    leader_epoch,
-                    replica_nodes: vec![broker_id],
-                    isr_nodes: vec![broker_id],
-                    offline_replicas: Vec::new(),
-                }],
-            }],
+            topics: topics
+                .iter()
+                .map(|topic| TopicMetadata {
+                    name: (*topic).to_owned(),
+                    topic_id: KafkaUuid::ZERO,
+                    is_internal: false,
+                    partitions: vec![
+                        PartitionMetadata {
+                            partition_index: 0,
+                            leader_id: broker_id,
+                            leader_epoch,
+                            replica_nodes: vec![broker_id],
+                            isr_nodes: vec![broker_id],
+                            offline_replicas: Vec::new(),
+                        },
+                        PartitionMetadata {
+                            partition_index: 1,
+                            leader_id: broker_id,
+                            leader_epoch,
+                            replica_nodes: vec![broker_id],
+                            isr_nodes: vec![broker_id],
+                            offline_replicas: Vec::new(),
+                        },
+                    ],
+                })
+                .collect(),
         }
     }
 }

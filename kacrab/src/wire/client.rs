@@ -266,12 +266,20 @@ impl WireClient {
     }
 
     /// Invalidate cached metadata when a topic-partition leadership error is observed.
-    pub fn invalidate_topic_partition(&self, _topic: &str, _partition: i32) {
+    ///
+    /// `partition` identifies the trigger and is recorded per partition, but the
+    /// invalidation is *topic-scoped*: Kafka's `Metadata` request is topic-keyed,
+    /// so the smallest unit that can actually be refetched is a whole topic.
+    /// Metadata for every other topic keeps being served from the cached
+    /// snapshot until its own `metadata.max.age.ms` / `metadata.max.idle.ms`
+    /// expiry, instead of one partition's leadership error forcing a
+    /// full-cluster refetch.
+    pub fn invalidate_topic_partition(&self, topic: &str, partition: i32) {
         self.inner
             .metadata
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .invalidate_all();
+            .invalidate_topic_partition(topic, partition);
     }
 
     #[cfg(feature = "producer")]
@@ -715,6 +723,57 @@ mod tests {
     }
 
     #[test]
+    fn invalidate_topic_partition_keeps_unrelated_topics_cached() {
+        let client = WireClient::connect_with_brokers(
+            ConnectionConfig::default()
+                .metadata_max_age(Duration::from_mins(5))
+                .metadata_max_idle(Duration::from_mins(5)),
+            "client-a",
+            [BrokerEndpoint::new(
+                7,
+                "127.0.0.1:9092".parse().expect("socket address"),
+            )],
+        );
+        let orders = "orders".to_owned();
+        let payments = "payments".to_owned();
+        client
+            .store_metadata(Arc::new(cluster_metadata_with_topics(&[
+                "orders", "payments",
+            ])))
+            .unwrap();
+        client.mark_topics_used(&[orders.clone(), payments.clone()]);
+
+        assert!(
+            client
+                .cached_metadata_for(std::slice::from_ref(&orders))
+                .is_some()
+        );
+        assert!(
+            client
+                .cached_metadata_for(std::slice::from_ref(&payments))
+                .is_some()
+        );
+
+        client.invalidate_topic_partition(&orders, 0);
+
+        // The unaffected topic is still served from the cached snapshot, so no
+        // metadata request is issued on its behalf.
+        assert!(
+            client
+                .cached_metadata_for(std::slice::from_ref(&payments))
+                .is_some(),
+            "a leadership error on one topic must not evict every other topic"
+        );
+        // The topic that lost its leader has to go back to the broker.
+        assert!(
+            client
+                .cached_metadata_for(std::slice::from_ref(&orders))
+                .is_none(),
+            "the invalidated topic must trigger a metadata refresh"
+        );
+    }
+
+    #[test]
     fn refresh_broker_id_reports_empty_registry() {
         let client = WireClient::connect_with_brokers(ConnectionConfig::default(), "client-a", []);
 
@@ -832,5 +891,34 @@ mod tests {
             client.persistent_topic_error_for(&["secret".to_owned()]),
             Some(("secret".to_owned(), ErrorCode::TopicAuthorizationFailed))
         );
+    }
+
+    fn cluster_metadata_with_topics(topics: &[&str]) -> ClusterMetadata {
+        ClusterMetadata {
+            cluster_id: Some("cluster-a".to_owned()),
+            controller_id: 7,
+            brokers: vec![BrokerMetadata {
+                node_id: 7,
+                host: "localhost".to_owned(),
+                port: 9092,
+                rack: None,
+            }],
+            topics: topics
+                .iter()
+                .map(|topic| TopicMetadata {
+                    name: (*topic).to_owned(),
+                    topic_id: KafkaUuid::ZERO,
+                    is_internal: false,
+                    partitions: vec![PartitionMetadata {
+                        partition_index: 0,
+                        leader_id: 7,
+                        leader_epoch: 1,
+                        replica_nodes: vec![7],
+                        isr_nodes: vec![7],
+                        offline_replicas: Vec::new(),
+                    }],
+                })
+                .collect(),
+        }
     }
 }
