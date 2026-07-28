@@ -169,12 +169,23 @@ fn generate_message_enums(specs: &[MessageSpec]) -> TokenStream {
     }
 }
 
-struct ApiKeyEntry {
-    api_key: i16,
-    variant: String,
-    min_version: i16,
-    max_version: i16,
-    flexible_versions_start: i16,
+/// One row of the generated `client_api_info` table.
+///
+/// Every value is lowered from the request schema, so this is also the
+/// authority on what the committed protocol crate *should* advertise — see
+/// [`crate::protocol_support`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApiKeyEntry {
+    /// Wire API key.
+    pub api_key: i16,
+    /// `ApiKey` enum variant name (schema name minus the `Request` suffix).
+    pub variant: String,
+    /// Lowest version from the schema's `validVersions`.
+    pub min_version: i16,
+    /// Highest version from the schema's `validVersions`.
+    pub max_version: i16,
+    /// First flexible version, or `i16::MAX` when the API is never flexible.
+    pub flexible_versions_start: i16,
 }
 
 struct MessagePair {
@@ -189,7 +200,9 @@ enum MessageKind {
     Response,
 }
 
-fn collect_api_key_entries(specs: &[MessageSpec]) -> Vec<ApiKeyEntry> {
+/// Lower every request spec that declares an API key into an [`ApiKeyEntry`],
+/// sorted by API key.
+pub fn collect_api_key_entries(specs: &[MessageSpec]) -> Vec<ApiKeyEntry> {
     let mut entries: Vec<ApiKeyEntry> = specs
         .iter()
         .filter(|s| s.message_type == MessageType::Request)

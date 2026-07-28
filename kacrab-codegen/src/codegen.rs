@@ -16,6 +16,7 @@ mod version_check;
 mod write_expr;
 
 use api_key::generate_api_key;
+pub use api_key::{ApiKeyEntry, collect_api_key_entries};
 use default_impl::generate_default_impl;
 pub use error::{CodegenError, CodegenErrorKind};
 use heck::ToSnakeCase;
