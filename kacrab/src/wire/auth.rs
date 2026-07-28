@@ -305,7 +305,7 @@ impl ScramExchange {
             attributes.iterations,
         )?;
         let client_key = hmac_bytes(self.mechanism, &salted_password, b"Client Key")?;
-        let stored_key = digest_bytes(self.mechanism, &client_key);
+        let stored_key = digest_bytes(self.mechanism, &client_key)?;
         let client_signature = hmac_bytes(self.mechanism, &stored_key, auth_message.as_bytes())?;
         let proof = xor_bytes(&client_key, &client_signature)?;
         let server_key = hmac_bytes(self.mechanism, &salted_password, b"Server Key")?;
@@ -548,17 +548,22 @@ fn hmac_bytes(
     }
 }
 
-fn digest_bytes(mechanism: SaslMechanism, payload: &[u8]) -> Vec<u8> {
+fn digest_bytes(
+    mechanism: SaslMechanism,
+    payload: &[u8],
+) -> Result<Vec<u8>, crate::wire::WireError> {
     match mechanism {
         SaslMechanism::ScramSha256 => {
             use sha2::Digest;
-            Sha256::digest(payload).to_vec()
+            Ok(Sha256::digest(payload).to_vec())
         },
         SaslMechanism::ScramSha512 => {
             use sha2::Digest;
-            Sha512::digest(payload).to_vec()
+            Ok(Sha512::digest(payload).to_vec())
         },
-        _ => Vec::new(),
+        _ => Err(crate::wire::WireError::UnsupportedSaslMechanism(
+            mechanism.as_str().to_owned(),
+        )),
     }
 }
 
@@ -1466,6 +1471,21 @@ mod tests {
         MAX_SCRAM_ITERATIONS, MIN_SCRAM_ITERATIONS, OAuthToken, SaslConfig, SaslMechanism,
         ScramExchange,
     };
+    use crate::wire::WireError;
+
+    /// `digest_bytes` feeds the SCRAM `stored_key`. Returning an empty hash for
+    /// a mechanism it cannot digest would produce a silently wrong client proof
+    /// — a failure the server can only report as bad credentials — so it must
+    /// reject the mechanism the way `hmac_bytes` already does.
+    #[test]
+    fn scram_digest_rejects_a_mechanism_it_cannot_hash() {
+        let error = super::digest_bytes(SaslMechanism::Plain, b"client key")
+            .expect_err("PLAIN has no SCRAM digest");
+        assert!(
+            matches!(error, WireError::UnsupportedSaslMechanism(ref name) if name == "PLAIN"),
+            "unexpected error: {error}"
+        );
+    }
 
     fn server_first(nonce: &str, iterations: &str) -> String {
         format!("r={nonce}extra,s=QSXCR+Q6sek8bf92,i={iterations}")

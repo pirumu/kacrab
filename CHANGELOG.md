@@ -128,6 +128,13 @@ release date and links to relevant pull requests or issues.
   took its offsets. The id disjunct now only counts when the id is non-zero,
   leaving the topic name to disambiguate as it always did on older brokers.
 
+- **The SCRAM digest could silently degrade to an empty hash.** `digest_bytes`
+  produces the `stored_key` behind every client proof, but its catch-all arm
+  returned `Vec::new()` where its sibling `hmac_bytes` returns
+  `WireError::UnsupportedSaslMechanism`. A mechanism it cannot hash therefore
+  yielded a well-formed but wrong proof, which a broker can only report as bad
+  credentials. It is now fallible in exactly the same way.
+
 - **Typed producer builders never configured their registered interceptors.**
   `ProducerBuilder::build_with_serializers` and
   `build_with_configured_serializers` were drifted copies of `build`'s pipeline
