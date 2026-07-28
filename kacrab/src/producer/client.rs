@@ -17,7 +17,10 @@ use kacrab_protocol::{
     },
     version::client_api_info,
 };
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::{
+    Notify,
+    mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+};
 
 #[cfg(test)]
 use super::dispatcher::DispatchOutcome;
@@ -515,7 +518,7 @@ impl Producer {
             enqueued_at: std::time::Instant::now(),
         };
         if handle.tx.send(slow).is_err() {
-            let _previous = handle.pending.fetch_sub(1, Ordering::AcqRel);
+            release_slow_send(&handle.pending, &handle.drained);
             return Err(ProducerError::Backpressure);
         }
         Ok(proxy)
@@ -523,6 +526,7 @@ impl Producer {
 
     fn spawn_slow_send_drain(&self) -> SlowSendHandle {
         let pending = Arc::new(AtomicUsize::new(0));
+        let drained = Arc::new(Notify::new());
         let (tx, rx) = unbounded_channel::<SlowSend>();
         let context = SlowSendContext {
             control_dispatcher: self.control_dispatcher.clone(),
@@ -534,8 +538,17 @@ impl Producer {
             max_request_size: self.max_request_size,
             buffer_memory: self.buffer_memory,
         };
-        let _drain = tokio::spawn(run_slow_send_drain(rx, context, Arc::clone(&pending)));
-        SlowSendHandle { tx, pending }
+        let _drain = tokio::spawn(run_slow_send_drain(
+            rx,
+            context,
+            Arc::clone(&pending),
+            Arc::clone(&drained),
+        ));
+        SlowSendHandle {
+            tx,
+            pending,
+            drained,
+        }
     }
 
     /// Force-dispatch every buffered batch regardless of linger or batch size.
@@ -564,14 +577,12 @@ impl Producer {
         self.drive_flush_until_complete().await
     }
 
-    /// Yield until every record handed to the synchronous-send slow drain has been
+    /// Wait until every record handed to the synchronous-send slow drain has been
     /// appended (or failed). A non-zero pending count also gates the fast path, so
     /// waiting here lets `flush` reset both back to the inline append path.
     async fn wait_for_slow_send_drain(&self) {
         if let Some(handle) = self.slow_send.get() {
-            while handle.pending.load(Ordering::Acquire) > 0 {
-                tokio::task::yield_now().await;
-            }
+            wait_until_drained(&handle.pending, &handle.drained).await;
         }
     }
 
@@ -1490,6 +1501,9 @@ struct SlowSendHandle {
     /// Records enqueued-but-not-yet-appended; a non-zero count makes new
     /// fast-path sends queue behind them so per-partition append order is kept.
     pending: Arc<AtomicUsize>,
+    /// Signalled whenever `pending` falls back to zero, so `flush` can park on the
+    /// drain instead of spinning on `yield_now` for the whole queue.
+    drained: Arc<Notify>,
 }
 
 /// A record routed to the slow drain because it could not be appended
@@ -1550,13 +1564,40 @@ async fn run_slow_send_drain(
     mut rx: UnboundedReceiver<SlowSend>,
     context: SlowSendContext,
     pending: Arc<AtomicUsize>,
+    drained: Arc<Notify>,
 ) {
     while let Some(slow) = rx.recv().await {
         context.process(slow).await;
         // Decrement only after the record has been appended (or failed), so a
         // fast-path send that observes `pending == 0` knows every queued record
         // is already ordered ahead of it in the accumulator.
-        let _previous = pending.fetch_sub(1, Ordering::AcqRel);
+        release_slow_send(&pending, &drained);
+    }
+}
+
+/// Drop one queued slow-send record and wake `flush` once the queue empties.
+fn release_slow_send(pending: &AtomicUsize, drained: &Notify) {
+    if pending.fetch_sub(1, Ordering::AcqRel) == 1 {
+        drained.notify_waiters();
+    }
+}
+
+/// Park until `pending` reaches zero, woken by [`release_slow_send`].
+///
+/// This used to spin on `yield_now`, which kept `flush` runnable for the whole
+/// drain and starved the very drain task it was waiting on.
+pub(super) async fn wait_until_drained(pending: &AtomicUsize, drained: &Notify) {
+    loop {
+        // Arm the notification before re-reading `pending`: `notify_waiters` only
+        // wakes waiters that are already registered, so a drain finishing between
+        // the load and the await must still wake this task.
+        let notified = drained.notified();
+        tokio::pin!(notified);
+        let _armed = notified.as_mut().enable();
+        if pending.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        notified.await;
     }
 }
 

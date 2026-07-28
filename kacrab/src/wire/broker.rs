@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use kacrab_protocol::{
     KafkaString, Result as ProtocolResult, frame,
     frame::RequestFrameSpec,
@@ -1165,11 +1165,72 @@ where
     let length = usize::try_from(length).map_err(|_| WireError::ConnectionClosed)?;
     let capacity = read_buffer_capacity.map_or(length, |capacity| length.max(capacity));
     let mut payload = buffers.acquire_read(capacity);
-    payload.resize(length, 0);
-    let _bytes_read = reader.read_exact(&mut payload[..]).await?;
+    // Every exit past this point must hand the buffer back, mirroring
+    // `write_pooled_frame`: a bare `?` would drop it out of the pool for good.
+    if let Err(error) = fill_payload(reader, &mut payload, length).await {
+        buffers.release_read(payload);
+        return Err(error);
+    }
     let frozen = payload.split_to(length).freeze();
     buffers.release_read(payload);
     Ok(frozen)
+}
+
+/// Read `frames` framed responses from `reader` through a private buffer pool and
+/// return the total payload bytes plus the number of frames still held alive.
+///
+/// `retain_frames` keeps every decoded frame alive until the run ends, which models
+/// a pipelined broker whose responses are still being decoded while the reader keeps
+/// going; dropping them models a reader that outruns its consumer. The two differ
+/// only in whether the pool can reclaim the split-off tail of each frame.
+///
+/// Benchmark-only, exempt from semver — see `benches/README.md`.
+#[cfg(feature = "__bench")]
+pub async fn bench_read_frames<R>(
+    reader: &mut R,
+    frames: usize,
+    read_buffer_capacity: Option<usize>,
+    buffer_pool_capacity: usize,
+    retain_frames: bool,
+) -> (usize, usize)
+where
+    R: AsyncRead + Unpin,
+{
+    let buffers = BufferPools::new(buffer_pool_capacity);
+    let mut retained = Vec::new();
+    let mut total = 0_usize;
+    for _ in 0..frames {
+        let Ok(frame) = read_frame(reader, read_buffer_capacity, &buffers).await else {
+            break;
+        };
+        total = total.saturating_add(frame.len());
+        if retain_frames {
+            retained.push(frame);
+        }
+    }
+    (total, retained.len())
+}
+
+/// Fill exactly `length` bytes into the buffer's spare capacity.
+///
+/// `read_buf` writes straight into the uninitialized tail, so the frame is never
+/// zeroed first — `resize(length, 0)` before `read_exact` cost a full-frame memset
+/// on every response (a 100 MiB fetch paid a 100 MiB `memset`). The per-read
+/// `limit` keeps the reader from running past the frame into the next one.
+async fn fill_payload<R>(reader: &mut R, payload: &mut BytesMut, length: usize) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    while payload.len() < length {
+        let remaining = length.saturating_sub(payload.len());
+        let mut limited = (&mut *payload).limit(remaining);
+        if reader.read_buf(&mut limited).await? == 0 {
+            return Err(WireError::Io(std::io::Error::from(
+                std::io::ErrorKind::UnexpectedEof,
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn decode_response<Resp>(mut envelope: ResponseEnvelope) -> Result<Resp>
@@ -1926,6 +1987,62 @@ mod tests {
         assert_eq!(payload, Bytes::from_static(b"abc"));
         assert_eq!(buffers.stats().read_reused, 0);
         assert_eq!(buffers.stats().read_released, 1);
+    }
+
+    #[tokio::test]
+    async fn read_frame_returns_the_pooled_buffer_when_the_payload_is_truncated() {
+        let buffers = BufferPools::new(1);
+        let mut framed = Vec::new();
+        framed.extend_from_slice(&8_i32.to_be_bytes());
+        framed.extend_from_slice(b"abc");
+        let mut reader = &framed[..];
+
+        let error = read_frame(&mut reader, Some(16), &buffers)
+            .await
+            .expect_err("truncated payload frame");
+
+        assert!(matches!(error, WireError::Io(_)));
+        // The buffer must go back to the pool on the error exit too; a bare `?`
+        // used to drop it and shrink the pool by one buffer per failed read.
+        assert_eq!(buffers.stats().read_acquired, 1);
+        assert_eq!(buffers.stats().read_released, 1);
+    }
+
+    #[tokio::test]
+    async fn read_frame_fills_payload_across_multiple_reads() {
+        let buffers = BufferPools::new(1);
+        let mut framed = Vec::new();
+        framed.extend_from_slice(&5_i32.to_be_bytes());
+        framed.extend_from_slice(b"abcde");
+        framed.extend_from_slice(b"trailing-next-frame");
+        // A reader that hands back one byte at a time proves the fill loop stops
+        // exactly at the frame boundary instead of swallowing the next frame.
+        let mut reader = OneByteAtATime { inner: &framed[..] };
+
+        let payload = read_frame(&mut reader, Some(64), &buffers)
+            .await
+            .expect("payload frame");
+
+        assert_eq!(payload, Bytes::from_static(b"abcde"));
+        assert_eq!(reader.inner, b"trailing-next-frame");
+    }
+
+    struct OneByteAtATime<'a> {
+        inner: &'a [u8],
+    }
+
+    impl tokio::io::AsyncRead for OneByteAtATime<'_> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if let Some((first, rest)) = self.inner.split_first() {
+                buf.put_slice(std::slice::from_ref(first));
+                self.inner = rest;
+            }
+            std::task::Poll::Ready(Ok(()))
+        }
     }
 
     #[tokio::test]

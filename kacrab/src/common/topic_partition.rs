@@ -1,7 +1,10 @@
 //! Topic/partition key and committed-offset metadata.
 
 /// Topic/partition key used by offset commits and partition-scoped operations.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// The ordering derives from `topic` then `partition`, which is what the
+/// partition-keyed maps in the consumer sort by.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TopicPartition {
     /// Topic name.
     pub topic: String,

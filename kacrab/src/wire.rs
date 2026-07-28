@@ -27,6 +27,13 @@ mod tls;
 pub(crate) use self::backoff::{BackoffPolicy, BackoffState};
 #[cfg(feature = "producer")]
 pub(crate) use self::broker::PendingBrokerResponse;
+/// Diagnostic hook for measuring the wire read path, exposed only under the
+/// internal `__bench` feature so `benches/` can reach it.
+///
+/// Not part of the public API and exempt from semver.
+#[cfg(feature = "__bench")]
+#[doc(hidden)]
+pub use self::broker::bench_read_frames;
 #[cfg(feature = "gssapi")]
 pub use self::gssapi::GssapiAuthenticator;
 #[cfg(feature = "producer")]
