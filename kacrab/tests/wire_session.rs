@@ -12,6 +12,12 @@ use base64::{Engine, engine::general_purpose};
 use bytes::{Bytes, BytesMut};
 use hmac::{Hmac, Mac};
 use kacrab::wire::{BrokerEndpoint, ConnectionConfig, WireClient, WireError};
+#[cfg(feature = "share-consumer")]
+use kacrab_protocol::generated::ShareGroupHeartbeatResponseData;
+#[cfg(feature = "consumer")]
+use kacrab_protocol::generated::{
+    ConsumerGroupHeartbeatResponseData, ErrorCode, JoinGroupResponseData,
+};
 use kacrab_protocol::{
     KafkaString, frame,
     generated::{
@@ -1690,6 +1696,354 @@ async fn wire_client_reuses_configured_buffer_pool() {
     assert_eq!(server.join().await, 3);
 }
 
+/// A broker that never advertises `ConsumerGroupHeartbeat` cannot host a KIP-848
+/// member, and `group.protocol=consumer` used to reach that verdict only after
+/// the heartbeat had already been framed, sent, and rejected — leaving the caller
+/// with a bare `UNSUPPORTED_VERSION` and no idea that `group.protocol=classic`
+/// would have worked. The consumer must decide from the negotiated `ApiVersions`
+/// data instead: no heartbeat on the wire, and an error naming both the missing
+/// API and the fallback.
+///
+/// The check is capability-based, not release-based, deliberately: Kafka 3.9
+/// *does* advertise `ConsumerGroupHeartbeat` v0 (KIP-848 early access), so
+/// "needs 4.0+" would be wrong on a broker that works.
+#[cfg(feature = "consumer")]
+#[tokio::test]
+async fn consumer_group_protocol_fails_before_heartbeating_a_broker_without_kip_848() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let handled = Arc::new(AtomicUsize::new(0));
+    let broker = MockBroker::serve_many(vec![
+        Box::new({
+            let handled = Arc::clone(&handled);
+            move |request| {
+                let _previous = handled.fetch_add(1, Ordering::SeqCst);
+                capability_handshake_response(request, &[])
+            }
+        }),
+        Box::new({
+            let handled = Arc::clone(&handled);
+            move |request| {
+                let _previous = handled.fetch_add(1, Ordering::SeqCst);
+                find_coordinator_response(request)
+            }
+        }),
+        // The unfixed order is coordinator → metadata → heartbeat, so the
+        // metadata round trip is one more thing a fail-fast check saves.
+        Box::new({
+            let handled = Arc::clone(&handled);
+            move |mut request| {
+                let _previous = handled.fetch_add(1, Ordering::SeqCst);
+                let header_version = request_header_version(ApiKey::Metadata as i16, 12);
+                let header =
+                    RequestHeaderData::read(&mut request, header_version).expect("metadata header");
+                let response =
+                    metadata_response(0, "orders", vec![(0, "127.0.0.1".to_owned(), 9092)]);
+                response_frame(ApiKey::Metadata, 12, header.correlation_id, &response)
+            }
+        }),
+        Box::new({
+            let handled = Arc::clone(&handled);
+            move |mut request| {
+                let _previous = handled.fetch_add(1, Ordering::SeqCst);
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(
+                    header.request_api_key,
+                    ApiKey::ConsumerGroupHeartbeat as i16
+                );
+                let response = ConsumerGroupHeartbeatResponseData {
+                    error_code: i16::from(ErrorCode::UnsupportedVersion),
+                    ..ConsumerGroupHeartbeatResponseData::default()
+                };
+                response_frame(
+                    ApiKey::ConsumerGroupHeartbeat,
+                    1,
+                    header.correlation_id,
+                    &response,
+                )
+            }
+        }),
+    ])
+    .await;
+
+    let mut consumer = kacrab::consumer::Consumer::from_map([
+        ("bootstrap.servers", broker.addr().to_string()),
+        ("group.id", "kip848-group".to_owned()),
+        ("group.protocol", "consumer".to_owned()),
+    ])
+    .await
+    .expect("consumer builds");
+    consumer.subscribe(["orders"]).expect("subscribe");
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        consumer.poll(std::time::Duration::from_millis(100)),
+    )
+    .await
+    .expect("poll must fail fast, not hang")
+    .expect_err("a broker without ConsumerGroupHeartbeat cannot serve group.protocol=consumer");
+
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("ConsumerGroupHeartbeat"),
+        "error must name the missing API: {rendered}"
+    );
+    assert!(
+        rendered.contains("does not advertise this API"),
+        "error must be capability-based, not release-based: {rendered}"
+    );
+    assert!(
+        rendered.contains("group.protocol=classic"),
+        "error must name the working fallback: {rendered}"
+    );
+    assert_eq!(
+        handled.load(Ordering::SeqCst),
+        2,
+        "the verdict must come from the handshake plus the coordinator lookup — no metadata \
+         refresh and no ConsumerGroupHeartbeat"
+    );
+}
+
+/// The same broker, the same missing API — but `group.protocol=classic` does not
+/// need it, so the gate must stay out of the way and let `JoinGroup` go out. A
+/// capability check that refuses too broadly would take the classic protocol
+/// down with it on every broker that predates KIP-848.
+#[cfg(feature = "consumer")]
+#[tokio::test]
+async fn classic_group_protocol_still_joins_a_broker_without_kip_848() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let handled = Arc::new(AtomicUsize::new(0));
+    let broker = MockBroker::serve_many(vec![
+        Box::new({
+            let handled = Arc::clone(&handled);
+            move |request| {
+                let _previous = handled.fetch_add(1, Ordering::SeqCst);
+                capability_handshake_response(request, &[])
+            }
+        }),
+        Box::new({
+            let handled = Arc::clone(&handled);
+            move |request| {
+                let _previous = handled.fetch_add(1, Ordering::SeqCst);
+                find_coordinator_response(request)
+            }
+        }),
+        Box::new({
+            let handled = Arc::clone(&handled);
+            move |mut request| {
+                let _previous = handled.fetch_add(1, Ordering::SeqCst);
+                let header_version = request_header_version(ApiKey::JoinGroup as i16, 9);
+                let header = RequestHeaderData::read(&mut request, header_version)
+                    .expect("join group header");
+                assert_eq!(header.request_api_key, ApiKey::JoinGroup as i16);
+                // Any non-retriable code ends the poll; the point is that the
+                // request reached the broker at all.
+                let response = JoinGroupResponseData {
+                    error_code: i16::from(ErrorCode::InvalidGroupId),
+                    ..JoinGroupResponseData::default()
+                };
+                response_frame(ApiKey::JoinGroup, 9, header.correlation_id, &response)
+            }
+        }),
+    ])
+    .await;
+
+    let mut consumer = kacrab::consumer::Consumer::from_map([
+        ("bootstrap.servers", broker.addr().to_string()),
+        ("group.id", "classic-group".to_owned()),
+        ("group.protocol", "classic".to_owned()),
+        ("enable.auto.commit", "false".to_owned()),
+    ])
+    .await
+    .expect("consumer builds");
+    consumer.subscribe(["orders"]).expect("subscribe");
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        consumer.poll(std::time::Duration::from_millis(100)),
+    )
+    .await
+    .expect("poll must not hang")
+    .expect_err("the mock coordinator rejects the group id");
+
+    assert!(
+        !matches!(
+            error,
+            kacrab::consumer::ConsumerError::UnsupportedGroupProtocol { .. }
+        ),
+        "the classic protocol must not be gated on KIP-848: {error}"
+    );
+    assert_eq!(
+        handled.load(Ordering::SeqCst),
+        3,
+        "the classic path must still reach JoinGroup"
+    );
+}
+
+/// The share-group counterpart: KIP-932 needs `ShareGroupHeartbeat`, `ShareFetch`
+/// and `ShareAcknowledge`, and a broker through 4.0 advertises none of them. The
+/// share consumer must say which API is missing before it heartbeats, and point
+/// at the ordinary [`Consumer`](kacrab::consumer::Consumer) as the fallback.
+#[cfg(feature = "share-consumer")]
+#[tokio::test]
+async fn share_consumer_fails_before_heartbeating_a_broker_without_kip_932() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let handled = Arc::new(AtomicUsize::new(0));
+    let broker = MockBroker::serve_many(vec![
+        Box::new({
+            let handled = Arc::clone(&handled);
+            move |request| {
+                let _previous = handled.fetch_add(1, Ordering::SeqCst);
+                // A 4.0-shaped broker: KIP-848 landed, KIP-932 did not.
+                capability_handshake_response(request, &[(ApiKey::ConsumerGroupHeartbeat, 0, 1)])
+            }
+        }),
+        Box::new({
+            let handled = Arc::clone(&handled);
+            move |request| {
+                let _previous = handled.fetch_add(1, Ordering::SeqCst);
+                find_coordinator_response(request)
+            }
+        }),
+        Box::new({
+            let handled = Arc::clone(&handled);
+            move |mut request| {
+                let _previous = handled.fetch_add(1, Ordering::SeqCst);
+                let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+                assert_eq!(header.request_api_key, ApiKey::ShareGroupHeartbeat as i16);
+                let response = ShareGroupHeartbeatResponseData {
+                    error_code: i16::from(ErrorCode::UnsupportedVersion),
+                    ..ShareGroupHeartbeatResponseData::default()
+                };
+                response_frame(
+                    ApiKey::ShareGroupHeartbeat,
+                    1,
+                    header.correlation_id,
+                    &response,
+                )
+            }
+        }),
+    ])
+    .await;
+
+    let mut consumer = kacrab::consumer::ShareConsumer::from_map([
+        ("bootstrap.servers", broker.addr().to_string()),
+        ("group.id", "work-queue".to_owned()),
+    ])
+    .await
+    .expect("share consumer builds");
+    consumer.subscribe(["jobs"]).expect("subscribe");
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        consumer.poll(std::time::Duration::from_millis(100)),
+    )
+    .await
+    .expect("poll must fail fast, not hang")
+    .expect_err("a broker without the share APIs cannot serve a share group");
+
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("ShareGroupHeartbeat"),
+        "error must name the first missing API: {rendered}"
+    );
+    assert!(
+        rendered.contains("does not advertise this API"),
+        "error must be capability-based, not release-based: {rendered}"
+    );
+    assert!(
+        rendered.contains("share-group protocol (KIP-932)"),
+        "error must name the unsupported mode: {rendered}"
+    );
+    assert!(
+        rendered.contains("use a Consumer"),
+        "error must name the working fallback: {rendered}"
+    );
+    assert_eq!(
+        handled.load(Ordering::SeqCst),
+        2,
+        "the verdict must come from the handshake plus the coordinator lookup — no \
+         ShareGroupHeartbeat"
+    );
+}
+
+/// An `ApiVersions` handshake answer carrying the classic-group surface every
+/// broker since 2.4 has, plus whatever `extra` the caller wants advertised on top
+/// (`api key`, `min`, `max`). Nothing forward-looking is in the base set, so a
+/// test opts in to KIP-848/KIP-932 explicitly rather than opting out.
+#[cfg(feature = "consumer")]
+fn capability_handshake_response(mut request: Bytes, extra: &[(ApiKey, i16, i16)]) -> BytesMut {
+    let header = RequestHeaderData::read(&mut request, 2).expect("request header");
+    let base = [
+        (ApiKey::ApiVersions, 0_i16, 3_i16),
+        (ApiKey::Metadata, 0, 12),
+        (ApiKey::FindCoordinator, 0, 4),
+        (ApiKey::Fetch, 0, 15),
+        (ApiKey::ListOffsets, 0, 8),
+        (ApiKey::OffsetCommit, 0, 9),
+        (ApiKey::OffsetFetch, 0, 8),
+        (ApiKey::JoinGroup, 0, 9),
+        (ApiKey::SyncGroup, 0, 5),
+        (ApiKey::Heartbeat, 0, 4),
+        (ApiKey::LeaveGroup, 0, 5),
+    ];
+    let response = ApiVersionsResponseData {
+        error_code: 0,
+        api_keys: base
+            .iter()
+            .chain(extra.iter())
+            .map(|&(api_key, min_version, max_version)| ApiVersion {
+                api_key: api_key as i16,
+                min_version,
+                max_version,
+                _unknown_tagged_fields: Vec::new(),
+            })
+            .collect(),
+        ..ApiVersionsResponseData::default()
+    };
+    response_frame(ApiKey::ApiVersions, 3, header.correlation_id, &response)
+}
+
+/// Point the group coordinator back at the bootstrap node (id 0) so the group
+/// path reuses the one connection the mock broker accepts.
+#[cfg(feature = "consumer")]
+fn find_coordinator_response(mut request: Bytes) -> BytesMut {
+    let header_version = request_header_version(ApiKey::FindCoordinator as i16, 4);
+    let header = RequestHeaderData::read(&mut request, header_version)
+        .expect("find coordinator request header");
+    assert_eq!(header.request_api_key, ApiKey::FindCoordinator as i16);
+    let find = FindCoordinatorRequestData::read(&mut request, 4).expect("find coordinator body");
+    let key = find
+        .coordinator_keys
+        .into_iter()
+        .next()
+        .expect("find coordinator carries the group key at v4");
+    let response = FindCoordinatorResponseData {
+        coordinators: vec![kacrab_protocol::generated::Coordinator {
+            key,
+            node_id: 0,
+            host: KafkaString::from("127.0.0.1".to_owned()),
+            port: 9092,
+            error_code: 0,
+            error_message: None,
+            _unknown_tagged_fields: Vec::new(),
+        }],
+        ..FindCoordinatorResponseData::default()
+    };
+    response_frame(ApiKey::FindCoordinator, 4, header.correlation_id, &response)
+}
+
 fn api_versions_response(mut request: Bytes) -> BytesMut {
     let header = RequestHeaderData::read(&mut request, 2).expect("request header");
     let response = ApiVersionsResponseData {
@@ -2231,6 +2585,29 @@ impl ApiVersions for MetadataResponseData {
 impl ApiVersions for FindCoordinatorResponseData {
     fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
         self.write(buf, version).expect("find coordinator response");
+    }
+}
+
+#[cfg(feature = "consumer")]
+impl ApiVersions for JoinGroupResponseData {
+    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
+        self.write(buf, version).expect("join group response");
+    }
+}
+
+#[cfg(feature = "consumer")]
+impl ApiVersions for ConsumerGroupHeartbeatResponseData {
+    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
+        self.write(buf, version)
+            .expect("consumer group heartbeat response");
+    }
+}
+
+#[cfg(feature = "share-consumer")]
+impl ApiVersions for ShareGroupHeartbeatResponseData {
+    fn write_api_versions(&self, buf: &mut BytesMut, version: i16) {
+        self.write(buf, version)
+            .expect("share group heartbeat response");
     }
 }
 

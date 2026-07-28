@@ -34,6 +34,7 @@ use crate::{
     common::TopicPartition,
     config::{ClientConfig, ConfigKey, ConfigValue, ConsumerConfig, Properties},
     consumer::{
+        capabilities,
         client::resolve_bootstrap_brokers,
         coordinator,
         error::{ConsumerError, Result},
@@ -615,6 +616,11 @@ impl ShareConsumer {
 
         let group_id = self.config.base.group_id.clone();
         let coordinator = self.ensure_coordinator(&group_id).await?;
+        // The coordinator lookup is the first RPC a share consumer makes, so by
+        // here a connection has completed its `ApiVersions` handshake and the
+        // cluster can be asked whether it serves share groups at all — before
+        // any heartbeat, fetch or acknowledgement is framed.
+        capabilities::require_share_group(&self.wire, coordinator)?;
         if self.group.is_none() {
             self.group = Some(ShareGroupState::new(self.config.base.heartbeat_interval)?);
         }

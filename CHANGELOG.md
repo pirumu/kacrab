@@ -121,6 +121,20 @@ release date and links to relevant pull requests or issues.
 
 ### Fixed
 
+- **A consumer configured for a group protocol the broker cannot serve only found
+  out mid-poll, and was never told what to change.** `group.protocol=consumer`
+  (KIP-848) and the KIP-932 `ShareConsumer` both went through a coordinator lookup
+  — and, for `group.protocol=consumer`, a metadata refresh — before the first
+  heartbeat surfaced a bare "no compatible `ConsumerGroupHeartbeat` API version".
+  Both now check the negotiated `ApiVersions` data as soon as the coordinator
+  lookup has produced a handshake, and refuse before anything else goes out:
+  `group.protocol=consumer is not supported by this broker: ... — set
+  group.protocol=classic to use the JoinGroup/SyncGroup protocol this broker does
+  serve`, via the new `ConsumerError::UnsupportedGroupProtocol`. The verdict comes
+  from what the broker advertises, never from its release number: Kafka 3.9 serves
+  `ConsumerGroupHeartbeat` v0 under KIP-848 early access, so a "4.0 or newer" rule
+  would refuse a broker that works.
+
 - **A broker older than Apache Kafka 2.4 hung the client instead of saying so.**
   kacrab pins its `ApiVersions` handshake to v3 (KIP-511, so the broker logs the
   client's identity), and a pre-2.4 broker cannot parse it — it answers
