@@ -278,10 +278,6 @@ impl PartitionData {
         write_i64(buf, self.start_offset);
         if version >= 1 {
             write_i32(buf, self.delivery_complete_count);
-        } else if self.delivery_complete_count != -1i32 {
-            return Err(
-                UnsupportedFieldVersion::new(85, "delivery_complete_count", version).into(),
-            );
         }
         write_compact_array_length(buf, self.state_batches.len() as i32);
         for el in &self.state_batches {
@@ -300,10 +296,6 @@ impl PartitionData {
         len += 8;
         if version >= 1 {
             len += 4;
-        } else if self.delivery_complete_count != -1i32 {
-            return Err(
-                UnsupportedFieldVersion::new(85, "delivery_complete_count", version).into(),
-            );
         }
         len += compact_array_length_len(self.state_batches.len() as i32);
         for el in &self.state_batches {

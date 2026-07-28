@@ -387,8 +387,6 @@ impl DescribeShareGroupOffsetsResponsePartition {
         write_i32(buf, self.leader_epoch);
         if version >= 1 {
             write_i64(buf, self.lag);
-        } else if self.lag != -1i64 {
-            return Err(UnsupportedFieldVersion::new(90, "lag", version).into());
         }
         write_i16(buf, self.error_code);
         write_compact_nullable_string(buf, self.error_message.as_ref())?;
@@ -404,8 +402,6 @@ impl DescribeShareGroupOffsetsResponsePartition {
         len += 4;
         if version >= 1 {
             len += 8;
-        } else if self.lag != -1i64 {
-            return Err(UnsupportedFieldVersion::new(90, "lag", version).into());
         }
         len += 2;
         len += compact_nullable_string_len(self.error_message.as_ref())?;

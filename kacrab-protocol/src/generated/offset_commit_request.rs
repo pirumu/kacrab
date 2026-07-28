@@ -164,8 +164,6 @@ impl OffsetCommitRequestData {
         }
         if version <= 4 {
             write_i64(buf, self.retention_time_ms);
-        } else if self.retention_time_ms != -1i64 {
-            return Err(UnsupportedFieldVersion::new(8, "retention_time_ms", version).into());
         }
         if version >= 8 {
             write_compact_array_length(buf, self.topics.len() as i32);
@@ -212,8 +210,6 @@ impl OffsetCommitRequestData {
         }
         if version <= 4 {
             len += 8;
-        } else if self.retention_time_ms != -1i64 {
-            return Err(UnsupportedFieldVersion::new(8, "retention_time_ms", version).into());
         }
         if version >= 8 {
             len += compact_array_length_len(self.topics.len() as i32);
@@ -325,13 +321,9 @@ impl OffsetCommitRequestTopic {
             } else {
                 write_string(buf, &self.name)?;
             }
-        } else if self.name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(8, "name", version).into());
         }
         if version >= 10 {
             write_uuid(buf, &self.topic_id);
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(8, "topic_id", version).into());
         }
         if version >= 8 {
             write_compact_array_length(buf, self.partitions.len() as i32);
@@ -359,13 +351,9 @@ impl OffsetCommitRequestTopic {
             } else {
                 len += string_len(&self.name)?;
             }
-        } else if self.name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(8, "name", version).into());
         }
         if version >= 10 {
             len += 16;
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(8, "topic_id", version).into());
         }
         if version >= 8 {
             len += compact_array_length_len(self.partitions.len() as i32);
@@ -465,8 +453,6 @@ impl OffsetCommitRequestPartition {
         write_i64(buf, self.committed_offset);
         if version >= 6 {
             write_i32(buf, self.committed_leader_epoch);
-        } else if self.committed_leader_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(8, "committed_leader_epoch", version).into());
         }
         if version >= 8 {
             write_compact_nullable_string(buf, self.committed_metadata.as_ref())?;
@@ -486,8 +472,6 @@ impl OffsetCommitRequestPartition {
         len += 8;
         if version >= 6 {
             len += 4;
-        } else if self.committed_leader_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(8, "committed_leader_epoch", version).into());
         }
         if version >= 8 {
             len += compact_nullable_string_len(self.committed_metadata.as_ref())?;

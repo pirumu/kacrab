@@ -110,19 +110,13 @@ impl SyncGroupResponseData {
         }
         if version >= 1 {
             write_i32(buf, self.throttle_time_ms);
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(14, "throttle_time_ms", version).into());
         }
         write_i16(buf, self.error_code);
         if version >= 5 {
             write_compact_nullable_string(buf, self.protocol_type.as_ref())?;
-        } else if self.protocol_type != None {
-            return Err(UnsupportedFieldVersion::new(14, "protocol_type", version).into());
         }
         if version >= 5 {
             write_compact_nullable_string(buf, self.protocol_name.as_ref())?;
-        } else if self.protocol_name != None {
-            return Err(UnsupportedFieldVersion::new(14, "protocol_name", version).into());
         }
         if version >= 4 {
             write_compact_bytes(buf, &self.assignment)?;
@@ -143,19 +137,13 @@ impl SyncGroupResponseData {
         let mut len: usize = 0;
         if version >= 1 {
             len += 4;
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(14, "throttle_time_ms", version).into());
         }
         len += 2;
         if version >= 5 {
             len += compact_nullable_string_len(self.protocol_type.as_ref())?;
-        } else if self.protocol_type != None {
-            return Err(UnsupportedFieldVersion::new(14, "protocol_type", version).into());
         }
         if version >= 5 {
             len += compact_nullable_string_len(self.protocol_name.as_ref())?;
-        } else if self.protocol_name != None {
-            return Err(UnsupportedFieldVersion::new(14, "protocol_name", version).into());
         }
         if version >= 4 {
             len += compact_bytes_len(&self.assignment)?;

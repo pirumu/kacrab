@@ -195,8 +195,6 @@ impl ShareFetchRequestData {
         write_i32(buf, self.batch_size);
         if version >= 2 {
             write_i8(buf, self.share_acquire_mode);
-        } else if self.share_acquire_mode != 0i8 {
-            return Err(UnsupportedFieldVersion::new(78, "share_acquire_mode", version).into());
         }
         if version >= 2 {
             write_bool(buf, self.is_renew_ack);
@@ -231,8 +229,6 @@ impl ShareFetchRequestData {
         len += 4;
         if version >= 2 {
             len += 1;
-        } else if self.share_acquire_mode != 0i8 {
-            return Err(UnsupportedFieldVersion::new(78, "share_acquire_mode", version).into());
         }
         if version >= 2 {
             len += 1;

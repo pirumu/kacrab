@@ -90,8 +90,6 @@ impl OffsetCommitResponseData {
         }
         if version >= 3 {
             write_i32(buf, self.throttle_time_ms);
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(8, "throttle_time_ms", version).into());
         }
         if version >= 8 {
             write_compact_array_length(buf, self.topics.len() as i32);
@@ -118,8 +116,6 @@ impl OffsetCommitResponseData {
         let mut len: usize = 0;
         if version >= 3 {
             len += 4;
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(8, "throttle_time_ms", version).into());
         }
         if version >= 8 {
             len += compact_array_length_len(self.topics.len() as i32);
@@ -231,13 +227,9 @@ impl OffsetCommitResponseTopic {
             } else {
                 write_string(buf, &self.name)?;
             }
-        } else if self.name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(8, "name", version).into());
         }
         if version >= 10 {
             write_uuid(buf, &self.topic_id);
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(8, "topic_id", version).into());
         }
         if version >= 8 {
             write_compact_array_length(buf, self.partitions.len() as i32);
@@ -265,13 +257,9 @@ impl OffsetCommitResponseTopic {
             } else {
                 len += string_len(&self.name)?;
             }
-        } else if self.name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(8, "name", version).into());
         }
         if version >= 10 {
             len += 16;
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(8, "topic_id", version).into());
         }
         if version >= 8 {
             len += compact_array_length_len(self.partitions.len() as i32);

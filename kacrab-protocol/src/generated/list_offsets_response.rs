@@ -90,8 +90,6 @@ impl ListOffsetsResponseData {
         }
         if version >= 2 {
             write_i32(buf, self.throttle_time_ms);
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(2, "throttle_time_ms", version).into());
         }
         if version >= 6 {
             write_compact_array_length(buf, self.topics.len() as i32);
@@ -118,8 +116,6 @@ impl ListOffsetsResponseData {
         let mut len: usize = 0;
         if version >= 2 {
             len += 4;
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(2, "throttle_time_ms", version).into());
         }
         if version >= 6 {
             len += compact_array_length_len(self.topics.len() as i32);

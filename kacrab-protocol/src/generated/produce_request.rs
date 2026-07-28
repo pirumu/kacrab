@@ -258,13 +258,9 @@ impl TopicProduceData {
             } else {
                 write_string(buf, &self.name)?;
             }
-        } else if self.name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(0, "name", version).into());
         }
         if version >= 13 {
             write_uuid(buf, &self.topic_id);
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(0, "topic_id", version).into());
         }
         if version >= 9 {
             write_compact_array_length(buf, self.partition_data.len() as i32);
@@ -292,13 +288,9 @@ impl TopicProduceData {
             } else {
                 len += string_len(&self.name)?;
             }
-        } else if self.name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(0, "name", version).into());
         }
         if version >= 13 {
             len += 16;
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(0, "topic_id", version).into());
         }
         if version >= 9 {
             len += compact_array_length_len(self.partition_data.len() as i32);

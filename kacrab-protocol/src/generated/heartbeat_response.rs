@@ -72,8 +72,6 @@ impl HeartbeatResponseData {
         }
         if version >= 1 {
             write_i32(buf, self.throttle_time_ms);
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(12, "throttle_time_ms", version).into());
         }
         write_i16(buf, self.error_code);
         if version >= 4 {
@@ -90,8 +88,6 @@ impl HeartbeatResponseData {
         let mut len: usize = 0;
         if version >= 1 {
             len += 4;
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(12, "throttle_time_ms", version).into());
         }
         len += 2;
         if version >= 4 {

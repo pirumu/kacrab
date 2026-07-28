@@ -106,8 +106,6 @@ impl DescribeQuorumResponseData {
         write_i16(buf, self.error_code);
         if version >= 2 {
             write_compact_nullable_string(buf, self.error_message.as_ref())?;
-        } else if self.error_message != None {
-            return Err(UnsupportedFieldVersion::new(55, "error_message", version).into());
         }
         write_compact_array_length(buf, self.topics.len() as i32);
         for el in &self.topics {
@@ -134,8 +132,6 @@ impl DescribeQuorumResponseData {
         len += 2;
         if version >= 2 {
             len += compact_nullable_string_len(self.error_message.as_ref())?;
-        } else if self.error_message != None {
-            return Err(UnsupportedFieldVersion::new(55, "error_message", version).into());
         }
         len += compact_array_length_len(self.topics.len() as i32);
         for el in &self.topics {
@@ -359,8 +355,6 @@ impl PartitionData {
         write_i16(buf, self.error_code);
         if version >= 2 {
             write_compact_nullable_string(buf, self.error_message.as_ref())?;
-        } else if self.error_message != None {
-            return Err(UnsupportedFieldVersion::new(55, "error_message", version).into());
         }
         write_i32(buf, self.leader_id);
         write_i32(buf, self.leader_epoch);
@@ -384,8 +378,6 @@ impl PartitionData {
         len += 2;
         if version >= 2 {
             len += compact_nullable_string_len(self.error_message.as_ref())?;
-        } else if self.error_message != None {
-            return Err(UnsupportedFieldVersion::new(55, "error_message", version).into());
         }
         len += 4;
         len += 4;
@@ -652,15 +644,9 @@ impl ReplicaState {
         write_i64(buf, self.log_end_offset);
         if version >= 1 {
             write_i64(buf, self.last_fetch_timestamp);
-        } else if self.last_fetch_timestamp != -1i64 {
-            return Err(UnsupportedFieldVersion::new(55, "last_fetch_timestamp", version).into());
         }
         if version >= 1 {
             write_i64(buf, self.last_caught_up_timestamp);
-        } else if self.last_caught_up_timestamp != -1i64 {
-            return Err(
-                UnsupportedFieldVersion::new(55, "last_caught_up_timestamp", version).into(),
-            );
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
@@ -678,15 +664,9 @@ impl ReplicaState {
         len += 8;
         if version >= 1 {
             len += 8;
-        } else if self.last_fetch_timestamp != -1i64 {
-            return Err(UnsupportedFieldVersion::new(55, "last_fetch_timestamp", version).into());
         }
         if version >= 1 {
             len += 8;
-        } else if self.last_caught_up_timestamp != -1i64 {
-            return Err(
-                UnsupportedFieldVersion::new(55, "last_caught_up_timestamp", version).into(),
-            );
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);

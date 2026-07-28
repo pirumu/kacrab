@@ -226,14 +226,10 @@ impl DeletableTopicResult {
         }
         if version >= 6 {
             write_uuid(buf, &self.topic_id);
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(20, "topic_id", version).into());
         }
         write_i16(buf, self.error_code);
         if version >= 5 {
             write_compact_nullable_string(buf, self.error_message.as_ref())?;
-        } else if self.error_message != None {
-            return Err(UnsupportedFieldVersion::new(20, "error_message", version).into());
         }
         if version >= 4 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -257,14 +253,10 @@ impl DeletableTopicResult {
         }
         if version >= 6 {
             len += 16;
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(20, "topic_id", version).into());
         }
         len += 2;
         if version >= 5 {
             len += compact_nullable_string_len(self.error_message.as_ref())?;
-        } else if self.error_message != None {
-            return Err(UnsupportedFieldVersion::new(20, "error_message", version).into());
         }
         if version >= 4 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();

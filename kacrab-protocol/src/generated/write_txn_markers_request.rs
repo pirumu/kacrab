@@ -193,8 +193,6 @@ impl WritableTxnMarker {
         write_i32(buf, self.coordinator_epoch);
         if version >= 2 {
             write_i8(buf, self.transaction_version);
-        } else if self.transaction_version != 0i8 {
-            return Err(UnsupportedFieldVersion::new(27, "transaction_version", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
@@ -213,8 +211,6 @@ impl WritableTxnMarker {
         len += 4;
         if version >= 2 {
             len += 1;
-        } else if self.transaction_version != 0i8 {
-            return Err(UnsupportedFieldVersion::new(27, "transaction_version", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);

@@ -123,8 +123,6 @@ impl OffsetFetchResponseData {
         }
         if version >= 3 {
             write_i32(buf, self.throttle_time_ms);
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(9, "throttle_time_ms", version).into());
         }
         if version <= 7 {
             if version >= 6 {
@@ -143,8 +141,6 @@ impl OffsetFetchResponseData {
         }
         if version >= 2 && version <= 7 {
             write_i16(buf, self.error_code);
-        } else if self.error_code != 0i16 {
-            return Err(UnsupportedFieldVersion::new(9, "error_code", version).into());
         }
         if version >= 8 {
             write_compact_array_length(buf, self.groups.len() as i32);
@@ -168,8 +164,6 @@ impl OffsetFetchResponseData {
         let mut len: usize = 0;
         if version >= 3 {
             len += 4;
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(9, "throttle_time_ms", version).into());
         }
         if version <= 7 {
             if version >= 6 {
@@ -188,8 +182,6 @@ impl OffsetFetchResponseData {
         }
         if version >= 2 && version <= 7 {
             len += 2;
-        } else if self.error_code != 0i16 {
-            return Err(UnsupportedFieldVersion::new(9, "error_code", version).into());
         }
         if version >= 8 {
             len += compact_array_length_len(self.groups.len() as i32);
@@ -416,8 +408,6 @@ impl OffsetFetchResponsePartition {
         write_i64(buf, self.committed_offset);
         if version >= 5 {
             write_i32(buf, self.committed_leader_epoch);
-        } else if self.committed_leader_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(9, "committed_leader_epoch", version).into());
         }
         if version >= 6 {
             write_compact_nullable_string(buf, self.metadata.as_ref())?;
@@ -438,8 +428,6 @@ impl OffsetFetchResponsePartition {
         len += 8;
         if version >= 5 {
             len += 4;
-        } else if self.committed_leader_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(9, "committed_leader_epoch", version).into());
         }
         if version >= 6 {
             len += compact_nullable_string_len(self.metadata.as_ref())?;
@@ -614,13 +602,9 @@ impl OffsetFetchResponseTopics {
     pub fn write(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
         if version <= 9 {
             write_compact_string(buf, &self.name)?;
-        } else if self.name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(9, "name", version).into());
         }
         if version >= 10 {
             write_uuid(buf, &self.topic_id);
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(9, "topic_id", version).into());
         }
         write_compact_array_length(buf, self.partitions.len() as i32);
         for el in &self.partitions {
@@ -635,13 +619,9 @@ impl OffsetFetchResponseTopics {
         let mut len: usize = 0;
         if version <= 9 {
             len += compact_string_len(&self.name)?;
-        } else if self.name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(9, "name", version).into());
         }
         if version >= 10 {
             len += 16;
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(9, "topic_id", version).into());
         }
         len += compact_array_length_len(self.partitions.len() as i32);
         for el in &self.partitions {

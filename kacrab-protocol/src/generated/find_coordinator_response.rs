@@ -149,8 +149,6 @@ impl FindCoordinatorResponseData {
         }
         if version >= 1 {
             write_i32(buf, self.throttle_time_ms);
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(10, "throttle_time_ms", version).into());
         }
         if version <= 3 {
             write_i16(buf, self.error_code);
@@ -163,8 +161,6 @@ impl FindCoordinatorResponseData {
             } else {
                 write_nullable_string(buf, self.error_message.as_ref())?;
             }
-        } else if self.error_message != None {
-            return Err(UnsupportedFieldVersion::new(10, "error_message", version).into());
         }
         if version <= 3 {
             write_i32(buf, self.node_id);
@@ -207,8 +203,6 @@ impl FindCoordinatorResponseData {
         let mut len: usize = 0;
         if version >= 1 {
             len += 4;
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(10, "throttle_time_ms", version).into());
         }
         if version <= 3 {
             len += 2;
@@ -221,8 +215,6 @@ impl FindCoordinatorResponseData {
             } else {
                 len += nullable_string_len(self.error_message.as_ref())?;
             }
-        } else if self.error_message != None {
-            return Err(UnsupportedFieldVersion::new(10, "error_message", version).into());
         }
         if version <= 3 {
             len += 4;

@@ -125,8 +125,6 @@ impl AddPartitionsToTxnResponseData {
         write_i32(buf, self.throttle_time_ms);
         if version >= 4 {
             write_i16(buf, self.error_code);
-        } else if self.error_code != 0_i16 {
-            return Err(UnsupportedFieldVersion::new(24, "error_code", version).into());
         }
         if version >= 4 {
             write_compact_array_length(buf, self.results_by_transaction.len() as i32);
@@ -168,8 +166,6 @@ impl AddPartitionsToTxnResponseData {
         len += 4;
         if version >= 4 {
             len += 2;
-        } else if self.error_code != 0_i16 {
-            return Err(UnsupportedFieldVersion::new(24, "error_code", version).into());
         }
         if version >= 4 {
             len += compact_array_length_len(self.results_by_transaction.len() as i32);

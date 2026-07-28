@@ -66,6 +66,20 @@ release date and links to relevant pull requests or issues.
   [`benches/README.md`](benches/README.md). Their docs now say so, and the stale
   reference to a non-existent `send_now` method is gone.
 
+- **APIs Apache Kafka withdrew in 4.0 are no longer part of the generated protocol
+  surface.** `LeaderAndIsr`, `StopReplica`, `UpdateMetadata`, and
+  `ControlledShutdown` declare `"validVersions": "none"` in the 4.3.0 schemas —
+  there is no version of them left to speak. The generator lowered that to `0-0`,
+  so `ApiKey` carried a variant for each and `client_api_info` advertised v0,
+  claiming support for four broker-internal RPCs kacrab has never been able to
+  send. The four variants are gone from `ApiKey`, `RequestKind`, and
+  `ResponseKind`, and `ApiKey::from_i16` now returns `None` for keys 4-7. Their
+  `*Data` structs are still generated and still public.
+
+  `kacrab_protocol::version::CONTROLLED_SHUTDOWN_KEY` replaces
+  `ApiKey::ControlledShutdown` for the one place the key is still needed: the
+  legacy request-header v0 rule that `ControlledShutdown` v0 frames use.
+
 ### Added
 
 - **Share consumer (KIP-932), behind the new `share-consumer` feature.**
@@ -201,6 +215,18 @@ release date and links to relevant pull requests or issues.
   negotiated `Fetch` version, so a broker older than 2.4 rejected every fetch
   instead of simply serving from the leader. The field is ignorable and is now
   dropped below v11, degrading rack-aware fetching to leader fetching.
+
+- **The generated encoder rejected every ignorable field below its version instead
+  of dropping it.** Kafka's schemas mark a field `"ignorable": true` when a broker
+  that cannot receive it still handles the request correctly, and upstream's own
+  generator emits the "non-default value at an unsupported version" guard only for
+  fields that are *not* ignorable (`MessageDataGenerator.generateFieldWriter`:
+  `if (!field.ignorable())`) — an ignorable field is simply not written. kacrab's
+  generator ignored the flag and emitted the guard for every field, so any request
+  carrying an ignorable field failed with `UnsupportedFieldVersion` on an older
+  broker rather than being sent without it. The three cases above were each fixed
+  by hand at the call seam; the generator now honours the flag, which fixes the
+  whole class at once and lets those hand-written normalizations go away.
 
 - **`list_consumer_groups` reported share, streams, and connect groups as consumer
   groups.** The broker's `ListGroups` response carries every group it coordinates

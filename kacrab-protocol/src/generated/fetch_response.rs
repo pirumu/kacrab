@@ -139,8 +139,6 @@ impl FetchResponseData {
         write_i32(buf, self.throttle_time_ms);
         if version >= 7 {
             write_i16(buf, self.error_code);
-        } else if self.error_code != 0_i16 {
-            return Err(UnsupportedFieldVersion::new(1, "error_code", version).into());
         }
         if version >= 7 {
             write_i32(buf, self.session_id);
@@ -186,8 +184,6 @@ impl FetchResponseData {
         len += 4;
         if version >= 7 {
             len += 2;
-        } else if self.error_code != 0_i16 {
-            return Err(UnsupportedFieldVersion::new(1, "error_code", version).into());
         }
         if version >= 7 {
             len += 4;
@@ -317,13 +313,9 @@ impl FetchableTopicResponse {
             } else {
                 write_string(buf, &self.topic)?;
             }
-        } else if self.topic != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(1, "topic", version).into());
         }
         if version >= 13 {
             write_uuid(buf, &self.topic_id);
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(1, "topic_id", version).into());
         }
         if version >= 12 {
             write_compact_array_length(buf, self.partitions.len() as i32);
@@ -351,13 +343,9 @@ impl FetchableTopicResponse {
             } else {
                 len += string_len(&self.topic)?;
             }
-        } else if self.topic != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(1, "topic", version).into());
         }
         if version >= 13 {
             len += 16;
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(1, "topic_id", version).into());
         }
         if version >= 12 {
             len += compact_array_length_len(self.partitions.len() as i32);
@@ -571,8 +559,6 @@ impl PartitionData {
         write_i64(buf, self.last_stable_offset);
         if version >= 5 {
             write_i64(buf, self.log_start_offset);
-        } else if self.log_start_offset != -1i64 {
-            return Err(UnsupportedFieldVersion::new(1, "log_start_offset", version).into());
         }
         if version >= 12 {
             match &self.aborted_transactions {
@@ -650,8 +636,6 @@ impl PartitionData {
         len += 8;
         if version >= 5 {
             len += 8;
-        } else if self.log_start_offset != -1i64 {
-            return Err(UnsupportedFieldVersion::new(1, "log_start_offset", version).into());
         }
         if version >= 12 {
             match &self.aborted_transactions {

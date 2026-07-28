@@ -1316,12 +1316,33 @@ mod tests {
         let sent: HashSet<KafkaUuid> = request.topics.iter().map(|t| t.topic_id).collect();
         assert_eq!(sent, [uuid(1), uuid(2)].into_iter().collect());
 
-        // The strict codec accepts the id-keyed shape at v17 and rejects it at
-        // the name-keyed v12 (proof the two shapes cannot be mixed up).
+        // The id-keyed shape only round-trips at v13+. Kafka marks both topic
+        // keys ignorable, so encoding it at the name-keyed v12 drops the id
+        // instead of erroring — exactly what upstream's generator emits — leaving
+        // a topic with no key at all. That is why `select_fetch_version` must
+        // pair the id-keyed shape with v13+ and never with v12.
         let mut buf = BytesMut::new();
         request.write(&mut buf, 17).expect("v17 encode");
         assert_eq!(buf.len(), request.encoded_len(17).expect("v17 len"));
-        assert!(request.write(&mut BytesMut::new(), 12).is_err());
+        let decoded = FetchRequestData::read(&mut buf.freeze(), 17).expect("v17 decode");
+        assert!(
+            decoded
+                .topics
+                .iter()
+                .all(|topic| !topic.topic_id.is_nil() && topic.topic.as_str().is_empty()),
+            "v17 must carry the topic ids and no names"
+        );
+
+        let mut downgraded = BytesMut::new();
+        request.write(&mut downgraded, 12).expect("v12 encode");
+        let decoded = FetchRequestData::read(&mut downgraded.freeze(), 12).expect("v12 decode");
+        assert!(
+            decoded
+                .topics
+                .iter()
+                .all(|topic| topic.topic_id.is_nil() && topic.topic.as_str().is_empty()),
+            "the id-keyed shape loses its only key at v12, so it must never be sent there"
+        );
     }
 
     #[test]
@@ -1332,8 +1353,24 @@ mod tests {
         let request = build_fetch_request(&config, &session, &entries, 500, None);
         assert_eq!(request.topics[0].topic.as_str(), "t");
         assert!(request.topics[0].topic_id.is_nil());
-        request.write(&mut BytesMut::new(), 12).expect("v12 encode");
-        assert!(request.write(&mut BytesMut::new(), 17).is_err());
+
+        let mut buf = BytesMut::new();
+        request.write(&mut buf, 12).expect("v12 encode");
+        let decoded = FetchRequestData::read(&mut buf.freeze(), 12).expect("v12 decode");
+        assert_eq!(decoded.topics[0].topic.as_str(), "t");
+
+        // Symmetrically, the name-keyed shape loses its key at v17 rather than
+        // being rejected, because `Topic` is ignorable from v13 on.
+        let mut upgraded = BytesMut::new();
+        request.write(&mut upgraded, 17).expect("v17 encode");
+        let decoded = FetchRequestData::read(&mut upgraded.freeze(), 17).expect("v17 decode");
+        assert!(
+            decoded
+                .topics
+                .iter()
+                .all(|topic| topic.topic_id.is_nil() && topic.topic.as_str().is_empty()),
+            "the name-keyed shape loses its only key at v17, so it must never be sent there"
+        );
     }
 
     #[test]

@@ -73,15 +73,9 @@ impl ApiVersionsRequestData {
         }
         if version >= 3 {
             write_compact_string(buf, &self.client_software_name)?;
-        } else if self.client_software_name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(18, "client_software_name", version).into());
         }
         if version >= 3 {
             write_compact_string(buf, &self.client_software_version)?;
-        } else if self.client_software_version != KafkaString::default() {
-            return Err(
-                UnsupportedFieldVersion::new(18, "client_software_version", version).into(),
-            );
         }
         if version >= 3 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -97,15 +91,9 @@ impl ApiVersionsRequestData {
         let mut len: usize = 0;
         if version >= 3 {
             len += compact_string_len(&self.client_software_name)?;
-        } else if self.client_software_name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(18, "client_software_name", version).into());
         }
         if version >= 3 {
             len += compact_string_len(&self.client_software_version)?;
-        } else if self.client_software_version != KafkaString::default() {
-            return Err(
-                UnsupportedFieldVersion::new(18, "client_software_version", version).into(),
-            );
         }
         if version >= 3 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();

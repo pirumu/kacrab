@@ -183,8 +183,6 @@ impl ApiVersionsResponseData {
         }
         if version >= 1 {
             write_i32(buf, self.throttle_time_ms);
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(18, "throttle_time_ms", version).into());
         }
         if version >= 3 {
             let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
@@ -252,8 +250,6 @@ impl ApiVersionsResponseData {
         }
         if version >= 1 {
             len += 4;
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(18, "throttle_time_ms", version).into());
         }
         if version >= 3 {
             let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();

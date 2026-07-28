@@ -17,6 +17,14 @@ pub type Result<T> = core::result::Result<T, UnsupportedVersion>;
 /// header version selection.
 pub const API_VERSIONS_KEY: i16 = 18;
 
+/// Kafka `ControlledShutdown` API key (`7`), the legacy request-header v0
+/// exception.
+///
+/// The API was withdrawn in Kafka 4.0 (`ControlledShutdownRequest.json` declares
+/// `validVersions: none`), so it has no [`ApiKey`] variant to name it — but the
+/// header rule still has to hold for anything decoding a v0 frame off the wire.
+pub const CONTROLLED_SHUTDOWN_KEY: i16 = 7;
+
 /// A contiguous range of supported API versions, inclusive on both ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApiVersionRange {
@@ -54,7 +62,7 @@ pub fn resolve_api_version(api_key: i16, broker_range: ApiVersionRange) -> Optio
 /// `ControlledShutdown` v0 is the legacy request-header v0 exception.
 #[must_use]
 pub fn request_header_version(api_key: i16, api_version: i16) -> i16 {
-    if api_key == ApiKey::ControlledShutdown as i16 && api_version == 0 {
+    if api_key == CONTROLLED_SHUTDOWN_KEY && api_version == 0 {
         return 0;
     }
     if is_flexible_version(api_key, api_version) {
@@ -90,8 +98,8 @@ fn is_flexible_version(api_key: i16, api_version: i16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        API_VERSIONS_KEY, ApiVersionRange, request_header_version, resolve_api_version,
-        response_header_version,
+        API_VERSIONS_KEY, ApiVersionRange, CONTROLLED_SHUTDOWN_KEY, request_header_version,
+        resolve_api_version, response_header_version,
     };
     use crate::generated::ApiKey;
 
@@ -144,9 +152,13 @@ mod tests {
     #[test]
     fn header_versions_follow_flexible_metadata_and_special_cases() {
         let metadata = ApiKey::Metadata as i16;
-        let controlled_shutdown = ApiKey::ControlledShutdown as i16;
 
-        assert_eq!(request_header_version(controlled_shutdown, 0), 0);
+        assert_eq!(request_header_version(CONTROLLED_SHUTDOWN_KEY, 0), 0);
+        assert_eq!(
+            request_header_version(CONTROLLED_SHUTDOWN_KEY, 1),
+            1,
+            "only v0 of the withdrawn API took the legacy header"
+        );
         assert_eq!(request_header_version(metadata, 8), 1);
         assert_eq!(request_header_version(metadata, 9), 2);
 

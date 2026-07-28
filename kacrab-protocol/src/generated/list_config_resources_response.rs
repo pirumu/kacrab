@@ -163,8 +163,6 @@ impl ConfigResource {
         write_compact_string(buf, &self.resource_name)?;
         if version >= 1 {
             write_i8(buf, self.resource_type);
-        } else if self.resource_type != 16i8 {
-            return Err(UnsupportedFieldVersion::new(74, "resource_type", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
@@ -176,8 +174,6 @@ impl ConfigResource {
         len += compact_string_len(&self.resource_name)?;
         if version >= 1 {
             len += 1;
-        } else if self.resource_type != 16i8 {
-            return Err(UnsupportedFieldVersion::new(74, "resource_type", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);

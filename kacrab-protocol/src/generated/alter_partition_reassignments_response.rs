@@ -109,13 +109,6 @@ impl AlterPartitionReassignmentsResponseData {
         write_i32(buf, self.throttle_time_ms);
         if version >= 1 {
             write_bool(buf, self.allow_replication_factor_change);
-        } else if self.allow_replication_factor_change != true {
-            return Err(UnsupportedFieldVersion::new(
-                45,
-                "allow_replication_factor_change",
-                version,
-            )
-            .into());
         }
         write_i16(buf, self.error_code);
         write_compact_nullable_string(buf, self.error_message.as_ref())?;
@@ -136,13 +129,6 @@ impl AlterPartitionReassignmentsResponseData {
         len += 4;
         if version >= 1 {
             len += 1;
-        } else if self.allow_replication_factor_change != true {
-            return Err(UnsupportedFieldVersion::new(
-                45,
-                "allow_replication_factor_change",
-                version,
-            )
-            .into());
         }
         len += 2;
         len += compact_nullable_string_len(self.error_message.as_ref())?;

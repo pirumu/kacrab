@@ -128,10 +128,6 @@ impl ShareAcknowledgeResponseData {
         write_compact_nullable_string(buf, self.error_message.as_ref())?;
         if version >= 2 {
             write_i32(buf, self.acquisition_lock_timeout_ms);
-        } else if self.acquisition_lock_timeout_ms != 0_i32 {
-            return Err(
-                UnsupportedFieldVersion::new(79, "acquisition_lock_timeout_ms", version).into(),
-            );
         }
         write_compact_array_length(buf, self.responses.len() as i32);
         for el in &self.responses {
@@ -156,10 +152,6 @@ impl ShareAcknowledgeResponseData {
         len += compact_nullable_string_len(self.error_message.as_ref())?;
         if version >= 2 {
             len += 4;
-        } else if self.acquisition_lock_timeout_ms != 0_i32 {
-            return Err(
-                UnsupportedFieldVersion::new(79, "acquisition_lock_timeout_ms", version).into(),
-            );
         }
         len += compact_array_length_len(self.responses.len() as i32);
         for el in &self.responses {
