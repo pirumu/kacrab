@@ -107,7 +107,8 @@ generator itself, not only its output:
   (`kacrab/src/producer/batch.rs`). Both are generator outputs shaped by how the
   client uses them.
 - **The Kafka version is a pinned input, not a dependency's release cadence.**
-  kacrab targets 4.3.0 and regenerates from `apache/kafka@4.3.0` on demand; the
+  kacrab pins the schema source at `apache/kafka@4.3.0` and regenerates on
+  demand (request versions themselves are still negotiated per broker); the
   same resolver also generates the config catalog, so protocol and config never
   drift to different upstream revisions.
 
