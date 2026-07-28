@@ -180,15 +180,11 @@ impl JoinGroupResponseData {
         }
         if version >= 2 {
             write_i32(buf, self.throttle_time_ms);
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(11, "throttle_time_ms", version).into());
         }
         write_i16(buf, self.error_code);
         write_i32(buf, self.generation_id);
         if version >= 7 {
             write_compact_nullable_string(buf, self.protocol_type.as_ref())?;
-        } else if self.protocol_type != None {
-            return Err(UnsupportedFieldVersion::new(11, "protocol_type", version).into());
         }
         if version >= 7 {
             write_compact_nullable_string(buf, self.protocol_name.as_ref())?;
@@ -243,15 +239,11 @@ impl JoinGroupResponseData {
         let mut len: usize = 0;
         if version >= 2 {
             len += 4;
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(11, "throttle_time_ms", version).into());
         }
         len += 2;
         len += 4;
         if version >= 7 {
             len += compact_nullable_string_len(self.protocol_type.as_ref())?;
-        } else if self.protocol_type != None {
-            return Err(UnsupportedFieldVersion::new(11, "protocol_type", version).into());
         }
         if version >= 7 {
             len += compact_nullable_string_len(self.protocol_name.as_ref())?;
@@ -382,8 +374,6 @@ impl JoinGroupResponseMember {
             } else {
                 write_nullable_string(buf, self.group_instance_id.as_ref())?;
             }
-        } else if self.group_instance_id != None {
-            return Err(UnsupportedFieldVersion::new(11, "group_instance_id", version).into());
         }
         if version >= 6 {
             write_compact_bytes(buf, &self.metadata)?;
@@ -410,8 +400,6 @@ impl JoinGroupResponseMember {
             } else {
                 len += nullable_string_len(self.group_instance_id.as_ref())?;
             }
-        } else if self.group_instance_id != None {
-            return Err(UnsupportedFieldVersion::new(11, "group_instance_id", version).into());
         }
         if version >= 6 {
             len += compact_bytes_len(&self.metadata)?;

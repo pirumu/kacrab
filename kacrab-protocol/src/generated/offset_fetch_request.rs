@@ -495,13 +495,9 @@ impl OffsetFetchRequestGroup {
         write_compact_string(buf, &self.group_id)?;
         if version >= 9 {
             write_compact_nullable_string(buf, self.member_id.as_ref())?;
-        } else if self.member_id != None {
-            return Err(UnsupportedFieldVersion::new(9, "member_id", version).into());
         }
         if version >= 9 {
             write_i32(buf, self.member_epoch);
-        } else if self.member_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(9, "member_epoch", version).into());
         }
         match &self.topics {
             None => {
@@ -524,13 +520,9 @@ impl OffsetFetchRequestGroup {
         len += compact_string_len(&self.group_id)?;
         if version >= 9 {
             len += compact_nullable_string_len(self.member_id.as_ref())?;
-        } else if self.member_id != None {
-            return Err(UnsupportedFieldVersion::new(9, "member_id", version).into());
         }
         if version >= 9 {
             len += 4;
-        } else if self.member_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(9, "member_epoch", version).into());
         }
         match &self.topics {
             None => {
@@ -619,13 +611,9 @@ impl OffsetFetchRequestTopics {
     pub fn write(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
         if version <= 9 {
             write_compact_string(buf, &self.name)?;
-        } else if self.name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(9, "name", version).into());
         }
         if version >= 10 {
             write_uuid(buf, &self.topic_id);
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(9, "topic_id", version).into());
         }
         write_compact_array_length(buf, self.partition_indexes.len() as i32);
         for el in &self.partition_indexes {
@@ -640,13 +628,9 @@ impl OffsetFetchRequestTopics {
         let mut len: usize = 0;
         if version <= 9 {
             len += compact_string_len(&self.name)?;
-        } else if self.name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(9, "name", version).into());
         }
         if version >= 10 {
             len += 16;
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(9, "topic_id", version).into());
         }
         len += compact_array_length_len(self.partition_indexes.len() as i32);
         len += self.partition_indexes.len() * 4usize;

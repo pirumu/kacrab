@@ -134,8 +134,6 @@ impl ListOffsetsRequestData {
         }
         if version >= 10 {
             write_i32(buf, self.timeout_ms);
-        } else if self.timeout_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(2, "timeout_ms", version).into());
         }
         if version >= 6 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -168,8 +166,6 @@ impl ListOffsetsRequestData {
         }
         if version >= 10 {
             len += 4;
-        } else if self.timeout_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(2, "timeout_ms", version).into());
         }
         if version >= 6 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -363,8 +359,6 @@ impl ListOffsetsPartition {
         write_i32(buf, self.partition_index);
         if version >= 4 {
             write_i32(buf, self.current_leader_epoch);
-        } else if self.current_leader_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(2, "current_leader_epoch", version).into());
         }
         write_i64(buf, self.timestamp);
         if version >= 6 {
@@ -379,8 +373,6 @@ impl ListOffsetsPartition {
         len += 4;
         if version >= 4 {
             len += 4;
-        } else if self.current_leader_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(2, "current_leader_epoch", version).into());
         }
         len += 8;
         if version >= 6 {

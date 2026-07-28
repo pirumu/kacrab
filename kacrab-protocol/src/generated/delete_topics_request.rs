@@ -126,8 +126,6 @@ impl DeleteTopicsRequestData {
                     write_string(buf, el)?;
                 }
             }
-        } else if self.topic_names != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(20, "topic_names", version).into());
         }
         write_i32(buf, self.timeout_ms);
         if version >= 4 {
@@ -162,8 +160,6 @@ impl DeleteTopicsRequestData {
                     len += string_len(el)?;
                 }
             }
-        } else if self.topic_names != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(20, "topic_names", version).into());
         }
         len += 4;
         if version >= 4 {

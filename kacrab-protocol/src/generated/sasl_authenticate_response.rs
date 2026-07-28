@@ -111,8 +111,6 @@ impl SaslAuthenticateResponseData {
         }
         if version >= 1 {
             write_i64(buf, self.session_lifetime_ms);
-        } else if self.session_lifetime_ms != 0i64 {
-            return Err(UnsupportedFieldVersion::new(36, "session_lifetime_ms", version).into());
         }
         if version >= 2 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -139,8 +137,6 @@ impl SaslAuthenticateResponseData {
         }
         if version >= 1 {
             len += 8;
-        } else if self.session_lifetime_ms != 0i64 {
-            return Err(UnsupportedFieldVersion::new(36, "session_lifetime_ms", version).into());
         }
         if version >= 2 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();

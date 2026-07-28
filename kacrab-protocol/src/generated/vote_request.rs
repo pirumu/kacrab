@@ -87,8 +87,6 @@ impl VoteRequestData {
         write_compact_nullable_string(buf, self.cluster_id.as_ref())?;
         if version >= 1 {
             write_i32(buf, self.voter_id);
-        } else if self.voter_id != -1i32 {
-            return Err(UnsupportedFieldVersion::new(52, "voter_id", version).into());
         }
         write_compact_array_length(buf, self.topics.len() as i32);
         for el in &self.topics {
@@ -107,8 +105,6 @@ impl VoteRequestData {
         len += compact_nullable_string_len(self.cluster_id.as_ref())?;
         if version >= 1 {
             len += 4;
-        } else if self.voter_id != -1i32 {
-            return Err(UnsupportedFieldVersion::new(52, "voter_id", version).into());
         }
         len += compact_array_length_len(self.topics.len() as i32);
         for el in &self.topics {
@@ -315,13 +311,9 @@ impl PartitionData {
         write_i32(buf, self.replica_id);
         if version >= 1 {
             write_uuid(buf, &self.replica_directory_id);
-        } else if self.replica_directory_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(52, "replica_directory_id", version).into());
         }
         if version >= 1 {
             write_uuid(buf, &self.voter_directory_id);
-        } else if self.voter_directory_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(52, "voter_directory_id", version).into());
         }
         write_i32(buf, self.last_offset_epoch);
         write_i64(buf, self.last_offset);
@@ -342,13 +334,9 @@ impl PartitionData {
         len += 4;
         if version >= 1 {
             len += 16;
-        } else if self.replica_directory_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(52, "replica_directory_id", version).into());
         }
         if version >= 1 {
             len += 16;
-        } else if self.voter_directory_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(52, "voter_directory_id", version).into());
         }
         len += 4;
         len += 8;

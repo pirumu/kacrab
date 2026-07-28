@@ -185,13 +185,9 @@ impl BrokerRegistrationRequestData {
             for el in &self.log_dirs {
                 write_uuid(buf, el);
             }
-        } else if self.log_dirs != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(62, "log_dirs", version).into());
         }
         if version >= 3 {
             write_i64(buf, self.previous_broker_epoch);
-        } else if self.previous_broker_epoch != -1i64 {
-            return Err(UnsupportedFieldVersion::new(62, "previous_broker_epoch", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
@@ -223,13 +219,9 @@ impl BrokerRegistrationRequestData {
         if version >= 2 {
             len += compact_array_length_len(self.log_dirs.len() as i32);
             len += self.log_dirs.len() * 16usize;
-        } else if self.log_dirs != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(62, "log_dirs", version).into());
         }
         if version >= 3 {
             len += 8;
-        } else if self.previous_broker_epoch != -1i64 {
-            return Err(UnsupportedFieldVersion::new(62, "previous_broker_epoch", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);

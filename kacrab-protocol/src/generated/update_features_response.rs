@@ -103,8 +103,6 @@ impl UpdateFeaturesResponseData {
             for el in &self.results {
                 el.write(buf, version)?;
             }
-        } else if self.results != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(57, "results", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
@@ -124,8 +122,6 @@ impl UpdateFeaturesResponseData {
             for el in &self.results {
                 len += el.encoded_len(version)?;
             }
-        } else if self.results != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(57, "results", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);

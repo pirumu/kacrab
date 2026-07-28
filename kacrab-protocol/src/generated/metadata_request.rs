@@ -344,8 +344,6 @@ impl MetadataRequestTopic {
     pub fn write(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
         if version >= 10 {
             write_uuid(buf, &self.topic_id);
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(3, "topic_id", version).into());
         }
         if version >= 10 {
             write_compact_nullable_string(buf, self.name.as_ref())?;
@@ -371,8 +369,6 @@ impl MetadataRequestTopic {
         let mut len: usize = 0;
         if version >= 10 {
             len += 16;
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(3, "topic_id", version).into());
         }
         if version >= 10 {
             len += compact_nullable_string_len(self.name.as_ref())?;

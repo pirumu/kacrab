@@ -175,13 +175,9 @@ impl SyncGroupRequestData {
         }
         if version >= 5 {
             write_compact_nullable_string(buf, self.protocol_type.as_ref())?;
-        } else if self.protocol_type != None {
-            return Err(UnsupportedFieldVersion::new(14, "protocol_type", version).into());
         }
         if version >= 5 {
             write_compact_nullable_string(buf, self.protocol_name.as_ref())?;
-        } else if self.protocol_name != None {
-            return Err(UnsupportedFieldVersion::new(14, "protocol_name", version).into());
         }
         if version >= 4 {
             write_compact_array_length(buf, self.assignments.len() as i32);
@@ -228,13 +224,9 @@ impl SyncGroupRequestData {
         }
         if version >= 5 {
             len += compact_nullable_string_len(self.protocol_type.as_ref())?;
-        } else if self.protocol_type != None {
-            return Err(UnsupportedFieldVersion::new(14, "protocol_type", version).into());
         }
         if version >= 5 {
             len += compact_nullable_string_len(self.protocol_name.as_ref())?;
-        } else if self.protocol_name != None {
-            return Err(UnsupportedFieldVersion::new(14, "protocol_name", version).into());
         }
         if version >= 4 {
             len += compact_array_length_len(self.assignments.len() as i32);

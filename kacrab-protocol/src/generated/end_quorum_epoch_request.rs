@@ -129,8 +129,6 @@ impl EndQuorumEpochRequestData {
             for el in &self.leader_endpoints {
                 el.write(buf, version)?;
             }
-        } else if self.leader_endpoints != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(54, "leader_endpoints", version).into());
         }
         if version >= 1 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -165,8 +163,6 @@ impl EndQuorumEpochRequestData {
             for el in &self.leader_endpoints {
                 len += el.encoded_len(version)?;
             }
-        } else if self.leader_endpoints != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(54, "leader_endpoints", version).into());
         }
         if version >= 1 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -401,16 +397,12 @@ impl PartitionData {
             for el in &self.preferred_successors {
                 write_i32(buf, *el);
             }
-        } else if self.preferred_successors != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(54, "preferred_successors", version).into());
         }
         if version >= 1 {
             write_compact_array_length(buf, self.preferred_candidates.len() as i32);
             for el in &self.preferred_candidates {
                 el.write(buf, version)?;
             }
-        } else if self.preferred_candidates != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(54, "preferred_candidates", version).into());
         }
         if version >= 1 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -427,16 +419,12 @@ impl PartitionData {
         if version == 0 {
             len += array_length_len();
             len += self.preferred_successors.len() * 4usize;
-        } else if self.preferred_successors != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(54, "preferred_successors", version).into());
         }
         if version >= 1 {
             len += compact_array_length_len(self.preferred_candidates.len() as i32);
             for el in &self.preferred_candidates {
                 len += el.encoded_len(version)?;
             }
-        } else if self.preferred_candidates != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(54, "preferred_candidates", version).into());
         }
         if version >= 1 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();

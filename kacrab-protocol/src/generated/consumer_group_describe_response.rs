@@ -421,8 +421,6 @@ impl Member {
         self.target_assignment.write(buf, version)?;
         if version >= 1 {
             write_i8(buf, self.member_type);
-        } else if self.member_type != -1i8 {
-            return Err(UnsupportedFieldVersion::new(69, "member_type", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
@@ -446,8 +444,6 @@ impl Member {
         len += self.target_assignment.encoded_len(version)?;
         if version >= 1 {
             len += 1;
-        } else if self.member_type != -1i8 {
-            return Err(UnsupportedFieldVersion::new(69, "member_type", version).into());
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);

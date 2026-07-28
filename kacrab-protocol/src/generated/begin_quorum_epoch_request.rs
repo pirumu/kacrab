@@ -127,8 +127,6 @@ impl BeginQuorumEpochRequestData {
         }
         if version >= 1 {
             write_i32(buf, self.voter_id);
-        } else if self.voter_id != -1i32 {
-            return Err(UnsupportedFieldVersion::new(53, "voter_id", version).into());
         }
         if version >= 1 {
             write_compact_array_length(buf, self.topics.len() as i32);
@@ -146,8 +144,6 @@ impl BeginQuorumEpochRequestData {
             for el in &self.leader_endpoints {
                 el.write(buf, version)?;
             }
-        } else if self.leader_endpoints != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(53, "leader_endpoints", version).into());
         }
         if version >= 1 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -168,8 +164,6 @@ impl BeginQuorumEpochRequestData {
         }
         if version >= 1 {
             len += 4;
-        } else if self.voter_id != -1i32 {
-            return Err(UnsupportedFieldVersion::new(53, "voter_id", version).into());
         }
         if version >= 1 {
             len += compact_array_length_len(self.topics.len() as i32);
@@ -187,8 +181,6 @@ impl BeginQuorumEpochRequestData {
             for el in &self.leader_endpoints {
                 len += el.encoded_len(version)?;
             }
-        } else if self.leader_endpoints != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(53, "leader_endpoints", version).into());
         }
         if version >= 1 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -392,8 +384,6 @@ impl PartitionData {
         write_i32(buf, self.partition_index);
         if version >= 1 {
             write_uuid(buf, &self.voter_directory_id);
-        } else if self.voter_directory_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(53, "voter_directory_id", version).into());
         }
         write_i32(buf, self.leader_id);
         write_i32(buf, self.leader_epoch);
@@ -409,8 +399,6 @@ impl PartitionData {
         len += 4;
         if version >= 1 {
             len += 16;
-        } else if self.voter_directory_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(53, "voter_directory_id", version).into());
         }
         len += 4;
         len += 4;

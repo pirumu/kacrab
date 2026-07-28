@@ -90,8 +90,6 @@ impl DescribeGroupsResponseData {
         }
         if version >= 1 {
             write_i32(buf, self.throttle_time_ms);
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(15, "throttle_time_ms", version).into());
         }
         if version >= 5 {
             write_compact_array_length(buf, self.groups.len() as i32);
@@ -118,8 +116,6 @@ impl DescribeGroupsResponseData {
         let mut len: usize = 0;
         if version >= 1 {
             len += 4;
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(15, "throttle_time_ms", version).into());
         }
         if version >= 5 {
             len += compact_array_length_len(self.groups.len() as i32);
@@ -514,8 +510,6 @@ impl DescribedGroupMember {
             } else {
                 write_nullable_string(buf, self.group_instance_id.as_ref())?;
             }
-        } else if self.group_instance_id != None {
-            return Err(UnsupportedFieldVersion::new(15, "group_instance_id", version).into());
         }
         if version >= 5 {
             write_compact_string(buf, &self.client_id)?;
@@ -557,8 +551,6 @@ impl DescribedGroupMember {
             } else {
                 len += nullable_string_len(self.group_instance_id.as_ref())?;
             }
-        } else if self.group_instance_id != None {
-            return Err(UnsupportedFieldVersion::new(15, "group_instance_id", version).into());
         }
         if version >= 5 {
             len += compact_string_len(&self.client_id)?;

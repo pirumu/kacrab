@@ -454,8 +454,6 @@ impl TxnOffsetCommitRequestPartition {
         write_i64(buf, self.committed_offset);
         if version >= 2 {
             write_i32(buf, self.committed_leader_epoch);
-        } else if self.committed_leader_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(28, "committed_leader_epoch", version).into());
         }
         if version >= 3 {
             write_compact_nullable_string(buf, self.committed_metadata.as_ref())?;
@@ -475,8 +473,6 @@ impl TxnOffsetCommitRequestPartition {
         len += 8;
         if version >= 2 {
             len += 4;
-        } else if self.committed_leader_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(28, "committed_leader_epoch", version).into());
         }
         if version >= 3 {
             len += compact_nullable_string_len(self.committed_metadata.as_ref())?;

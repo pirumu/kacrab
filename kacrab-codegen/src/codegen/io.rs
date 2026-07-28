@@ -320,11 +320,26 @@ fn generate_write_field_exprs(def: &StructDef<'_>) -> Result<Vec<TokenStream>, C
         .collect()
 }
 
+/// Emit the `else if <non-default> { return Err(UnsupportedFieldVersion) }` guard
+/// that rejects a field carrying a non-default value at a version that cannot
+/// encode it.
+///
+/// A field the schema marks `"ignorable": true` gets no guard: it is silently
+/// dropped instead, which is what upstream's own generator does. See
+/// `MessageDataGenerator.generateFieldWriter`
+/// (`generator/src/main/java/org/apache/kafka/message/MessageDataGenerator.java:776-778`
+/// in apache/kafka@4.3.0), which attaches
+/// `FieldSpec.generateNonIgnorableFieldCheck` to the field's version conditional
+/// only `if (!field.ignorable())` — an ignorable field simply has no
+/// `ifNotMember` branch, so writing at a version outside its range emits nothing.
 fn generate_unsupported_field_check(
     def: &StructDef<'_>,
     field: &crate::ir::field::FieldSpec,
     var_ident: &Ident,
 ) -> Result<TokenStream, CodegenErrorKind> {
+    if field.ignorable {
+        return Ok(quote! {});
+    }
     let Some(api_key) = def.api_key else {
         return Ok(quote! {});
     };
@@ -551,4 +566,115 @@ fn write_method_signature(def: &StructDef<'_>) -> (TokenStream, TokenStream) {
         quote! { _version: i16 }
     };
     (buf_param, ver_param)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::expect_used,
+        reason = "codegen unit tests should fail fast with the failing generator named"
+    )]
+
+    use super::{generate_len_field_exprs, generate_write_field_exprs};
+    use crate::{
+        codegen::struct_def::StructDef,
+        ir::{
+            field::{FieldSpec, FieldType},
+            version_range::VersionRange,
+        },
+    };
+
+    /// An `int32` present only from v10, mirroring `ListOffsetsRequest.TimeoutMs`.
+    fn late_field(ignorable: bool) -> FieldSpec {
+        FieldSpec {
+            name: "TimeoutMs".to_owned(),
+            field_type: FieldType::Int32,
+            versions: VersionRange::From(10),
+            nullable_versions: VersionRange::None,
+            tagged_versions: VersionRange::None,
+            tag: None,
+            about: String::new(),
+            default: None,
+            ignorable,
+            map_key: false,
+            entity_type: None,
+            zero_copy: false,
+            flexible_versions: VersionRange::None,
+            has_flexible_versions_override: false,
+            fields: Vec::new(),
+        }
+    }
+
+    fn def(fields: &[FieldSpec]) -> StructDef<'_> {
+        StructDef {
+            name: "ListOffsetsRequestData".to_owned(),
+            about: String::new(),
+            fields,
+            top_level: Some((2, VersionRange::Range(1, 11))),
+            api_key: Some(2),
+            is_data_struct: true,
+            flexible_versions: VersionRange::From(6),
+            effective_versions: VersionRange::Range(1, 11),
+        }
+    }
+
+    fn write_body(fields: &[FieldSpec]) -> String {
+        generate_write_field_exprs(&def(fields))
+            .expect("write field expressions should generate")
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    fn len_body(fields: &[FieldSpec]) -> String {
+        generate_len_field_exprs(&def(fields))
+            .expect("length field expressions should generate")
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn non_ignorable_field_below_its_version_is_rejected() {
+        let fields = [late_field(false)];
+
+        let write = write_body(&fields);
+        let len = len_body(&fields);
+
+        assert!(
+            write.contains("version >= 10"),
+            "the write should still be version-gated: {write}"
+        );
+        assert!(
+            write.contains("UnsupportedFieldVersion"),
+            "a non-ignorable field carrying a non-default value below its version must error: \
+             {write}"
+        );
+        assert!(
+            len.contains("UnsupportedFieldVersion"),
+            "encoded_len must reject exactly what write rejects: {len}"
+        );
+    }
+
+    #[test]
+    fn ignorable_field_below_its_version_is_skipped() {
+        let fields = [late_field(true)];
+
+        let write = write_body(&fields);
+        let len = len_body(&fields);
+
+        assert!(
+            write.contains("version >= 10"),
+            "the write should stay version-gated so the field is dropped, not encoded: {write}"
+        );
+        assert!(
+            !write.contains("UnsupportedFieldVersion"),
+            "an ignorable field must be silently skipped below its version, like upstream's \
+             generator: {write}"
+        );
+        assert!(
+            !len.contains("UnsupportedFieldVersion"),
+            "encoded_len must skip whatever write skips: {len}"
+        );
+    }
 }

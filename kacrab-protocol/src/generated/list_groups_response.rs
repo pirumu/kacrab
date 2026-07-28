@@ -100,8 +100,6 @@ impl ListGroupsResponseData {
         }
         if version >= 1 {
             write_i32(buf, self.throttle_time_ms);
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(16, "throttle_time_ms", version).into());
         }
         write_i16(buf, self.error_code);
         if version >= 3 {
@@ -129,8 +127,6 @@ impl ListGroupsResponseData {
         let mut len: usize = 0;
         if version >= 1 {
             len += 4;
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(16, "throttle_time_ms", version).into());
         }
         len += 2;
         if version >= 3 {
@@ -245,13 +241,9 @@ impl ListedGroup {
         }
         if version >= 4 {
             write_compact_string(buf, &self.group_state)?;
-        } else if self.group_state != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(16, "group_state", version).into());
         }
         if version >= 5 {
             write_compact_string(buf, &self.group_type)?;
-        } else if self.group_type != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(16, "group_type", version).into());
         }
         if version >= 3 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -274,13 +266,9 @@ impl ListedGroup {
         }
         if version >= 4 {
             len += compact_string_len(&self.group_state)?;
-        } else if self.group_state != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(16, "group_state", version).into());
         }
         if version >= 5 {
             len += compact_string_len(&self.group_type)?;
-        } else if self.group_type != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(16, "group_type", version).into());
         }
         if version >= 3 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();

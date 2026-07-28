@@ -242,13 +242,9 @@ impl FetchRequestData {
         write_i8(buf, self.isolation_level);
         if version >= 7 {
             write_i32(buf, self.session_id);
-        } else if self.session_id != 0i32 {
-            return Err(UnsupportedFieldVersion::new(1, "session_id", version).into());
         }
         if version >= 7 {
             write_i32(buf, self.session_epoch);
-        } else if self.session_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(1, "session_epoch", version).into());
         }
         if version >= 12 {
             write_compact_array_length(buf, self.topics.len() as i32);
@@ -282,8 +278,6 @@ impl FetchRequestData {
             } else {
                 write_string(buf, &self.rack_id)?;
             }
-        } else if self.rack_id != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(1, "rack_id", version).into());
         }
         if version >= 12 {
             let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
@@ -326,13 +320,9 @@ impl FetchRequestData {
         len += 1;
         if version >= 7 {
             len += 4;
-        } else if self.session_id != 0i32 {
-            return Err(UnsupportedFieldVersion::new(1, "session_id", version).into());
         }
         if version >= 7 {
             len += 4;
-        } else if self.session_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(1, "session_epoch", version).into());
         }
         if version >= 12 {
             len += compact_array_length_len(self.topics.len() as i32);
@@ -366,8 +356,6 @@ impl FetchRequestData {
             } else {
                 len += string_len(&self.rack_id)?;
             }
-        } else if self.rack_id != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(1, "rack_id", version).into());
         }
         if version >= 12 {
             let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
@@ -550,13 +538,9 @@ impl FetchTopic {
             } else {
                 write_string(buf, &self.topic)?;
             }
-        } else if self.topic != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(1, "topic", version).into());
         }
         if version >= 13 {
             write_uuid(buf, &self.topic_id);
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(1, "topic_id", version).into());
         }
         if version >= 12 {
             write_compact_array_length(buf, self.partitions.len() as i32);
@@ -584,13 +568,9 @@ impl FetchTopic {
             } else {
                 len += string_len(&self.topic)?;
             }
-        } else if self.topic != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(1, "topic", version).into());
         }
         if version >= 13 {
             len += 16;
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(1, "topic_id", version).into());
         }
         if version >= 12 {
             len += compact_array_length_len(self.partitions.len() as i32);
@@ -742,8 +722,6 @@ impl FetchPartition {
         write_i32(buf, self.partition);
         if version >= 9 {
             write_i32(buf, self.current_leader_epoch);
-        } else if self.current_leader_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(1, "current_leader_epoch", version).into());
         }
         write_i64(buf, self.fetch_offset);
         if version >= 12 {
@@ -753,8 +731,6 @@ impl FetchPartition {
         }
         if version >= 5 {
             write_i64(buf, self.log_start_offset);
-        } else if self.log_start_offset != -1i64 {
-            return Err(UnsupportedFieldVersion::new(1, "log_start_offset", version).into());
         }
         write_i32(buf, self.partition_max_bytes);
         if version >= 12 {
@@ -787,8 +763,6 @@ impl FetchPartition {
         len += 4;
         if version >= 9 {
             len += 4;
-        } else if self.current_leader_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(1, "current_leader_epoch", version).into());
         }
         len += 8;
         if version >= 12 {
@@ -798,8 +772,6 @@ impl FetchPartition {
         }
         if version >= 5 {
             len += 8;
-        } else if self.log_start_offset != -1i64 {
-            return Err(UnsupportedFieldVersion::new(1, "log_start_offset", version).into());
         }
         len += 4;
         if version >= 12 {
@@ -919,13 +891,9 @@ impl ForgottenTopic {
             } else {
                 write_string(buf, &self.topic)?;
             }
-        } else if self.topic != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(1, "topic", version).into());
         }
         if version >= 13 {
             write_uuid(buf, &self.topic_id);
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(1, "topic_id", version).into());
         }
         if version >= 12 {
             write_compact_array_length(buf, self.partitions.len() as i32);
@@ -953,13 +921,9 @@ impl ForgottenTopic {
             } else {
                 len += string_len(&self.topic)?;
             }
-        } else if self.topic != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(1, "topic", version).into());
         }
         if version >= 13 {
             len += 16;
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(1, "topic_id", version).into());
         }
         if version >= 12 {
             len += compact_array_length_len(self.partitions.len() as i32);

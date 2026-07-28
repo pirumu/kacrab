@@ -254,8 +254,6 @@ impl MemberIdentity {
         }
         if version >= 5 {
             write_compact_nullable_string(buf, self.reason.as_ref())?;
-        } else if self.reason != None {
-            return Err(UnsupportedFieldVersion::new(13, "reason", version).into());
         }
         if version >= 4 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -278,8 +276,6 @@ impl MemberIdentity {
         }
         if version >= 5 {
             len += compact_nullable_string_len(self.reason.as_ref())?;
-        } else if self.reason != None {
-            return Err(UnsupportedFieldVersion::new(13, "reason", version).into());
         }
         if version >= 4 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();

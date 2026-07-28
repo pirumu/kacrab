@@ -96,13 +96,9 @@ impl EndTxnResponseData {
         write_i16(buf, self.error_code);
         if version >= 5 {
             write_i64(buf, self.producer_id);
-        } else if self.producer_id != -1i64 {
-            return Err(UnsupportedFieldVersion::new(26, "producer_id", version).into());
         }
         if version >= 5 {
             write_i16(buf, self.producer_epoch);
-        } else if self.producer_epoch != -1i16 {
-            return Err(UnsupportedFieldVersion::new(26, "producer_epoch", version).into());
         }
         if version >= 3 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -120,13 +116,9 @@ impl EndTxnResponseData {
         len += 2;
         if version >= 5 {
             len += 8;
-        } else if self.producer_id != -1i64 {
-            return Err(UnsupportedFieldVersion::new(26, "producer_id", version).into());
         }
         if version >= 5 {
             len += 2;
-        } else if self.producer_epoch != -1i16 {
-            return Err(UnsupportedFieldVersion::new(26, "producer_epoch", version).into());
         }
         if version >= 3 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();

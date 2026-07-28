@@ -101,8 +101,6 @@ impl DescribeLogDirsResponseData {
         write_i32(buf, self.throttle_time_ms);
         if version >= 3 {
             write_i16(buf, self.error_code);
-        } else if self.error_code != 0_i16 {
-            return Err(UnsupportedFieldVersion::new(35, "error_code", version).into());
         }
         if version >= 2 {
             write_compact_array_length(buf, self.results.len() as i32);
@@ -130,8 +128,6 @@ impl DescribeLogDirsResponseData {
         len += 4;
         if version >= 3 {
             len += 2;
-        } else if self.error_code != 0_i16 {
-            return Err(UnsupportedFieldVersion::new(35, "error_code", version).into());
         }
         if version >= 2 {
             len += compact_array_length_len(self.results.len() as i32);
@@ -290,18 +286,12 @@ impl DescribeLogDirsResult {
         }
         if version >= 4 {
             write_i64(buf, self.total_bytes);
-        } else if self.total_bytes != -1i64 {
-            return Err(UnsupportedFieldVersion::new(35, "total_bytes", version).into());
         }
         if version >= 4 {
             write_i64(buf, self.usable_bytes);
-        } else if self.usable_bytes != -1i64 {
-            return Err(UnsupportedFieldVersion::new(35, "usable_bytes", version).into());
         }
         if version >= 5 {
             write_bool(buf, self.is_cordoned);
-        } else if self.is_cordoned != false {
-            return Err(UnsupportedFieldVersion::new(35, "is_cordoned", version).into());
         }
         if version >= 2 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -331,18 +321,12 @@ impl DescribeLogDirsResult {
         }
         if version >= 4 {
             len += 8;
-        } else if self.total_bytes != -1i64 {
-            return Err(UnsupportedFieldVersion::new(35, "total_bytes", version).into());
         }
         if version >= 4 {
             len += 8;
-        } else if self.usable_bytes != -1i64 {
-            return Err(UnsupportedFieldVersion::new(35, "usable_bytes", version).into());
         }
         if version >= 5 {
             len += 1;
-        } else if self.is_cordoned != false {
-            return Err(UnsupportedFieldVersion::new(35, "is_cordoned", version).into());
         }
         if version >= 2 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();

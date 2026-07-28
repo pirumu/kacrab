@@ -139,70 +139,6 @@ impl ResponseMessage for FindCoordinatorResponseData {
     }
 }
 
-// `ListOffsets` carries the KIP-1075 remote-storage `timeout_ms` only from v10.
-// Kafka marks the field ignorable, so a broker that negotiates an older version
-// is sent the request without it rather than being sent a request its encoder
-// rejects (see `normalize_list_offsets_request`). The response is pass-through.
-impl RequestMessage for ListOffsetsRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        normalize_list_offsets_request(self, version).write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        normalize_list_offsets_request(self, version).encoded_len(version)
-    }
-}
-
-impl ResponseMessage for ListOffsetsResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
-// `Fetch` carries the consumer's `rack_id` only from v11 (KIP-392, rack-aware
-// follower fetching). Kafka marks the field ignorable, so a broker negotiating
-// an older version is sent the fetch without it (see `normalize_fetch_request`)
-// rather than one its encoder rejects. The response is pass-through.
-impl RequestMessage for FetchRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        normalize_fetch_request(self, version).write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        normalize_fetch_request(self, version).encoded_len(version)
-    }
-}
-
-impl ResponseMessage for FetchResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
-// `SyncGroup` carries the assignor's `protocol_type`/`protocol_name` only from
-// v5, where the coordinator uses them to fence a member speaking a different
-// protocol. Kafka marks both ignorable, so an older negotiated version is sent
-// the request without them (see `normalize_sync_group_request`) instead of one
-// its encoder rejects. The response is pass-through.
-impl RequestMessage for SyncGroupRequestData {
-    fn write_request(&self, buf: &mut BytesMut, version: i16) -> Result<()> {
-        normalize_sync_group_request(self, version).write(buf, version)?;
-        Ok(())
-    }
-
-    fn encoded_len(&self, version: i16) -> Result<usize> {
-        normalize_sync_group_request(self, version).encoded_len(version)
-    }
-}
-
-impl ResponseMessage for SyncGroupResponseData {
-    fn read_response(buf: &mut Bytes, version: i16) -> Result<Self> {
-        Self::read(buf, version)
-    }
-}
-
 // Produce is not a straight pass-through: depending on the negotiated version
 // the wire form carries either the topic name (v < 13) or the topic id (v >= 13),
 // so the unused field is cleared before the generated encoder runs (see
@@ -276,12 +212,22 @@ impl_passthrough_message! {
     DeleteShareGroupOffsetsRequestData => DeleteShareGroupOffsetsResponseData,
 }
 
-// Consumer client request/response pairs: fetch, the classic consumer-group
-// coordination RPCs (join/sync/heartbeat), offset-for-leader-epoch, and the new
-// KIP-848 consumer group protocol (ConsumerGroupHeartbeat). All are pure
-// pass-through codecs, like the admin block above.
+// Consumer client request/response pairs: fetch, offset lookup, the classic
+// consumer-group coordination RPCs (join/sync/heartbeat), offset-for-leader-epoch,
+// and the new KIP-848 consumer group protocol (ConsumerGroupHeartbeat). All are
+// pure pass-through codecs, like the admin block above.
+//
+// `Fetch`, `ListOffsets`, and `SyncGroup` each carry a field that only appears
+// from some version on — the consumer's `rack_id` (v11, KIP-392), the
+// remote-storage `timeout_ms` (v10, KIP-1075), and the assignor's
+// `protocol_type`/`protocol_name` (v5). Kafka marks all of them ignorable, so the
+// generated encoder drops them below their version instead of rejecting the
+// request, and no normalization is needed here.
 impl_passthrough_message! {
+    FetchRequestData => FetchResponseData,
+    ListOffsetsRequestData => ListOffsetsResponseData,
     JoinGroupRequestData => JoinGroupResponseData,
+    SyncGroupRequestData => SyncGroupResponseData,
     HeartbeatRequestData => HeartbeatResponseData,
     OffsetForLeaderEpochRequestData => OffsetForLeaderEpochResponseData,
     ConsumerGroupHeartbeatRequestData => ConsumerGroupHeartbeatResponseData,
@@ -328,71 +274,6 @@ fn normalize_find_coordinator_request(
     let mut normalized = request.clone();
     normalized.key = key.clone();
     normalized.coordinator_keys.clear();
-    Cow::Owned(normalized)
-}
-
-/// First `ListOffsets` version carrying the remote-storage `timeout_ms`
-/// (KIP-1075).
-const LIST_OFFSETS_TIMEOUT_MIN_VERSION: i16 = 10;
-
-/// Drop the `ListOffsets` request timeout for a negotiated `version` that does
-/// not carry it.
-///
-/// Kafka marks the field ignorable — the broker applies its own timeout when the
-/// request cannot express one — so dropping it is what its own encoder does, and
-/// leaves the offset lookup itself unchanged.
-fn normalize_list_offsets_request(
-    request: &ListOffsetsRequestData,
-    version: i16,
-) -> Cow<'_, ListOffsetsRequestData> {
-    if version >= LIST_OFFSETS_TIMEOUT_MIN_VERSION || request.timeout_ms == 0 {
-        return Cow::Borrowed(request);
-    }
-    let mut normalized = request.clone();
-    normalized.timeout_ms = 0;
-    Cow::Owned(normalized)
-}
-
-/// First `Fetch` version carrying the consumer's `rack_id` (KIP-392).
-const FETCH_RACK_ID_MIN_VERSION: i16 = 11;
-
-/// Drop the consumer's `rack_id` for a negotiated `Fetch` `version` that does not
-/// carry it.
-///
-/// Kafka marks the field ignorable — a broker too old for rack-aware fetching
-/// serves the leader's partitions as it always did — so `client.rack` degrades to
-/// leader fetching instead of failing the fetch outright.
-fn normalize_fetch_request(request: &FetchRequestData, version: i16) -> Cow<'_, FetchRequestData> {
-    if version >= FETCH_RACK_ID_MIN_VERSION || request.rack_id == KafkaString::default() {
-        return Cow::Borrowed(request);
-    }
-    let mut normalized = request.clone();
-    normalized.rack_id = KafkaString::default();
-    Cow::Owned(normalized)
-}
-
-/// First `SyncGroup` version carrying the assignor's `protocol_type` and
-/// `protocol_name`.
-const SYNC_GROUP_PROTOCOL_MIN_VERSION: i16 = 5;
-
-/// Drop the `SyncGroup` protocol identity for a negotiated `version` that does
-/// not carry it.
-///
-/// Kafka marks both fields ignorable: a coordinator too old to fence on them
-/// simply does not receive them, which is what its own encoder sends, and the
-/// assignment the member is asking for is unchanged.
-fn normalize_sync_group_request(
-    request: &SyncGroupRequestData,
-    version: i16,
-) -> Cow<'_, SyncGroupRequestData> {
-    if version >= SYNC_GROUP_PROTOCOL_MIN_VERSION
-        || (request.protocol_type.is_none() && request.protocol_name.is_none())
-    {
-        return Cow::Borrowed(request);
-    }
-    let mut normalized = request.clone();
-    normalized.protocol_type = None;
-    normalized.protocol_name = None;
     Cow::Owned(normalized)
 }
 

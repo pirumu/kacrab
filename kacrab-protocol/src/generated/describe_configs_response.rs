@@ -468,8 +468,6 @@ impl DescribeConfigsResourceResult {
         }
         if version >= 3 {
             write_i8(buf, self.config_type);
-        } else if self.config_type != 0i8 {
-            return Err(UnsupportedFieldVersion::new(32, "config_type", version).into());
         }
         if version >= 3 {
             if version >= 4 {
@@ -477,8 +475,6 @@ impl DescribeConfigsResourceResult {
             } else {
                 write_nullable_string(buf, self.documentation.as_ref())?;
             }
-        } else if self.documentation != None {
-            return Err(UnsupportedFieldVersion::new(32, "documentation", version).into());
         }
         if version >= 4 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -515,8 +511,6 @@ impl DescribeConfigsResourceResult {
         }
         if version >= 3 {
             len += 1;
-        } else if self.config_type != 0i8 {
-            return Err(UnsupportedFieldVersion::new(32, "config_type", version).into());
         }
         if version >= 3 {
             if version >= 4 {
@@ -524,8 +518,6 @@ impl DescribeConfigsResourceResult {
             } else {
                 len += nullable_string_len(self.documentation.as_ref())?;
             }
-        } else if self.documentation != None {
-            return Err(UnsupportedFieldVersion::new(32, "documentation", version).into());
         }
         if version >= 4 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();

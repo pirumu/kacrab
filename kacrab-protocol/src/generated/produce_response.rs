@@ -273,13 +273,9 @@ impl TopicProduceResponse {
             } else {
                 write_string(buf, &self.name)?;
             }
-        } else if self.name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(0, "name", version).into());
         }
         if version >= 13 {
             write_uuid(buf, &self.topic_id);
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(0, "topic_id", version).into());
         }
         if version >= 9 {
             write_compact_array_length(buf, self.partition_responses.len() as i32);
@@ -307,13 +303,9 @@ impl TopicProduceResponse {
             } else {
                 len += string_len(&self.name)?;
             }
-        } else if self.name != KafkaString::default() {
-            return Err(UnsupportedFieldVersion::new(0, "name", version).into());
         }
         if version >= 13 {
             len += 16;
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(0, "topic_id", version).into());
         }
         if version >= 9 {
             len += compact_array_length_len(self.partition_responses.len() as i32);
@@ -485,8 +477,6 @@ impl PartitionProduceResponse {
         write_i64(buf, self.log_append_time_ms);
         if version >= 5 {
             write_i64(buf, self.log_start_offset);
-        } else if self.log_start_offset != -1i64 {
-            return Err(UnsupportedFieldVersion::new(0, "log_start_offset", version).into());
         }
         if version >= 8 {
             if version >= 9 {
@@ -500,8 +490,6 @@ impl PartitionProduceResponse {
                     el.write(buf, version)?;
                 }
             }
-        } else if self.record_errors != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(0, "record_errors", version).into());
         }
         if version >= 8 {
             if version >= 9 {
@@ -509,8 +497,6 @@ impl PartitionProduceResponse {
             } else {
                 write_nullable_string(buf, self.error_message.as_ref())?;
             }
-        } else if self.error_message != None {
-            return Err(UnsupportedFieldVersion::new(0, "error_message", version).into());
         }
         if version >= 9 {
             let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
@@ -537,8 +523,6 @@ impl PartitionProduceResponse {
         len += 8;
         if version >= 5 {
             len += 8;
-        } else if self.log_start_offset != -1i64 {
-            return Err(UnsupportedFieldVersion::new(0, "log_start_offset", version).into());
         }
         if version >= 8 {
             if version >= 9 {
@@ -552,8 +536,6 @@ impl PartitionProduceResponse {
                     len += el.encoded_len(version)?;
                 }
             }
-        } else if self.record_errors != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(0, "record_errors", version).into());
         }
         if version >= 8 {
             if version >= 9 {
@@ -561,8 +543,6 @@ impl PartitionProduceResponse {
             } else {
                 len += nullable_string_len(self.error_message.as_ref())?;
             }
-        } else if self.error_message != None {
-            return Err(UnsupportedFieldVersion::new(0, "error_message", version).into());
         }
         if version >= 9 {
             let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();

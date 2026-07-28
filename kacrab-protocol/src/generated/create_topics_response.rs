@@ -276,8 +276,6 @@ impl CreatableTopicResult {
         }
         if version >= 7 {
             write_uuid(buf, &self.topic_id);
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(19, "topic_id", version).into());
         }
         write_i16(buf, self.error_code);
         if version >= 5 {
@@ -287,13 +285,9 @@ impl CreatableTopicResult {
         }
         if version >= 5 {
             write_i32(buf, self.num_partitions);
-        } else if self.num_partitions != -1i32 {
-            return Err(UnsupportedFieldVersion::new(19, "num_partitions", version).into());
         }
         if version >= 5 {
             write_i16(buf, self.replication_factor);
-        } else if self.replication_factor != -1i16 {
-            return Err(UnsupportedFieldVersion::new(19, "replication_factor", version).into());
         }
         if version >= 5 {
             match &self.configs {
@@ -307,8 +301,6 @@ impl CreatableTopicResult {
                     }
                 },
             }
-        } else if self.configs != None {
-            return Err(UnsupportedFieldVersion::new(19, "configs", version).into());
         }
         if version >= 5 {
             let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();
@@ -336,8 +328,6 @@ impl CreatableTopicResult {
         }
         if version >= 7 {
             len += 16;
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(19, "topic_id", version).into());
         }
         len += 2;
         if version >= 5 {
@@ -347,13 +337,9 @@ impl CreatableTopicResult {
         }
         if version >= 5 {
             len += 4;
-        } else if self.num_partitions != -1i32 {
-            return Err(UnsupportedFieldVersion::new(19, "num_partitions", version).into());
         }
         if version >= 5 {
             len += 2;
-        } else if self.replication_factor != -1i16 {
-            return Err(UnsupportedFieldVersion::new(19, "replication_factor", version).into());
         }
         if version >= 5 {
             match &self.configs {
@@ -367,8 +353,6 @@ impl CreatableTopicResult {
                     }
                 },
             }
-        } else if self.configs != None {
-            return Err(UnsupportedFieldVersion::new(19, "configs", version).into());
         }
         if version >= 5 {
             let mut known_tagged_fields: Vec<RawTaggedField> = Vec::new();

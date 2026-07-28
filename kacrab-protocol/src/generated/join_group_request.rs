@@ -177,8 +177,6 @@ impl JoinGroupRequestData {
         write_i32(buf, self.session_timeout_ms);
         if version >= 1 {
             write_i32(buf, self.rebalance_timeout_ms);
-        } else if self.rebalance_timeout_ms != -1i32 {
-            return Err(UnsupportedFieldVersion::new(11, "rebalance_timeout_ms", version).into());
         }
         if version >= 6 {
             write_compact_string(buf, &self.member_id)?;
@@ -212,8 +210,6 @@ impl JoinGroupRequestData {
         }
         if version >= 8 {
             write_compact_nullable_string(buf, self.reason.as_ref())?;
-        } else if self.reason != None {
-            return Err(UnsupportedFieldVersion::new(11, "reason", version).into());
         }
         if version >= 6 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -235,8 +231,6 @@ impl JoinGroupRequestData {
         len += 4;
         if version >= 1 {
             len += 4;
-        } else if self.rebalance_timeout_ms != -1i32 {
-            return Err(UnsupportedFieldVersion::new(11, "rebalance_timeout_ms", version).into());
         }
         if version >= 6 {
             len += compact_string_len(&self.member_id)?;
@@ -270,8 +264,6 @@ impl JoinGroupRequestData {
         }
         if version >= 8 {
             len += compact_nullable_string_len(self.reason.as_ref())?;
-        } else if self.reason != None {
-            return Err(UnsupportedFieldVersion::new(11, "reason", version).into());
         }
         if version >= 6 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();

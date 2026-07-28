@@ -188,6 +188,18 @@ release date and links to relevant pull requests or issues.
   instead of simply serving from the leader. The field is ignorable and is now
   dropped below v11, degrading rack-aware fetching to leader fetching.
 
+- **The generated encoder rejected every ignorable field below its version instead
+  of dropping it.** Kafka's schemas mark a field `"ignorable": true` when a broker
+  that cannot receive it still handles the request correctly, and upstream's own
+  generator emits the "non-default value at an unsupported version" guard only for
+  fields that are *not* ignorable (`MessageDataGenerator.generateFieldWriter`:
+  `if (!field.ignorable())`) — an ignorable field is simply not written. kacrab's
+  generator ignored the flag and emitted the guard for every field, so any request
+  carrying an ignorable field failed with `UnsupportedFieldVersion` on an older
+  broker rather than being sent without it. The three cases above were each fixed
+  by hand at the call seam; the generator now honours the flag, which fixes the
+  whole class at once and lets those hand-written normalizations go away.
+
 - **`list_consumer_groups` reported share, streams, and connect groups as consumer
   groups.** The broker's `ListGroups` response carries every group it coordinates
   whatever its protocol, and Java's `listConsumerGroups` filters that response down

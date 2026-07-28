@@ -271,10 +271,6 @@ impl PartitionResult {
         write_i64(buf, self.start_offset);
         if version >= 1 {
             write_i32(buf, self.delivery_complete_count);
-        } else if self.delivery_complete_count != -1i32 {
-            return Err(
-                UnsupportedFieldVersion::new(87, "delivery_complete_count", version).into(),
-            );
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);
@@ -291,10 +287,6 @@ impl PartitionResult {
         len += 8;
         if version >= 1 {
             len += 4;
-        } else if self.delivery_complete_count != -1i32 {
-            return Err(
-                UnsupportedFieldVersion::new(87, "delivery_complete_count", version).into(),
-            );
         }
         let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
         all_tags.sort_by_key(|f| f.tag);

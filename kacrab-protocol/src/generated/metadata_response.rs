@@ -170,8 +170,6 @@ impl MetadataResponseData {
         }
         if version >= 3 {
             write_i32(buf, self.throttle_time_ms);
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(3, "throttle_time_ms", version).into());
         }
         if version >= 9 {
             write_compact_array_length(buf, self.brokers.len() as i32);
@@ -190,13 +188,9 @@ impl MetadataResponseData {
             } else {
                 write_nullable_string(buf, self.cluster_id.as_ref())?;
             }
-        } else if self.cluster_id != None {
-            return Err(UnsupportedFieldVersion::new(3, "cluster_id", version).into());
         }
         if version >= 1 {
             write_i32(buf, self.controller_id);
-        } else if self.controller_id != -1i32 {
-            return Err(UnsupportedFieldVersion::new(3, "controller_id", version).into());
         }
         if version >= 9 {
             write_compact_array_length(buf, self.topics.len() as i32);
@@ -218,8 +212,6 @@ impl MetadataResponseData {
         }
         if version >= 13 {
             write_i16(buf, self.error_code);
-        } else if self.error_code != 0_i16 {
-            return Err(UnsupportedFieldVersion::new(3, "error_code", version).into());
         }
         if version >= 9 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -235,8 +227,6 @@ impl MetadataResponseData {
         let mut len: usize = 0;
         if version >= 3 {
             len += 4;
-        } else if self.throttle_time_ms != 0_i32 {
-            return Err(UnsupportedFieldVersion::new(3, "throttle_time_ms", version).into());
         }
         if version >= 9 {
             len += compact_array_length_len(self.brokers.len() as i32);
@@ -255,13 +245,9 @@ impl MetadataResponseData {
             } else {
                 len += nullable_string_len(self.cluster_id.as_ref())?;
             }
-        } else if self.cluster_id != None {
-            return Err(UnsupportedFieldVersion::new(3, "cluster_id", version).into());
         }
         if version >= 1 {
             len += 4;
-        } else if self.controller_id != -1i32 {
-            return Err(UnsupportedFieldVersion::new(3, "controller_id", version).into());
         }
         if version >= 9 {
             len += compact_array_length_len(self.topics.len() as i32);
@@ -283,8 +269,6 @@ impl MetadataResponseData {
         }
         if version >= 13 {
             len += 2;
-        } else if self.error_code != 0_i16 {
-            return Err(UnsupportedFieldVersion::new(3, "error_code", version).into());
         }
         if version >= 9 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -386,8 +370,6 @@ impl MetadataResponseBroker {
             } else {
                 write_nullable_string(buf, self.rack.as_ref())?;
             }
-        } else if self.rack != None {
-            return Err(UnsupportedFieldVersion::new(3, "rack", version).into());
         }
         if version >= 9 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -411,8 +393,6 @@ impl MetadataResponseBroker {
             } else {
                 len += nullable_string_len(self.rack.as_ref())?;
             }
-        } else if self.rack != None {
-            return Err(UnsupportedFieldVersion::new(3, "rack", version).into());
         }
         if version >= 9 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -561,13 +541,9 @@ impl MetadataResponseTopic {
         }
         if version >= 10 {
             write_uuid(buf, &self.topic_id);
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(3, "topic_id", version).into());
         }
         if version >= 1 {
             write_bool(buf, self.is_internal);
-        } else if self.is_internal != false {
-            return Err(UnsupportedFieldVersion::new(3, "is_internal", version).into());
         }
         if version >= 9 {
             write_compact_array_length(buf, self.partitions.len() as i32);
@@ -610,13 +586,9 @@ impl MetadataResponseTopic {
         }
         if version >= 10 {
             len += 16;
-        } else if self.topic_id != KafkaUuid::ZERO {
-            return Err(UnsupportedFieldVersion::new(3, "topic_id", version).into());
         }
         if version >= 1 {
             len += 1;
-        } else if self.is_internal != false {
-            return Err(UnsupportedFieldVersion::new(3, "is_internal", version).into());
         }
         if version >= 9 {
             len += compact_array_length_len(self.partitions.len() as i32);
@@ -806,8 +778,6 @@ impl MetadataResponsePartition {
         write_i32(buf, self.leader_id);
         if version >= 7 {
             write_i32(buf, self.leader_epoch);
-        } else if self.leader_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(3, "leader_epoch", version).into());
         }
         if version >= 9 {
             write_compact_array_length(buf, self.replica_nodes.len() as i32);
@@ -843,8 +813,6 @@ impl MetadataResponsePartition {
                     write_i32(buf, *el);
                 }
             }
-        } else if self.offline_replicas != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(3, "offline_replicas", version).into());
         }
         if version >= 9 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();
@@ -860,8 +828,6 @@ impl MetadataResponsePartition {
         len += 4;
         if version >= 7 {
             len += 4;
-        } else if self.leader_epoch != -1i32 {
-            return Err(UnsupportedFieldVersion::new(3, "leader_epoch", version).into());
         }
         if version >= 9 {
             len += compact_array_length_len(self.replica_nodes.len() as i32);
@@ -885,8 +851,6 @@ impl MetadataResponsePartition {
                 len += array_length_len();
                 len += self.offline_replicas.len() * 4usize;
             }
-        } else if self.offline_replicas != Vec::new() {
-            return Err(UnsupportedFieldVersion::new(3, "offline_replicas", version).into());
         }
         if version >= 9 {
             let mut all_tags: Vec<RawTaggedField> = self._unknown_tagged_fields.clone();

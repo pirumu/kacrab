@@ -89,8 +89,6 @@ impl OffsetForLeaderEpochRequestData {
         }
         if version >= 3 {
             write_i32(buf, self.replica_id);
-        } else if self.replica_id != -2i32 {
-            return Err(UnsupportedFieldVersion::new(23, "replica_id", version).into());
         }
         if version >= 4 {
             write_compact_array_length(buf, self.topics.len() as i32);
@@ -117,8 +115,6 @@ impl OffsetForLeaderEpochRequestData {
         let mut len: usize = 0;
         if version >= 3 {
             len += 4;
-        } else if self.replica_id != -2i32 {
-            return Err(UnsupportedFieldVersion::new(23, "replica_id", version).into());
         }
         if version >= 4 {
             len += compact_array_length_len(self.topics.len() as i32);
