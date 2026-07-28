@@ -27,7 +27,7 @@ use kacrab_protocol::{
         ApiKey, ErrorCode, FetchRequestData, FetchResponseData,
         fetch_request::{FetchPartition, FetchTopic, ForgottenTopic, ReplicaState},
     },
-    record::decode_next_batch,
+    record::{CrcCheck, RecordError, decode_next_batch_with_crc},
 };
 
 use super::{
@@ -65,6 +65,43 @@ const fn select_fetch_version(negotiated: i16, all_topics_have_ids: bool) -> (i1
 
 /// The `LogAppendTime` bit (bit 3) in a record batch's attributes.
 const LOG_APPEND_TIME_BIT: i16 = 0x0008;
+
+/// The `check.crcs` setting as the record decoder takes it.
+///
+/// Kafka's default is `true`, and leaving it there is what makes a corrupted
+/// batch — on the wire or on the broker's disk — an error instead of records
+/// with garbage in them. Turning it off skips one pass over each batch payload
+/// and is only worth it when something else already guarantees integrity.
+pub(super) const fn crc_check(config: &ConsumerRuntimeConfig) -> CrcCheck {
+    if config.check_crcs {
+        CrcCheck::Verify
+    } else {
+        CrcCheck::Trust
+    }
+}
+
+/// Report a record batch that would not decode.
+///
+/// Attributed to the broker with `CORRUPT_MESSAGE` — Kafka's own code for this —
+/// and naming the partition, the offset the decode was standing at, and the
+/// specific failure. The alternative the consumer used to give was
+/// `InvalidState`, a variant documented as *the caller* misusing the API, with
+/// no partition, no offset and no cause: a CRC mismatch from a bad disk read
+/// looked exactly like mixing `subscribe` with `assign`.
+pub(super) fn corrupt_batch(
+    partition: &TopicPartition,
+    offset: i64,
+    error: &RecordError,
+) -> ConsumerError {
+    ConsumerError::broker(
+        "fetch",
+        ErrorCode::CorruptMessage,
+        format!(
+            "{}-{} returned a record batch at offset {offset} that could not be decoded: {}",
+            partition.topic, partition.partition, error.kind
+        ),
+    )
+}
 
 /// `session_id` meaning "no fetch session" (a full, sessionless fetch).
 const INVALID_SESSION_ID: i32 = 0;
@@ -576,11 +613,10 @@ impl DecodedFetch {
     /// Decode batches until at least `budget` records are ready or the blob
     /// runs out. Records below the current position (a fetch landing mid-batch)
     /// are skipped.
-    fn refill(&mut self, budget: usize) -> Result<()> {
+    fn refill(&mut self, budget: usize, crc_check: CrcCheck) -> Result<()> {
         while self.records.len() < budget && !self.blob.is_empty() {
-            let batch = decode_next_batch(&mut self.blob).map_err(|_error| {
-                ConsumerError::InvalidState("failed to decode fetched record batch")
-            })?;
+            let batch = decode_next_batch_with_crc(&mut self.blob, crc_check)
+                .map_err(|error| corrupt_batch(&self.partition, self.next_offset, &error))?;
             let Some(batch) = batch else {
                 // A truncated trailing batch — normal at the end of a fetch
                 // response; the records continue in the next fetch.
@@ -673,6 +709,7 @@ impl FetchBuffer {
         &mut self,
         subscription: &SubscriptionState,
         max_records: usize,
+        crc_check: CrcCheck,
     ) -> Result<Vec<PartitionFetch>> {
         let mut out = Vec::new();
         let mut budget = max_records;
@@ -701,7 +738,7 @@ impl FetchBuffer {
                 BufferedFetch::Decoded(decoded) => decoded,
                 BufferedFetch::Raw(raw) => DecodedFetch::new(raw),
             };
-            decoded.refill(budget)?;
+            decoded.refill(budget, crc_check)?;
             if decoded.records.is_empty() {
                 // Nothing at or past the position in this blob.
                 continue;
@@ -899,6 +936,100 @@ mod tests {
         TopicPartition::new("t", 0)
     }
 
+    /// Rewrite one byte *inside a record's value*, leaving every length, every
+    /// varint and the stored CRC untouched. That is what a bad disk sector or a
+    /// mangled frame looks like, and the only thing the CRC is there to catch:
+    /// every structural check in the decoder still passes on this blob.
+    fn corrupt_a_value_byte(blob: &Bytes) -> Bytes {
+        let mut bytes = blob.to_vec();
+        // `encode_batch` writes values "v0", "v1", … — flip the digit of the
+        // first one, which no length or type field describes.
+        let digit = bytes
+            .windows(2)
+            .position(|pair| pair == b"v0")
+            .and_then(|start| start.checked_add(1))
+            .expect("the fixture batch carries a v0 value");
+        bytes[digit] = b'9';
+        Bytes::from(bytes)
+    }
+
+    fn buffered(blob: Bytes) -> DecodedFetch {
+        DecodedFetch::new(RawPartitionFetch {
+            partition: tp(),
+            fetch_position: FetchPosition::new(100, None),
+            records: blob,
+        })
+    }
+
+    /// `check.crcs=true` (Kafka's default) has to *do* something: a batch whose
+    /// payload no longer matches its checksum must not reach the application.
+    #[test]
+    fn a_corrupted_batch_is_rejected_when_check_crcs_is_on() {
+        let mut decoded = buffered(corrupt_a_value_byte(&encode_batch(100, 3)));
+
+        let error = decoded
+            .refill(10, CrcCheck::Verify)
+            .expect_err("a batch whose CRC does not match its payload is corrupt");
+
+        let rendered = error.to_string();
+        assert!(
+            matches!(
+                error,
+                ConsumerError::Broker {
+                    error: ErrorCode::CorruptMessage,
+                    ..
+                }
+            ),
+            "corruption is the broker's CORRUPT_MESSAGE, not a caller mistake: {rendered}"
+        );
+        assert!(
+            rendered.contains("t-0"),
+            "the error must name the partition: {rendered}"
+        );
+        assert!(
+            rendered.contains("CRC") || rendered.contains("crc"),
+            "the error must name the cause, not just 'failed to decode': {rendered}"
+        );
+        assert!(
+            decoded.records.is_empty(),
+            "no record from a corrupt batch may reach the application"
+        );
+    }
+
+    /// `check.crcs=false` is a real setting, not a no-op: the same blob decodes,
+    /// because the consumer skipped the checksum the caller told it to skip.
+    #[test]
+    fn the_same_corrupted_batch_decodes_when_check_crcs_is_off() {
+        let mut decoded = buffered(corrupt_a_value_byte(&encode_batch(100, 3)));
+
+        decoded
+            .refill(10, CrcCheck::Trust)
+            .expect("check.crcs=false trusts the batch");
+
+        assert_eq!(
+            decoded.records.len(),
+            3,
+            "every record is still there — only the integrity check was skipped"
+        );
+    }
+
+    /// The knob the two tests above exercise is the one `check.crcs` sets.
+    #[test]
+    fn crc_check_follows_the_check_crcs_config() {
+        let client: crate::config::ClientConfig =
+            std::iter::once(("bootstrap.servers", "127.0.0.1:9092")).collect();
+        let mut config = ConsumerRuntimeConfig::from_config(
+            &client.consumer_config().expect("valid consumer config"),
+        )
+        .expect("runtime config");
+
+        assert!(config.check_crcs, "Kafka's default is to verify");
+        assert_eq!(crc_check(&config), CrcCheck::Verify);
+
+        config.check_crcs = false;
+        assert_eq!(crc_check(&config), CrcCheck::Trust);
+    }
+
     #[test]
     fn decodes_records_with_absolute_offsets() {
         let mut decoded = DecodedFetch::new(RawPartitionFetch {
@@ -906,7 +1037,7 @@ mod tests {
             fetch_position: FetchPosition::new(100, None),
             records: encode_batch(100, 3),
         });
-        decoded.refill(10).unwrap();
+        decoded.refill(10, CrcCheck::Verify).unwrap();
         assert_eq!(decoded.records.len(), 3);
         assert_eq!(decoded.records[0].offset, 100);
         assert_eq!(decoded.records[2].offset, 102);
@@ -925,7 +1056,7 @@ mod tests {
             fetch_position: FetchPosition::new(101, None),
             records: encode_batch(100, 3),
         });
-        decoded.refill(10).unwrap();
+        decoded.refill(10, CrcCheck::Verify).unwrap();
         assert_eq!(decoded.records.len(), 2);
         assert_eq!(decoded.records[0].offset, 101);
         assert_eq!(decoded.next_offset, 103);
@@ -944,11 +1075,11 @@ mod tests {
             records: blob.freeze(),
         });
 
-        decoded.refill(2).unwrap();
+        decoded.refill(2, CrcCheck::Verify).unwrap();
         assert_eq!(decoded.records.len(), 3);
         assert!(!decoded.blob.is_empty());
 
-        decoded.refill(6).unwrap();
+        decoded.refill(6, CrcCheck::Verify).unwrap();
         assert_eq!(decoded.records.len(), 6);
         assert!(decoded.blob.is_empty());
         assert_eq!(decoded.next_offset, 106);
@@ -970,7 +1101,9 @@ mod tests {
         });
         let subscription = subscription_at("t", 0, 100);
 
-        let drained = buffer.drain(&subscription, 10).expect("drain");
+        let drained = buffer
+            .drain(&subscription, 10, CrcCheck::Verify)
+            .expect("drain");
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].records.len(), 3);
         assert_eq!(drained[0].next_offset, 103);
@@ -1166,7 +1299,9 @@ mod tests {
 
         // First drain: 2 of 5 records, position advances past them, remainder
         // stays buffered so the partition must not be re-fetched.
-        let first = buffer.drain(&subscription, 2).expect("drain");
+        let first = buffer
+            .drain(&subscription, 2, CrcCheck::Verify)
+            .expect("drain");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].records.len(), 2);
         assert_eq!(first[0].next_offset, 102);
@@ -1174,13 +1309,17 @@ mod tests {
         assert!(buffer.has(&tp));
 
         // Second drain continues from the remainder without any new fetch.
-        let second = buffer.drain(&subscription, 2).expect("drain");
+        let second = buffer
+            .drain(&subscription, 2, CrcCheck::Verify)
+            .expect("drain");
         assert_eq!(second[0].records.len(), 2);
         assert_eq!(second[0].records[0].offset, 102);
         subscription.advance_position(&tp, second[0].next_offset, second[0].next_leader_epoch);
 
         // Final drain empties the buffer and advances past the whole blob.
-        let third = buffer.drain(&subscription, 2).expect("drain");
+        let third = buffer
+            .drain(&subscription, 2, CrcCheck::Verify)
+            .expect("drain");
         assert_eq!(third[0].records.len(), 1);
         assert_eq!(third[0].next_offset, 105);
         assert!(!buffer.has(&tp));
@@ -1192,7 +1331,9 @@ mod tests {
         // The app sought elsewhere: the buffered blob no longer matches the
         // position and must be dropped, not served.
         let subscription = subscription_at("t", 0, 42);
-        let drained = buffer.drain(&subscription, 10).expect("drain");
+        let drained = buffer
+            .drain(&subscription, 10, CrcCheck::Verify)
+            .expect("drain");
         assert!(drained.is_empty());
         assert!(!buffer.has(&TopicPartition::new("t", 0)));
     }
@@ -1203,7 +1344,9 @@ mod tests {
         // The partition is no longer assigned (rebalance revoked it).
         let mut subscription = subscription_at("u", 1, 0);
         subscription.set_position(&TopicPartition::new("u", 1), FetchPosition::new(0, None));
-        let drained = buffer.drain(&subscription, 10).expect("drain");
+        let drained = buffer
+            .drain(&subscription, 10, CrcCheck::Verify)
+            .expect("drain");
         assert!(drained.is_empty());
         assert!(!buffer.has(&TopicPartition::new("t", 0)));
     }
@@ -1216,12 +1359,16 @@ mod tests {
         subscription.pause(std::slice::from_ref(&tp));
 
         // Paused: nothing drains but the data is kept (Java parity).
-        let drained = buffer.drain(&subscription, 10).expect("drain");
+        let drained = buffer
+            .drain(&subscription, 10, CrcCheck::Verify)
+            .expect("drain");
         assert!(drained.is_empty());
         assert!(buffer.has(&tp));
 
         subscription.resume(std::slice::from_ref(&tp));
-        let drained = buffer.drain(&subscription, 10).expect("drain");
+        let drained = buffer
+            .drain(&subscription, 10, CrcCheck::Verify)
+            .expect("drain");
         assert_eq!(drained[0].records.len(), 3);
         assert!(!buffer.has(&tp));
     }
@@ -1242,7 +1389,9 @@ mod tests {
         subscription.pause(&[TopicPartition::new("t", 0)]);
 
         // The paused front entry rotates to the back; t-1 still drains.
-        let drained = buffer.drain(&subscription, 10).expect("drain");
+        let drained = buffer
+            .drain(&subscription, 10, CrcCheck::Verify)
+            .expect("drain");
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].partition, other);
         assert_eq!(drained[0].records.len(), 2);
@@ -1262,7 +1411,9 @@ mod tests {
         });
         // Position matches the entry (103) but every record is below it.
         let subscription = subscription_at("t", 0, 103);
-        let drained = buffer.drain(&subscription, 10).expect("drain");
+        let drained = buffer
+            .drain(&subscription, 10, CrcCheck::Verify)
+            .expect("drain");
         assert!(drained.is_empty());
         assert!(!buffer.has(&TopicPartition::new("t", 0)));
     }

@@ -15,7 +15,10 @@ pub mod error;
 pub mod header;
 
 pub use self::{
-    batch::{RecordBatch, TimestampType, decode_batches, decode_next_batch},
+    batch::{
+        CrcCheck, RecordBatch, TimestampType, decode_batches, decode_next_batch,
+        decode_next_batch_with_crc,
+    },
     entry::Record,
     error::{RecordError, RecordErrorKind},
     header::RecordHeader,

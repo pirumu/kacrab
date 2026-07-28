@@ -855,9 +855,11 @@ impl Consumer {
                 // data waits client-side no Fetch RPC blocks the poll, so one
                 // fetch round's surplus is drained across polls instead of
                 // being re-served by the broker every poll.
-                let drained = self
-                    .fetch_buffer
-                    .drain(&self.subscription, self.config.max_poll_records)?;
+                let drained = self.fetch_buffer.drain(
+                    &self.subscription,
+                    self.config.max_poll_records,
+                    fetch::crc_check(&self.config),
+                )?;
 
                 // Pipeline the next fetch (Java's network thread): dry
                 // partitions get their Fetch in flight while the caller
@@ -887,9 +889,11 @@ impl Consumer {
                 if self.in_flight_fetch.is_some() {
                     let remaining = timeout.saturating_sub(start.elapsed());
                     self.reap_fetch(Some(remaining)).await?;
-                    let drained = self
-                        .fetch_buffer
-                        .drain(&self.subscription, self.config.max_poll_records)?;
+                    let drained = self.fetch_buffer.drain(
+                        &self.subscription,
+                        self.config.max_poll_records,
+                        fetch::crc_check(&self.config),
+                    )?;
                     if !drained.is_empty() {
                         return Ok(self.deliver(drained));
                     }

@@ -39,7 +39,7 @@ use crate::{
         config::{clamp_i32, clamp_ms},
         coordinator::{self, is_coordinator_moved},
         error::{ConsumerError, Result},
-        fetch::idle_backoff,
+        fetch::{crc_check, idle_backoff},
         membership::{AssignedTopic, EPOCH_JOINING, EPOCH_LEAVING, GroupMemberState},
         metrics::{ConsumerMetrics, ConsumerMetricsSnapshot},
         offsets::partition_leader,
@@ -891,7 +891,7 @@ impl ShareConsumer {
                 "share fetch request rejected",
             ));
         }
-        decode_share_fetch(response, topic_names)
+        decode_share_fetch(response, topic_names, crc_check(&self.config.base))
     }
 
     /// Send every pending acknowledgement as a standalone `ShareAcknowledge`,

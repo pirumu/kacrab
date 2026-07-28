@@ -34,7 +34,7 @@ use kacrab_protocol::{
             AcknowledgementBatch as FetchRequestBatch, FetchPartition, FetchTopic, ForgottenTopic,
         },
     },
-    record::decode_next_batch,
+    record::{CrcCheck, decode_next_batch_with_crc},
 };
 
 use super::record::{ACKNOWLEDGE_GAP, ShareRecord};
@@ -42,7 +42,7 @@ use crate::{
     common::TopicPartition,
     consumer::{
         error::{ConsumerError, Result},
-        fetch::batch_records,
+        fetch::{batch_records, corrupt_batch},
         topics::{group_by_topic, topic_id_from_key, topic_id_key},
     },
 };
@@ -419,6 +419,7 @@ const fn is_retriable_partition_error(error: ErrorCode) -> bool {
 pub(super) fn decode_share_fetch(
     response: ShareFetchResponseData,
     topic_names: &HashMap<KafkaUuid, String>,
+    crc_check: CrcCheck,
 ) -> Result<ShareFetchOutcome> {
     let mut outcome = ShareFetchOutcome {
         acquisition_lock_timeout: acquisition_lock_timeout(response.acquisition_lock_timeout_ms),
@@ -453,8 +454,9 @@ pub(super) fn decode_share_fetch(
             let acquired = acquired_offsets(&partition.acquired_records);
             let decoded = decode_records(
                 partition.records.unwrap_or_default(),
+                &tp,
                 &topic_handle,
-                partition.partition_index,
+                crc_check,
             )?;
             outcome
                 .partitions
@@ -489,20 +491,22 @@ fn acquired_offsets(
 /// nothing an application can consume, so they end up as gaps.
 fn decode_records(
     mut blob: Bytes,
-    topic: &Arc<str>,
-    partition: i32,
+    partition: &TopicPartition,
+    topic_handle: &Arc<str>,
+    crc_check: CrcCheck,
 ) -> Result<BTreeMap<i64, crate::consumer::record::ConsumerRecord>> {
     let mut decoded = BTreeMap::new();
+    let mut last_offset = -1;
     while !blob.is_empty() {
-        let batch = decode_next_batch(&mut blob).map_err(|_error| {
-            ConsumerError::InvalidState("failed to decode an acquired record batch")
-        })?;
+        let batch = decode_next_batch_with_crc(&mut blob, crc_check)
+            .map_err(|error| corrupt_batch(partition, last_offset, &error))?;
         // A truncated trailing batch is normal at the end of a response.
         let Some(batch) = batch else { break };
+        last_offset = batch.base_offset;
         if batch.is_control_batch() {
             continue;
         }
-        let (records, _leader_epoch) = batch_records(batch, topic, partition);
+        let (records, _leader_epoch) = batch_records(batch, topic_handle, partition.partition);
         for record in records {
             let _previous = decoded.insert(record.offset, record);
         }
@@ -789,7 +793,7 @@ mod tests {
         };
         let names: HashMap<KafkaUuid, String> = HashMap::from([(topic_id, "jobs".to_owned())]);
 
-        let outcome = decode_share_fetch(response, &names).expect("decodes");
+        let outcome = decode_share_fetch(response, &names, CrcCheck::Verify).expect("decodes");
         assert_eq!(outcome.partitions.len(), 1);
         let (partition, data) = &outcome.partitions[0];
         assert_eq!(*partition, TopicPartition::new("jobs", 0));
@@ -825,13 +829,21 @@ mod tests {
             ..ShareFetchResponseData::default()
         };
 
-        let outcome =
-            decode_share_fetch(with_error(ErrorCode::NotLeaderOrFollower), &names).expect("stale");
+        let outcome = decode_share_fetch(
+            with_error(ErrorCode::NotLeaderOrFollower),
+            &names,
+            CrcCheck::Verify,
+        )
+        .expect("stale");
         assert_eq!(outcome.stale, vec![TopicPartition::new("jobs", 0)]);
         assert!(outcome.partitions.is_empty());
 
-        let error = decode_share_fetch(with_error(ErrorCode::TopicAuthorizationFailed), &names)
-            .expect_err("fatal");
+        let error = decode_share_fetch(
+            with_error(ErrorCode::TopicAuthorizationFailed),
+            &names,
+            CrcCheck::Verify,
+        )
+        .expect_err("fatal");
         assert!(matches!(
             error,
             ConsumerError::Broker {
@@ -865,7 +877,7 @@ mod tests {
             ..ShareFetchResponseData::default()
         };
 
-        let outcome = decode_share_fetch(response, &names).expect("decodes");
+        let outcome = decode_share_fetch(response, &names, CrcCheck::Verify).expect("decodes");
         assert_eq!(
             outcome.acknowledge_error,
             Some((

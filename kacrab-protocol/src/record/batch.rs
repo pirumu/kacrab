@@ -35,6 +35,27 @@ const LOG_OVERHEAD: usize = 12;
 const BATCH_HEADER_SIZE: i32 = 49;
 const BATCH_HEADER_SIZE_USIZE: usize = 49;
 
+/// Whether batch decoding verifies the stored CRC32C.
+///
+/// Every batch carries a CRC over its payload, and checking it is what catches
+/// on-the-wire and on-disk corruption before the records reach an application.
+/// It also costs a pass over the payload, which is why Kafka consumers make it a
+/// choice (`check.crcs`); Java reads the same flag in `CompletedFetch`.
+///
+/// [`RecordBatch::decode`] and [`decode_next_batch`] verify. The `_with_crc`
+/// forms take the choice, so a caller that has already decided can pass it
+/// through instead of writing a second decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CrcCheck {
+    /// Verify the stored CRC32C and reject a batch whose payload disagrees.
+    #[default]
+    Verify,
+    /// Trust the batch and skip the CRC pass (`check.crcs=false`). Every other
+    /// bound and length check still applies — this trades corruption detection
+    /// for throughput, not safety.
+    Trust,
+}
+
 /// Kafka timestamp type — derived from bit 3 of the batch `attributes` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -233,12 +254,19 @@ impl RecordBatch {
 
     /// Decode one batch from `buf`. Validates CRC32C, decompresses if needed,
     /// and rejects a `record_count` above [`super::MAX_RECORDS_PER_BATCH`].
+    pub fn decode(buf: &mut Bytes) -> Result<Self> {
+        Self::decode_with_crc(buf, CrcCheck::Verify)
+    }
+
+    /// Decode one batch from `buf`, verifying its CRC32C only when `crc_check`
+    /// says to. Everything else — bounds, magic, `record_count`, decompression —
+    /// is checked either way.
     #[expect(
         clippy::too_many_lines,
         reason = "Record-batch decoding mirrors the Kafka wire layout step-by-step; splitting it \
                   before generated protocol decode is stable would obscure validation order."
     )]
-    pub fn decode(buf: &mut Bytes) -> Result<Self> {
+    pub fn decode_with_crc(buf: &mut Bytes, crc_check: CrcCheck) -> Result<Self> {
         let available = buf.remaining();
         if available < LOG_OVERHEAD {
             return Err(RecordError::unknown_offset(RecordErrorKind::Primitive(
@@ -284,30 +312,32 @@ impl RecordBatch {
 
         let mut batch_data = buf.split_to(batch_len);
 
-        let crc_slice = batch_data.get(5..9).ok_or_else(|| {
-            RecordError::at_offset(
-                base_offset,
-                RecordErrorKind::LengthOverflow {
-                    field: "crc field",
-                    got: 9,
-                    remaining: batch_data.len(),
-                },
-            )
-        })?;
-        let crc_bytes: [u8; 4] = crc_slice.try_into().map_err(|_| {
-            RecordError::at_offset(
-                base_offset,
-                RecordErrorKind::LengthOverflow {
-                    field: "crc field",
-                    got: 4,
-                    remaining: crc_slice.len(),
-                },
-            )
-        })?;
-        let stored_crc = u32::from_be_bytes(crc_bytes);
-        let crc_payload = batch_data.get(9..).unwrap_or(&[]);
-        crc::validate_crc32c(crc_payload, stored_crc)
-            .map_err(|e| RecordError::at_offset(base_offset, RecordErrorKind::Crc(e)))?;
+        if crc_check == CrcCheck::Verify {
+            let crc_slice = batch_data.get(5..9).ok_or_else(|| {
+                RecordError::at_offset(
+                    base_offset,
+                    RecordErrorKind::LengthOverflow {
+                        field: "crc field",
+                        got: 9,
+                        remaining: batch_data.len(),
+                    },
+                )
+            })?;
+            let crc_bytes: [u8; 4] = crc_slice.try_into().map_err(|_| {
+                RecordError::at_offset(
+                    base_offset,
+                    RecordErrorKind::LengthOverflow {
+                        field: "crc field",
+                        got: 4,
+                        remaining: crc_slice.len(),
+                    },
+                )
+            })?;
+            let stored_crc = u32::from_be_bytes(crc_bytes);
+            let crc_payload = batch_data.get(9..).unwrap_or(&[]);
+            crc::validate_crc32c(crc_payload, stored_crc)
+                .map_err(|e| RecordError::at_offset(base_offset, RecordErrorKind::Crc(e)))?;
+        }
 
         let partition_leader_epoch = batch_data.get_i32();
         let magic = batch_data.get_i8();
@@ -439,6 +469,19 @@ impl RecordBatch {
 /// batch is *malformed*, not just incomplete. Lets a consumer decode a fetched
 /// blob one batch at a time instead of materializing every record up front.
 pub fn decode_next_batch(buf: &mut Bytes) -> Result<Option<RecordBatch>> {
+    decode_next_batch_with_crc(buf, CrcCheck::Verify)
+}
+
+/// [`decode_next_batch`], verifying the batch CRC32C only when `crc_check` says
+/// to — the `check.crcs` decision, taken once by the caller.
+///
+/// # Errors
+/// Same as [`decode_next_batch`]: a malformed batch, never a merely incomplete
+/// one.
+pub fn decode_next_batch_with_crc(
+    buf: &mut Bytes,
+    crc_check: CrcCheck,
+) -> Result<Option<RecordBatch>> {
     if buf.remaining() < LOG_OVERHEAD {
         return Ok(None);
     }
@@ -460,7 +503,7 @@ pub fn decode_next_batch(buf: &mut Bytes) -> Result<Option<RecordBatch>> {
     if buf.remaining() < needed {
         return Ok(None);
     }
-    RecordBatch::decode(buf).map(Some)
+    RecordBatch::decode_with_crc(buf, crc_check).map(Some)
 }
 
 /// Decode every batch in a contiguous buffer.
@@ -532,5 +575,60 @@ mod tests {
         assert_eq!(encoded_len, bytes.capacity());
         let decoded = RecordBatch::decode(&mut bytes.freeze()).expect("record batch decode");
         assert_eq!(decoded.records.len(), 2);
+    }
+
+    /// The CRC is the only thing standing between a corrupted payload and the
+    /// application, so `Verify` has to reject it — and `Trust` has to be a real
+    /// choice rather than a no-op, or `check.crcs=false` means nothing.
+    #[test]
+    fn crc_check_decides_whether_a_corrupted_payload_is_rejected() {
+        let batch = RecordBatch {
+            base_offset: 0,
+            partition_leader_epoch: -1,
+            magic: 2,
+            attributes: 0,
+            last_offset_delta: 0,
+            first_timestamp: 10,
+            max_timestamp: 10,
+            producer_id: -1,
+            producer_epoch: -1,
+            base_sequence: -1,
+            records: vec![Record {
+                attributes: 0,
+                timestamp_delta: 0,
+                offset_delta: 0,
+                key: None,
+                value: Some(Bytes::from_static(b"value-0")),
+                headers: Vec::new(),
+            }],
+        };
+        let mut encoded = BytesMut::new();
+        batch.encode(&mut encoded).expect("batch encode");
+        // Rewrite a byte inside the value: no length, varint or type field
+        // describes it, so every structural check still passes.
+        let mut corrupted = encoded.to_vec();
+        let digit = corrupted
+            .windows(7)
+            .position(|window| window == b"value-0")
+            .and_then(|start| start.checked_add(6))
+            .expect("the encoded value is in the payload");
+        corrupted[digit] = b'9';
+        let mut corrupted = Bytes::from(corrupted);
+
+        let error = RecordBatch::decode(&mut corrupted.clone())
+            .expect_err("a payload that disagrees with its CRC is corrupt");
+        assert!(
+            matches!(error.kind, super::RecordErrorKind::Crc(_)),
+            "the failure must be reported as a CRC mismatch: {error:?}"
+        );
+
+        let trusted = RecordBatch::decode_with_crc(&mut corrupted, super::CrcCheck::Trust)
+            .expect("CrcCheck::Trust skips the checksum");
+        assert_eq!(trusted.records.len(), 1);
+        assert_eq!(
+            trusted.records[0].value.as_deref(),
+            Some(b"value-9".as_slice()),
+            "the corrupted bytes come through untouched, which is the trade"
+        );
     }
 }
