@@ -32,11 +32,17 @@ const COMPLETED_BATCH_IDENTITY_TOMBSTONE_LIMIT: usize = 4096;
 #[derive(Debug)]
 pub(crate) struct ProducerSenderState {
     in_flight: JoinSet<TimedDispatchOutcome>,
-    // Per-partition in-flight DEPTH (number of outstanding ProduceRequests for each
-    // partition). Idempotent producers pipeline up to max.in.flight.requests.per.connection
-    // requests per partition (Kafka parity); `select_dispatchable_batches` emits at most one
-    // new request per partition per cycle so each becomes its own concurrent dispatch task
-    // (pipelining across the outer in-flight JoinSet) and the depth here bounds the pipeline.
+    // ACROSS DISPATCHES: per-partition in-flight DEPTH (number of outstanding
+    // ProduceRequests for each partition, counted over every concurrent dispatch task in
+    // `in_flight`). Idempotent producers pipeline up to
+    // max.in.flight.requests.per.connection requests per partition (Kafka parity);
+    // `select_dispatchable_batches` emits at most one new request per partition per cycle
+    // so each becomes its own concurrent dispatch task and the depth here bounds the
+    // pipeline. Ordering across those tasks is `EnqueueSequencer`'s job: each dispatch
+    // takes a spawn-order ticket and waits its turn before enqueuing, so the broker sees
+    // ascending base sequences per partition. The dispatcher's own one-request-per-
+    // partition gate (`pop_dispatchable_broker_request`) is scoped to a single dispatch's
+    // requests and does not bound this depth.
     in_flight_partitions: AHashMap<InFlightPartitionKey, usize>,
     in_flight_batch_identities: AHashSet<ReadyBatchIdentity>,
     completed_batch_identities: AHashSet<ReadyBatchIdentity>,

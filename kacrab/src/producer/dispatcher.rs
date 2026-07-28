@@ -2200,8 +2200,9 @@ impl ProducerDispatcher {
         let mut completed = Vec::new();
         let mut in_flight_routes = AHashSet::new();
         let max_in_flight = self.broker_dispatch_in_flight_limit();
-        // Only idempotent/transactional producers must serialize same-partition
-        // requests; non-idempotent producers pipeline them up to max.in.flight.
+        // Only idempotent/transactional producers must serialize this dispatch's own
+        // same-partition requests (see `pop_dispatchable_broker_request`); non-idempotent
+        // producers pipeline them up to max.in.flight.
         let enforce_partition_ordering = self.idempotence.enabled;
         // Wait for this dispatch's spawn-order turn before enqueuing, so concurrent
         // same-partition requests reach the broker in ascending base-sequence order. The
@@ -4220,11 +4221,15 @@ fn pop_dispatchable_broker_request(
     in_flight_routes: &AHashSet<TopicPartitionKey>,
     enforce_partition_ordering: bool,
 ) -> Option<(usize, BrokerProduceRequest)> {
-    // Idempotent/transactional producers keep at most one in-flight request per
-    // partition so broker-side sequence numbers can never reorder. Non-idempotent
-    // producers may pipeline several requests to the same partition (up to
-    // max.in.flight.requests.per.connection), matching Kafka, so they take requests
-    // in FIFO order regardless of which partitions are already in flight.
+    // WITHIN ONE DISPATCH: an idempotent/transactional producer keeps at most one of
+    // *this dispatch's* requests in flight per partition, so the requests this call
+    // splits a broker's batches into cannot reorder against each other on the wire.
+    // `in_flight_routes` is local to `dispatch_broker_requests` and says nothing about
+    // other dispatches — the sender pipelines several concurrent dispatch tasks per
+    // partition (see `ProducerSenderState::in_flight_partitions`), and what keeps
+    // *those* in ascending base-sequence order is `EnqueueSequencer`, not this gate.
+    // Non-idempotent producers have no sequences to reorder, so they take requests in
+    // FIFO order regardless of which partitions are already in flight.
     let dispatch_index = if enforce_partition_ordering {
         pending.iter().position(|(_index, request)| {
             !request_conflicts_with_in_flight(request, in_flight_routes)
