@@ -17,6 +17,8 @@ use tokio::sync::Mutex;
 
 #[cfg(feature = "producer")]
 use super::broker::PendingBrokerResponse;
+#[cfg(feature = "consumer")]
+use super::capabilities::BrokerCapabilities;
 #[cfg(feature = "producer")]
 use super::metadata::PartitionLeaderChange;
 use super::{
@@ -92,6 +94,35 @@ impl WireClient {
     #[cfg(any(feature = "producer", feature = "consumer"))]
     pub(crate) fn any_broker_id(&self) -> Result<i32> {
         self.refresh_broker_id()
+    }
+
+    /// Capabilities negotiated with `preferred`, falling back to any broker
+    /// whose connection has already completed its `ApiVersions` handshake.
+    ///
+    /// `None` means no connection has handshaken yet — not that the cluster
+    /// lacks anything. The fallback matters because a group member learns its
+    /// coordinator's node id from `FindCoordinator` (answered by some other
+    /// broker) and only connects to it when it sends the first group RPC: at the
+    /// moment the consumer wants to decide whether that RPC is even servable,
+    /// the coordinator's own handshake has not happened. Every broker in a
+    /// cluster runs the same release and advertises the same API set, so the
+    /// broker that answered `FindCoordinator` is a sound stand-in.
+    ///
+    /// Reads the handle registry directly rather than going through
+    /// [`handle_for`](Self::handle_for), which would spawn a connection task for
+    /// a broker that has not been contacted — the opposite of what a
+    /// capability *query* should do.
+    #[cfg(feature = "consumer")]
+    pub(crate) fn negotiated_capabilities(&self, preferred: i32) -> Option<BrokerCapabilities> {
+        let handles = self
+            .inner
+            .handles
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        handles
+            .get(&preferred)
+            .and_then(BrokerHandle::capabilities)
+            .or_else(|| handles.values().find_map(BrokerHandle::capabilities))
     }
 
     /// Highest mutually-supported version the given broker advertised for

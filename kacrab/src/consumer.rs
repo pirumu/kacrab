@@ -17,6 +17,7 @@
 //! partition ownership with offset commits.
 
 mod assignor;
+mod capabilities;
 mod client;
 mod config;
 mod coordinator;

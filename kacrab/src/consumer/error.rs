@@ -56,6 +56,24 @@ pub enum ConsumerError {
     /// A consumer API precondition was violated (e.g. mixing subscribe + assign).
     #[error("invalid consumer state: {0}")]
     InvalidState(&'static str),
+    /// The broker does not serve an API the configured consuming mode is built
+    /// on, so the mode cannot work against this cluster at all.
+    ///
+    /// Raised from the negotiated `ApiVersions` data as soon as the consumer has
+    /// any, rather than from the first rejected feature RPC, so the caller is
+    /// told what to change instead of being handed a bare `UNSUPPORTED_VERSION`
+    /// mid-poll. The `source` names the API and both sides' version ranges.
+    #[error("{mode} is not supported by this broker: {source} — {fallback}")]
+    UnsupportedGroupProtocol {
+        /// The configured mode that cannot run here, phrased as the user set it
+        /// (`group.protocol=consumer`) or as the API they reached for.
+        mode: &'static str,
+        /// What to change to consume from this cluster today.
+        fallback: &'static str,
+        /// Which API is missing, what kacrab speaks, and what the broker offers.
+        #[source]
+        source: WireError,
+    },
     /// A consumer API argument was invalid (e.g. malformed `bootstrap.servers`).
     #[error("invalid consumer argument {field}: {message}")]
     InvalidArgument {

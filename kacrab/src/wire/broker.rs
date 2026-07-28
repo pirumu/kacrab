@@ -248,6 +248,21 @@ impl BrokerHandle {
         }
     }
 
+    /// Everything the broker advertised in its `ApiVersions` handshake, or
+    /// `None` until the connection has completed one.
+    ///
+    /// [`negotiated_version`](Self::negotiated_version) collapses "no handshake
+    /// yet" and "the broker does not serve this API" into the same `None`; the
+    /// consumer's group-protocol gate has to tell them apart, because only the
+    /// second is a reason to refuse.
+    #[cfg(feature = "consumer")]
+    pub(crate) fn capabilities(&self) -> Option<BrokerCapabilities> {
+        self.capabilities
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Highest mutually-supported version the broker advertised for `api_key`,
     /// or `None` until the connection has completed `ApiVersions` negotiation.
     #[cfg(any(feature = "producer", feature = "consumer"))]

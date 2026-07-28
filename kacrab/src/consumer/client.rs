@@ -34,6 +34,7 @@ use tokio::task::JoinHandle;
 
 use super::{
     assignor::{self, MemberSubscription},
+    capabilities,
     config::{AutoOffsetReset, ConsumerRuntimeConfig, GroupProtocol},
     coordinator,
     error::{ConsumerError, Result},
@@ -1436,6 +1437,11 @@ impl Consumer {
 
         let group_id = self.config.group_id.clone();
         let coordinator = self.ensure_coordinator(&group_id).await?;
+        // The coordinator lookup is the first RPC of the group path, so by here
+        // a connection has completed its `ApiVersions` handshake and the cluster
+        // can be asked whether it serves KIP-848 at all — before the metadata
+        // refresh below and before any heartbeat is framed.
+        capabilities::require_consumer_protocol(&self.wire, coordinator)?;
         if self.modern_group.is_none() {
             self.modern_group = Some(ModernGroupState::new(self.config.heartbeat_interval)?);
         }
