@@ -15,8 +15,10 @@ pub struct InterceptorConfigs {
     pub client_id: Option<String>,
 }
 
-/// Cluster identity handed to [`ProducerInterceptor::on_update`] when the
-/// producer's metadata first resolves or its cluster id changes, mirroring Kafka
+/// Cluster identity handed to [`ProducerInterceptor::on_update`].
+///
+/// Delivered when the producer's metadata first resolves and again whenever the
+/// cluster id changes, mirroring Kafka
 /// `ClusterResourceListener.onUpdate(ClusterResource)`.
 #[derive(Debug, Clone, Default)]
 pub struct ClusterResource {

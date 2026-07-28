@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::{config::ConfigError, wire::WireError};
 
 /// Errors from producer operations.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum ProducerError {
     /// Lower-level wire/session failure.
@@ -147,9 +148,6 @@ pub enum ProducerError {
     /// `SendFuture` handle was dropped before a broker receipt was produced.
     #[error("producer delivery was dropped before completion")]
     DeliveryDropped,
-    /// Public API exists for Kafka compatibility, but the backend is not wired yet.
-    #[error("producer operation is not supported yet: {0}")]
-    UnsupportedOperation(&'static str),
     /// Client telemetry APIs were called while `enable.metrics.push=false`.
     #[error("telemetry is not enabled; set config `enable.metrics.push` to `true`")]
     TelemetryDisabled,
@@ -180,6 +178,7 @@ pub enum ProducerError {
     #[error("producer config error: {error}")]
     Config {
         /// Configuration validation error.
+        #[source]
         error: ConfigError,
     },
     /// Public producer config could not be mapped to runtime settings.
@@ -194,3 +193,36 @@ pub enum ProducerError {
 
 /// Result alias for producer operations.
 pub type Result<T> = std::result::Result<T, ProducerError>;
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::missing_assert_message,
+        reason = "Unit test fixtures fail fastest with contextual expect calls."
+    )]
+
+    use std::error::Error as _;
+
+    use super::ProducerError;
+    use crate::config::{ClientKind, ConfigError};
+
+    #[test]
+    fn config_variant_exposes_the_config_error_as_its_source() {
+        let cause = ConfigError::MissingRequired {
+            client: ClientKind::Producer,
+            key: "bootstrap.servers",
+        };
+        let error = ProducerError::Config {
+            error: cause.clone(),
+        };
+
+        let source = error.source().expect("Config variant reports a source");
+
+        assert_eq!(source.to_string(), cause.to_string());
+        assert!(
+            source.downcast_ref::<ConfigError>().is_some(),
+            "the source downcasts back to the concrete ConfigError"
+        );
+    }
+}

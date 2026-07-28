@@ -80,6 +80,83 @@ release date and links to relevant pull requests or issues.
   `ApiKey::ControlledShutdown` for the one place the key is still needed: the
   legacy request-header v0 rule that `ControlledShutdown` v0 frames use.
 
+- **`ProducerError` and `ConsumerError` are sealed with `#[non_exhaustive]`.**
+  Removing `ProducerError::UnsupportedOperation` (below) already cost a break;
+  sealing both enums in the same release makes it the last one an added or
+  removed variant will ever cost. A `match` on either now needs a `_ =>` arm.
+  Constructing a variant is unaffected — `#[non_exhaustive]` on an enum
+  constrains matching, not construction.
+
+  `ProducerError::Config` and `ConsumerError::Config` also mark their payload
+  `#[source]`, so `source()` returns the underlying `ConfigError` (downcastable),
+  matching `AdminError::Config`. `WireError` and the producer's `MetricsError`
+  are deliberately left for a separate pass.
+
+- **The public admin and config types are now `#[non_exhaustive]`.** The crate had
+  exactly three `#[non_exhaustive]` attributes in it, none of them on the admin
+  surface — so every one of the 1,880 lines of options/result types in
+  `admin/types.rs` and every public error enum was frozen by its own field and
+  variant list. Kafka adds `AclOperation`s, config sources, and group states; a
+  broker response gains fields. Applying the attribute now, pre-1.0, costs one
+  break instead of one per future addition.
+
+  Marked: all thirteen `…Options` structs; the thirty-four result structs the
+  admin client returns (`TopicDescription`, `ConsumerGroupDescription`,
+  `LogDirDescription`, `QuorumInfo`, `FeatureMetadata`, …); the nine
+  broker-vocabulary enums that already carried an `Unknown` fallback
+  (`ResourceType`, `ConfigSource`, `GroupState`, `GroupType`, `AclResourceType`,
+  `AclPatternType`, `AclOperation`, `AclPermissionType`, `ScramMechanism`);
+  `ConfigError`, `ParseConfigValueError`, `AdminError`; and
+  `WarningSeverity`/`ConfigWarning`/`WarningReport`.
+
+  Input types you build by hand (`NewTopic`, `AclBinding`, `AclBindingFilter`,
+  `ConfigResource`, `ScramCredentialUpsertion`, `RaftVoterEndpoint`, …) are
+  deliberately *not* marked: sealing a type whose whole purpose is to be
+  constructed, without a constructor covering every field, removes the only way
+  to use it.
+
+  **What to change.** A `match` on one of the nine enums or on `ConfigError`/
+  `AdminError` needs a `_ =>` arm. A struct literal or `..Default::default()` for
+  an options struct becomes `Options::default()` plus the new fluent setters —
+  `CreateTopicsOptions::default().validate_only(true)`, mirroring Java's
+  `new CreateTopicsOptions().validateOnly(true)` — and every options field gained
+  one. `DescribeTopicsOptions` is field-less, so it is now
+  `DescribeTopicsOptions::default()` rather than the bare name.
+  `ParseConfigValueError::new(target, value)` replaces its literal.
+
+- **The last three admin methods taking a positional `bool` now take an options
+  struct like every one of their siblings.** `describe_client_quotas`,
+  `alter_client_quotas`, and `update_features` ended in a bare `true`/`false` at
+  the call site with nothing naming it, while the other seventeen admin methods
+  with a flag take a `…Options` value. They now take
+  `DescribeClientQuotasOptions { strict }`, `AlterClientQuotasOptions
+  { validate_only }`, and `UpdateFeaturesOptions { validate_only }`. Pass
+  `Options::default()` where the flag was `false`.
+
+- **`producer::RecordHeaders` and its `producer::Headers` alias are gone.** The
+  type was ~180 lines of exported, self-tested collection that nothing in kacrab
+  ever constructed: `ProducerRecord::headers` is a `Vec<RecordHeader>`, and
+  `ProducerSerializer::serialize` takes `&mut Vec<RecordHeader>`, so no producer
+  path could ever hand one out. Java needs a `Headers` object because
+  `ProducerRecord.headers()` returns a live, mutable view the producer freezes
+  with `setReadOnly` after the interceptor chain runs — kacrab has no freeze
+  point, so its `set_read_only`/`is_read_only` pair guarded an invariant the
+  producer never applied.
+
+  `ProducerRecord` already carries the whole Java `Headers` surface as inherent
+  methods — `header`, `header_null`, `with_headers`, `headers`, `headers_for_key`
+  (Java `headers(key)`), `last_header` (`lastHeader`), `remove_headers`,
+  `remove_headers_mut` — and the tests that pinned those semantics are untouched.
+  `producer::Header`/`producer::RecordHeader` are unchanged.
+
+- **`ProducerError::UnsupportedOperation` is gone.** No code path in the crate
+  ever constructed it — the only three mentions were the variant itself and the
+  two hand-written clone/`match` arms that copied it around. It was a public
+  variant users had to keep a `match` arm for to describe a state that could not
+  occur. The internal `CachedProducerError::UnsupportedOperation` twin in the
+  transaction dispatcher goes with it; the `From<&ProducerError>` fallback arm
+  already covered every remaining error.
+
 ### Added
 
 - **Share consumer (KIP-932), behind the new `share-consumer` feature.**
@@ -134,6 +211,38 @@ release date and links to relevant pull requests or issues.
   records, and admin interop against the live group.
 
 ### Fixed
+
+- **`TypedProducer` no longer demands `K: Sync, V: Sync`.** Both parameters appear
+  only inside `PhantomData<fn(K, V)>` — nothing in the type or its methods ever
+  shares a `K` or a `V` across threads — so the bound constrained nothing while
+  leaking out of the struct declaration into eight public constructor signatures
+  (`Producer::from_properties_with_serializers`, `from_map_with_serializers`,
+  `from_map_with_configured_serializers`,
+  `from_properties_with_configured_serializers`, `from_parts_with_serializers`,
+  `ProducerBuilder::build_with_serializers`,
+  `build_with_configured_serializers`, and the internal config path). Rust API
+  guideline C-STRUCT-BOUNDS; a `!Sync` key or value type now works, and a
+  compile-level test pins it.
+
+- **`ProducerInterceptor::configure` and `on_update` could not be overridden
+  outside kacrab.** Both are public trait methods, but their parameter types —
+  `InterceptorConfigs` and `ClusterResource` — were never re-exported from
+  `kacrab::producer`, so a downstream crate had no way to name the argument and
+  was stuck with the two default implementations. Both types are now re-exported,
+  mirroring `consumer::InterceptorConfigs`, and a new integration test
+  (`tests/producer_interceptor_api.rs` — a separate crate, so it proves the
+  downstream case) implements every method of the trait.
+
+- **`ConfigError` and `ParseConfigValueError` are now `std::error::Error`.** Both
+  implemented `Display` but not `Error`, so they could not be boxed into
+  `Box<dyn Error>`, could not be `?`-converted in a `main`, and produced no source
+  chain in `anyhow`/`eyre`. Both now derive `thiserror::Error` with the same
+  messages, and `AdminError::Config` marks its payload `#[source]` so
+  `AdminError::source()` hands back the underlying `ConfigError` (downcastable).
+  The repo's own `examples/config.rs` was the proof of the gap: it wrapped every
+  fallible call in `map_err(|error| error.to_string())` to reach a
+  `Result<(), String>` main. Those six shims are gone and the example returns
+  `Box<dyn Error>` like normal Rust.
 
 - **A consumer configured for a group protocol the broker cannot serve only found
   out mid-poll, and was never told what to change.** `group.protocol=consumer`

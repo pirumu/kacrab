@@ -100,11 +100,12 @@ use super::{
     metrics::{AdminMetrics, AdminMetricsSnapshot},
     types::{
         AbortTransactionSpec, AclBinding, AclBindingFilter, AclOperation, AclPatternType,
-        AclPermissionType, AclResourceType, AlterConfigOp, AlterConfigsOptions, BrokerLogDirs,
-        ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaEntry, ClientQuotaFilterComponent,
-        ClientQuotaMatch, ClusterDescription, ConfigEntry, ConfigResource, ConfigSource,
-        ConsumerGroupDescription, ConsumerGroupListing, CreateDelegationTokenOptions,
-        CreatePartitionsOptions, CreateTopicsOptions, DelegationToken, DeletedRecords,
+        AclPermissionType, AclResourceType, AlterClientQuotasOptions, AlterConfigOp,
+        AlterConfigsOptions, BrokerLogDirs, ClientQuotaAlteration, ClientQuotaEntity,
+        ClientQuotaEntry, ClientQuotaFilterComponent, ClientQuotaMatch, ClusterDescription,
+        ConfigEntry, ConfigResource, ConfigSource, ConsumerGroupDescription, ConsumerGroupListing,
+        CreateDelegationTokenOptions, CreatePartitionsOptions, CreateTopicsOptions,
+        DelegationToken, DeletedRecords, DescribeClientQuotasOptions,
         DescribeConsumerGroupsOptions, DescribeTopicsOptions, ElectionType, FeatureMetadata,
         FeatureUpdate, FencedProducer, FinalizedVersionRange, GroupOffset, GroupState, GroupType,
         ListConsumerGroupOffsetsOptions, ListConsumerGroupsOptions, ListOffsetsResult,
@@ -115,7 +116,7 @@ use super::{
         ResourceConfig, ResourceType, ScramCredentialDeletion, ScramCredentialInfo,
         ScramCredentialUpsertion, ScramMechanism, ShareGroupDescription, StreamsGroupDescription,
         SupportedVersionRange, TopicDescription, TopicListing, TopicPartitionInfo,
-        TransactionDescription, TransactionListing, UserScramCredentials,
+        TransactionDescription, TransactionListing, UpdateFeaturesOptions, UserScramCredentials,
     },
 };
 use crate::{
@@ -2403,14 +2404,15 @@ impl AdminClient {
     }
 
     /// Describe client quotas matching the given filter components. With
-    /// `strict`, only entities whose types exactly equal the filter set match.
+    /// [`strict`](DescribeClientQuotasOptions::strict), only entities whose types
+    /// exactly equal the filter set match.
     ///
     /// # Errors
     /// Returns the broker error code or a wire error.
     pub async fn describe_client_quotas(
         &self,
         filter: Vec<ClientQuotaFilterComponent>,
-        strict: bool,
+        options: DescribeClientQuotasOptions,
     ) -> Result<Vec<ClientQuotaEntry>> {
         let request = DescribeClientQuotasRequestData {
             components: filter
@@ -2429,7 +2431,7 @@ impl AdminClient {
                     }
                 })
                 .collect(),
-            strict,
+            strict: options.strict,
             _unknown_tagged_fields: Vec::new(),
         };
         let broker_id = self.wire.admin_any_broker_id()?;
@@ -2470,7 +2472,7 @@ impl AdminClient {
     pub async fn alter_client_quotas(
         &self,
         alterations: Vec<ClientQuotaAlteration>,
-        validate_only: bool,
+        options: AlterClientQuotasOptions,
     ) -> Result<()> {
         let request = AlterClientQuotasRequestData {
             entries: alterations
@@ -2499,7 +2501,7 @@ impl AdminClient {
                     _unknown_tagged_fields: Vec::new(),
                 })
                 .collect(),
-            validate_only,
+            validate_only: options.validate_only,
             _unknown_tagged_fields: Vec::new(),
         };
         let response: AlterClientQuotasResponseData = self
@@ -2921,7 +2923,8 @@ impl AdminClient {
     }
 
     /// Finalize feature version-level changes (controller-routed). Set
-    /// `validate_only` to check without applying.
+    /// [`validate_only`](UpdateFeaturesOptions::validate_only) to check without
+    /// applying.
     ///
     /// # Errors
     /// Returns the top-level error, the first per-feature error, or a routing
@@ -2929,7 +2932,7 @@ impl AdminClient {
     pub async fn update_features(
         &self,
         updates: Vec<FeatureUpdate>,
-        validate_only: bool,
+        options: UpdateFeaturesOptions,
     ) -> Result<()> {
         let request = UpdateFeaturesRequestData {
             timeout_ms: self.request_timeout_ms,
@@ -2943,7 +2946,7 @@ impl AdminClient {
                     _unknown_tagged_fields: Vec::new(),
                 })
                 .collect(),
-            validate_only,
+            validate_only: options.validate_only,
             _unknown_tagged_fields: Vec::new(),
         };
         let response: UpdateFeaturesResponseData = self

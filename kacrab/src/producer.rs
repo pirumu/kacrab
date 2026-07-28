@@ -44,17 +44,14 @@ pub use self::{
     client::{Producer, ProducerBuilder},
     config::ProducerCompression,
     error::{ProducerError, Result},
-    interceptor::ProducerInterceptor,
+    interceptor::{ClusterResource, InterceptorConfigs, ProducerInterceptor},
     metrics::{
         KafkaMetric, MetricConfig, MetricName, MetricNameTemplate, MetricQuota, MetricReporter,
         MetricValue, Metrics, MetricsError, ProducerMetricValue, ProducerMetricsSnapshot, SensorId,
         SensorRecordingLevel,
     },
     partitioner::{ProducerPartitioner, RoundRobinPartitioner},
-    record::{
-        DeliveryCallback, Header, Headers, ProducerRecord, RecordHeader, RecordHeaders,
-        RecordMetadata, SendFuture,
-    },
+    record::{DeliveryCallback, Header, ProducerRecord, RecordHeader, RecordMetadata, SendFuture},
     serializer::{
         BooleanSerializer, ByteArraySerializer, BytesSerializer, ConfiguredProducerSerializer,
         DoubleSerializer, FloatSerializer, IntegerSerializer, ListInnerSerializer,

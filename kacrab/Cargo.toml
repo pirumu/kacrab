@@ -123,11 +123,19 @@ name = "config_macro"
 required-features = ["macros"]
 
 [[test]]
+name = "admin_options_api"
+required-features = ["admin"]
+
+[[test]]
 name = "producer_accumulator"
 required-features = ["producer"]
 
 [[test]]
 name = "producer_dispatcher"
+required-features = ["producer"]
+
+[[test]]
+name = "producer_interceptor_api"
 required-features = ["producer"]
 
 [[test]]

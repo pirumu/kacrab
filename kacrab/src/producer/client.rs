@@ -193,8 +193,6 @@ impl Producer {
         config: &ClientConfig,
     ) -> Result<TypedProducer<K, V, KS, VS>>
     where
-        K: Sync,
-        V: Sync,
         KS: ConfiguredProducerSerializer<K>,
         VS: ConfiguredProducerSerializer<V>,
     {
@@ -247,8 +245,6 @@ impl Producer {
         value_serializer: VS,
     ) -> Result<TypedProducer<K, V, KS, VS>>
     where
-        K: Sync,
-        V: Sync,
         KS: ProducerSerializer<K>,
         VS: ProducerSerializer<V>,
     {
@@ -276,8 +272,6 @@ impl Producer {
         I: IntoIterator<Item = (CK, CV)>,
         CK: Into<ConfigKey>,
         CV: Into<ConfigValue>,
-        K: Sync,
-        V: Sync,
         KS: ProducerSerializer<K>,
         VS: ProducerSerializer<V>,
     {
@@ -304,8 +298,6 @@ impl Producer {
         I: IntoIterator<Item = (CK, CV)>,
         CK: Into<ConfigKey>,
         CV: Into<ConfigValue>,
-        K: Sync,
-        V: Sync,
         KS: ConfiguredProducerSerializer<K>,
         VS: ConfiguredProducerSerializer<V>,
     {
@@ -324,8 +316,6 @@ impl Producer {
         properties: Properties,
     ) -> Result<TypedProducer<K, V, KS, VS>>
     where
-        K: Sync,
-        V: Sync,
         KS: ConfiguredProducerSerializer<K>,
         VS: ConfiguredProducerSerializer<V>,
     {
@@ -341,8 +331,6 @@ impl Producer {
         value_serializer: VS,
     ) -> TypedProducer<K, V, KS, VS>
     where
-        K: Sync,
-        V: Sync,
         KS: ProducerSerializer<K>,
         VS: ProducerSerializer<V>,
     {
@@ -1879,9 +1867,6 @@ fn producer_error_for_callback(error: &ProducerError) -> Option<ProducerError> {
         },
         ProducerError::DispatchTask(message) => Some(ProducerError::DispatchTask(message.clone())),
         ProducerError::DeliveryDropped => Some(ProducerError::DeliveryDropped),
-        ProducerError::UnsupportedOperation(operation) => {
-            Some(ProducerError::UnsupportedOperation(operation))
-        },
         ProducerError::TelemetryDisabled => Some(ProducerError::TelemetryDisabled),
         ProducerError::Telemetry { operation, error } => Some(ProducerError::Telemetry {
             operation,
@@ -2070,8 +2055,6 @@ impl ProducerBuilder {
         value_serializer: VS,
     ) -> Result<TypedProducer<K, V, KS, VS>>
     where
-        K: Sync,
-        V: Sync,
         KS: ProducerSerializer<K>,
         VS: ProducerSerializer<V>,
     {
@@ -2096,8 +2079,6 @@ impl ProducerBuilder {
         self,
     ) -> Result<TypedProducer<K, V, KS, VS>>
     where
-        K: Sync,
-        V: Sync,
         KS: ConfiguredProducerSerializer<K>,
         VS: ConfiguredProducerSerializer<V>,
     {

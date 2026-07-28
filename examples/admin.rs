@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("list_topics: {} topic(s)", listed.len());
 
     let described = admin
-        .describe_topics(vec![args.topic.clone()], DescribeTopicsOptions)
+        .describe_topics(vec![args.topic.clone()], DescribeTopicsOptions::default())
         .await?;
     if let Some(topic) = described.first() {
         println!(

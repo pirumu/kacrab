@@ -599,8 +599,6 @@ fn write_i32(output: &mut Vec<u8>, value: i32) {
 #[derive(Debug)]
 pub struct TypedProducer<K, V, KS, VS>
 where
-    K: Sync,
-    V: Sync,
     KS: ProducerSerializer<K>,
     VS: ProducerSerializer<V>,
 {
@@ -612,8 +610,6 @@ where
 
 impl<K, V, KS, VS> TypedProducer<K, V, KS, VS>
 where
-    K: Sync,
-    V: Sync,
     KS: ProducerSerializer<K>,
     VS: ProducerSerializer<V>,
 {
@@ -738,8 +734,6 @@ fn abort_missing_state<T>() -> T {
 
 impl<K, V, KS, VS> Drop for TypedProducer<K, V, KS, VS>
 where
-    K: Sync,
-    V: Sync,
     KS: ProducerSerializer<K>,
     VS: ProducerSerializer<V>,
 {
@@ -782,6 +776,64 @@ mod tests {
         },
         wire::{BrokerEndpoint, ConnectionConfig, WireClient},
     };
+
+    /// A key/value type that is deliberately `!Sync`.
+    ///
+    /// `TypedProducer` used to declare `K: Sync, V: Sync` on the struct itself.
+    /// Both parameters appear only inside `PhantomData<fn(K, V)>`, so the bound
+    /// constrained nothing kacrab actually touches — it just leaked into every
+    /// public constructor signature that names a `TypedProducer` (C-STRUCT-BOUNDS).
+    #[derive(Debug)]
+    struct NotSyncPayload(std::cell::Cell<u32>);
+
+    #[derive(Debug)]
+    struct NotSyncPayloadSerializer;
+
+    impl ProducerSerializer<NotSyncPayload> for NotSyncPayloadSerializer {
+        fn serialize(
+            &self,
+            _topic: &str,
+            _headers: &mut Vec<RecordHeader>,
+            value: Option<&NotSyncPayload>,
+        ) -> super::Result<Option<Bytes>> {
+            Ok(value.map(|payload| Bytes::copy_from_slice(&payload.0.get().to_be_bytes())))
+        }
+    }
+
+    #[test]
+    fn typed_producer_does_not_require_sync_keys_or_values() {
+        // Naming `TypedProducer<NotSyncPayload, ..>` in a parameter position forces
+        // the compiler to prove the struct's where-clause, so this stops compiling
+        // the moment a `K: Sync`/`V: Sync` bound comes back.
+        const fn accepts<K, V, KS, VS>(_typed: Option<&TypedProducer<K, V, KS, VS>>)
+        where
+            KS: ProducerSerializer<K>,
+            VS: ProducerSerializer<V>,
+        {
+        }
+
+        accepts::<NotSyncPayload, NotSyncPayload, NotSyncPayloadSerializer, NotSyncPayloadSerializer>(
+            None,
+        );
+
+        // The same for the public constructors the bound used to leak into:
+        // referencing the function item type-checks its where-clause.
+        let build = crate::producer::ProducerBuilder::build_with_serializers::<
+            NotSyncPayload,
+            NotSyncPayload,
+            NotSyncPayloadSerializer,
+            NotSyncPayloadSerializer,
+        >;
+        let from_parts = Producer::from_parts_with_serializers::<
+            NotSyncPayload,
+            NotSyncPayload,
+            NotSyncPayloadSerializer,
+            NotSyncPayloadSerializer,
+        >;
+
+        assert_eq!(size_of_val(&build), 0, "function items are zero-sized");
+        assert_eq!(size_of_val(&from_parts), 0, "function items are zero-sized");
+    }
 
     #[test]
     fn bytes_serializer_preserves_bytes_and_nulls() {

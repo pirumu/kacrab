@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::{config::ConfigError, wire::WireError};
 
 /// Errors from admin client operations.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum AdminError {
     /// Lower-level wire/session failure.
@@ -63,6 +64,7 @@ pub enum AdminError {
     #[error("admin config error: {error}")]
     Config {
         /// Configuration validation error.
+        #[source]
         error: ConfigError,
     },
 }
@@ -75,3 +77,34 @@ impl From<ConfigError> for AdminError {
 
 /// Result alias for admin operations.
 pub type Result<T> = std::result::Result<T, AdminError>;
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::missing_assert_message,
+        reason = "Unit test fixtures fail fastest with contextual expect calls."
+    )]
+
+    use std::error::Error as _;
+
+    use super::AdminError;
+    use crate::config::{ClientKind, ConfigError};
+
+    #[test]
+    fn config_variant_exposes_the_config_error_as_its_source() {
+        let cause = ConfigError::MissingRequired {
+            client: ClientKind::Admin,
+            key: "bootstrap.servers",
+        };
+        let error = AdminError::from(cause.clone());
+
+        let source = error.source().expect("Config variant reports a source");
+
+        assert_eq!(source.to_string(), cause.to_string());
+        assert!(
+            source.downcast_ref::<ConfigError>().is_some(),
+            "the source downcasts back to the concrete ConfigError"
+        );
+    }
+}

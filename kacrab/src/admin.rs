@@ -16,12 +16,13 @@ pub use self::{
     metrics::AdminMetricsSnapshot,
     types::{
         AbortTransactionSpec, AclBinding, AclBindingFilter, AclOperation, AclPatternType,
-        AclPermissionType, AclResourceType, AlterConfigOp, AlterConfigOpType, AlterConfigsOptions,
-        BrokerLogDirs, ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaEntry,
-        ClientQuotaFilterComponent, ClientQuotaMatch, ClientQuotaOp, ClusterDescription,
-        ConfigEntry, ConfigResource, ConfigSource, ConsumerGroupDescription, ConsumerGroupListing,
-        CreateDelegationTokenOptions, CreatePartitionsOptions, CreateTopicsOptions,
-        DelegationToken, DeletedRecords, DescribeConsumerGroupsOptions, DescribeTopicsOptions,
+        AclPermissionType, AclResourceType, AlterClientQuotasOptions, AlterConfigOp,
+        AlterConfigOpType, AlterConfigsOptions, BrokerLogDirs, ClientQuotaAlteration,
+        ClientQuotaEntity, ClientQuotaEntry, ClientQuotaFilterComponent, ClientQuotaMatch,
+        ClientQuotaOp, ClusterDescription, ConfigEntry, ConfigResource, ConfigSource,
+        ConsumerGroupDescription, ConsumerGroupListing, CreateDelegationTokenOptions,
+        CreatePartitionsOptions, CreateTopicsOptions, DelegationToken, DeletedRecords,
+        DescribeClientQuotasOptions, DescribeConsumerGroupsOptions, DescribeTopicsOptions,
         ElectionType, FeatureMetadata, FeatureUpdate, FeatureUpdateUpgradeType, FencedProducer,
         FinalizedVersionRange, GroupOffset, GroupState, GroupType, ListConsumerGroupOffsetsOptions,
         ListConsumerGroupsOptions, ListOffsetsResult, ListTopicsOptions, ListTransactionsOptions,
@@ -32,7 +33,7 @@ pub use self::{
         ResourceConfig, ResourceType, ScramCredentialDeletion, ScramCredentialInfo,
         ScramCredentialUpsertion, ScramMechanism, ShareGroupDescription, StreamsGroupDescription,
         SupportedVersionRange, TopicDescription, TopicListing, TopicPartitionInfo,
-        TransactionDescription, TransactionListing, UserScramCredentials,
+        TransactionDescription, TransactionListing, UpdateFeaturesOptions, UserScramCredentials,
     },
 };
 // Shared `org.apache.kafka.common` domain types the admin API accepts/returns.

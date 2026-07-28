@@ -1,13 +1,17 @@
 //! Configuration errors.
 
-use std::{fmt, string::String};
+use std::string::String;
+
+use thiserror::Error;
 
 use super::ClientKind;
 
 /// Error returned by strict or security-sensitive config validation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ConfigError {
     /// Property key is not present in the official catalog for the client.
+    #[error("unknown Kafka config key `{key}`")]
     UnknownKey {
         /// Client family being validated.
         client: ClientKind,
@@ -15,6 +19,7 @@ pub enum ConfigError {
         key: String,
     },
     /// Required property was not supplied.
+    #[error("required Kafka config key `{key}` is missing")]
     MissingRequired {
         /// Client family being built.
         client: ClientKind,
@@ -22,6 +27,7 @@ pub enum ConfigError {
         key: &'static str,
     },
     /// Property key is Java/JVM specific and has no faithful Rust property form.
+    #[error("Java-only Kafka config key `{key}` is not supported: {reason}")]
     JavaOnly {
         /// Client family being validated.
         client: ClientKind,
@@ -31,6 +37,7 @@ pub enum ConfigError {
         reason: &'static str,
     },
     /// Property key requires a disabled feature.
+    #[error("Kafka config key `{key}` requires feature `{feature}`")]
     UnsupportedFeature {
         /// Client family being validated.
         client: ClientKind,
@@ -40,6 +47,7 @@ pub enum ConfigError {
         feature: &'static str,
     },
     /// Property key is cataloged but not yet exposed by this typed config.
+    #[error("Kafka config key `{key}` is not modeled by this typed config")]
     UnsupportedKey {
         /// Client family being parsed.
         client: ClientKind,
@@ -47,6 +55,7 @@ pub enum ConfigError {
         key: String,
     },
     /// Property value cannot be parsed into the typed Rust config field.
+    #[error("failed to parse Kafka config key `{key}` value `{value}` as {target}")]
     InvalidValue {
         /// Client family being parsed.
         client: ClientKind,
@@ -59,42 +68,10 @@ pub enum ConfigError {
     },
 }
 
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownKey { key, .. } => write!(f, "unknown Kafka config key `{key}`"),
-            Self::MissingRequired { key, .. } => {
-                write!(f, "required Kafka config key `{key}` is missing")
-            },
-            Self::JavaOnly { key, reason, .. } => {
-                write!(
-                    f,
-                    "Java-only Kafka config key `{key}` is not supported: {reason}"
-                )
-            },
-            Self::UnsupportedFeature { key, feature, .. } => {
-                write!(f, "Kafka config key `{key}` requires feature `{feature}`")
-            },
-            Self::UnsupportedKey { key, .. } => {
-                write!(
-                    f,
-                    "Kafka config key `{key}` is not modeled by this typed config"
-                )
-            },
-            Self::InvalidValue {
-                key, target, value, ..
-            } => {
-                write!(
-                    f,
-                    "failed to parse Kafka config key `{key}` value `{value}` as {target}"
-                )
-            },
-        }
-    }
-}
-
 /// Error returned when parsing a raw config value into a typed Rust value.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("failed to parse Kafka config value `{value}` as {target}")]
 pub struct ParseConfigValueError {
     /// Target Rust type name.
     pub target: &'static str,
@@ -110,16 +87,6 @@ impl ParseConfigValueError {
             target,
             value: value.into(),
         }
-    }
-}
-
-impl fmt::Display for ParseConfigValueError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "failed to parse Kafka config value `{}` as {}",
-            self.value, self.target
-        )
     }
 }
 
@@ -186,5 +153,26 @@ mod tests {
             error.to_string(),
             "failed to parse Kafka config value `abc` as usize"
         );
+    }
+
+    #[test]
+    fn config_errors_are_std_errors() {
+        const fn assert_std_error<E: std::error::Error>() {}
+
+        assert_std_error::<ConfigError>();
+        assert_std_error::<ParseConfigValueError>();
+
+        // The payoff: a config failure converts into the `Box<dyn Error>` a
+        // `main` returns, so callers stop writing `map_err(|e| e.to_string())`.
+        let boxed: Box<dyn std::error::Error> = Box::new(ConfigError::MissingRequired {
+            client: ClientKind::Producer,
+            key: "bootstrap.servers",
+        });
+
+        assert_eq!(
+            boxed.to_string(),
+            "required Kafka config key `bootstrap.servers` is missing"
+        );
+        assert!(boxed.source().is_none());
     }
 }
