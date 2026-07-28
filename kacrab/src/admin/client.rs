@@ -87,6 +87,7 @@ use kacrab_protocol::{
         describe_user_scram_credentials_request::UserName,
         elect_leaders_request::TopicPartitions as ElectLeadersTopicPartitions,
         leave_group_request::MemberIdentity,
+        list_groups_response::ListedGroup,
         write_txn_markers_request::{WritableTxnMarker, WritableTxnMarkerTopic},
     },
     version::client_api_info,
@@ -718,13 +719,31 @@ impl AdminClient {
     /// List the consumer groups known to the cluster.
     ///
     /// Mirrors Java's `listConsumerGroups`: every live broker is asked for the
-    /// groups it coordinates and the results are aggregated.
+    /// groups it coordinates and the results are aggregated. As in Java, only
+    /// groups speaking the consumer protocol — plus simple consumer groups, which
+    /// report an empty protocol type — are returned; share, streams, and connect
+    /// groups come back in the broker's `ListGroups` response but are dropped.
+    /// Use [`list_groups`](Self::list_groups) to see every group type.
     ///
     /// # Errors
     /// Returns a wire error, or the first broker top-level error code.
     pub async fn list_consumer_groups(
         &self,
         options: ListConsumerGroupsOptions,
+    ) -> Result<Vec<ConsumerGroupListing>> {
+        self.list_groups_from_all_brokers(options, consumer_group_listings)
+            .await
+    }
+
+    /// Ask every live broker for the groups it coordinates and aggregate the
+    /// listings, converting each broker's `ListGroups` response with
+    /// `listings_from`. Shared by [`list_consumer_groups`](Self::list_consumer_groups)
+    /// and [`list_groups`](Self::list_groups), which differ only in which of the
+    /// reported groups they keep.
+    async fn list_groups_from_all_brokers(
+        &self,
+        options: ListConsumerGroupsOptions,
+        listings_from: fn(&[ListedGroup]) -> Vec<ConsumerGroupListing>,
     ) -> Result<Vec<ConsumerGroupListing>> {
         let request = ListGroupsRequestData {
             states_filter: options.states_filter.into_iter().map(Into::into).collect(),
@@ -744,16 +763,7 @@ impl AdminClient {
                 .send_metered(broker_id, ApiKey::ListGroups, version, &request)
                 .await?;
             check_code("", response.error_code, None)?;
-            for group in response.groups {
-                listings.push(ConsumerGroupListing {
-                    group_id: group.group_id.as_str().to_owned(),
-                    is_simple_consumer_group: group.protocol_type.as_str().is_empty(),
-                    state: non_empty(group.group_state.as_str())
-                        .map(|state| GroupState::from_broker(&state)),
-                    group_type: non_empty(group.group_type.as_str())
-                        .map(|group_type| GroupType::from_broker(&group_type)),
-                });
-            }
+            listings.extend(listings_from(&response.groups));
         }
         Ok(listings)
     }
@@ -1691,36 +1701,8 @@ impl AdminClient {
         &self,
         options: ListConsumerGroupsOptions,
     ) -> Result<Vec<ConsumerGroupListing>> {
-        let request = ListGroupsRequestData {
-            states_filter: options.states_filter.into_iter().map(Into::into).collect(),
-            types_filter: options.types_filter.into_iter().map(Into::into).collect(),
-            _unknown_tagged_fields: Vec::new(),
-        };
-        let metadata = self.wire.admin_metadata(None).await?;
-        let broker_ids: Vec<i32> = metadata
-            .brokers
-            .iter()
-            .map(|broker| broker.node_id)
-            .collect();
-        let version = client_api_info(ApiKey::ListGroups).max_version;
-        let mut listings = Vec::new();
-        for broker_id in broker_ids {
-            let response: ListGroupsResponseData = self
-                .send_metered(broker_id, ApiKey::ListGroups, version, &request)
-                .await?;
-            check_code("", response.error_code, None)?;
-            for group in response.groups {
-                listings.push(ConsumerGroupListing {
-                    group_id: group.group_id.as_str().to_owned(),
-                    is_simple_consumer_group: group.protocol_type.as_str().is_empty(),
-                    state: non_empty(group.group_state.as_str())
-                        .map(|state| GroupState::from_broker(&state)),
-                    group_type: non_empty(group.group_type.as_str())
-                        .map(|group_type| GroupType::from_broker(&group_type)),
-                });
-            }
-        }
-        Ok(listings)
+        self.list_groups_from_all_brokers(options, all_group_listings)
+            .await
     }
 
     /// Describe the given classic-protocol groups. Like
@@ -3251,6 +3233,49 @@ fn non_empty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
+/// The `protocol_type` a group registers under when it speaks the consumer
+/// protocol, matching Java's `ConsumerProtocol.PROTOCOL_TYPE`.
+const CONSUMER_PROTOCOL_TYPE: &str = "consumer";
+
+/// Convert one broker-reported group into a client-side listing.
+fn group_listing(group: &ListedGroup) -> ConsumerGroupListing {
+    ConsumerGroupListing {
+        group_id: group.group_id.as_str().to_owned(),
+        is_simple_consumer_group: group.protocol_type.as_str().is_empty(),
+        state: non_empty(group.group_state.as_str()).map(|state| GroupState::from_broker(&state)),
+        group_type: non_empty(group.group_type.as_str())
+            .map(|group_type| GroupType::from_broker(&group_type)),
+    }
+}
+
+/// Whether `listConsumerGroups` reports this group.
+///
+/// Java's `KafkaAdminClient.maybeAddConsumerGroup` keeps a listed group only when
+/// its protocol type is `ConsumerProtocol.PROTOCOL_TYPE` or empty (a simple
+/// consumer group that committed offsets without joining), so share, streams, and
+/// connect groups are dropped client-side even though the broker returns them all
+/// in the same `ListGroups` response.
+fn is_consumer_protocol_group(group: &ListedGroup) -> bool {
+    let protocol_type = group.protocol_type.as_str();
+    protocol_type == CONSUMER_PROTOCOL_TYPE || protocol_type.is_empty()
+}
+
+/// The listings [`AdminClient::list_consumer_groups`] reports for one broker's
+/// `ListGroups` response: consumer-protocol and simple groups only.
+fn consumer_group_listings(groups: &[ListedGroup]) -> Vec<ConsumerGroupListing> {
+    groups
+        .iter()
+        .filter(|group| is_consumer_protocol_group(group))
+        .map(group_listing)
+        .collect()
+}
+
+/// The listings [`AdminClient::list_groups`] reports for one broker's
+/// `ListGroups` response: every group, whatever its protocol type.
+fn all_group_listings(groups: &[ListedGroup]) -> Vec<ConsumerGroupListing> {
+    groups.iter().map(group_listing).collect()
+}
+
 /// Build [`OffsetAndMetadata`] from an `OffsetFetch` partition result, dropping
 /// the sentinel `-1` leader epoch and empty metadata.
 fn build_offset(
@@ -3817,6 +3842,70 @@ fn parse_bootstrap_server(server: &str) -> Result<(String, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn listed_group(group_id: &str, protocol_type: &str, group_type: &str) -> ListedGroup {
+        ListedGroup {
+            group_id: KafkaString::from(group_id.to_owned()),
+            protocol_type: KafkaString::from(protocol_type.to_owned()),
+            group_state: KafkaString::from("Stable".to_owned()),
+            group_type: KafkaString::from(group_type.to_owned()),
+            _unknown_tagged_fields: Vec::new(),
+        }
+    }
+
+    fn group_ids(listings: &[ConsumerGroupListing]) -> Vec<&str> {
+        listings
+            .iter()
+            .map(|listing| listing.group_id.as_str())
+            .collect()
+    }
+
+    /// Java's `KafkaAdminClient.maybeAddConsumerGroup` keeps a listed group only
+    /// when its protocol type is `ConsumerProtocol.PROTOCOL_TYPE` or empty, so
+    /// `listConsumerGroups` never reports share, streams, or connect groups even
+    /// though the broker returns them in the same `ListGroups` response.
+    #[test]
+    fn consumer_group_listings_drop_non_consumer_protocol_groups() {
+        let groups = vec![
+            listed_group("orders", CONSUMER_PROTOCOL_TYPE, "consumer"),
+            listed_group("legacy-simple", "", "classic"),
+            listed_group("share-orders", "share", "share"),
+            listed_group("streams-app", "streams", "streams"),
+            listed_group("connect-sink", "connect", "classic"),
+        ];
+        assert_eq!(
+            group_ids(&consumer_group_listings(&groups)),
+            ["orders", "legacy-simple"]
+        );
+    }
+
+    /// `listGroups` is the "any group type" listing, so it must keep everything
+    /// the broker reports.
+    #[test]
+    fn all_group_listings_keep_every_protocol_type() {
+        let groups = vec![
+            listed_group("orders", CONSUMER_PROTOCOL_TYPE, "consumer"),
+            listed_group("share-orders", "share", "share"),
+            listed_group("streams-app", "streams", "streams"),
+        ];
+        assert_eq!(
+            group_ids(&all_group_listings(&groups)),
+            ["orders", "share-orders", "streams-app"]
+        );
+    }
+
+    #[test]
+    fn group_listing_maps_state_type_and_simple_flag() {
+        let listing = group_listing(&listed_group("orders", CONSUMER_PROTOCOL_TYPE, "consumer"));
+        assert_eq!(listing.group_id, "orders");
+        assert!(!listing.is_simple_consumer_group);
+        assert_eq!(listing.state, Some(GroupState::Stable));
+        assert_eq!(listing.group_type, Some(GroupType::Consumer));
+
+        let simple = group_listing(&listed_group("legacy-simple", "", ""));
+        assert!(simple.is_simple_consumer_group);
+        assert_eq!(simple.group_type, None);
+    }
 
     #[test]
     fn broker_target_returns_id_when_all_same_broker() {

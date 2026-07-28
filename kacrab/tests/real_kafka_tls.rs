@@ -6,11 +6,17 @@
 //! the handshake + (where applicable) SASL exchange complete over TLS. A
 //! negative case confirms an untrusted server certificate is rejected.
 //!
+//! The suite needs a compiled-in TLS crypto provider, so it declares
+//! `required-features = ["aws-lc-rs-tls"]` in `Cargo.toml` — without one, every
+//! connection fails at config validation with `no TLS crypto provider is compiled
+//! in`, and Cargo now skips the target instead of building a suite that cannot
+//! pass.
+//!
 //! Run after generating the trust material and bringing the broker up:
 //!   `bash scripts/gen-tls-certs.sh ./.tls-certs`
 //!   `KACRAB_TLS_DIR=$PWD/.tls-certs docker compose -f docker-compose.tls.yml up -d`
-//!   `KACRAB_TLS_DIR=$PWD/.tls-certs cargo test -p kacrab --test real_kafka_tls \
-//!      -- --ignored --nocapture`
+//!   `KACRAB_TLS_DIR=$PWD/.tls-certs cargo test -p kacrab --features aws-lc-rs-tls \
+//!      --test real_kafka_tls -- --ignored --nocapture`
 
 #![allow(
     clippy::expect_used,
