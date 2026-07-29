@@ -19,6 +19,10 @@
 //! [`broker_capability`] is the other shared fixture: the
 //! `require_broker_api!` guard the `real_kafka_*` suites use to self-skip on
 //! brokers that do not advertise an API a test needs.
+//!
+//! [`script`] is the scripted misbehaving-peer layer: an ordered
+//! [`script::ScriptAction`] list executed statefully across requests and
+//! reconnects, served through [`MockBroker::serve_script`].
 
 #![allow(
     dead_code,
@@ -35,6 +39,7 @@
 )]
 
 pub(crate) mod broker_capability;
+pub(crate) mod script;
 
 use std::{future::Future, net::SocketAddr};
 
@@ -167,6 +172,14 @@ impl MockBroker {
     /// Answer `handlers` in order, one response per request, then stop.
     pub(crate) async fn serve_many(handlers: Vec<Handler>) -> Self {
         Self::serve_with(|listener| Self::run_handlers(listener, handlers)).await
+    }
+
+    /// Run a [`script::ScriptAction`] sequence: per-request actions executed
+    /// statefully across a connection and across reconnects, for
+    /// misbehaving-peer tests. [`Self::join`] yields the number of requests
+    /// read across every connection the script served.
+    pub(crate) async fn serve_script(actions: Vec<script::ScriptAction>) -> Self {
+        Self::serve_with(|listener| script::run_script(listener, actions)).await
     }
 
     /// `serve_many` bound to a caller-chosen address, for the tests that need a
