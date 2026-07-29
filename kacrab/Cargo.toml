@@ -170,6 +170,12 @@ required-features = ["producer", "consumer", "admin"]
 name = "real_kafka_gssapi"
 required-features = ["gssapi"]
 
+# The cross-client interop suite drives the JVM tooling inside the compose
+# broker container as the peer; `gzip` covers the compressed-batch leg.
+[[test]]
+name = "real_kafka_interop"
+required-features = ["producer", "consumer", "gzip"]
+
 [[test]]
 name = "real_kafka_producer"
 required-features = ["producer"]

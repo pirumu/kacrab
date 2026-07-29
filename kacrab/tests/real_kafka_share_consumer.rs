@@ -16,10 +16,14 @@
 //! first poll.
 
 #![allow(
+    clippy::arithmetic_side_effects,
     clippy::expect_used,
     clippy::print_stdout,
     clippy::unwrap_used,
-    reason = "Ignored real-broker test is an explicit smoke check with direct failure output."
+    reason = "Ignored real-broker test is an explicit smoke check with direct failure output; \
+              arithmetic is deadline/counter bookkeeping on small bounded values. (The in-test \
+              relaxation clippy applies on its own stops working in functions that expand the \
+              `require_broker_api!` guard, so the allowance is spelled out.)"
 )]
 
 use std::{
@@ -38,6 +42,22 @@ use kacrab::{
     consumer::{AcknowledgeType, ShareConsumer, ShareRecord, ShareRecords},
     producer::{Producer, ProducerRecord},
 };
+use kacrab_protocol::generated::ApiKey;
+
+mod common;
+
+/// Every test in this suite drives the same three KIP-932 APIs — membership,
+/// the acquiring fetch, and the acknowledgement — none of which a broker below
+/// 4.2 advertises (the CI matrix first sees them on 4.3.0, at `min_version` 1).
+macro_rules! require_share_group_apis {
+    () => {
+        common::require_broker_api!(
+            ApiKey::ShareGroupHeartbeat => 1,
+            ApiKey::ShareFetch => 1,
+            ApiKey::ShareAcknowledge => 1,
+        );
+    };
+}
 
 /// The broker's `group.share.delivery.count.limit` default: a record is archived
 /// once it has been delivered this many times.
@@ -53,6 +73,7 @@ const MIN_RECORD_LOCK_MS: &str = "15000";
 #[tokio::test]
 #[ignore = "requires local Kafka from docker-compose.kafka.yml"]
 async fn real_kafka_share_consumer_implicit_acknowledgement() {
+    require_share_group_apis!();
     let bootstrap = bootstrap();
     let topic = topic("implicit");
     let group = format!("share-{topic}");
@@ -166,6 +187,7 @@ async fn real_kafka_share_consumer_implicit_acknowledgement() {
 #[tokio::test]
 #[ignore = "requires local Kafka from docker-compose.kafka.yml"]
 async fn real_kafka_share_consumer_accept_release_reject() {
+    require_share_group_apis!();
     let bootstrap = bootstrap();
     let topic = topic("dispositions");
     let group = format!("share-{topic}");
@@ -236,6 +258,7 @@ async fn real_kafka_share_consumer_accept_release_reject() {
 #[tokio::test]
 #[ignore = "requires local Kafka from docker-compose.kafka.yml"]
 async fn real_kafka_share_consumer_delivery_count_reaches_the_limit() {
+    require_share_group_apis!();
     let bootstrap = bootstrap();
     let topic = topic("poison");
     let group = format!("share-{topic}");
@@ -282,6 +305,7 @@ async fn real_kafka_share_consumer_delivery_count_reaches_the_limit() {
 #[tokio::test]
 #[ignore = "requires local Kafka from docker-compose.kafka.yml"]
 async fn real_kafka_share_consumer_more_consumers_than_partitions() {
+    require_share_group_apis!();
     let bootstrap = bootstrap();
     let topic = topic("fanout");
     let group = format!("share-{topic}");
@@ -345,6 +369,7 @@ async fn real_kafka_share_consumer_more_consumers_than_partitions() {
 #[tokio::test]
 #[ignore = "requires local Kafka from docker-compose.kafka.yml"]
 async fn real_kafka_share_consumer_lock_expiry_redelivers() {
+    require_share_group_apis!();
     let bootstrap = bootstrap();
     let topic = topic("lock-expiry");
     let group = format!("share-{topic}");

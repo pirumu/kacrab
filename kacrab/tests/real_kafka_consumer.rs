@@ -9,10 +9,14 @@
 //! --nocapture`.
 
 #![allow(
+    clippy::arithmetic_side_effects,
     clippy::expect_used,
     clippy::print_stdout,
     clippy::unwrap_used,
-    reason = "Ignored real-broker test is an explicit smoke check with direct failure output."
+    reason = "Ignored real-broker test is an explicit smoke check with direct failure output; \
+              arithmetic is deadline/counter bookkeeping on small bounded values. (The in-test \
+              relaxation clippy applies on its own stops working in functions that expand the \
+              `require_broker_api!` guard, so the allowance is spelled out.)"
 )]
 
 use std::{
@@ -27,6 +31,9 @@ use kacrab::{
     consumer::{Consumer, ConsumerInterceptor, ConsumerRecords, InterceptorConfigs},
     producer::{Producer, ProducerRecord},
 };
+use kacrab_protocol::generated::ApiKey;
+
+mod common;
 
 const RECORD_COUNT: usize = 10;
 
@@ -397,6 +404,10 @@ fn regex_escape(literal: &str) -> String {
 #[tokio::test]
 #[ignore = "requires local Kafka from docker-compose.kafka.yml"]
 async fn real_kafka_consumer_protocol_kip848() {
+    // KIP-848 is served from `ConsumerGroupHeartbeat` v1 (broker 4.0). 3.9
+    // advertises only the early-access v0, behind a broker feature flag the CI
+    // fixtures do not enable, and 3.6 does not advertise the API at all.
+    common::require_broker_api!(ApiKey::ConsumerGroupHeartbeat => 1);
     let bootstrap = bootstrap();
     let topic = topic();
     let per_partition = 5;

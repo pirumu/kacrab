@@ -15,11 +15,17 @@
 //! mid-handshake) stay in the test file that needs them and are built on
 //! [`MockBroker::serve_with`]; keeping them out of here is also what stops the
 //! shared struct from growing a second inherent impl per test file.
+//!
+//! [`broker_capability`] is the other shared fixture: the
+//! `require_broker_api!` guard the `real_kafka_*` suites use to self-skip on
+//! brokers that do not advertise an API a test needs.
 
 #![allow(
     dead_code,
+    unused_imports,
+    unused_macros,
     reason = "One shared fixture serves several test binaries; each uses the subset of \
-              constructors and response impls its own protocol exercises."
+              constructors, response impls, and capability guards its own protocol exercises."
 )]
 #![allow(
     clippy::expect_used,
@@ -28,8 +34,11 @@
     reason = "Integration test fixtures fail fastest with contextual unwrap/expect calls."
 )]
 
+pub(crate) mod broker_capability;
+
 use std::{future::Future, net::SocketAddr};
 
+pub(crate) use broker_capability::require_broker_api;
 use bytes::{Bytes, BytesMut};
 use kacrab_protocol::{
     frame,
