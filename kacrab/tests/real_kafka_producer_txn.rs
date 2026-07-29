@@ -51,10 +51,18 @@ fn unique_suffix() -> String {
 fn create_topic(topic: &str, partitions: u32) {
     let mut command = env::var("KACRAB_KAFKA_BIN").map_or_else(
         |_error| {
+            // Same `KACRAB_KAFKA_CONTAINER` / `KACRAB_KAFKA_CONTAINER_BOOTSTRAP`
+            // seam as `real_kafka_producer.rs`'s `create_topic`: retarget the
+            // `docker exec` at a secondary fixture without touching the shared
+            // default broker.
+            let container = env::var("KACRAB_KAFKA_CONTAINER")
+                .unwrap_or_else(|_error| "kacrab-kafka".to_owned());
+            let container_bootstrap = env::var("KACRAB_KAFKA_CONTAINER_BOOTSTRAP")
+                .unwrap_or_else(|_error| "localhost:9092".to_owned());
             let mut command = Command::new("docker");
             let _args = command
-                .args(["exec", "kacrab-kafka", "/opt/kafka/bin/kafka-topics.sh"])
-                .args(["--bootstrap-server", "localhost:9092"]);
+                .args(["exec", &container, "/opt/kafka/bin/kafka-topics.sh"])
+                .args(["--bootstrap-server", &container_bootstrap]);
             command
         },
         |bin| {
@@ -409,10 +417,18 @@ async fn real_kafka_abort_then_next_transaction_commits_cleanly() {
 fn create_topic_with_config(topic: &str, partitions: u32, config: &[(&str, &str)]) {
     let mut command = env::var("KACRAB_KAFKA_BIN").map_or_else(
         |_error| {
+            // Same `KACRAB_KAFKA_CONTAINER` / `KACRAB_KAFKA_CONTAINER_BOOTSTRAP`
+            // seam as `real_kafka_producer.rs`'s `create_topic`: retarget the
+            // `docker exec` at a secondary fixture without touching the shared
+            // default broker.
+            let container = env::var("KACRAB_KAFKA_CONTAINER")
+                .unwrap_or_else(|_error| "kacrab-kafka".to_owned());
+            let container_bootstrap = env::var("KACRAB_KAFKA_CONTAINER_BOOTSTRAP")
+                .unwrap_or_else(|_error| "localhost:9092".to_owned());
             let mut command = Command::new("docker");
             let _args = command
-                .args(["exec", "kacrab-kafka", "/opt/kafka/bin/kafka-topics.sh"])
-                .args(["--bootstrap-server", "localhost:9092"]);
+                .args(["exec", &container, "/opt/kafka/bin/kafka-topics.sh"])
+                .args(["--bootstrap-server", &container_bootstrap]);
             command
         },
         |bin| {

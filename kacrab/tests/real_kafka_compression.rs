@@ -35,7 +35,24 @@ use kacrab::producer::{Producer, ProducerRecord};
 
 const CODECS: [&str; 4] = ["gzip", "snappy", "lz4", "zstd"];
 const RECORDS_PER_CODEC: usize = 3;
-const CONTAINER: &str = "kacrab-kafka";
+
+/// Compose container running the broker: `kacrab-kafka` (every
+/// `docker-compose.kafka*.yml` default) unless `KACRAB_KAFKA_CONTAINER` points
+/// the suite at a secondary fixture brought up under another name — e.g. an
+/// old-broker compose running next to the default broker.
+fn container() -> String {
+    env::var("KACRAB_KAFKA_CONTAINER").unwrap_or_else(|_error| "kacrab-kafka".to_owned())
+}
+
+/// Bootstrap address that works from *inside* the container. The default is
+/// the composes' in-container PLAINTEXT listener, whose advertised address
+/// only stays in-container-reachable while `KAFKA_HOST_PORT` is 9092; a
+/// secondary fixture on another host port must steer in-container CLIs to the
+/// INTERNAL listener instead (`KACRAB_KAFKA_CONTAINER_BOOTSTRAP=kafka:29092`).
+fn container_bootstrap() -> String {
+    env::var("KACRAB_KAFKA_CONTAINER_BOOTSTRAP")
+        .unwrap_or_else(|_error| "localhost:9092".to_owned())
+}
 
 #[tokio::test]
 #[ignore = "requires the broker from docker-compose.kafka.yml and the docker CLI"]
@@ -227,9 +244,9 @@ fn cli_command(script: &str, interactive: bool) -> Command {
         let _arg = command.arg("-i");
     }
     let _args = command
-        .arg(CONTAINER)
+        .arg(container())
         .arg(format!("/opt/kafka/bin/{script}"))
-        .args(["--bootstrap-server", "localhost:9092"]);
+        .args(["--bootstrap-server", &container_bootstrap()]);
     command
 }
 
@@ -271,7 +288,7 @@ fn stored_codecs(topic: &str) -> Vec<String> {
          /var/lib/kafka/data/{topic}-0/*.log"
     );
     let output = Command::new("docker")
-        .args(["exec", CONTAINER, "sh", "-c", &dump])
+        .args(["exec", &container(), "sh", "-c", &dump])
         .output()
         .expect("kafka-dump-log should run");
     let text = String::from_utf8_lossy(&output.stdout);
@@ -297,10 +314,10 @@ fn consume_all(topic: &str, count: usize) -> String {
     let output = Command::new("docker")
         .args([
             "exec",
-            CONTAINER,
+            &container(),
             "/opt/kafka/bin/kafka-console-consumer.sh",
             "--bootstrap-server",
-            "localhost:9092",
+            &container_bootstrap(),
             "--topic",
             topic,
             "--from-beginning",

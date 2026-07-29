@@ -74,6 +74,20 @@ const ASSERTED_APIS: [ApiKey; 7] = [
 ///   feature flag until 4.2, so a share consumer against 4.0 must be told the API is missing.
 const FIXTURES: &[Fixture] = &[
     Fixture {
+        label: "3.3.2",
+        frame: include_bytes!("fixtures/api_versions/kafka-3.3.2.bin"),
+        summary: include_str!("fixtures/api_versions/kafka-3.3.2.json"),
+        negotiated: &[
+            (ApiKey::Produce, Some(9)),
+            (ApiKey::Fetch, Some(13)),
+            (ApiKey::FindCoordinator, Some(4)),
+            (ApiKey::Metadata, Some(12)),
+            (ApiKey::OffsetCommit, Some(8)),
+            (ApiKey::ConsumerGroupHeartbeat, None),
+            (ApiKey::ShareFetch, None),
+        ],
+    },
+    Fixture {
         label: "3.6.2",
         frame: include_bytes!("fixtures/api_versions/kafka-3.6.2.bin"),
         summary: include_str!("fixtures/api_versions/kafka-3.6.2.json"),
@@ -417,6 +431,8 @@ fn newer_apis_report_unavailable_on_older_brokers_without_panicking() {
     assert_eq!(
         unavailable,
         vec![
+            ("3.3.2", ApiKey::ConsumerGroupHeartbeat),
+            ("3.3.2", ApiKey::ShareFetch),
             ("3.6.2", ApiKey::ConsumerGroupHeartbeat),
             ("3.6.2", ApiKey::ShareFetch),
             ("3.9.0", ApiKey::ShareFetch),
