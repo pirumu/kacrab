@@ -52,6 +52,9 @@ Java comparison wrappers (`scripts/`):
   compact counter lines; unit-tested via `make test-bench-scripts`.
 - `netem.sh` - high-RTT emulation profiles for the docker broker; see
   [High-RTT emulation (B2)](#high-rtt-emulation-b2).
+- `latency_gate.sh` - extracts p50/p99 from `producer_kafka_bench` logs and
+  compares against `benches/latency-thresholds.toml`; see
+  [Latency Gate](#latency-gate-ci-issue-52-b4).
 
 ## Running
 
@@ -487,6 +490,28 @@ The producer and consumer baselines in this file were re-measured under these
 rules on 2026-07-27 and re-verified at 0.4.0: producer within ±1.5% over four
 interleaved real-broker pairs, consumer inside the ±1.7% A/A noise floor, and
 the accumulator microbenchmark back at baseline.
+
+## Latency Gate (CI, issue #52 B4)
+
+`.github/workflows/latency-gate.yml` runs nightly (and on dispatch, never on
+PRs): it boots the `docker-compose.kafka.yml` broker on the runner, builds
+`producer_kafka_bench` once, runs a fixed medium workload (1M x 10 B,
+acks=all + idempotence defaults, unpinned) **three identical invocations of
+that one binary**, and gates the median p50/p99 produce latency against
+`benches/latency-thresholds.toml` via `benches/scripts/latency_gate.sh`.
+
+The three invocations double as the job's A/A control: same build, same argv,
+same environment, so their min-max spread is the run's noise floor and the
+gate prints it next to the medians. The discipline rules above transfer with
+one adjustment — a hosted runner cannot be made quiet, only consistently
+shared, so thresholds must be calibrated from the job's own run history on
+that runner class, never from a local machine or from the native-broker
+baselines in this file.
+
+**The checked-in thresholds are uncalibrated placeholders** and the job is
+`continue-on-error` until the maintainer calibrates them (issue #52 B4):
+accumulate nightly runs, take observed medians plus the printed spread, and
+set each threshold to median + a margin that clears that spread.
 
 ## Real-Kafka Producer Baselines
 

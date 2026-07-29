@@ -1,0 +1,109 @@
+name: latency-gate
+
+# Nightly producer-latency regression gate (issue #52 B4).
+#
+# Runs `producer_kafka_bench` against the single-broker compose fixture on a
+# fixed medium workload — 1M x 10 B records, acks=all + idempotence defaults,
+# `kacrab-bench` (3 partitions), unpinned rate — three identical invocations
+# of one release binary, then gates the median p50/p99 against
+# benches/latency-thresholds.toml via benches/scripts/latency_gate.sh.
+#
+# Methodology (see "A/B Discipline" in benches/README.md):
+#   - One fixed executable path: the same binary file, same argv, same
+#     environment for all three invocations. The variable under test is the
+#     commit, nothing else.
+#   - The three invocations are this job's built-in A/A control: they run the
+#     identical build, so their min-max spread IS the noise floor, and the
+#     gate script prints it next to the medians. A threshold margin smaller
+#     than that spread cannot distinguish a regression from noise — that is
+#     what the calibration note in benches/latency-thresholds.toml is about.
+#   - The quiet-host gate from the README does not transfer literally: a
+#     hosted CI runner is not quiet and cannot be made quiet, it is merely
+#     *consistently* shared. Expect a wider noise floor than local runs and
+#     calibrate thresholds from this job's own history, never from a laptop
+#     or from the native-broker baselines in benches/README.md (the broker
+#     here is dockerized on the same VM — a different machine class).
+#
+# NON-BLOCKING until the maintainer calibrates the thresholds
+# (`continue-on-error: true` below): the checked-in values are generous
+# placeholders, and a gate that cries wolf gets deleted, not fixed. Not run
+# on pull requests on purpose — per-PR latency numbers from shared runners
+# are noise, and a nightly trend is the signal this gate is after.
+
+on:
+  schedule:
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: latency-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  producer-latency:
+    name: producer latency gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Placeholder thresholds (issue #52 B4): keep the job non-blocking until
+    # they are calibrated from this job's own run history. Remove this line
+    # to make the gate enforcing.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # Boot the broker in the background; image pull + KRaft format overlap
+      # with the toolchain install and the bench build (same pattern as
+      # real-broker.yml).
+      - name: Start Kafka (background)
+        run: docker compose -f docker-compose.kafka.yml up -d
+
+      - name: Pinned Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build producer bench (release)
+        run: cargo build -p kacrab-benches --release --bin producer_kafka_bench
+
+      - name: Wait for broker health
+        run: |
+          docker compose -f docker-compose.kafka.yml up -d --wait kafka
+          docker wait kacrab-kafka-init
+
+      # Three identical invocations of the one binary. KACRAB_BENCH_RUNS=1
+      # per invocation so every sample pays the same startup/warmup cost;
+      # the bench itself warms metadata and the broker session outside its
+      # measured window. Environment is byte-identical across invocations
+      # (the README's env-padding rule exists for A/B arms launched from
+      # different shells; a single-arm gate needs "identical", which this is).
+      - name: Run fixed medium workload (3x)
+        run: |
+          for i in 1 2 3; do
+            KACRAB_BOOTSTRAP=127.0.0.1:9092 \
+            KACRAB_ONLY_10B=1 \
+            KACRAB_BENCH_MESSAGES=1000000 \
+            KACRAB_BENCH_RUNS=1 \
+              ./target/release/producer_kafka_bench | tee "gate-run-$i.log"
+          done
+
+      - name: Gate p50/p99 against thresholds
+        run: benches/scripts/latency_gate.sh gate-run-1.log gate-run-2.log gate-run-3.log
+
+      - name: Upload bench logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latency-gate-logs
+          path: gate-run-*.log
+          retention-days: 30
+
+      - name: Broker logs on failure
+        if: failure()
+        run: docker logs kacrab-kafka --tail 300

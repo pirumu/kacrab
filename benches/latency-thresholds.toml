@@ -1,0 +1,27 @@
+# Latency-gate thresholds for .github/workflows/latency-gate.yml (issue #52 B4).
+#
+# !!! PLACEHOLDER VALUES — NOT CALIBRATED !!!
+#
+# These numbers are deliberately generous so the gate exercises the pipeline
+# without producing false alarms. Before the workflow is made blocking
+# (removing `continue-on-error`), the maintainer must calibrate them from the
+# gate's own history: let the nightly job accumulate ~2 weeks of runs on the
+# CI runner class it actually uses, take the observed medians plus the A/A
+# spread the job prints, and set each threshold to median + a margin that
+# clears the noise floor (see "A/B Discipline" in benches/README.md — no
+# delta smaller than the A/A spread means anything, and that applies to
+# threshold margins too). Do NOT calibrate from a laptop: the numbers below
+# gate runs on shared CI hardware with a dockerized broker, which is a
+# different machine class than the native-broker baselines in benches/README.md.
+#
+# Workload identity (must match the workflow exactly — a threshold is only
+# meaningful for the workload it was measured on):
+#   producer_kafka_bench, 1,000,000 x 10 B records, acks=all + idempotence
+#   (defaults), topic kacrab-bench (3 partitions), unpinned rate, 3 identical
+#   invocations, median per metric.
+
+[producer-medium]
+# Median-of-3 p50 produce latency (ms), send call -> callback completion.
+p50_ms_max = 250
+# Median-of-3 p99 produce latency (ms).
+p99_ms_max = 1500
