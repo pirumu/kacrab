@@ -808,3 +808,21 @@ sample counts, and the accumulator benchmark uses `BatchSize::LargeInput`):
 ## License
 
 This crate is licensed under either MIT or Apache-2.0, matching the workspace.
+
+## B3 memory soak — self-service runner
+
+`benches/scripts/soak_b3.sh [hours]` (default 12; the B3 range is 8–24) runs
+the long memory soak from issue #52 end to end: preflight (docker VM ≥ 6 GiB,
+≥ 20 GB free disk), the 3-broker cluster on ports 29092/29094/29096, the
+standard soak workload with chaos churn (broker-kill rotation + consumer
+bounces — the churn that exercises pooled buffers, accumulator reuse, and
+per-topic sensor expiry), a retention cap so disk stays bounded, and an
+automatic RSS verdict: the median of the final 10% window against the
+post-warm-up 25–35% baseline (chaos windows spike RSS transiently, so a
+linear slope would misread fault phases as growth — the median comparison was
+validated against the 2026-07-29 compound run: baseline 12.2 MiB, final
+13.3 MiB, PASS).
+
+`KEEP_CLUSTER=1` leaves the brokers up afterwards. Output lands in a dated,
+gitignored `benches/soak-out-b3-*` directory; update `SOAK-REPORT.md` with
+the outcome either way.
