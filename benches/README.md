@@ -50,6 +50,11 @@ Java comparison wrappers (`scripts/`):
   targets.
 - `producer_counter_metrics.py` - parses `--print-metrics` output into the
   compact counter lines; unit-tested via `make test-bench-scripts`.
+- `netem.sh` - high-RTT emulation profiles for the docker broker; see
+  [High-RTT emulation (B2)](#high-rtt-emulation-b2).
+- `latency_gate.sh` - extracts p50/p99 from `producer_kafka_bench` logs and
+  compares against `benches/latency-thresholds.toml`; see
+  [Latency Gate](#latency-gate-ci-issue-52-b4).
 
 ## Running
 
@@ -103,6 +108,85 @@ creates `kacrab-bench` with 3 partitions (override with `KAFKA_HOST_PORT`,
 docker compose -f docker-compose.kafka.yml up -d
 docker compose -f docker-compose.kafka.yml down
 ```
+
+## High-RTT emulation (B2)
+
+`benches/scripts/netem.sh` shapes the docker broker's traffic with `tc netem`
+to emulate cross-DC RTTs (issue #52 B2). The broker image ships no `tc`, so
+the script runs a short-lived sidecar container (`alpine` + `iproute2-tc`,
+built once as `kacrab-netem`) with `--cap-add NET_ADMIN` **inside the broker
+container's network namespace** and applies netem to the broker's `eth0`
+egress. That placement was chosen over host-side veth shaping because it is
+pure docker — no VM-specific interface hunting on colima/CI — and one netem
+instance covers every client. Delay on broker egress postpones every response
+by the full profile value, so each request/response round trip gains the
+profile's delay: **the profile value is the added RTT** (asymmetric placement,
+symmetric effect on RTT). The netem queue limit is raised to 100K packets so
+the profiles shape latency/loss, not bandwidth.
+
+```bash
+benches/scripts/netem.sh wan50         # +50ms RTT ±5ms jitter
+benches/scripts/netem.sh wan150        # +150ms ±15ms, 0.1% loss
+benches/scripts/netem.sh wan200-lossy  # +200ms ±20ms, 1% loss
+benches/scripts/netem.sh status        # show the broker's current qdisc
+benches/scripts/netem.sh off           # ALWAYS run when done (alias: lan)
+```
+
+Profiles are idempotent (`tc qdisc replace` — re-applying any profile swaps
+out the previous one) and `off` restores the default qdisc. The target
+defaults to the shared `kacrab-kafka` container (`KACRAB_NETEM_TARGET` /
+`KACRAB_NETEM_DEV` / `KACRAB_NETEM_IMAGE` override); that broker is shared
+with functional test runs, so **always finish with `off`**.
+
+Validation (2026-07-29, macOS client → colima-VM docker broker from
+`docker-compose.kafka.yml`, 10 B records, `kacrab-bench`, acks=all +
+idempotence defaults, single runs — a mechanism check, not a baseline):
+
+Producer pinned to 50K rec/s (`KACRAB_BENCH_THROUGHPUT=50000`,
+`KACRAB_BENCH_MESSAGES=150000`), where latency measures the round trip rather
+than queue depth:
+
+| profile | avg | p50 | p95 | p99 | max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lan (off) | 4.63 ms | 5 ms | 8 ms | 9 ms | 12 ms |
+| wan50 | 60.85 ms | 59 ms | 76 ms | 83 ms | 89 ms |
+
+The p50 shift is **+54 ms ≈ the injected 50 ± 5 ms**: one acks=all produce is
+one round trip, and the delay is applied once per round trip (on the response
+path), not once per direction — so the expected shift is the profile value
+itself, and that is what shows up.
+
+Producer unpinned (200K x 10 B, closed-loop saturation):
+
+| profile | throughput | avg | p50 | p99 |
+| --- | ---: | ---: | ---: | ---: |
+| lan (off) | 3.23M rec/s (30.8 MB/s) | 15.5 ms | 16 ms | 22 ms |
+| wan50 | 138.9K rec/s (1.32 MB/s) | 710.8 ms | 722 ms | 1366 ms |
+
+Read the saturated latencies as queue depth, not RTT: the send loop appends
+the whole 2 MB workload into `buffer.memory` almost immediately, and records
+then wait for the RTT-bound drain (the same 77 produce requests as the lan
+run, each now costing ~50 ms at limited pipeline depth), so per-record latency
+is dominated by accumulator wait time. This is exactly the in-flight-window /
+delivery-timeout territory B2 exists to probe.
+
+Consumer (200K x 10 B, subscribe mode):
+
+| profile | consume | fetch | rebalance | poll p50 / p99 / p99.9 |
+| --- | ---: | ---: | ---: | --- |
+| lan (off) | 4.95M rec/s (47.2 MB/s) | 11.7M rec/s | 23 ms | 0.037 / 0.084 / 23.3 ms |
+| wan50 | 104.4K rec/s (1.00 MB/s) | 151.8K rec/s | 598 ms | 0.048 / 101.7 / 598.1 ms |
+
+Group join pays the RTT on every coordination round trip (23 ms → 598 ms),
+while the fetch path amortizes it: 200K records arrived in 2 Fetch requests,
+so poll p50 is unchanged and the RTT shows up only in the tail (the polls
+that actually waited on a fetch).
+
+Caveats: the lan baseline already includes the colima port-forward tunnel
+(see Broker Setup — roughly triple loopback RTT and a hard throughput cap),
+so these tables are netem-delta evidence only; do not compare them against
+the native-broker baselines below. The full B2 RTT-tier report (wan150,
+wan200-lossy, defect hunt) is tracked in issue #52.
 
 ## Producer Benchmark (`producer_kafka_bench`)
 
@@ -406,6 +490,28 @@ The producer and consumer baselines in this file were re-measured under these
 rules on 2026-07-27 and re-verified at 0.4.0: producer within ±1.5% over four
 interleaved real-broker pairs, consumer inside the ±1.7% A/A noise floor, and
 the accumulator microbenchmark back at baseline.
+
+## Latency Gate (CI, issue #52 B4)
+
+`.github/workflows/latency-gate.yml` runs nightly (and on dispatch, never on
+PRs): it boots the `docker-compose.kafka.yml` broker on the runner, builds
+`producer_kafka_bench` once, runs a fixed medium workload (1M x 10 B,
+acks=all + idempotence defaults, unpinned) **three identical invocations of
+that one binary**, and gates the median p50/p99 produce latency against
+`benches/latency-thresholds.toml` via `benches/scripts/latency_gate.sh`.
+
+The three invocations double as the job's A/A control: same build, same argv,
+same environment, so their min-max spread is the run's noise floor and the
+gate prints it next to the medians. The discipline rules above transfer with
+one adjustment — a hosted runner cannot be made quiet, only consistently
+shared, so thresholds must be calibrated from the job's own run history on
+that runner class, never from a local machine or from the native-broker
+baselines in this file.
+
+**The checked-in thresholds are uncalibrated placeholders** and the job is
+`continue-on-error` until the maintainer calibrates them (issue #52 B4):
+accumulate nightly runs, take observed medians plus the printed spread, and
+set each threshold to median + a margin that clears that spread.
 
 ## Real-Kafka Producer Baselines
 
