@@ -1,0 +1,109 @@
+name: kacrab-kafka-bench
+
+# Single-broker KRaft fixture for the Kafka 3.3 line — the release where KRaft
+# went GA (KIP-833 landed in 3.3.1; 3.3.2 is that line's final bugfix release).
+# It exists to put a real broker from the "accepted, not yet CI-verified"
+# 2.4–3.5 range into the real-broker.yml version matrix.
+#
+# Like docker-compose.kafka-bitnami.yml (3.6.2), this reaches for
+# `bitnamilegacy/kafka` — `apache/kafka` publishes no tag older than 3.7, and
+# Bitnami's 3.x back-catalogue moved to the `bitnamilegacy` namespace in 2025.
+# It is a third compose file rather than an overlay of the 3.6 one for the same
+# reason that file is not an overlay of the Apache one: the env shapes differ
+# and an overlay can only add keys, never drop them. What differs at 3.3:
+#
+#   - `KAFKA_ENABLE_KRAFT: "yes"` is REQUIRED. The 3.3-era Bitnami scripts
+#     default to ZooKeeper mode and error out asking for
+#     `KAFKA_CFG_ZOOKEEPER_CONNECT` unless KRaft is switched on explicitly;
+#     the 3.6-era scripts infer KRaft from `KAFKA_CFG_PROCESS_ROLES` and
+#     removed the switch. Every other `KAFKA_CFG_*` key below is a broker
+#     config that already existed at 3.3 and is spelled identically.
+#
+# Bitnami's filesystem layout is the same as at 3.6: KAFKA_HOME at
+# /opt/bitnami/kafka and the uid-1001-writable data dir at /bitnami/kafka/data
+# (see docker-compose.kafka-bitnami.yml for why log.dirs must stay there). The
+# real_kafka_* suites shell out to `/opt/kafka/bin/*.sh` and read
+# `/var/lib/kafka/data`, so the workflow's path shim symlinks both Apache-image
+# paths onto Bitnami's after the health gate, exactly as on the 3.6 leg.
+#
+# `container_name` is interpolated so a local run can coexist with the shared
+# dev broker (which owns the literal `kacrab-kafka` name on 9092): CI relies on
+# the defaults (`docker exec kacrab-kafka`, `docker wait kacrab-kafka-init`),
+# while e.g.
+#
+#   KAFKA_HOST_PORT=39292 KAFKA_CONTAINER_NAME=ob50-kafka \
+#     docker compose -f docker-compose.kafka-33.yml -p ob50 up -d --wait kafka
+#
+# boots a throwaway copy that clashes with nothing.
+
+services:
+  kafka:
+    image: ${KAFKA_IMAGE:-bitnamilegacy/kafka:3.3.2}
+    container_name: ${KAFKA_CONTAINER_NAME:-kacrab-kafka}
+    ports:
+      - "${KAFKA_HOST_PORT:-9092}:9092"
+    environment:
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      # 3.3-era Bitnami scripts default to ZooKeeper mode; this is the switch.
+      KAFKA_ENABLE_KRAFT: "yes"
+      KAFKA_KRAFT_CLUSTER_ID: ${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,INTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:${KAFKA_HOST_PORT:-9092},INTERNAL://kafka:29092
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CFG_LOG_DIRS: /bitnami/kafka/data
+      KAFKA_CFG_NUM_PARTITIONS: ${KAFKA_BENCH_PARTITIONS:-3}
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_CFG_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CFG_LOG_RETENTION_HOURS: 1
+      KAFKA_CFG_LOG_SEGMENT_BYTES: 1073741824
+      # No share-coordinator settings: KIP-932 does not exist before 4.2, and the
+      # share suites do not run on this fixture (see the workflow's core suite).
+    volumes:
+      - kafka-33-data:/bitnami/kafka/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/bitnami/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 30s
+
+  kafka-init:
+    image: ${KAFKA_IMAGE:-bitnamilegacy/kafka:3.3.2}
+    container_name: ${KAFKA_CONTAINER_NAME:-kacrab-kafka}-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - sh
+      - -lc
+      - |
+        /opt/bitnami/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka:29092 \
+          --create \
+          --if-not-exists \
+          --topic "${KAFKA_BENCH_TOPIC:-kacrab-bench}" \
+          --partitions "${KAFKA_BENCH_PARTITIONS:-3}" \
+          --replication-factor 1
+        /opt/bitnami/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka:29092 \
+          --describe \
+          --topic "${KAFKA_BENCH_TOPIC:-kacrab-bench}"
+    environment:
+      KAFKA_BENCH_TOPIC: ${KAFKA_BENCH_TOPIC:-kacrab-bench}
+      KAFKA_BENCH_PARTITIONS: ${KAFKA_BENCH_PARTITIONS:-3}
+    restart: "no"
+
+volumes:
+  kafka-33-data:

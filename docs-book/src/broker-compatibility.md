@@ -11,7 +11,7 @@ Three numbers carry the story:
 | | Version | What makes it true |
 |---|---|---|
 | **Minimum accepted** | Apache Kafka **2.4** | The `ApiVersions` v3 handshake. Older brokers are rejected on connect with a typed error naming the requirement. |
-| **CI-exercised** | **3.6.2 · 3.9.0 · 4.0.0 · 4.3.0** | The broker-version matrix in `.github/workflows/real-broker.yml`, running the real suites against real containers. |
+| **CI-exercised** | **3.3.2 · 3.6.2 · 3.9.0 · 4.0.0 · 4.3.0** | The broker-version matrix in `.github/workflows/real-broker.yml`, running the real suites against real containers. 3.3.2 — the first leg inside the 2.4–3.5 range — runs nightly and on push, not on PRs. |
 | **Maximum** | Schemas generated from Apache Kafka **4.3.0** | Newer brokers negotiate down to 4.3.0-era versions under Kafka's own bidirectional compatibility model. Tested up to 4.3.0. |
 
 ## The mechanism: nothing is hardcoded
@@ -64,13 +64,18 @@ on a pre-2.4 broker rather than looping. The constant behind the message is
 error and the number in this table cannot drift.
 
 Between 2.4 and 3.5, negotiation and version-aware request construction are
-implemented and covered by unit and fixture tests — but those releases are **not
-in the CI matrix**. Treat them as *accepted, not yet CI-verified*.
+implemented and covered by unit and fixture tests — and since the 3.3.2 leg
+landed, one release in that range is **CI-verified at 3.3.2 (core tier,
+nightly)**. 3.3 is the line where KRaft went GA (KIP-833, 3.3.1), which is what
+lets it reuse the repo's single-broker combined-roles fixture shape with no
+ZooKeeper. Releases below 3.3 — including 2.8, the last pre-KRaft-default line,
+which would need a ZooKeeper-shaped fixture — remain *accepted, not yet
+CI-verified*.
 
 ## The CI matrix
 
 `.github/workflows/real-broker.yml` runs the `#[ignore]`d `real_kafka_*` suites
-against live containers, matrixed over four broker releases. Each leg sets
+against live containers, matrixed over five broker releases. Each leg sets
 `KAFKA_IMAGE` for the compose file, a seam every compose file already had
 (`${KAFKA_IMAGE:-apache/kafka:4.3.0}`).
 
@@ -80,6 +85,7 @@ against live containers, matrixed over four broker releases. Each leg sets
 | 4.0.0 | `apache/kafka:4.0.0` | `docker-compose.kafka.yml` | core | non-blocking |
 | 3.9.0 | `apache/kafka:3.9.0` | `docker-compose.kafka.yml` | core | non-blocking |
 | 3.6.2 | `bitnamilegacy/kafka:3.6.2` | `docker-compose.kafka-bitnami.yml` | core | non-blocking |
+| 3.3.2 | `bitnamilegacy/kafka:3.3.2` | `docker-compose.kafka-33.yml` | core | non-blocking, nightly/push only |
 
 **Two tiers.** *core* — producer, the classic-protocol consumer tests, a
 compression round-trip, and admin smoke — runs on every leg, because those APIs
@@ -94,9 +100,10 @@ failover, which is orthogonal to version negotiation.
 
 **When each leg runs.** The suites run `--test-threads=1` — they share one broker
 and name topics with millisecond nonces, so parallel runs collide — which makes
-each leg a full serial pass and four legs four times the wall clock. Pull
-requests therefore get two legs, newest and oldest, where a negotiation break
-shows up first. The complete matrix runs on push-to-master, on the nightly
+each leg a full serial pass and five legs five times the wall clock. Pull
+requests therefore get two legs, 4.3.0 and 3.6.2 — newest plus the oldest of
+the original matrix, where a negotiation break shows up first. The complete
+matrix, including the 3.3.2 leg, runs on push-to-master, on the nightly
 schedule, and on demand.
 
 **Why the old legs are non-blocking.** They carry `continue-on-error` and cannot
@@ -125,6 +132,12 @@ Apache-shaped ones, which would then sit in the environment doing nothing while
 reading as if they applied. Every setting in it is the same setting as in
 `docker-compose.kafka.yml`, spelled the way that image reads it.
 
+The 3.3.2 leg's `docker-compose.kafka-33.yml` is the same Bitnami shape once
+more, with one addition: the 3.3-era image needs `KAFKA_ENABLE_KRAFT=yes`
+spelled out — its scripts default to ZooKeeper mode and demand
+`KAFKA_CFG_ZOOKEEPER_CONNECT` otherwise — where the 3.6-era scripts infer KRaft
+from `process.roles`.
+
 ## Capability-aware admin smoke
 
 `real_kafka_admin_smoke` runs on every leg, which means it meets brokers that
@@ -137,13 +150,14 @@ operations report named `SKIPPED` lines plus a capability-summary line:
   field.
 - **3.6.2** — `list_config_resources(Topic)` *and*
   `list_client_metrics_resources` skipped: API 74 does not exist before 3.7.
+- **3.3.2** — the same two operations skipped, for the same reason.
 
 Two earlier failures on these legs — the API 74 `UnsupportedApiVersion` on 3.6.2
 and the `UnsupportedFieldVersion { field: "resource_types", version: 0 }` on
 3.9.0 and 4.0.0 — were real client bugs, not broker limitations. Both are fixed:
 the v0/v1 request shape is handled, and only the two operations a broker cannot
-semantically serve are skipped. The suite is verified green on 3.6.2, 3.9.0 and
-4.3.0.
+semantically serve are skipped. The suite is verified green on 3.3.2, 3.6.2,
+3.9.0 and 4.3.0.
 
 A skip is data, not an excuse: a surface that skips 100% on some release is
 exactly the raw material the per-surface floor table needs.
@@ -162,14 +176,15 @@ the frame it describes.
 
 | Fixture | Image | Frame bytes | APIs advertised |
 |---|---|---:|---:|
+| `kafka-3.3.2` | `bitnamilegacy/kafka:3.3.2` | 419 | 49 |
 | `kafka-3.6.2` | `bitnamilegacy/kafka:3.6.2` | 461 | 55 |
 | `kafka-3.9.0` | `apache/kafka:3.9.0` | 503 | 61 |
 | `kafka-4.0.0` | `apache/kafka:4.0.0` | 547 | 61 |
 | `kafka-4.3.0` | `apache/kafka:4.3.0` | 724 | 75 |
 
-Captured 2026-07-28 on `linux/arm64`, one broker at a time; the exact
-`docker run` commands are in that directory's `README.md`, along with the
-`capture_api_versions_fixture` harness for adding a new release.
+Captured 2026-07-28 (3.3.2: 2026-07-29) on `linux/arm64`, one broker at a time;
+the exact `docker run` commands are in that directory's `README.md`, along with
+the `capture_api_versions_fixture` harness for adding a new release.
 
 `kacrab/tests/api_versions_fixtures.rs` replays each frame through the
 production decode path and into `BrokerCapabilities`, asserting: the committed
@@ -227,9 +242,11 @@ would have worked on this cluster:
 
 Honest gaps, so the table above is not read for more than it says:
 
-- **2.4 through 3.5 are accepted but not CI-verified.** Negotiation and
-  version-aware request construction are implemented and unit/fixture-tested;
-  no container in CI runs those releases.
+- **Below 3.3 is accepted but not CI-verified.** The 3.3.2 leg put the first
+  real container from the 2.4–3.5 range into the matrix (core tier, nightly);
+  2.4 through 3.2 — including 2.8, the last pre-KRaft-default line, which needs
+  a ZooKeeper-shaped fixture — are still covered only by negotiation
+  unit/fixture tests.
 - **The old legs are non-blocking**, pending per-test `#[min_broker(..)]` gating
   and a published per-surface floor table.
 - **No cross-client interop suite yet** beyond the byte-level Java oracle
