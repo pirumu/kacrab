@@ -157,7 +157,16 @@ pub type OffsetCommitCallback = Box<dyn FnOnce(Result<()>) + Send>;
 
 /// Max join/sync rounds in one rejoin before giving up (a rebalance can restart
 /// the round when another member joins mid-sync).
-const MAX_REJOIN_ATTEMPTS: u32 = 10;
+/// Guard rail on rejoin rounds. The PRIMARY bound is the rebalance-timeout
+/// deadline in `ensure_active_group` — the window the broker itself grants a
+/// joining member — this cap only stops a pathological zero-sleep loop.
+const MAX_REJOIN_ATTEMPTS: u32 = 1_000;
+
+/// The rejoin deadline; a saturated add falls back to `now`, degrading to a
+/// single attempt rather than an unbounded window.
+fn rejoin_deadline_from(now: Instant, rebalance_timeout: Duration) -> Instant {
+    now.checked_add(rebalance_timeout).unwrap_or(now)
+}
 
 /// How often a pattern subscription re-matches its regex against the cluster's
 /// topic list, so newly created (or deleted) topics are picked up.
@@ -1296,6 +1305,11 @@ impl Consumer {
         // loading `__consumer_offsets`, so JoinGroup keeps answering
         // NOT_COORDINATOR for a while — without the sleep all attempts burn in
         // milliseconds and the join fails on a broker that is seconds from ready.
+        // Bound the rejoin window by the rebalance timeout — the deadline the
+        // broker actually grants a joining member — not by an attempt count
+        // whose backoff schedule caps out in single-digit seconds, which a
+        // coordinator still loading `__consumer_offsets` can outlast.
+        let rejoin_deadline = rejoin_deadline_from(Instant::now(), self.config.rebalance_timeout);
         let mut attempts = 0_u32;
         let mut retry_backoff = crate::wire::BackoffState::new(self.config.retry_backoff_policy());
         let (assigned, cooperative, coordinator) = loop {
@@ -1303,6 +1317,8 @@ impl Consumer {
                 tokio::time::sleep(retry_backoff.next_delay()?).await;
             }
             attempts = attempts.saturating_add(1);
+            let retry_budget_left =
+                Instant::now() < rejoin_deadline && attempts < MAX_REJOIN_ATTEMPTS;
             let coordinator = self.ensure_coordinator(&group_id).await?;
             let context = coordinator::GroupContext {
                 wire: &self.wire,
@@ -1324,7 +1340,7 @@ impl Consumer {
             .await
             {
                 Ok(join) => join,
-                Err(error) if attempts < MAX_REJOIN_ATTEMPTS && is_coordinator_moved(&error) => {
+                Err(error) if retry_budget_left && is_coordinator_moved(&error) => {
                     self.coordinator_id = None;
                     continue;
                 },
@@ -1350,9 +1366,8 @@ impl Consumer {
             .await
             {
                 Ok(assigned) => break (assigned, cooperative, coordinator),
-                Err(error)
-                    if is_rebalance_in_progress(&error) && attempts < MAX_REJOIN_ATTEMPTS => {},
-                Err(error) if is_coordinator_moved(&error) && attempts < MAX_REJOIN_ATTEMPTS => {
+                Err(error) if retry_budget_left && is_rebalance_in_progress(&error) => {},
+                Err(error) if retry_budget_left && is_coordinator_moved(&error) => {
                     self.coordinator_id = None;
                 },
                 Err(error) => return Err(error),
