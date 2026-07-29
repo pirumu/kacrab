@@ -41,3 +41,6 @@ docs-book/mermaid-init.js
 
 # Soak harness output (benches/src/bin/soak_bench.rs)
 benches/soak-out/
+
+# Soak run artifacts stay local; SOAK-REPORT.md carries the analysis.
+benches/soak-out*/
