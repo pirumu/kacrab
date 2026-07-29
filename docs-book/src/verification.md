@@ -29,11 +29,11 @@ Apache image reads, and an overlay can only add keys — it cannot drop the
 Apache-shaped ones, which would then sit in the environment doing nothing while
 reading as if they applied.
 
-The *core* tier (producer, classic-protocol consumer, a compression round trip,
-admin smoke) runs on every leg; the *full* tier adds KIP-848 and the share
-consumer and is 4.3.0-only, because those APIs do not exist on the older legs.
-Which surfaces survive which release, why the old legs are non-blocking today,
-and what the golden `ApiVersions` fixtures prove offline is all in
+Every leg runs every suite unfiltered, and every leg blocks: tests that need
+an API an old broker does not serve — KIP-848, the share consumer — carry a
+`require_broker_api!` guard and self-skip with a named `SKIPPED` line. Which
+surfaces run on which release (the per-surface floor table), how the guard
+works, and what the golden `ApiVersions` fixtures prove offline is all in
 [Which brokers kacrab speaks to](./broker-compatibility.md).
 
 > **Quote**

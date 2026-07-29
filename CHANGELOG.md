@@ -958,6 +958,26 @@ release date and links to relevant pull requests or issues.
   clears the directories it owns so regeneration replaces rather than
   accumulates.
 
+### Changed
+
+- **Every broker leg of the real-broker CI matrix now blocks, and tests declare
+  their own broker floors.** ([#48]) The 3.6.2 / 3.9.0 / 4.0.0 legs ran as
+  non-blocking evidence-gathering, with the version split hard-coded as
+  workflow-level test-name filters. Version-sensitive tests now open with a
+  one-line `require_broker_api!(<api> => <min version>)` guard
+  (`kacrab/tests/common/broker_capability.rs`) that asks the connected broker's
+  `ApiVersions` response — never a release number — and self-skips with a named
+  `SKIPPED: <test> needs <api> >= v<n>` line when the broker does not serve
+  what the test needs: the KIP-848 consumer test requires
+  `ConsumerGroupHeartbeat` ≥ v1, and every share-consumer test requires the
+  three KIP-932 APIs at v1. Every leg now runs every suite unfiltered
+  (`real_kafka_admin_behavior` and both compression directions included — both
+  verified green on 3.6.2), the `experimental`/`continue-on-error` escape
+  hatches are gone, and the per-surface floor table those guards define is
+  published in the book's broker-compatibility chapter.
+
+[#48]: https://github.com/pirumu/kacrab/issues/48
+
 ### Documentation
 
 - New README sections: a verified comparison against `rust-rdkafka`, `rskafka`,

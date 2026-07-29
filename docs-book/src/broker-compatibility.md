@@ -74,22 +74,23 @@ against live containers, matrixed over four broker releases. Each leg sets
 `KAFKA_IMAGE` for the compose file, a seam every compose file already had
 (`${KAFKA_IMAGE:-apache/kafka:4.3.0}`).
 
-| Leg | Image | Compose file | Suite tier | Gating |
-|---|---|---|---|---|
-| 4.3.0 | `apache/kafka:4.3.0` | `docker-compose.kafka.yml` | full | blocking |
-| 4.0.0 | `apache/kafka:4.0.0` | `docker-compose.kafka.yml` | core | non-blocking |
-| 3.9.0 | `apache/kafka:3.9.0` | `docker-compose.kafka.yml` | core | non-blocking |
-| 3.6.2 | `bitnamilegacy/kafka:3.6.2` | `docker-compose.kafka-bitnami.yml` | core | non-blocking |
+| Leg | Image | Compose file | Gating |
+|---|---|---|---|
+| 4.3.0 | `apache/kafka:4.3.0` | `docker-compose.kafka.yml` | blocking |
+| 4.0.0 | `apache/kafka:4.0.0` | `docker-compose.kafka.yml` | blocking |
+| 3.9.0 | `apache/kafka:3.9.0` | `docker-compose.kafka.yml` | blocking |
+| 3.6.2 | `bitnamilegacy/kafka:3.6.2` | `docker-compose.kafka-bitnami.yml` | blocking |
 
-**Two tiers.** *core* — producer, the classic-protocol consumer tests, a
-compression round-trip, and admin smoke — runs on every leg, because those APIs
-all existed well before 3.6. *full* is core plus the KIP-848 consumer and the
-KIP-932 share-consumer suites, and runs on 4.3.0 only, because those APIs do not
-exist on the older legs. The `admin-extended` and `cluster` jobs stay pinned to
-4.3.0 for reasons of their own: the admin-extended fixture depends on 4.3.0
-broker defaults (share and streams features formatted on), so pointing it at an
-older image produces a broker missing the features the suite is about rather
-than an older-broker signal; and the cluster suite is about dispatch and leader
+**Every leg runs every suite, and every leg blocks.** The workflow carries no
+test-name filters and no suite tiers: a test that needs an API an old broker
+does not serve declares that itself (see
+[per-test capability gating](#per-test-capability-gating) below) and self-skips
+with a named `SKIPPED` line, so a red leg is always a regression signal rather
+than noise. The `admin-extended` and `cluster` jobs stay pinned to 4.3.0 for
+reasons of their own: the admin-extended fixture depends on 4.3.0 broker
+defaults (share and streams features formatted on), so pointing it at an older
+image produces a broker missing the features the suite is about rather than an
+older-broker signal; and the cluster suite is about dispatch and leader
 failover, which is orthogonal to version negotiation.
 
 **When each leg runs.** The suites run `--test-threads=1` — they share one broker
@@ -99,17 +100,63 @@ requests therefore get two legs, newest and oldest, where a negotiation break
 shows up first. The complete matrix runs on push-to-master, on the nightly
 schedule, and on demand.
 
-**Why the old legs are non-blocking.** They carry `continue-on-error` and cannot
-fail a PR yet. That is deliberate and temporary: nobody has published the
-per-surface floor table, so there is no agreed answer to "should this test pass
-on 3.6?", and a red leg would be noise rather than a regression signal. They are
-evidence-gathering. Once per-test `#[min_broker(..)]` gating lands and the floor
-table is published, the flag comes off — leaving them permanently non-blocking
-would make the whole matrix decorative.
-
 **Reading the results.** Every leg writes a per-suite outcome table into the
 GitHub step summary, so which surfaces survive which broker is visible without
 opening four job logs.
+
+## Per-test capability gating
+
+A version-sensitive real-broker test opens with a one-line guard from
+`kacrab/tests/common/broker_capability.rs`:
+
+```rust,ignore
+common::require_broker_api!(ApiKey::ConsumerGroupHeartbeat => 1);
+```
+
+The guard sends one `ApiVersions` request to the connected broker over kacrab's
+own wire client and asks whether the broker *advertises* each named API at or
+above the paired version. When it does not, the guard prints a named skip line
+and returns from the test:
+
+```text
+SKIPPED: real_kafka_consumer::real_kafka_consumer_protocol_kip848 needs
+ConsumerGroupHeartbeat >= v1 (the broker does not advertise the API)
+```
+
+Like the [runtime feature gates](#feature-floors), the guard judges on what the
+broker advertises, never on a release number. It also deliberately ignores what
+the *client* can negotiate: if a broker advertises an API and kacrab then fails
+to speak it, that is a client bug the test must surface, not a reason to skip.
+
+### The per-surface floor table
+
+Derived from the guards; this is the agreed answer to "should this test pass on
+3.6?". *runs* means the surface must be green on that leg — a failure blocks.
+
+| Surface | Guard (broker must advertise) | 3.6.2 | 3.9.0 | 4.0.0 | 4.3.0 |
+|---|---|---|---|---|---|
+| Producer (`real_kafka_producer`), transactions (`real_kafka_producer_txn`) | — (classic APIs, pre-2.4) | runs | runs | runs | runs |
+| Classic consumer (`real_kafka_consumer` except KIP-848, `real_kafka_consumer_ops`) | — (classic group protocol) | runs | runs | runs | runs |
+| `real_kafka_consumer_protocol_kip848` | `ConsumerGroupHeartbeat` ≥ v1 | skips | skips | runs | runs |
+| Share consumer (`real_kafka_share_consumer`, all tests) | `ShareGroupHeartbeat`, `ShareFetch`, `ShareAcknowledge` ≥ v1 | skips | skips | skips | runs |
+| Compression round-trips (`real_kafka_compression`, both directions) | — (record batches are stored unchanged) | runs | runs | runs | runs |
+| Admin smoke (`real_kafka_admin_smoke`) | per-op capability log (see below) | runs¹ | runs¹ | runs¹ | runs |
+| Admin behavior (`real_kafka_admin_behavior`) | — (classic admin + KRaft describes) | runs | runs | runs | runs |
+
+¹ All ops run except the per-op skips listed in
+[Capability-aware admin smoke](#capability-aware-admin-smoke).
+
+Two rows deserve their footnotes spelled out:
+
+- **KIP-848 requires v1, not v0.** Kafka 3.9 advertises
+  `ConsumerGroupHeartbeat` at v0 — KIP-848 early access, behind a broker
+  feature flag the CI fixtures do not enable. The *client* gate accepts a
+  v0-only broker (an operator may have enabled early access), but the *test*
+  cannot pass against the stock 3.9 fixture, so its floor is v1.
+- **Admin behavior has no guard on purpose.** Its cluster/quorum/features
+  assertions describe any single-broker KRaft fixture rather than one
+  release's exact shape; the suite is verified green against
+  `bitnamilegacy/kafka:3.6.2`.
 
 ### `docker-compose.kafka-bitnami.yml`
 
@@ -230,8 +277,6 @@ Honest gaps, so the table above is not read for more than it says:
 - **2.4 through 3.5 are accepted but not CI-verified.** Negotiation and
   version-aware request construction are implemented and unit/fixture-tested;
   no container in CI runs those releases.
-- **The old legs are non-blocking**, pending per-test `#[min_broker(..)]` gating
-  and a published per-surface floor table.
 - **No cross-client interop suite yet** beyond the byte-level Java oracle
   (`kacrab-protocol/tests/java_interop.rs`) and the compression round-trip that
   decodes batches produced by the Java CLI. A kacrab-producer/Java-consumer
