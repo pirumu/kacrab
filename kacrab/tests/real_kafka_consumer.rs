@@ -514,6 +514,28 @@ async fn real_kafka_async_commits_apply_in_order() {
     let partition = TopicPartition::new(topic.clone(), 0);
     consumer.assign([partition.clone()]).expect("assign");
 
+    // A freshly started broker answers OffsetCommit with NOT_COORDINATOR while
+    // the group coordinator is still claiming `__consumer_offsets` — a window
+    // that outlasts the async worker's single refind-and-retry (Java does not
+    // retry async commits at all; the callback owns the error). Warm the
+    // coordinator up with a bounded sync-commit loop so the subject under test
+    // stays the ORDERING of the async burst, not broker start-up timing.
+    let warm_deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut warmup = std::collections::HashMap::new();
+        let _prev = warmup.insert(partition.clone(), OffsetAndMetadata::new(0));
+        match consumer.commit_sync_offsets(warmup).await {
+            Ok(()) => break,
+            Err(error) => {
+                assert!(
+                    std::time::Instant::now() < warm_deadline,
+                    "the group coordinator never became ready: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            },
+        }
+    }
+
     let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
     let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     // Issue ten commits with strictly increasing offsets, back to back.
