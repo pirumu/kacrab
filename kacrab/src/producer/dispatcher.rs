@@ -2635,7 +2635,12 @@ impl ProducerDispatcher {
         Ok(())
     }
 
-    async fn mark_expired_idempotent_batches_unresolved(
+    /// `pub(crate)` for the sender's prepare-expiry path: batches that expire
+    /// there consumed their sequence range at prepare time but never reached
+    /// the wire, and dropping them without this reconciliation leaves a
+    /// permanent hole that wedges the partition on `OUT_OF_ORDER_SEQUENCE_NUMBER`
+    /// (audit pass #5, F1).
+    pub(crate) async fn mark_expired_idempotent_batches_unresolved(
         &self,
         batches: &[ReadyBatch],
         now: Instant,
@@ -3265,6 +3270,13 @@ impl ProducerDispatcher {
     /// batches by the same deadline as every retry arm.
     pub(crate) const fn delivery_timeout_bound(&self) -> Duration {
         self.delivery_timeout
+    }
+
+    /// Count one terminal produce failure on `record-error-rate`, for terminal
+    /// arms that live outside the dispatch loop (the sender's prepare-requeue
+    /// path) — every in-loop terminal arm counts the same way.
+    pub(crate) fn record_produce_error_metric(&self) {
+        self.record_metrics(ProducerMetrics::record_error);
     }
 
     /// Kafka fails the WHOLE transaction when any transactional batch fails
