@@ -3726,7 +3726,7 @@ impl ProducerSenderState {
         }
     }
 
-    async fn requeue_prepare_error(
+    pub(crate) async fn requeue_prepare_error(
         dispatcher: &ProducerDispatcher,
         accumulator: &SharedAccumulator,
         error: DispatchPrepareError,
@@ -3742,11 +3742,17 @@ impl ProducerSenderState {
             // loop and the delivery futures would never resolve. Fail the batches'
             // deliveries instead. The old awaited inline send surfaced this error to
             // the caller directly; the background dispatch loop must fail it here.
+            dispatcher.record_produce_error_metric();
             for batch in &mut batches {
                 if let Some(sender) = batch.delivery.take() {
                     sender.send_error(&error);
                 }
             }
+            // The batches never dispatch, so nothing downstream will ever mark
+            // their accumulator identities complete — do it here or the
+            // incomplete-identity set grows monotonically.
+            let _completed =
+                accumulator.complete_batch_identities(batches.iter().map(|batch| batch.identity));
             return error;
         }
         // A retriable prepare failure (typically UnknownTopic while metadata
@@ -3760,6 +3766,23 @@ impl ProducerSenderState {
         let (mut expired, alive): (Vec<_>, Vec<_>) = batches
             .into_iter()
             .partition(|batch| now.duration_since(batch.first_append_at) >= delivery_timeout);
+        if !expired.is_empty() {
+            // Prepare consumed these batches' idempotent sequence ranges
+            // (prepare_drained_batches stamps earlier batches before a later
+            // one can fail routing). Dropping them without reconciliation
+            // leaves a permanent hole that wedges the partition on
+            // OUT_OF_ORDER_SEQUENCE_NUMBER. `loss_is_ambiguous=true` because
+            // an expired batch here may be a REQUEUED RETRY that already went
+            // to the wire once — rewinding its sequence could corrupt the
+            // partition if the broker wrote it — so the resolve requests an
+            // epoch bump, which restarts sequences safely for both the
+            // never-sent and the maybe-written case (Kafka
+            // markSequenceUnresolved -> maybeResolveSequences).
+            dispatcher
+                .mark_expired_idempotent_batches_unresolved(&expired, now, true)
+                .await;
+            dispatcher.record_produce_error_metric();
+        }
         for batch in &mut expired {
             let timeout_error = ProducerError::DeliveryTimeout {
                 topic: batch.topic.clone(),
@@ -3772,6 +3795,11 @@ impl ProducerSenderState {
                 sender.send_error(&timeout_error);
             }
         }
+        // Expired batches never dispatch: complete their accumulator
+        // identities here or the incomplete-identity set grows monotonically
+        // and keeps reporting the dead batches as returnable.
+        let _completed =
+            accumulator.complete_batch_identities(expired.iter().map(|batch| batch.identity));
         if let Err(requeue_error) = accumulator.requeue_front(alive) {
             return requeue_error;
         }

@@ -3619,3 +3619,79 @@ fn transaction_v1_request_versions_match_java_caps() {
         client_api_info(ApiKey::EndTxn).max_version
     );
 }
+
+/// Audit pass #5, F1/F2/F3: a stamped batch that expires on the sender's
+/// prepare-requeue path consumed an idempotent sequence range that never
+/// reached the wire. The expire arm must reconcile it — request an epoch bump
+/// (the loss may be ambiguous for a requeued retry, so a plain rewind is not
+/// safe) — and complete the batch's accumulator identity. The old arm did
+/// neither: the sequence hole wedged the partition on
+/// `OUT_OF_ORDER_SEQUENCE_NUMBER` and the incomplete-identity set grew forever.
+#[tokio::test]
+async fn expired_prepare_batch_requests_epoch_bump_and_completes_identity() {
+    use super::super::sender::{DispatchPrepareError, ProducerSenderState};
+
+    let dispatcher = idempotent_dispatcher().delivery_timeout(Duration::ZERO);
+    {
+        let mut state = dispatcher.producer_state.lock().await;
+        state.identity = Some(ProducerIdentity {
+            producer_id: 42,
+            producer_epoch: 3,
+        });
+        let base = state
+            .next_sequence("orders", 0, 3)
+            .expect("sequence range reserves");
+        assert_eq!(base, 0, "prepare consumed the partition's first range");
+    }
+
+    let accumulator = SharedAccumulator::with_config(
+        AccumulatorConfig::default()
+            .batch_size(1)
+            .linger(Duration::from_secs(1)),
+    );
+    let delivery = accumulator
+        .append_for_delivery(ProducerRecord::new("orders", 0).value(Bytes::from_static(b"v")))
+        .expect("append for delivery");
+    let mut batch = accumulator
+        .drain_ready(Instant::now())
+        .pop()
+        .expect("ready batch");
+    let identity = batch.identity;
+    batch.producer_state = Some(crate::producer::ProducerBatchState {
+        identity: ProducerIdentity {
+            producer_id: 42,
+            producer_epoch: 3,
+        },
+        base_sequence: 0,
+        transactional: false,
+    });
+
+    let error = ProducerSenderState::requeue_prepare_error(
+        &dispatcher,
+        &accumulator,
+        DispatchPrepareError {
+            error: ProducerError::UnknownTopic("orders".to_owned()),
+            batches: vec![batch],
+        },
+    )
+    .await;
+    assert!(matches!(error, ProducerError::UnknownTopic(_)));
+
+    // F1: the consumed-but-never-sent range requests the epoch bump that
+    // restarts sequences (Kafka bumpIdempotentEpochAndResetIdIfNeeded).
+    assert!(
+        dispatcher.producer_state.lock().await.epoch_bump_required,
+        "an expired prepare batch must request an idempotent epoch bump"
+    );
+    // The delivery resolved terminally with the timeout, not silently.
+    assert!(matches!(
+        delivery.await,
+        Err(ProducerError::DeliveryTimeout { .. })
+    ));
+    // F2: the identity was completed — completing again removes nothing.
+    assert_eq!(
+        accumulator.complete_batch_identities([identity]),
+        0,
+        "the expired batch's identity must already be completed"
+    );
+}

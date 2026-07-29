@@ -1,0 +1,6 @@
+2026-07-29 04:22:26 compound orchestrator armed: kafka1 outage at T+3h30m for 25m
+2026-07-29 08:23:09 COMPOUND: stopping kacrab-kafka1 (permanent-loss phase)
+kacrab-kafka1
+2026-07-29 09:05:04 COMPOUND: restarting kacrab-kafka1 (recovery phase)
+kacrab-kafka1
+2026-07-29 09:05:04 compound orchestrator done

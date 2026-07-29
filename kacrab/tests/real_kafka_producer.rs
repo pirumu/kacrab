@@ -827,3 +827,90 @@ async fn real_kafka_missing_topic_send_fails_after_delivery_timeout() {
         "the failure must honor delivery.timeout.ms, not fail eagerly: {elapsed:?}"
     );
 }
+
+/// Regression (audit pass #5, F1): a batch that expires on the sender's
+/// prepare-requeue path consumed its idempotent sequence range at prepare
+/// time (earlier batches in a drained selection are stamped before a later
+/// batch can fail routing) but never reached the wire. Dropping it without
+/// the standard sequence reconciliation left a permanent hole that wedged the
+/// partition on `OUT_OF_ORDER_SEQUENCE_NUMBER` for every later batch.
+///
+/// The interleave: each round sends one record to a MISSING topic (prepare
+/// fails routing for the whole selection, starving the healthy batches) and
+/// one to a healthy topic in the same breath. Stamped-then-expired healthy
+/// batches are probabilistic per round, so ten rounds pile up the odds; the
+/// probe send afterwards must land regardless — with the hole, it errors out.
+#[tokio::test]
+#[ignore = "requires local Kafka from docker-compose.kafka.yml"]
+async fn real_kafka_expired_prepare_batch_does_not_wedge_the_partition() {
+    let healthy = format!("kacrab-prep-heal-{}", unique_suffix());
+    let missing = format!("kacrab-prep-miss-{}", unique_suffix());
+    create_topic(&healthy, 1);
+
+    let producer = Producer::builder()
+        .set("bootstrap.servers", bootstrap_addr().to_string())
+        .set("client.id", "kacrab-prepare-expiry-test")
+        .set("enable.idempotence", "true")
+        .set("acks", "all")
+        .set("linger.ms", "0")
+        .set("batch.size", "1")
+        .set("request.timeout.ms", "2000")
+        .set("delivery.timeout.ms", "5000")
+        .build()
+        .await
+        .expect("producer should connect to local Kafka");
+
+    let mut deliveries = Vec::new();
+    for round in 0..10 {
+        deliveries.push(
+            producer
+                .send(
+                    ProducerRecord::new(missing.clone(), 0)
+                        .value(Bytes::from(format!("missing-{round}"))),
+                )
+                .expect("send to the missing topic enqueues"),
+        );
+        deliveries.push(
+            producer
+                .send(
+                    ProducerRecord::new(healthy.clone(), 0)
+                        .value(Bytes::from(format!("healthy-{round}"))),
+                )
+                .expect("send to the healthy topic enqueues"),
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    // Let every in-flight delivery settle (success or DeliveryTimeout) so all
+    // stamped sequences have reached their terminal state before the probe.
+    let mut healthy_failures = 0_u32;
+    for delivery in deliveries {
+        if let Err(error) = tokio::time::timeout(Duration::from_secs(30), delivery)
+            .await
+            .expect("every delivery must resolve within the timeout bound")
+            && matches!(
+                &error,
+                ProducerError::DeliveryTimeout { topic, .. } if topic == &healthy
+            )
+        {
+            healthy_failures += 1;
+        }
+    }
+    println!("  healthy-topic batches expired by starvation: {healthy_failures}");
+
+    // The probe: with the sequence holes reconciled, the next batch on the
+    // healthy partition must land; with the old code the partition is wedged
+    // and this delivery errors out (OUT_OF_ORDER retries exhausted or times
+    // out).
+    let receipt = tokio::time::timeout(
+        Duration::from_secs(30),
+        producer
+            .send(ProducerRecord::new(healthy.clone(), 0).value(Bytes::from_static(b"probe")))
+            .expect("probe send enqueues"),
+    )
+    .await
+    .expect("the probe delivery must resolve")
+    .expect("the probe must land — a failure here means the partition is wedged");
+    assert_eq!(receipt.partition, 0);
+    assert!(receipt.offset >= 0, "the probe holds a real log position");
+}
