@@ -7,10 +7,10 @@ name: real-broker
 # driven against a dead broker), so without this workflow a green CI says
 # nothing about that path.
 #
-# The `base` job is a matrix over broker releases — 3.6.2 / 3.9.0 / 4.0.0 /
-# 4.3.0 — because kacrab's protocol schemas are generated from the Java client
-# 4.3.0 and every older broker is reached by ApiVersions negotiation. Only a
-# real old broker proves that negotiation works; see the "Broker version
+# The `base` job is a matrix over broker releases — 3.3.2 / 3.6.2 / 3.9.0 /
+# 4.0.0 / 4.3.0 — because kacrab's protocol schemas are generated from the Java
+# client 4.3.0 and every older broker is reached by ApiVersions negotiation.
+# Only a real old broker proves that negotiation works; see the "Broker version
 # matrix" section below for what runs where and why.
 #
 # Each job gets its own runner VM, so the composes' host-port choices never
@@ -60,10 +60,25 @@ name: real-broker
 #
 # Wall time: the suites run `--test-threads=1` (they share one broker and name
 # topics with millisecond nonces, so parallel runs collide), which makes each
-# leg a full serial pass. Four legs is four times the wall clock, so pull
-# requests get two legs — newest and oldest, where a negotiation break would
-# show up first — and the complete matrix runs on push-to-master, on the nightly
-# schedule, and on demand.
+# leg a full serial pass. Five legs is five times the wall clock, so pull
+# requests get two legs — 4.3.0 and 3.6.2, newest plus the oldest PR-eligible
+# leg, where a negotiation break would show up first — and the complete matrix
+# runs on push-to-master, on the nightly schedule, and on demand.
+#
+# ### The 3.3.2 leg — first CI evidence inside the 2.4–3.5 range (issue #50)
+#
+# Everything below 3.6 used to be "accepted, not yet CI-verified". The 3.3.2
+# leg is the first container from that range: 3.3 is the line where KRaft went
+# GA (KIP-833, 3.3.1), so it still fits the repo's single-broker
+# combined-roles compose shape with no ZooKeeper. It gets its own compose file
+# (docker-compose.kafka-33.yml) because the 3.3-era Bitnami image needs
+# `KAFKA_ENABLE_KRAFT=yes` spelled out where the 3.6-era scripts infer KRaft
+# from `process.roles`. Nightly/push only (`pr: false`) — a fifth serial leg
+# is not worth every PR's wall clock. Verified green locally against
+# bitnamilegacy/kafka:3.3.2 across the whole core tier: producer 9/9,
+# producer-txn 5/5, classic consumer 13/13, consumer-ops 8/8, compression
+# round-trip, and admin smoke with the same two SKIPPED ops as 3.6.2.
+# A pre-KRaft (ZooKeeper) leg for 2.8 remains follow-up work on issue #50.
 
 on:
   push:
@@ -110,17 +125,19 @@ jobs:
       # the `base` job needs to differ:
       #
       #   image       broker image to run. `apache/kafka` publishes no tag older
-      #               than 3.7, so 3.6 comes from Bitnami — and from
-      #               `bitnamilegacy/`, not `bitnami/`: the 3.6 tags were removed
+      #               than 3.7, so 3.6 and 3.3 come from Bitnami — and from
+      #               `bitnamilegacy/`, not `bitnami/`: the 3.x tags were removed
       #               from the original repo when Bitnami moved its back
-      #               catalogue in 2025. Same image, current name. These four
+      #               catalogue in 2025. Same image, current name. These five
       #               images are exactly the ones the ApiVersions fixtures were
       #               captured from (kacrab/tests/fixtures/api_versions/README.md).
       #   compose     Bitnami configures the broker through `KAFKA_CFG_*` rather
       #               than the `KAFKA_*` shape the Apache image reads, so 3.6 gets
       #               its own compose file instead of an overlay (an overlay can
       #               only add keys, never drop the ones that would no longer
-      #               apply).
+      #               apply). 3.3 gets a third file because that era of the image
+      #               additionally needs `KAFKA_ENABLE_KRAFT=yes` (see the file's
+      #               header).
       #   path_shim   whether `/opt/kafka` and `/var/lib/kafka` have to be
       #               symlinked into the container before the suites run.
       #   pr          whether this leg runs on pull requests.
@@ -134,7 +151,8 @@ jobs:
             {"label":"4.3.0","image":"apache/kafka:4.3.0","compose":"docker-compose.kafka.yml","path_shim":false,"pr":true},
             {"label":"4.0.0","image":"apache/kafka:4.0.0","compose":"docker-compose.kafka.yml","path_shim":false,"pr":false},
             {"label":"3.9.0","image":"apache/kafka:3.9.0","compose":"docker-compose.kafka.yml","path_shim":false,"pr":false},
-            {"label":"3.6.2","image":"bitnamilegacy/kafka:3.6.2","compose":"docker-compose.kafka-bitnami.yml","path_shim":true,"pr":true}
+            {"label":"3.6.2","image":"bitnamilegacy/kafka:3.6.2","compose":"docker-compose.kafka-bitnami.yml","path_shim":true,"pr":true},
+            {"label":"3.3.2","image":"bitnamilegacy/kafka:3.3.2","compose":"docker-compose.kafka-33.yml","path_shim":true,"pr":false}
           ]'
           if [ "$EVENT" = "pull_request" ]; then
             legs=$(printf '%s' "$all" | jq -c '[.[] | select(.pr)]')
@@ -239,9 +257,9 @@ jobs:
         run: cargo test -p kacrab --all-features --test real_kafka_producer_txn -- --ignored --test-threads=1 --nocapture
 
       # Classic-protocol tests run everywhere; `real_kafka_consumer_protocol_
-      # kip848` guards on ConsumerGroupHeartbeat >= v1 and self-skips on 3.6.2
-      # (API absent) and 3.9.0 (early-access v0 only, behind a broker feature
-      # flag this fixture does not enable).
+      # kip848` guards on ConsumerGroupHeartbeat >= v1 and self-skips on 3.3.2
+      # and 3.6.2 (API absent) and 3.9.0 (early-access v0 only, behind a broker
+      # feature flag this fixture does not enable).
       - name: Consumer suite
         id: consumer
         run: cargo test -p kacrab --all-features --test real_kafka_consumer -- --ignored --test-threads=1 --nocapture

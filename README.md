@@ -68,7 +68,7 @@ config keys you know from the Java client work here.
   admin, every SASL mechanism and TLS mode, every codec, 3-broker failover) runs
   end-to-end against real Kafka containers as a merge gate on
   [every PR and push][real-broker-url] across a
-  [four-release broker matrix](#broker-compatibility); authenticated listeners
+  [five-release broker matrix](#broker-compatibility); authenticated listeners
   (SASL, TLS, GSSAPI against a real KDC) run
   [weekly and on auth-stack PRs][real-broker-auth-url].
 
@@ -77,8 +77,8 @@ config keys you know from the Java client work here.
 | | |
 | --- | --- |
 | **Minimum accepted** | Apache Kafka **2.4**. An older broker cannot answer the `ApiVersions` v3 handshake and is rejected on connect with a typed error naming the requirement — not a reconnect loop ending in a timeout. |
-| **Verified in CI** | **3.6.2 · 3.9.0 · 4.0.0 · 4.3.0** — real containers running the real suites ([`real-broker.yml`][real-broker-url]). 4.3.0 is the blocking leg and runs the full suite; the three older legs run the core suite (producer, classic consumer, compression, admin smoke) and are non-blocking evidence-gathering for now. |
-| **2.4 – 3.5** | Accepted and negotiated, covered offline by golden `ApiVersions` fixtures and `MockBroker` tests — but no CI container runs them. Honestly: accepted, not yet CI-verified. |
+| **Verified in CI** | **3.3.2 · 3.6.2 · 3.9.0 · 4.0.0 · 4.3.0** — real containers running the real suites ([`real-broker.yml`][real-broker-url]). 4.3.0 is the blocking leg and runs the full suite; the older legs run the core suite (producer, classic consumer, compression, admin smoke) and are non-blocking evidence-gathering for now. 3.3.2 — the first leg inside the 2.4–3.5 range — runs nightly and on push, not on PRs. |
+| **2.4 – 3.5** | Accepted and negotiated, covered offline by golden `ApiVersions` fixtures and `MockBroker` tests — and CI-verified at **3.3.2** (core suite, nightly) since the KRaft-GA line fits the repo's single-broker fixture shape. Below 3.3 (including 2.8, which needs a ZooKeeper-shaped fixture): accepted, not yet CI-verified. |
 | **Maximum** | Schemas are generated from Apache Kafka **4.3.0**; a newer broker negotiates down under Kafka's own bidirectional compatibility model. Tested up to 4.3.0. |
 
 Feature floors are gated on what a broker *advertises*, never on a release number

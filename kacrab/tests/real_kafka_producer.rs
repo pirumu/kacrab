@@ -96,14 +96,22 @@ fn unique_suffix() -> String {
 
 /// Create `topic` on the broker (compose disables auto topic creation): via the
 /// compose container's CLI by default, or a native install when
-/// `KACRAB_KAFKA_BIN` points at its `bin/`.
+/// `KACRAB_KAFKA_BIN` points at its `bin/`. `KACRAB_KAFKA_CONTAINER` retargets
+/// the `docker exec` at a secondary fixture (default `kacrab-kafka`), and
+/// `KACRAB_KAFKA_CONTAINER_BOOTSTRAP` sets the address that works from inside
+/// it (default `localhost:9092`; a fixture on a non-default `KAFKA_HOST_PORT`
+/// needs its INTERNAL listener, `kafka:29092`).
 fn create_topic(topic: &str, partitions: u32) {
     let mut command = env::var("KACRAB_KAFKA_BIN").map_or_else(
         |_error| {
+            let container = env::var("KACRAB_KAFKA_CONTAINER")
+                .unwrap_or_else(|_error| "kacrab-kafka".to_owned());
+            let container_bootstrap = env::var("KACRAB_KAFKA_CONTAINER_BOOTSTRAP")
+                .unwrap_or_else(|_error| "localhost:9092".to_owned());
             let mut command = Command::new("docker");
             let _args = command
-                .args(["exec", "kacrab-kafka", "/opt/kafka/bin/kafka-topics.sh"])
-                .args(["--bootstrap-server", "localhost:9092"]);
+                .args(["exec", &container, "/opt/kafka/bin/kafka-topics.sh"])
+                .args(["--bootstrap-server", &container_bootstrap]);
             command
         },
         |bin| {

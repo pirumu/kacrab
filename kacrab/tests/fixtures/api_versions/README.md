@@ -22,22 +22,28 @@ can never drift from the bytes.
 
 ## Provenance
 
-Captured on **2026-07-28** on `linux/arm64` (Docker Desktop, macOS host), one
-broker at a time on `127.0.0.1:9092`, each container removed before the next
-started.
+Captured on **2026-07-28** (3.3.2: **2026-07-29**) on `linux/arm64` (Docker
+Desktop, macOS host), one broker at a time, each container removed before the
+next started. The first four were captured on `127.0.0.1:9092`; 3.3.2 was
+captured from its compose fixture (`docker-compose.kafka-33.yml`) on
+`127.0.0.1:39292` via `KACRAB_FIXTURE_BOOTSTRAP`.
 
 | Fixture | Image | Frame bytes | APIs advertised |
 | --- | --- | --- | --- |
+| `kafka-3.3.2` | `bitnamilegacy/kafka:3.3.2` | 419 | 49 |
 | `kafka-3.6.2` | `bitnamilegacy/kafka:3.6.2` | 461 | 55 |
 | `kafka-3.9.0` | `apache/kafka:3.9.0` | 503 | 61 |
 | `kafka-4.0.0` | `apache/kafka:4.0.0` | 547 | 61 |
 | `kafka-4.3.0` | `apache/kafka:4.3.0` | 724 | 75 |
 
-`apache/kafka` publishes no tag older than 3.7, so 3.6 comes from Bitnami. The
-`bitnami/kafka:3.6*` tags were removed from Docker Hub when Bitnami moved its
-back-catalogue to the `bitnamilegacy` namespace in 2025 — `bitnamilegacy/kafka:3.6.2`
-is the same image under its current name, and it needs Bitnami's `KAFKA_CFG_*`
-environment shape rather than the `KAFKA_*` shape `apache/kafka` uses.
+`apache/kafka` publishes no tag older than 3.7, so 3.6 and 3.3 come from
+Bitnami. The `bitnami/kafka:3.x` tags were removed from Docker Hub when Bitnami
+moved its back-catalogue to the `bitnamilegacy` namespace in 2025 —
+`bitnamilegacy/kafka:<tag>` is the same image under its current name, and it
+needs Bitnami's `KAFKA_CFG_*` environment shape rather than the `KAFKA_*` shape
+`apache/kafka` uses. The 3.3-era image additionally needs
+`KAFKA_ENABLE_KRAFT=yes`: its scripts default to ZooKeeper mode, where the
+3.6-era scripts infer KRaft from `process.roles`.
 
 ### Brokers used
 
@@ -85,6 +91,11 @@ docker run -d --name kacrab-fixture --hostname kafka -p 9092:9092 \
   bitnamilegacy/kafka:3.6.2
 ```
 
+`bitnamilegacy/kafka:3.3.2` — same shape plus the KRaft switch that era
+requires (`-e KAFKA_ENABLE_KRAFT=yes -e KAFKA_KRAFT_CLUSTER_ID=...`). The
+committed 3.3.2 fixture was captured from the broker that
+`docker-compose.kafka-33.yml` boots, which is exactly this environment.
+
 ## Capturing a new broker release
 
 The harness is the `#[ignore]`d `capture_api_versions_fixture` test. It speaks
@@ -113,6 +124,10 @@ actually negotiates, and a row to the provenance table above.
 
 Read off these exact bytes — the fixtures, not folklore, are the source:
 
+- **3.3.2** — the first capture inside the "accepted, not yet CI-verified"
+  2.4–3.5 range — advertises 49 APIs, none of them KIP-848 or KIP-932, and
+  every core API inside kacrab's ranges (`Produce` ≤9, `Fetch` ≤13,
+  `Metadata` ≤12, `OffsetCommit` ≤8, `FindCoordinator` ≤4).
 - **3.6.2** advertises neither `ConsumerGroupHeartbeat` (68) nor `ShareFetch`
   (78): both negotiate to "unavailable".
 - **3.9.0** *does* advertise `ConsumerGroupHeartbeat`, but only at v0 (KIP-848
