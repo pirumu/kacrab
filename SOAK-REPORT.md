@@ -169,3 +169,67 @@ safe.
 client defect (verified). F1/F4 are fixed in code (PR #47) pending a fresh
 multi-hour compound soak — re-run the compound drill (a broker lost for tens of
 minutes, then restored) with the VM at ≥6 GB to close them out.
+
+---
+
+# Soak report — 2026-07-29 compound re-run (issue #51)
+
+5-hour run at v0.4.0 (master b80aaf2) on the same 3-broker compose, VM sized
+to 8 GiB (the July OOM class is gone). Same workload (1,000 rec/s × 512 B,
+6 partitions, idempotent `acks=all`, 2-consumer group, continuity tracker)
+and the same chaos rotation (kafka2/kafka3 killed every 600 s for 45 s,
+consumer bounced every 900 s) — **plus a deliberate compound phase**: at
+T+3h58m kafka1 was stopped HARD for 42 minutes while the rotation kept
+killing the other two (transient 1/3-broker windows — the July cascade,
+this time on purpose), then restored with ~50 minutes of observation left.
+Topic retention was capped (`retention.ms=1h`, `retention.bytes=1GiB`) to
+bound disk.
+
+## Headline: the July cascade does not reproduce
+
+| July finding | This run |
+|---|---|
+| **F1** — consumer group wedges permanently after coordinator loss; bounces do not heal; needs process restart | **CONFIRMED FIXED.** 13 watchdog interventions, all inside the no-quorum window where zero progress is physically correct. Consumption resumed **10 seconds** after kafka1 returned (+120 k drained immediately) and never wedged again. No process restart. |
+| **F3** — producer futures stuck >30 min; produce never resumes after cluster restoration | **CONFIRMED FIXED** (already verified in July's follow-up; re-confirmed under the full compound). In-flight deliveries either landed on restore or failed loudly per `delivery.timeout.ms` (23,672 errors, all in the outage window, `produced = acked + errors` exactly). Producer resumed full rate instantly. |
+| **F4** — connection leak across consumer close/recreate (26 sockets after 58 restarts) | **CONFIRMED FIXED.** Mid-run after 13 wedge bounces plus scheduled bounces: exactly **9** client sockets to the 3 brokers — the steady topology (producer×3 + 2 consumers×3). |
+
+Steady-state health matched or beat July: window p50/p99 ≈ 12–13 ms /
+17–20 ms, RSS 11–15 MiB flat over 5 h, zero producer lib errors, zero parse
+errors, 163 chaos events survived.
+
+## The harness verdict says FAIL — and the harness is wrong about most of it
+
+Final counters: losses (gaps never refilled) = **29,554**. Decomposition:
+
+- **23,672 = the delivery-error records.** The July F2 analysis already
+  predicted this class: the harness reserves a sequence before send and does
+  not rewind it on delivery failure, so a failed produce is miscounted as
+  consumer loss. This run **proved it broker-side**: direct dumps of
+  partition 0 around the largest gap ranges (e.g. `2147350..=2151295`) show
+  the surrounding sequences present and every probed gap sequence **absent
+  from the log** — never written, exactly as a failed delivery should be.
+  `produced = acked + delivery_errors` holds exactly, so no produced record
+  is unaccounted for.
+- **~5,882 residual** (`acked − (consumed − duplicates)`): same signature as
+  July's 2,400-gap residual, which the code trace cleared (`committed ≤
+  delivered` on every consumer path under this config; the only forward-skip
+  paths — `auto.offset.reset=latest`, filtering interceptors, KIP-848 revoke
+  — do not apply). Early-range broker forensics were not possible this time:
+  the retention cap had already deleted segments below offset ~2.03 M by
+  analysis time. Attribution therefore rests on the July code trace plus the
+  bounce-isolation experiment (0 losses under pure churn) until the harness
+  reconciliation below lands.
+
+**Action:** teach the tracker to reconcile producer-failed sequences (the
+follow-up July already named) and preserve per-partition failed-sequence
+lists in the output; re-run. Only a residual that survives a reconciling
+harness is a real client question.
+
+## Verdict
+
+The client passes the drill the July cascade failed: **survive the compound
+outage, recover unaided, leak nothing, lose nothing it acked** — modulo a
+~5.9 k residual currently attributable to known harness accounting, to be
+retired definitively by the harness fix. F1/F3/F4 are confirmed fixed at
+v0.4.0. Raw data: `benches/soak-out-20260729/` (CSV, events, harness
+report).
