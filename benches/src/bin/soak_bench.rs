@@ -7,6 +7,14 @@
 //! expected around chaos); a forward jump opens gap entries that a late
 //! delivery from a racing handover stream can refill (counted `reordered`);
 //! a gap that is NEVER refilled is a real LOSS and fails the run.
+//! Producer delivery failures are reconciled into the tracker: a failed
+//! `(partition, sequence)` is EXPECTED-ABSENT — excluded from losses and
+//! counted in a separate `failed` bucket — so a broker-rejected produce is
+//! never miscounted as consumer loss. Ambiguous failures (`DeliveryTimeout`,
+//! where the record may still have landed) are reclassified as
+//! consumed-normally if the consumer does observe them. The per-partition
+//! failed-sequence lists are persisted as `failed-seqs-p<N>.txt` in the
+//! output dir for post-run forensics.
 //! Every `KACRAB_SOAK_SAMPLE_SECS` a row of counters, latency
 //! percentiles for the window, and the process RSS is appended to `soak.csv`;
 //! chaos events go to `events.log`; a final `report.md` summarizes the run and
@@ -142,6 +150,10 @@ struct Counters {
     consumed: AtomicU64,
     duplicates: AtomicU64,
     reordered: AtomicU64,
+    /// Sequences reported failed that the consumer nevertheless observed
+    /// (e.g. an ambiguous `DeliveryTimeout` whose record actually landed) —
+    /// reclassified as consumed-normally.
+    failed_reclassified: AtomicU64,
     parse_errors: AtomicU64,
     consumer_restarts: AtomicU64,
     wedges: AtomicU64,
@@ -399,7 +411,17 @@ async fn produce_until_deadline(
                                     .counters
                                     .delivery_errors
                                     .fetch_add(1, Ordering::Relaxed);
+                                // A delivery timeout is ambiguous: the client
+                                // gave up, but the record may still have
+                                // landed on the broker. Every other delivery
+                                // error is a terminal rejection — the record
+                                // is expected to be absent from the log.
+                                let ambiguous = matches!(
+                                    error,
+                                    kacrab::producer::ProducerError::DeliveryTimeout { .. }
+                                );
                                 shared.note_error("delivery", &error);
+                                note_failed_delivery(&shared, partition, seq, ambiguous);
                             },
                         }
                     });
@@ -504,6 +526,42 @@ struct Continuity {
     expected: i64,
     /// Sequences skipped by a forward jump, awaiting a late delivery.
     gaps: std::collections::BTreeSet<i64>,
+    /// Sequences whose producer delivery FAILED — expected-absent from the
+    /// broker log, so never counted as consumer loss. The value marks an
+    /// ambiguous failure (`DeliveryTimeout`: the record may still have
+    /// landed); if the consumer does observe such a sequence it is removed
+    /// and reclassified as consumed-normally.
+    failed: std::collections::BTreeMap<i64, bool>,
+}
+
+/// Reconcile a producer delivery failure into the continuity tracker: the
+/// sequence was reserved and sent, but the broker never acked it, so its
+/// absence from the consumed stream is expected — not a loss. `ambiguous`
+/// marks failures (`DeliveryTimeout`) where the record may have landed
+/// anyway.
+fn note_failed_delivery(shared: &Shared, partition: i32, seq: i64, ambiguous: bool) {
+    let parked = {
+        let mut state = shared.continuity[partition as usize]
+            .lock()
+            .expect("continuity lock");
+        // Not yet observed (either ahead of the consumer or sitting in an
+        // open gap) — park it as expected-absent.
+        if seq >= state.expected || state.gaps.remove(&seq) {
+            let _prev = state.failed.insert(seq, ambiguous);
+            true
+        } else {
+            false
+        }
+    };
+    if !parked {
+        // The consumer already observed this sequence before the failure
+        // report arrived (an ambiguous timeout whose record landed): it is
+        // consumed, not absent.
+        let _prev = shared
+            .counters
+            .failed_reclassified
+            .fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn track_continuity(shared: &Shared, partition: i32, value: Option<&Bytes>) {
@@ -514,6 +572,20 @@ fn track_continuity(shared: &Shared, partition: i32, value: Option<&Bytes>) {
     let mut state = shared.continuity[partition as usize]
         .lock()
         .expect("continuity lock");
+    if state.failed.remove(&seq).is_some() {
+        // A sequence reported failed was observed after all (an ambiguous
+        // `DeliveryTimeout` whose record landed): reclassify it as
+        // consumed-normally — neither a duplicate nor a loss.
+        let _prev = shared
+            .counters
+            .failed_reclassified
+            .fetch_add(1, Ordering::Relaxed);
+        if seq >= state.expected {
+            open_gaps_for_jump(shared, &mut state, partition, seq);
+            state.expected = seq + 1;
+        }
+        return;
+    }
     match seq.cmp(&state.expected) {
         std::cmp::Ordering::Equal => state.expected = seq + 1,
         std::cmp::Ordering::Less => {
@@ -528,17 +600,27 @@ fn track_continuity(shared: &Shared, partition: i32, value: Option<&Bytes>) {
             }
         },
         std::cmp::Ordering::Greater => {
-            for missing in state.expected..seq {
-                let _new = state.gaps.insert(missing);
-            }
-            if shared.loss_events.fetch_add(1, Ordering::Relaxed) < 50 {
-                shared.event(&format!(
-                    "GAP: partition {partition} jumped from seq {} to {seq}",
-                    state.expected
-                ));
-            }
+            open_gaps_for_jump(shared, &mut state, partition, seq);
             state.expected = seq + 1;
         },
+    }
+}
+
+/// Open gap entries for a forward jump `expected..seq`, skipping sequences
+/// already reconciled as producer-failed (expected-absent). Logs a GAP event
+/// only when at least one real (non-failed) gap opened.
+fn open_gaps_for_jump(shared: &Shared, state: &mut Continuity, partition: i32, seq: i64) {
+    let mut opened = 0u64;
+    for missing in state.expected..seq {
+        if !state.failed.contains_key(&missing) && state.gaps.insert(missing) {
+            opened += 1;
+        }
+    }
+    if opened > 0 && shared.loss_events.fetch_add(1, Ordering::Relaxed) < 50 {
+        shared.event(&format!(
+            "GAP: partition {partition} jumped from seq {} to {seq} ({opened} unaccounted)",
+            state.expected
+        ));
     }
 }
 
@@ -577,13 +659,29 @@ fn open_gap_ranges(shared: &Shared, cap: usize) -> String {
     }
 }
 
-/// Sequences that were skipped and never refilled — real losses.
+/// Sequences that were skipped and never refilled — real losses. Sequences
+/// whose producer delivery failed never enter `gaps` (they are reconciled
+/// into the `failed` bucket), so this count excludes them structurally.
 fn open_gaps(shared: &Shared) -> u64 {
     shared
         .continuity
         .iter()
         .map(|slot| slot.lock().expect("continuity lock").gaps.len() as u64)
         .sum()
+}
+
+/// Producer-failed sequences the consumer never observed — expected-absent
+/// from the broker log. Returns `(total, ambiguous)` where `ambiguous`
+/// counts the `DeliveryTimeout` subset (record fate unknown, never seen).
+fn failed_absent(shared: &Shared) -> (u64, u64) {
+    let mut total = 0u64;
+    let mut ambiguous = 0u64;
+    for slot in &shared.continuity {
+        let state = slot.lock().expect("continuity lock");
+        total += state.failed.len() as u64;
+        ambiguous += state.failed.values().filter(|&&flag| flag).count() as u64;
+    }
+    (total, ambiguous)
 }
 
 fn parse_seq(bytes: &Bytes) -> Option<i64> {
@@ -711,11 +809,13 @@ async fn docker(args: &[&str]) {
 async fn sampler_loop(shared: &Arc<Shared>, config: &Arc<Config>, producer: &Arc<Producer>) {
     let csv_path = format!("{}/soak.csv", config.out_dir);
     let mut csv = File::create(&csv_path).expect("create soak.csv");
+    // `failed_seqs` (producer-failed sequences, expected-absent) is appended
+    // at the END to keep the schema backward-compatible for older parsers.
     writeln!(
         csv,
         "elapsed_s,produced,acked,send_rejects,delivery_errors,consumed,duplicates,reordered,\
          open_gaps,parse_errors,win_p50_us,win_p99_us,win_max_us,rss_mib,producer_retries,\
-         producer_lib_errors,rebalances,consumer_restarts,wedges"
+         producer_lib_errors,rebalances,consumer_restarts,wedges,failed_seqs"
     )
     .expect("csv header");
 
@@ -733,8 +833,9 @@ async fn sampler_loop(shared: &Arc<Shared>, config: &Arc<Config>, producer: &Arc
             .iter()
             .map(|slot| slot.load(Ordering::Relaxed))
             .sum();
+        let (failed_seqs, _ambiguous) = failed_absent(shared);
         let row = format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{:.1},{},{},{},{},{},{}",
             shared.started.elapsed().as_secs(),
             counters.produced.load(Ordering::Relaxed),
             counters.acked.load(Ordering::Relaxed),
@@ -754,6 +855,7 @@ async fn sampler_loop(shared: &Arc<Shared>, config: &Arc<Config>, producer: &Arc
             rebalances,
             counters.consumer_restarts.load(Ordering::Relaxed),
             counters.wedges.load(Ordering::Relaxed),
+            failed_seqs,
         );
         writeln!(csv, "{row}").expect("csv row");
         csv.flush().expect("csv flush");
@@ -791,18 +893,54 @@ fn tail_deficit(shared: &Shared) -> i64 {
         .iter()
         .zip(&shared.continuity)
         .map(|(produced, continuity)| {
-            let expected = continuity.lock().expect("continuity lock").expected;
-            (produced.load(Ordering::SeqCst) - expected).max(0)
+            let state = continuity.lock().expect("continuity lock");
+            // Failed sequences at/after the consumer position will never be
+            // observed — they are expected-absent, not an unconsumed tail.
+            let failed_ahead =
+                i64::try_from(state.failed.range(state.expected..).count()).expect("failed count");
+            (produced.load(Ordering::SeqCst) - state.expected - failed_ahead).max(0)
         })
         .sum()
+}
+
+/// Persist the per-partition failed-sequence lists (`failed-seqs-p<N>.txt`)
+/// so post-run forensics never needs the broker log (retention can eat the
+/// evidence). One sequence per line; ambiguous (`DeliveryTimeout`) entries
+/// are marked.
+fn write_failed_seq_files(shared: &Shared, out_dir: &str) {
+    for (partition, slot) in shared.continuity.iter().enumerate() {
+        let lines: Vec<String> = {
+            let state = slot.lock().expect("continuity lock");
+            state
+                .failed
+                .iter()
+                .map(|(seq, ambiguous)| {
+                    if *ambiguous {
+                        format!("{seq} ambiguous")
+                    } else {
+                        seq.to_string()
+                    }
+                })
+                .collect()
+        };
+        if lines.is_empty() {
+            continue;
+        }
+        let mut text = lines.join("\n");
+        text.push('\n');
+        let path = format!("{out_dir}/failed-seqs-p{partition}.txt");
+        fs::write(&path, text).expect("write failed-seqs file");
+    }
 }
 
 fn write_report(shared: &Shared, config: &Config, producer: &Arc<Producer>) -> bool {
     let counters = &shared.counters;
     let losses = open_gaps(shared);
+    let (failed, failed_ambiguous) = failed_absent(shared);
     let deficit = tail_deficit(shared);
     let verdict_ok = losses == 0 && deficit == 0;
     let metrics = producer.metrics();
+    write_failed_seq_files(shared, &config.out_dir);
 
     let (events_text, events_count) = {
         let events = shared.events.lock().expect("events lock");
@@ -828,11 +966,13 @@ fn write_report(shared: &Shared, config: &Config, producer: &Arc<Producer>) -> b
          every {}s\n\n## Verdict: {}\n\n| metric | value |\n|---|---|\n| produced | {} |\n| acked \
          | {} |\n| send rejects | {} |\n| delivery errors | {} |\n| consumed | {} |\n| duplicates \
          (at-least-once re-reads) | {} |\n| reordered (gaps later refilled) | {} |\n| **losses \
-         (gaps never refilled)** | **{}** |\n| unconsumed tail at end | {} |\n| parse errors | {} \
-         |\n| producer retries (lib) | {} |\n| producer errors (lib) | {} |\n| rebalances \
-         observed | {} |\n| consumer restarts | {} |\n| consumer-group wedges | {} |\n| chaos \
-         events | {} |\n\nTime series in `soak.csv`; chaos timeline in `events.log`.\n\nUnfilled \
-         gap ranges: {}\n",
+         (gaps never refilled)** | **{}** |\n| failed (expected absent) | {} |\n| … of which \
+         ambiguous (delivery timeout, never observed) | {} |\n| failed reclassified as consumed | \
+         {} |\n| unconsumed tail at end | {} |\n| parse errors | {} |\n| producer retries (lib) | \
+         {} |\n| producer errors (lib) | {} |\n| rebalances observed | {} |\n| consumer restarts \
+         | {} |\n| consumer-group wedges | {} |\n| chaos events | {} |\n\nTime series in \
+         `soak.csv`; chaos timeline in `events.log`; per-partition failed-sequence lists in \
+         `failed-seqs-p<N>.txt` (when non-empty).\n\nUnfilled gap ranges: {}\n",
         shared.started.elapsed().as_secs(),
         config.rate,
         config.value_size,
@@ -854,6 +994,9 @@ fn write_report(shared: &Shared, config: &Config, producer: &Arc<Producer>) -> b
         counters.duplicates.load(Ordering::Relaxed),
         counters.reordered.load(Ordering::Relaxed),
         losses,
+        failed,
+        failed_ambiguous,
+        counters.failed_reclassified.load(Ordering::Relaxed),
         deficit,
         counters.parse_errors.load(Ordering::Relaxed),
         metrics.produce_retry_count,
